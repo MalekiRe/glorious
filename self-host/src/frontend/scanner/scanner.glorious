@@ -38,6 +38,7 @@ pub struct DeclarationShell {
 
 pub struct DefTable {
     shells: IndexVec<ShellTag, DeclarationShell>,
+    import_shells: Vec<ShellId>,
     delimiters: DelimiterMap,
     names: HashMap<(Option<ShellId>, Id<String>, Namespace), DefSearch>
 }
@@ -134,6 +135,14 @@ pub range_end(value: &TokenRange) -> usize {
 
 pub shell_count(value: &DeclarationIndex) -> usize {
     IndexVec::len(&value.shells)
+}
+
+pub import_shell_count(value: &DeclarationIndex) -> usize {
+    Vec::len(&value.import_shells)
+}
+
+pub import_shell_at(value: &DeclarationIndex, index: usize) -> ShellId {
+    *Vec::index(&value.import_shells, index)
 }
 
 pub shell_id_at_ordinal(
@@ -363,10 +372,16 @@ find_body(
             Result::Err(ScanError::IncompleteDeclaration(index, start))
         } else if(super::syntax::delimiter_is_open(delimiters, index)) {
             if(token_is_brace_open(value, index)) {
-                let skip_handler_body = function
+                let skip_signature_brace = function
                     and { index > start }
-                    and { token_kind_at(value, index - 1) is TokenKind::Slash };
-                if(skip_handler_body) {
+                    and {
+                        (token_kind_at(value, index - 1) is TokenKind::Slash)
+                            or {
+                                token_kind_at(value, index - 1)
+                                    is TokenKind::Eq
+                            }
+                    };
+                if(skip_signature_brace) {
                     let close = try(matching_close(delimiters, index), @find_body);
                     find_body(value, delimiters, close + 1, limit, start, function)
                 } else {
@@ -782,6 +797,23 @@ index_def_names(
     } else { () }
 }
 
+index_import_shells(
+    shells: &IndexVec<ShellTag, DeclarationShell>,
+    ordinal: usize,
+    imports: &mut Vec<ShellId>
+) {
+    if(ordinal < IndexVec::len(shells)) {
+        let id = handle Id::from_usize(ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(shell_kind_code(IndexVec::index(shells, id)) == 2) {
+            Vec::push(imports, id)
+        } else { () };
+        index_import_shells(shells, ordinal + 1, imports)
+    } else { () }
+}
+
 scan_complete(
     value: &super::lexer::LexedSource,
     scopes: Vec<ScanScope>,
@@ -792,9 +824,12 @@ scan_complete(
     handle Vec::pop(&mut remaining) {
         Result::Err(_) => {
             let names = HashMap::new();
+            let import_shells = Vec::new();
             index_def_names(&output, 0, &mut names);
+            index_import_shells(&output, 0, &mut import_shells);
             Result::Ok(DefTable {
                 shells: output,
+                import_shells: import_shells,
                 delimiters: delimiters,
                 names: names
             })

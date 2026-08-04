@@ -20,6 +20,59 @@ use super::super::frontend::scanner::ShellId;
 u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
 usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
 
+// Read-only debugger entry point for mapping the self-host frontend's stable
+// semantic type indices without running body elaboration or backend lowering.
+// A zero tuple indicates that an earlier frontend phase failed or the index is
+// outside the collected interface arena.
+pub interface_type_metadata(
+    original: String,
+    index: usize
+) -> (u32, u32, u32, u32) {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => (0, 0, 0, 0),
+        Result::Ok(source) => handle
+            super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => (0, 0, 0, 0),
+            Result::Ok(declarations) => handle
+                super::super::frontend::headers::parse(
+                    &original,
+                    source,
+                    &declarations
+                ) {
+                Result::Err(_) => (0, 0, 0, 0),
+                Result::Ok(headers) => handle collect_interfaces(
+                    &headers,
+                    &declarations
+                ) {
+                    Result::Err(_) => (0, 0, 0, 0),
+                    Result::Ok(interfaces) => if(
+                        index < super::super::frontend::elaboration::interface_type_count(
+                            &interfaces
+                        )
+                    ) {
+                        (
+                            wrapping_convert_to_u32(
+                                super::super::frontend::elaboration::interface_type_tag_at(
+                                    &interfaces, index
+                                )
+                            ),
+                            super::super::frontend::elaboration::interface_type_a_at(
+                                &interfaces, index
+                            ),
+                            super::super::frontend::elaboration::interface_type_b_at(
+                                &interfaces, index
+                            ),
+                            super::super::frontend::elaboration::interface_type_c_at(
+                                &interfaces, index
+                            )
+                        )
+                    } else { (0, 0, 0, 0) }
+                }
+            }
+        }
+    }
+}
+
 shell_parent_module(
     shell: &super::super::frontend::scanner::DeclarationShell
 ) -> Option<ShellId> {
@@ -161,7 +214,7 @@ value_uses_local(
         body,
         value
     ) {
-        CoreValueView::Local(_, found, _) => found == local,
+        CoreValueView::Local(_, found, _, _) => found == local,
         CoreValueView::Projection(_, subject, _) =>
             value_uses_local(body, subject, local),
         CoreValueView::Embedded(_, computation) =>
@@ -252,7 +305,9 @@ computation_uses_local(
             } else {
                 computation_uses_local(body, remainder, local)
             },
-        CoreComputationView::Call(_, _, operands) =>
+        CoreComputationView::Call(_, _, _, operands) =>
+            values_use_local(body, operands, 0, local),
+        CoreComputationView::Primitive(_, _, operands) =>
             values_use_local(body, operands, 0, local),
         CoreComputationView::Construct(_, _, fields) =>
             construction_fields_use_local(body, fields, 0, local),
@@ -266,7 +321,7 @@ computation_uses_local(
 }
 
 serialized_type_id(ty: u32) -> u32 {
-    if(ty < 14) { ty } else { 2147483648 + (ty - 14) }
+    if(ty < 19) { ty } else { 2147483648 + (ty - 19) }
 }
 
 write_type_id(output: &mut ByteBuf, ty: u32) {
@@ -334,7 +389,7 @@ write_value_expression(
                 Result::Ok(())
             }
         },
-        CoreValueView::Local(ty, local_id, copy) => {
+        CoreValueView::Local(ty, local_id, copy, _) => {
             let local = Id::to_u32(local_id);
             if(local < source_local_limit) {
                 ByteBuf::push(output, 2);
@@ -460,7 +515,7 @@ write_construct_fields<'a>(
                 body,
                 field_value
             ) {
-            CoreValueView::Local(_, local, _) =>
+            CoreValueView::Local(_, local, _, _) =>
                 1 < construction_local_occurrences(
                     body,
                     fields,
@@ -565,7 +620,7 @@ write_computation_expression(
             source_local_limit,
             tail_position
         ),
-        CoreComputationView::Call(ty, shell, operands) => {
+        CoreComputationView::Call(ty, shell, _, operands) => {
             ByteBuf::push(output, if(tail_position) { 4 } else { 3 });
             write_type_id(output, Id::to_u32(ty));
             write_function_identity(output, source, declarations, shell);
@@ -583,6 +638,11 @@ write_computation_expression(
                 operands
             )
         },
+        CoreComputationView::Primitive(_, _, _) => Result::Err(
+            ElaborationError::EmbeddedValueSerializationUnsupported(
+                Id::to_usize(computation)
+            )
+        ),
         CoreComputationView::Construct(ty, flavor, fields) => {
             ByteBuf::push(output, 6);
             write_type_id(output, Id::to_u32(ty));
@@ -737,7 +797,8 @@ write_block_expression(
         ) {
         CoreComputationView::Pure(found, _) => found,
         CoreComputationView::Let(found, _, _, _) => found,
-        CoreComputationView::Call(found, _, _) => found,
+        CoreComputationView::Call(found, _, _, _) => found,
+        CoreComputationView::Primitive(found, _, _) => found,
         CoreComputationView::Construct(found, _, _) => found,
         CoreComputationView::VariantDispatch(found, _, _) => found
     };

@@ -373,7 +373,22 @@ fn intrinsic_drop_containment_accepts_zero_use_and_rejects_must_move_principals(
         }
     "#;
     let phases = compile_source_to_phases("drop-supertrait-containment.glorious", source).unwrap();
-    assert_eq!(phases.artifact.drop_glue.len(), 3);
+    let mut user_drop_glue = phases
+        .artifact
+        .drop_glue
+        .iter()
+        .filter_map(|glue| {
+            let name = phases.artifact.functions[glue.function as usize]
+                .name
+                .as_str();
+            matches!(name, "$drop$Affine" | "$drop$Erased" | "$drop$Unrestricted").then_some(name)
+        })
+        .collect::<Vec<_>>();
+    user_drop_glue.sort_unstable();
+    assert_eq!(
+        user_drop_glue,
+        ["$drop$Affine", "$drop$Erased", "$drop$Unrestricted"],
+    );
     let parameter = |name: &str| {
         phases
             .artifact

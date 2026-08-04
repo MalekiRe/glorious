@@ -135,7 +135,7 @@ fn aggregate_construction_does_not_hide_forbidden_drop_operations_o0_o3() {
                 }
                 main() -> () { () }
             "#,
-            "custom Drop hook",
+            "assignment in Drop::drop",
         ),
         (
             "closed-suspension",

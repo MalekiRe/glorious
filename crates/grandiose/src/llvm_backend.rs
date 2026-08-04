@@ -5212,7 +5212,9 @@ impl<'a> Emitter<'a> {
                 let reference = self.load_register(function, *src)?;
                 self.line(&format!("  store ptr {reference}, ptr %r{dst}"));
             }
-            InstructionKind::DerefCopy { dst, src } | InstructionKind::DerefMove { dst, src } => {
+            InstructionKind::DerefCopy { dst, src }
+            | InstructionKind::DerefReborrow { dst, src, .. }
+            | InstructionKind::DerefMove { dst, src } => {
                 let reference = self.load_register(function, *src)?;
                 let ty = self.register_type(function, *dst)?;
                 let value = self.temp();

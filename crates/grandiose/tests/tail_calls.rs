@@ -20,10 +20,13 @@ fn function_code<'a>(artifact: &'a Artifact, name: &str) -> &'a [Instruction] {
 fn assert_direct_tail_call(artifact: &Artifact, caller: &str, callee: &str) {
     let callee = function_id(artifact, callee);
     let code = function_code(artifact, caller);
-    assert!(matches!(
-        code.last(),
-        Some(Instruction::TailCall { function, .. }) if *function == callee
-    ));
+    assert!(
+        matches!(
+            code.last(),
+            Some(Instruction::TailCall { function, .. }) if *function == callee
+        ),
+        "{caller} bytecode: {code:#?}"
+    );
     assert!(!code.iter().any(|instruction| matches!(
         instruction,
         Instruction::Call { .. } | Instruction::Return { .. }
@@ -41,8 +44,13 @@ fn direct_tail_positions_form_in_core_mir_and_bytecode_deterministically() {
         forever() -> ! { forever() }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("direct-tail.glorious", source).unwrap();
-    let second = compile_source_to_phases("direct-tail.glorious", source).unwrap();
+    let options = CompileOptions {
+        optimization_level: OptimizationLevel::O0,
+    };
+    let first =
+        compile_source_to_phases_with_options("direct-tail.glorious", source, options).unwrap();
+    let second =
+        compile_source_to_phases_with_options("direct-tail.glorious", source, options).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -122,12 +130,20 @@ fn observable_drop_and_reference_cleanup_keep_ordinary_call_return_order() {
         borrowed(value: &i64) -> i64 { leaf() }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("tail-fallback.glorious", source).unwrap();
+    let phases = compile_source_to_phases_with_options(
+        "tail-fallback.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
     for name in ["guarded", "borrowed"] {
         let code = function_code(&phases.artifact, name);
         assert!(
             code.iter()
-                .any(|instruction| matches!(instruction, Instruction::Call { .. }))
+                .any(|instruction| matches!(instruction, Instruction::Call { .. })),
+            "{name} bytecode: {code:#?}"
         );
         assert!(matches!(code.last(), Some(Instruction::Return { .. })));
         assert!(
@@ -294,7 +310,14 @@ fn reference_tail_proof_rejects_live_loans_returns_and_leftover_reference_owners
         }
         main() -> () { () }
     "#;
-    let phases = compile_source_to_phases("reference-tail-negative.glorious", source).unwrap();
+    let phases = compile_source_to_phases_with_options(
+        "reference-tail-negative.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
 
     for name in [
         "projected_loan",
@@ -306,7 +329,7 @@ fn reference_tail_proof_rejects_live_loans_returns_and_leftover_reference_owners
         assert!(
             code.iter()
                 .any(|instruction| matches!(instruction, Instruction::Call { .. })),
-            "{name} must retain an ordinary Call"
+            "{name} must retain an ordinary Call; bytecode: {code:#?}"
         );
         assert!(
             !code

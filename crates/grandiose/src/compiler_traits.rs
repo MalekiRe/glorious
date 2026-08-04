@@ -846,6 +846,29 @@ impl ParamEnv {
         })
     }
 
+    /// Returns the argument lists carried by exact lexical facts with this
+    /// polarity, trait, and subject. Generic-call inference uses these facts
+    /// to recover associated marker arguments that are not present in an
+    /// ordinary value parameter type. In particular, `L: Label<B>` makes `B`
+    /// available when a generic label is forwarded through a control helper.
+    pub(crate) fn matching_argument_lists(
+        &self,
+        polarity: GoalPolarity,
+        trait_key: &TraitKey,
+        subject: &ProvisionalType,
+    ) -> Vec<Vec<GenericArg>> {
+        self.facts
+            .iter()
+            .filter(|fact| {
+                fact.polarity == polarity
+                    && &fact.trait_key == trait_key
+                    && &fact.subject == subject
+                    && fact.bindings.is_empty()
+            })
+            .map(|fact| fact.arguments.clone())
+            .collect()
+    }
+
     /// Returns whether lexical positive `Use` evidence contains the requested
     /// interval. Quantity evidence is an interval contract rather than an
     /// invariant ordinary trait argument: `Use<[0,infinity]>` therefore

@@ -185,7 +185,7 @@ fn labels_cannot_escape_mandatory_control_inlining() {
 }
 
 #[test]
-fn recursive_label_transport_reports_a_directness_failure() {
+fn invariant_tail_recursive_label_transport_forms_a_direct_control_loop() {
     let source = r#"
         relay<L>(destination: L) -> ! where L: Label<i64> {
             relay(destination)
@@ -193,14 +193,32 @@ fn recursive_label_transport_reports_a_directness_failure() {
         answer() -> i64 { relay(@answer) }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("recursive-label-inline.glorious", source)
-        .expect_err("recursive label transport escaped mandatory control inlining");
+    let phases = compile_source_to_phases_with_options(
+        "recursive-label-inline.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O1,
+        },
+    )
+    .expect("an invariant tail-recursive label helper should control-inline");
+    let answer = phases
+        .core
+        .functions
+        .iter()
+        .find(|function| function.name == "answer")
+        .expect("answer has Core");
+    let core = format!("{:#?}", answer.body);
     assert!(
-        errors.iter().any(|error| {
-            error.message.contains("recursive")
-                && (error.message.contains("label") || error.message.contains("control"))
-        }),
-        "{errors:#?}"
+        core.contains("kind: ControlLoop {"),
+        "the invariant recursive helper did not form a Core control loop: {core}"
+    );
+    assert!(
+        phases
+            .artifact
+            .functions
+            .iter()
+            .all(|function| !function.name.starts_with("relay")),
+        "the proof-only label helper survived as a runtime callable"
     );
 }
 

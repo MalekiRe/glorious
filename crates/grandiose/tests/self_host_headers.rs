@@ -110,11 +110,12 @@ fn encode_type(output: &mut Vec<u8>, ty: &TypeSyntax) -> Result<(), ()> {
             arguments,
             lifetime_arguments,
         } => {
-            if !lifetime_arguments.is_empty() {
-                return Err(());
-            }
             output.push(5);
             encode_type(output, constructor)?;
+            push_u32(output, lifetime_arguments.len().try_into().unwrap());
+            for lifetime in lifetime_arguments {
+                push_string(output, &lifetime.lifetime.name);
+            }
             push_u32(output, arguments.len().try_into().unwrap());
             for argument in arguments {
                 encode_type(output, argument)?;
@@ -165,9 +166,6 @@ fn encode_callable(
     program: &grandiose::ast::Program,
     declaration: &Function,
 ) -> Result<(), ()> {
-    if declaration.where_clause.is_some() {
-        return Err(());
-    }
     output.push(u8::from(
         program.visibility(declaration.span) == Visibility::Public,
     ));
@@ -226,15 +224,19 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "identity<T>(value: T) -> T { value }",
         "pub consume(value: &mut Vec<u8>) { () }",
         "borrow<'a, T>(value: &'a T) -> &'a T { value }",
+        "slice<'a, T>(value: &'a Vec<T>) -> pkg::Slice<'a, T> { unreachable() }",
         "tuples(unit: (), single: (u8,), trio: (u8, String, !)) -> (u8, u8) { (0, 0) }",
         "view<T>(value: pkg::View<(T, !)>) -> pkg::View<(T, !)> { value }",
         "first<T>(value: Vec<T>) -> T { unreachable() } second(value: core::Pair<u8, u16>) { () }",
         "spaced<T,>(value: Vec< /* element */ T, >) -> Vec<T> { value }",
         "read<T, E: EffectRow>(value: T) -> pkg::Result<T, !> / {Console, Io<T> | E} { value }",
+        "bounded<T>(value: T) -> T where T: Use<[0, *]> { value }",
+        "call<F, T>(function: F, value: T) -> T where F: Fn<(T), Output=T> { function(value) }",
         "write(value: String) / Console { () }",
         "bad(value u32) { () }",
         "bad(value: Vec<>) { () }",
         "bad(value: T) trailing { () }",
+        "bad<T>(value: T) -> T where { value }",
     ];
     let mut paths = Vec::new();
     for (index, source) in focused.into_iter().enumerate() {

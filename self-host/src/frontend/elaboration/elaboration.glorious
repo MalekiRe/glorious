@@ -6,6 +6,7 @@ use super::resolution::ResolvedTarget;
 use super::resolution::ResolvedPatternBinder;
 use super::resolution::ResolutionError;
 use super::scanner::{ShellId, ShellTag};
+use super::bodies::{Visit, FoldVisit};
 
 pub struct TypeTag {}
 pub type TypeId = Id<TypeTag>;
@@ -20,7 +21,13 @@ enum TypeKind {
     Unit,
     Never,
     Scalar(u8),
+    TypeParameter(ShellId, u32),
     Tuple(TypeElementRange),
+    Text,
+    Bytes,
+    Array(TypeId),
+    Application(TypeId, TypeElementRange),
+    Effect(ShellId),
     Nominal(InterfaceNominalId),
     SharedReference(TypeId),
     UniqueReference(TypeId)
@@ -41,6 +48,9 @@ pub type InterfaceVariantId = Id<InterfaceVariantTag>;
 pub struct InterfaceCallableTag {}
 pub type InterfaceCallableId = Id<InterfaceCallableTag>;
 
+pub struct CallableInstanceTag {}
+pub type CallableInstanceId = Id<CallableInstanceTag>;
+
 type InterfaceFieldRange = super::syntax::IdRange<InterfaceFieldTag>;
 
 type InterfaceVariantRange = super::syntax::IdRange<InterfaceVariantTag>;
@@ -51,6 +61,10 @@ type VariantPayloadRange = super::syntax::IdRange<VariantPayloadRangeTag>;
 struct CallableParameterRangeTag {}
 type CallableParameterRange =
     super::syntax::IdRange<CallableParameterRangeTag>;
+
+struct CallableSubstitutionRangeTag {}
+type CallableSubstitutionRange =
+    super::syntax::IdRange<CallableSubstitutionRangeTag>;
 
 enum InterfaceNominalKind {
     Struct(InterfaceFieldRange),
@@ -73,6 +87,7 @@ impl Use<[0, *]> for AliasResolutionState {}
 
 struct InterfaceNominal {
     shell: ShellId,
+    generics: SignatureScope,
     kind: InterfaceNominalKind,
     copy_state: NominalCopyState
 }
@@ -101,10 +116,36 @@ impl Use<[0, *]> for InterfaceVariant {}
 struct InterfaceCallable {
     shell: ShellId,
     result: TypeId,
-    parameters: CallableParameterRange
+    parameters: CallableParameterRange,
+    generics: SignatureScope,
+    effects: TypeElementRange,
+    effect_tail: Option<u32>,
+    where_start: usize,
+    where_end: usize
 }
 
 impl Use<[0, *]> for InterfaceCallable {}
+
+struct CallableInstance {
+    callable: InterfaceCallableId,
+    result: TypeId,
+    parameters: CallableParameterRange,
+    substitutions: CallableSubstitutionRange
+}
+
+impl Use<[0, *]> for CallableInstance {}
+
+struct SignatureScope {
+    owner: ShellId,
+    start: u32,
+    count: u32
+}
+
+impl Use<[0, *]> for SignatureScope {}
+
+struct ResolvedModule { shell: Option<ShellId> }
+
+impl Use<[0, *]> for ResolvedModule {}
 
 pub struct TypedInterfaces {
     types: Arena<TypeTag, TypeNode>,
@@ -115,6 +156,10 @@ pub struct TypedInterfaces {
     variant_payloads: Vec<TypeId>,
     callables: Arena<InterfaceCallableTag, InterfaceCallable>,
     callable_parameters: Vec<TypeId>,
+    instances: Arena<CallableInstanceTag, CallableInstance>,
+    instance_parameters: Vec<TypeId>,
+    instance_substitutions: Vec<Option<TypeId>>,
+    callable_effects: Vec<TypeId>,
     // Indexed by declaration shell.
     shell_to_callable:
         IndexVec<ShellTag, Option<InterfaceCallableId>>,
@@ -141,7 +186,7 @@ pub type IntegerConstantId = Id<IntegerConstantTag>;
 enum CoreValueKind {
     Unit,
     Integer(IntegerConstantId),
-    Local(CoreLocalId),
+    Local(CoreLocalId, Bool),
     Projection(CoreValueId, u32),
     Embedded(CoreComputationId)
 }
@@ -175,7 +220,8 @@ impl Use<[0, *]> for ConstructionFlavor {}
 enum CoreComputationKind {
     Pure(CoreValueId),
     Let(CoreLocalId, CoreComputationId, CoreComputationId),
-    Call(ShellId, OperandRange),
+    Call(ShellId, CallableInstanceId, OperandRange),
+    Primitive(u32, OperandRange),
     Construct(ConstructionFlavor, ConstructionFieldRange),
     VariantDispatch(CoreValueId, MatchArmRange)
 }
@@ -201,6 +247,7 @@ impl Use<[0, *]> for CoreMatchArm {}
 pub struct CoreMatchBinding {
     field: u32,
     local: Option<CoreLocalId>,
+    integer: Option<IntegerConstantId>,
     ty: TypeId
 }
 
@@ -284,13 +331,176 @@ pub enum InterfaceTypeView<'a> {
     Unit,
     Never,
     Scalar(u8),
+    TypeParameter(u32, u32),
     Tuple(Slice<'a, TypeId>),
+    Text,
+    Bytes,
+    Array(u32),
+    Application(u32, Slice<'a, TypeId>),
+    Effect(u32),
     Nominal(u32),
     SharedReference(u32),
     UniqueReference(u32)
 }
 
 impl<'a> Use<[0, *]> for InterfaceTypeView<'a> {}
+
+__g1_walk_type_elements<'a, L, R, F, e: EffectRow>(
+    interfaces: &'a TypedInterfaces,
+    elements: Slice<'a, TypeId>,
+    index: usize,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(TypeId, InterfaceTypeView<'a>, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < Slice::len(elements)) {
+        let child = handle Slice::get(elements, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => *found
+        };
+        walk_type(interfaces, child, stop, visitor);
+        __g1_walk_type_elements(interfaces, elements, index + 1, stop, visitor)
+    } else { () }
+}
+
+__g1_walk_type_children<'a, L, R, F, e: EffectRow>(
+    interfaces: &'a TypedInterfaces,
+    ty: TypeId,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(TypeId, InterfaceTypeView<'a>, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle interface_type_at(interfaces, Id::to_usize(ty)) {
+        InterfaceTypeView::Tuple(elements) =>
+            __g1_walk_type_elements(interfaces, elements, 0, stop, visitor),
+        InterfaceTypeView::Array(element) =>
+            walk_type(interfaces, Id::from_u32(element), stop, visitor),
+        InterfaceTypeView::Application(constructor, elements) => {
+            walk_type(interfaces, Id::from_u32(constructor), stop, visitor);
+            __g1_walk_type_elements(interfaces, elements, 0, stop, visitor)
+        },
+        InterfaceTypeView::SharedReference(child) =>
+            walk_type(interfaces, Id::from_u32(child), stop, visitor),
+        InterfaceTypeView::UniqueReference(child) =>
+            walk_type(interfaces, Id::from_u32(child), stop, visitor),
+        _ => ()
+    }
+}
+
+pub walk_type<'a, L, R, F, e: EffectRow>(
+    interfaces: &'a TypedInterfaces,
+    ty: TypeId,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(TypeId, InterfaceTypeView<'a>, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle visitor(
+        ty,
+        interface_type_at(interfaces, Id::to_usize(ty)),
+        stop
+    ) {
+        Visit::Descend =>
+            __g1_walk_type_children(interfaces, ty, stop, visitor),
+        Visit::SkipChildren => ()
+    }
+}
+
+__g1_fold_type_elements<'a, L, R, A, F, e: EffectRow>(
+    interfaces: &'a TypedInterfaces,
+    elements: Slice<'a, TypeId>,
+    index: usize,
+    accumulator: A,
+    stop: L,
+    visitor: F
+) -> A
+where L: Label<R>,
+F: Fn<(A, TypeId, InterfaceTypeView<'a>, L), Output=FoldVisit<A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < Slice::len(elements)) {
+        let child = handle Slice::get(elements, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => *found
+        };
+        __g1_fold_type_elements(
+            interfaces,
+            elements,
+            index + 1,
+            fold_type(interfaces, child, accumulator, stop, visitor),
+            stop,
+            visitor
+        )
+    } else { accumulator }
+}
+
+__g1_fold_type_children<'a, L, R, A, F, e: EffectRow>(
+    interfaces: &'a TypedInterfaces,
+    ty: TypeId,
+    accumulator: A,
+    stop: L,
+    visitor: F
+) -> A
+where L: Label<R>,
+F: Fn<(A, TypeId, InterfaceTypeView<'a>, L), Output=FoldVisit<A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle interface_type_at(interfaces, Id::to_usize(ty)) {
+        InterfaceTypeView::Tuple(elements) => __g1_fold_type_elements(
+            interfaces, elements, 0, accumulator, stop, visitor
+        ),
+        InterfaceTypeView::Array(element) => fold_type(
+            interfaces, Id::from_u32(element), accumulator, stop, visitor
+        ),
+        InterfaceTypeView::Application(constructor, elements) =>
+            __g1_fold_type_elements(
+                interfaces,
+                elements,
+                0,
+                fold_type(
+                    interfaces,
+                    Id::from_u32(constructor),
+                    accumulator,
+                    stop,
+                    visitor
+                ),
+                stop,
+                visitor
+            ),
+        InterfaceTypeView::SharedReference(child) => fold_type(
+            interfaces, Id::from_u32(child), accumulator, stop, visitor
+        ),
+        InterfaceTypeView::UniqueReference(child) => fold_type(
+            interfaces, Id::from_u32(child), accumulator, stop, visitor
+        ),
+        _ => accumulator
+    }
+}
+
+pub fold_type<'a, L, R, A, F, e: EffectRow>(
+    interfaces: &'a TypedInterfaces,
+    ty: TypeId,
+    accumulator: A,
+    stop: L,
+    visitor: F
+) -> A
+where L: Label<R>,
+F: Fn<(A, TypeId, InterfaceTypeView<'a>, L), Output=FoldVisit<A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle visitor(
+        accumulator,
+        ty,
+        interface_type_at(interfaces, Id::to_usize(ty)),
+        stop
+    ) {
+        FoldVisit::Descend(next) =>
+            __g1_fold_type_children(interfaces, ty, next, stop, visitor),
+        FoldVisit::SkipChildren(next) => next
+    }
+}
 
 pub enum InterfaceNominalView {
     Struct(ShellId, u32, u32),
@@ -306,7 +516,7 @@ impl Use<[0, *]> for InterfaceFieldView {}
 pub enum CoreValueView {
     Unit(TypeId),
     Integer(TypeId, IntegerConstantId),
-    Local(TypeId, CoreLocalId, Bool),
+    Local(TypeId, CoreLocalId, Bool, Bool),
     Projection(TypeId, CoreValueId, u32),
     Embedded(TypeId, CoreComputationId)
 }
@@ -316,12 +526,456 @@ impl Use<[0, *]> for CoreValueView {}
 pub enum CoreComputationView<'a> {
     Pure(TypeId, CoreValueId),
     Let(TypeId, CoreLocalId, CoreComputationId, CoreComputationId),
-    Call(TypeId, ShellId, Slice<'a, CoreValueId>),
+    Call(TypeId, ShellId, CallableInstanceId, Slice<'a, CoreValueId>),
+    Primitive(TypeId, u32, Slice<'a, CoreValueId>),
     Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>),
     VariantDispatch(TypeId, CoreValueId, Slice<'a, CoreMatchArm>)
 }
 
 impl<'a> Use<[0, *]> for CoreComputationView<'a> {}
+
+pub enum CoreNodeId {
+    Value(CoreValueId),
+    Computation(CoreComputationId)
+}
+
+impl Use<[0, *]> for CoreNodeId {}
+
+pub enum CoreNodeView<'a> {
+    Value(CoreValueView),
+    Computation(CoreComputationView<'a>)
+}
+
+impl<'a> Use<[0, *]> for CoreNodeView<'a> {}
+
+pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
+    handle value {
+        CoreNodeView::Value(found) => handle found {
+            CoreValueView::Unit(ty) => ty,
+            CoreValueView::Integer(ty, _) => ty,
+            CoreValueView::Local(ty, _, _, _) => ty,
+            CoreValueView::Projection(ty, _, _) => ty,
+            CoreValueView::Embedded(ty, _) => ty
+        },
+        CoreNodeView::Computation(found) => handle found {
+            CoreComputationView::Pure(ty, _) => ty,
+            CoreComputationView::Let(ty, _, _, _) => ty,
+            CoreComputationView::Call(ty, _, _, _) => ty,
+            CoreComputationView::Primitive(ty, _, _) => ty,
+            CoreComputationView::Construct(ty, _, _) => ty,
+            CoreComputationView::VariantDispatch(ty, _, _) => ty
+        }
+    }
+}
+
+core_node_view<'a>(
+    body: &'a TypedBody,
+    node: CoreNodeId
+) -> CoreNodeView<'a> {
+    handle node {
+        CoreNodeId::Value(id) =>
+            CoreNodeView::Value(typed_body_value_at(body, id)),
+        CoreNodeId::Computation(id) => CoreNodeView::Computation(
+            typed_body_computation_at(body, id)
+        )
+    }
+}
+
+core_node_child_count(
+    body: &TypedBody,
+    node: CoreNodeId
+) -> usize {
+    handle core_node_view(body, node) {
+        CoreNodeView::Value(view) => handle view {
+            CoreValueView::Projection(_, _, _) => 1,
+            CoreValueView::Embedded(_, _) => 1,
+            _ => 0
+        },
+        CoreNodeView::Computation(view) => handle view {
+            CoreComputationView::Pure(_, _) => 1,
+            CoreComputationView::Let(_, _, _, _) => 2,
+            CoreComputationView::Call(_, _, _, operands) => Slice::len(operands),
+            CoreComputationView::Primitive(_, _, operands) =>
+                Slice::len(operands),
+            CoreComputationView::Construct(_, _, fields) => Slice::len(fields),
+            CoreComputationView::VariantDispatch(_, _, arms) =>
+                Slice::len(arms) + 1
+        }
+    }
+}
+
+core_node_child_at(
+    body: &TypedBody,
+    node: CoreNodeId,
+    index: usize
+) -> CoreNodeId {
+    handle core_node_view(body, node) {
+        CoreNodeView::Value(view) => handle view {
+            CoreValueView::Projection(_, source, _) =>
+                CoreNodeId::Value(source),
+            CoreValueView::Embedded(_, computation) =>
+                CoreNodeId::Computation(computation),
+            _ => unreachable()
+        },
+        CoreNodeView::Computation(view) => handle view {
+            CoreComputationView::Pure(_, value) => CoreNodeId::Value(value),
+            CoreComputationView::Let(_, _, initializer, remainder) => {
+                if(index == 0) {
+                    CoreNodeId::Computation(initializer)
+                } else { CoreNodeId::Computation(remainder) }
+            },
+            CoreComputationView::Call(_, _, _, operands) => {
+                let value = handle Slice::get(operands, index) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => *found
+                };
+                CoreNodeId::Value(value)
+            },
+            CoreComputationView::Primitive(_, _, operands) => {
+                let value = handle Slice::get(operands, index) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => *found
+                };
+                CoreNodeId::Value(value)
+            },
+            CoreComputationView::Construct(_, _, fields) => {
+                let field = handle Slice::get(fields, index) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                };
+                CoreNodeId::Value(construction_field_value(field))
+            },
+            CoreComputationView::VariantDispatch(_, subject, arms) => {
+                if(index == 0) { CoreNodeId::Value(subject) } else {
+                    let arm = handle Slice::get(arms, index - 1) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(found) => found
+                    };
+                    CoreNodeId::Computation(core_match_arm_body(arm))
+                }
+            }
+        }
+    }
+}
+
+__g1_push_core_walk_children(
+    body: &TypedBody,
+    work: &mut Vec<CoreNodeId>,
+    node: CoreNodeId,
+    count: usize
+) {
+    if(count > 0) {
+        let child = count - 1;
+        Vec::push(
+            &mut *work,
+            core_node_child_at(body, node, child)
+        );
+        __g1_push_core_walk_children(
+            body,
+            &mut *work,
+            node,
+            child
+        )
+    } else { () }
+}
+
+__g1_new_core_walk_work() -> Vec<CoreNodeId> { Vec::new() }
+
+__g1_walk_core_work<'a, L, R, F, e: EffectRow>(
+    body: &'a TypedBody,
+    work: Vec<CoreNodeId>,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(CoreNodeId, CoreNodeView<'a>, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle Vec::pop(&mut work) {
+        Result::Err(_) => { work; () },
+        Result::Ok(node) => {
+            handle visitor(node, core_node_view(body, node), stop) {
+                Visit::Descend => __g1_push_core_walk_children(
+                    body,
+                    &mut work,
+                    node,
+                    core_node_child_count(body, node)
+                ),
+                Visit::SkipChildren => ()
+            };
+            __g1_walk_core_work(body, work, stop, visitor)
+        }
+    }
+}
+
+pub walk_core<'a, L, R, F, e: EffectRow>(
+    body: &'a TypedBody,
+    root: CoreComputationId,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(CoreNodeId, CoreNodeView<'a>, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    let work = __g1_new_core_walk_work();
+    Vec::push(&mut work, CoreNodeId::Computation(root));
+    __g1_walk_core_work(
+        body,
+        work,
+        stop,
+        visitor
+    )
+}
+
+pub enum CoreRewriteVisit {
+    Descend(CoreNodeId),
+    SkipChildren(CoreNodeId)
+}
+
+impl Use<[0, *]> for CoreRewriteVisit {}
+
+core_rewrite_value(value: CoreNodeId) -> CoreValueId {
+    handle value {
+        CoreNodeId::Value(found) => found,
+        CoreNodeId::Computation(_) => unreachable()
+    }
+}
+
+core_rewrite_computation(value: CoreNodeId) -> CoreComputationId {
+    handle value {
+        CoreNodeId::Computation(found) => found,
+        CoreNodeId::Value(_) => unreachable()
+    }
+}
+
+core_value_set_kind(value: &mut CoreValue, kind: CoreValueKind) {
+    (*value).kind = move kind;
+    ()
+}
+
+core_value_kind_copy(body: &TypedBody, id: CoreValueId) -> CoreValueKind {
+    (Arena::index(&body.values, id)).kind
+}
+
+core_computation_set_kind(
+    value: &mut CoreComputation,
+    kind: CoreComputationKind
+) {
+    (*value).kind = move kind;
+    ()
+}
+
+core_computation_kind_copy(
+    body: &TypedBody,
+    id: CoreComputationId
+) -> CoreComputationKind {
+    (Arena::index(&body.computations, id)).kind
+}
+
+construction_field_set_value(value: &mut ConstructionField, replacement: CoreValueId) {
+    (*value).value = replacement;
+    ()
+}
+
+core_match_arm_set_body(value: &mut CoreMatchArm, replacement: CoreComputationId) {
+    (*value).body = replacement;
+    ()
+}
+
+typed_body_set_root(value: &mut TypedBody, replacement: CoreComputationId) {
+    (*value).root = replacement;
+    ()
+}
+
+core_node_child_set(
+    body: &mut TypedBody,
+    node: CoreNodeId,
+    index: usize,
+    replacement: CoreNodeId
+) {
+    handle node {
+        CoreNodeId::Value(id) => {
+            let current = core_value_kind_copy(&*body, id);
+            let next = handle current {
+                CoreValueKind::Projection(_, field) => CoreValueKind::Projection(
+                    core_rewrite_value(replacement),
+                    field
+                ),
+                CoreValueKind::Embedded(_) => CoreValueKind::Embedded(
+                    core_rewrite_computation(replacement)
+                ),
+                other => { replacement; index; other }
+            };
+            core_value_set_kind(
+                Arena::index_mut(&mut body.values, id),
+                move next
+            )
+        },
+        CoreNodeId::Computation(id) => {
+            let current = core_computation_kind_copy(&*body, id);
+            let next = handle current {
+                CoreComputationKind::Pure(_) => CoreComputationKind::Pure(
+                    core_rewrite_value(replacement)
+                ),
+                CoreComputationKind::Let(local, initializer, remainder) => {
+                    if(index == 0) {
+                        CoreComputationKind::Let(
+                            local,
+                            core_rewrite_computation(replacement),
+                            remainder
+                        )
+                    } else {
+                        CoreComputationKind::Let(
+                            local,
+                            initializer,
+                            core_rewrite_computation(replacement)
+                        )
+                    }
+                },
+                CoreComputationKind::Call(target, instance, operands) => {
+                    *Vec::index_mut(
+                        &mut body.operands,
+                        usize_from_u32(operands.start) + index
+                    ) = core_rewrite_value(replacement);
+                    CoreComputationKind::Call(target, instance, operands)
+                },
+                CoreComputationKind::Primitive(primitive, operands) => {
+                    *Vec::index_mut(
+                        &mut body.operands,
+                        usize_from_u32(operands.start) + index
+                    ) = core_rewrite_value(replacement);
+                    CoreComputationKind::Primitive(primitive, operands)
+                },
+                CoreComputationKind::Construct(flavor, fields) => {
+                    construction_field_set_value(
+                        Vec::index_mut(
+                            &mut body.construction_fields,
+                            usize_from_u32(fields.start) + index
+                        ),
+                        core_rewrite_value(replacement)
+                    );
+                    CoreComputationKind::Construct(flavor, fields)
+                },
+                CoreComputationKind::VariantDispatch(subject, arms) => {
+                    if(index == 0) {
+                        CoreComputationKind::VariantDispatch(
+                            core_rewrite_value(replacement),
+                            arms
+                        )
+                    } else {
+                        core_match_arm_set_body(
+                            Vec::index_mut(
+                                &mut body.match_arms,
+                                usize_from_u32(arms.start) + index - 1
+                            ),
+                            core_rewrite_computation(replacement)
+                        );
+                        CoreComputationKind::VariantDispatch(subject, arms)
+                    }
+                }
+            };
+            core_computation_set_kind(
+                Arena::index_mut(&mut body.computations, id),
+                move next
+            )
+        }
+    }
+}
+
+struct __CoreRewriteEdge { parent: CoreNodeId, child: usize }
+struct __CoreRewriteDecision { replacement: CoreNodeId, descend: Bool }
+
+__g1_new_core_rewrite_work() -> Vec<__CoreRewriteEdge> { Vec::new() }
+
+__g1_core_rewrite_decision(value: CoreRewriteVisit) -> __CoreRewriteDecision {
+    handle move value {
+        CoreRewriteVisit::SkipChildren(replacement) =>
+            __CoreRewriteDecision { replacement: replacement, descend: false },
+        CoreRewriteVisit::Descend(replacement) =>
+            __CoreRewriteDecision { replacement: replacement, descend: true }
+    }
+}
+
+__g1_push_core_rewrite_children(
+    work: &mut Vec<__CoreRewriteEdge>,
+    node: CoreNodeId,
+    count: usize
+) {
+    if(count > 0) {
+        let child = count - 1;
+        Vec::push(
+            &mut *work,
+            __CoreRewriteEdge { parent: node, child: child }
+        );
+        __g1_push_core_rewrite_children(&mut *work, node, child)
+    } else { () }
+}
+
+__g1_rewrite_core_work<L, R, F, e: EffectRow>(
+    body: &mut TypedBody,
+    work: Vec<__CoreRewriteEdge>,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(&mut TypedBody, CoreNodeId, L), Output=CoreRewriteVisit, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle Vec::pop(&mut work) {
+        Result::Err(_) => { work; () },
+        Result::Ok(edge) => {
+            let __CoreRewriteEdge { parent, child } = move edge;
+            let original = core_node_child_at(&*body, parent, child);
+            let __CoreRewriteDecision { replacement, descend } =
+                __g1_core_rewrite_decision(visitor(&mut *body, original, stop));
+            core_node_child_set(&mut *body, parent, child, replacement);
+            if(descend) {
+                __g1_push_core_rewrite_children(
+                    &mut work,
+                    replacement,
+                    core_node_child_count(&*body, replacement)
+                )
+            } else { () };
+            __g1_rewrite_core_work(move body, move work, stop, visitor)
+        }
+    }
+}
+
+pub rewrite_core<L, R, F, e: EffectRow>(
+    body: &mut TypedBody,
+    root: CoreComputationId,
+    stop: L,
+    visitor: F
+) -> CoreComputationId
+where L: Label<R>,
+F: Fn<(&mut TypedBody, CoreNodeId, L), Output=CoreRewriteVisit, Effects={| e}>,
+F: Use<[0, 0]> {
+    let __CoreRewriteDecision { replacement, descend } =
+        __g1_core_rewrite_decision(
+            visitor(&mut *body, CoreNodeId::Computation(root), stop)
+        );
+    let work = __g1_new_core_rewrite_work();
+    if(descend) {
+        __g1_push_core_rewrite_children(
+            &mut work,
+            replacement,
+            core_node_child_count(&*body, replacement)
+        )
+    } else { () };
+    __g1_rewrite_core_work(move body, move work, stop, visitor);
+    core_rewrite_computation(replacement)
+}
+
+__g1_identity_rewrite_core<L, R>(body: TypedBody, stop: L) -> TypedBody
+where L: Label<R> {
+    let root = body.root;
+    let rewritten = rewrite_core(
+        &mut body,
+        root,
+        stop,
+        { _, node, _ => CoreRewriteVisit::Descend(node) }
+    );
+    typed_body_set_root(&mut body, rewritten);
+    move body
+}
 
 pub struct IntegerConstantView {
     low0: u32,
@@ -334,8 +988,8 @@ impl Use<[0, *]> for IntegerConstantView {}
 
 enum PredeclaredNominal {
     Skip,
-    Struct,
-    Enum
+    Struct(SignatureScope),
+    Enum(SignatureScope)
 }
 
 impl Use<[0, *]> for PredeclaredNominal {}
@@ -464,7 +1118,8 @@ push_core_binding(
 enum TypeNameTarget {
     Alias(super::headers::AliasHeaderId),
     Struct(super::headers::StructHeaderId),
-    Enum(super::headers::EnumHeaderId)
+    Enum(super::headers::EnumHeaderId),
+    Effect(ShellId)
 }
 
 impl Use<[0, *]> for TypeNameTarget {}
@@ -551,6 +1206,97 @@ interface_callable_parameters(
     id: InterfaceCallableId
 ) -> CallableParameterRange {
     interface_callable_at(value, id).parameters
+}
+
+interface_callable_generics(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> SignatureScope {
+    interface_callable_at(value, id).generics
+}
+
+pub interface_callable_generic_count(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> u32 {
+    interface_callable_generics(value, id).count
+}
+
+callable_instance_at<'a>(
+    value: &'a TypedInterfaces,
+    id: CallableInstanceId
+) -> &'a CallableInstance {
+    Arena::index(&value.instances, id)
+}
+
+pub callable_instance_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.instances)
+}
+
+pub callable_instance_id_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> Option<CallableInstanceId> {
+    let id = try(Id::from_usize(index), @callable_instance_id_at);
+    handle Arena::get(&value.instances, id) {
+        Result::Err(_) => None,
+        Result::Ok(_) => Option::Some(id)
+    }
+}
+
+pub callable_instance_callable(
+    value: &TypedInterfaces,
+    id: CallableInstanceId
+) -> InterfaceCallableId {
+    callable_instance_at(value, id).callable
+}
+
+pub callable_instance_result(
+    value: &TypedInterfaces,
+    id: CallableInstanceId
+) -> TypeId {
+    callable_instance_at(value, id).result
+}
+
+callable_instance_parameters(
+    value: &TypedInterfaces,
+    id: CallableInstanceId
+) -> CallableParameterRange {
+    callable_instance_at(value, id).parameters
+}
+
+pub callable_instance_parameter_count(
+    value: &TypedInterfaces,
+    id: CallableInstanceId
+) -> u32 {
+    callable_instance_parameters(value, id).count
+}
+
+pub callable_instance_parameter_at(
+    value: &TypedInterfaces,
+    id: CallableInstanceId,
+    index: usize
+) -> TypeId {
+    let range = callable_instance_parameters(value, id);
+    *Vec::index(
+        &value.instance_parameters,
+        usize_from_u32(range.start) + index
+    )
+}
+
+callable_instance_substitutions<'a>(
+    value: &'a TypedInterfaces,
+    id: CallableInstanceId
+) -> Slice<'a, Option<TypeId>> {
+    let range = callable_instance_at(value, id).substitutions;
+    handle Slice::subslice(
+        Vec::as_slice(&value.instance_substitutions),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
 }
 
 pub interface_callable_id_at(
@@ -800,6 +1546,8 @@ pub interface_type_at<'a>(
         TypeKind::Unit => InterfaceTypeView::Unit,
         TypeKind::Never => InterfaceTypeView::Never,
         TypeKind::Scalar(kind) => InterfaceTypeView::Scalar(kind),
+        TypeKind::TypeParameter(owner, ordinal) =>
+            InterfaceTypeView::TypeParameter(Id::to_u32(owner), ordinal),
         TypeKind::Tuple(range) => InterfaceTypeView::Tuple(
             handle Slice::subslice(
                 Vec::as_slice(&value.type_elements),
@@ -810,6 +1558,24 @@ pub interface_type_at<'a>(
                 Result::Ok(elements) => elements
             }
         ),
+        TypeKind::Text => InterfaceTypeView::Text,
+        TypeKind::Bytes => InterfaceTypeView::Bytes,
+        TypeKind::Array(element) =>
+            InterfaceTypeView::Array(Id::to_u32(element)),
+        TypeKind::Application(constructor, range) =>
+            InterfaceTypeView::Application(
+                Id::to_u32(constructor),
+                handle Slice::subslice(
+                    Vec::as_slice(&value.type_elements),
+                    usize_from_u32(range.start),
+                    usize_from_u32(range.count)
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(elements) => elements
+                }
+            ),
+        TypeKind::Effect(shell) =>
+            InterfaceTypeView::Effect(Id::to_u32(shell)),
         TypeKind::Nominal(id) =>
             InterfaceTypeView::Nominal(Id::to_u32(id)),
         TypeKind::SharedReference(id) =>
@@ -824,7 +1590,13 @@ pub interface_type_tag_at(value: &TypedInterfaces, index: usize) -> u8 {
         TypeKind::Unit => 1,
         TypeKind::Never => 2,
         TypeKind::Scalar(_) => 3,
+        TypeKind::TypeParameter(_, _) => 8,
         TypeKind::Tuple(_) => 4,
+        TypeKind::Text => 11,
+        TypeKind::Bytes => 12,
+        TypeKind::Array(_) => 9,
+        TypeKind::Application(_, _) => 10,
+        TypeKind::Effect(_) => 13,
         TypeKind::Nominal(_) => 5,
         TypeKind::SharedReference(_) => 6,
         TypeKind::UniqueReference(_) => 7
@@ -834,7 +1606,11 @@ pub interface_type_tag_at(value: &TypedInterfaces, index: usize) -> u8 {
 pub interface_type_a_at(value: &TypedInterfaces, index: usize) -> u32 {
     handle type_kind_at(value, type_id_from_usize(index)) {
         TypeKind::Scalar(kind) => u32_from_u8(kind),
+        TypeKind::TypeParameter(owner, _) => Id::to_u32(owner),
         TypeKind::Tuple(range) => range.start,
+        TypeKind::Array(element) => Id::to_u32(element),
+        TypeKind::Application(constructor, _) => Id::to_u32(constructor),
+        TypeKind::Effect(shell) => Id::to_u32(shell),
         TypeKind::Nominal(id) => Id::to_u32(id),
         TypeKind::SharedReference(id) => Id::to_u32(id),
         TypeKind::UniqueReference(id) => Id::to_u32(id),
@@ -845,14 +1621,17 @@ pub interface_type_a_at(value: &TypedInterfaces, index: usize) -> u32 {
 pub interface_type_b_at(value: &TypedInterfaces, index: usize) -> u32 {
     handle type_kind_at(value, type_id_from_usize(index)) {
         TypeKind::Tuple(range) => range.count,
+        TypeKind::Application(_, range) => range.start,
+        TypeKind::TypeParameter(_, ordinal) => ordinal,
         _ => 0
     }
 }
 
 pub interface_type_c_at(value: &TypedInterfaces, index: usize) -> u32 {
-    value;
-    index;
-    0
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Application(_, range) => range.count,
+        _ => 0
+    }
 }
 
 pub interface_type_flags_at(value: &TypedInterfaces, index: usize) -> u32 {
@@ -861,6 +1640,13 @@ pub interface_type_flags_at(value: &TypedInterfaces, index: usize) -> u32 {
 
 pub interface_type_element_count(value: &TypedInterfaces) -> usize {
     Vec::len(&value.type_elements)
+}
+
+pub interface_type_element_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> TypeId {
+    *Vec::index(&value.type_elements, index)
 }
 
 checked_u32_from_usize(value: usize) -> u32 {
@@ -872,6 +1658,16 @@ checked_u32_from_usize(value: usize) -> u32 {
 
 pub interface_nominal_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.nominals)
+}
+
+pub interface_nominal_generic_count(
+    value: &TypedInterfaces,
+    index: usize
+) -> u32 {
+    interface_nominal_at(
+        value,
+        interface_nominal_id_from_usize(index)
+    ).generics.count
 }
 
 pub interface_nominal_at_view(
@@ -1001,6 +1797,31 @@ pub interface_variant_payloads_at<'a>(
     }
 }
 
+pub interface_variant_payload_count_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> u32 {
+    interface_variant_at(
+        value,
+        interface_variant_id_from_usize(index)
+    ).payloads.count
+}
+
+pub interface_variant_payload_at(
+    value: &TypedInterfaces,
+    index: usize,
+    ordinal: usize
+) -> TypeId {
+    let variant = interface_variant_at(
+        value,
+        interface_variant_id_from_usize(index)
+    );
+    *Vec::index(
+        &value.variant_payloads,
+        usize_from_u32(variant.payloads.start) + ordinal
+    )
+}
+
 pub interface_callable_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.callables)
 }
@@ -1068,12 +1889,13 @@ pub typed_body_value_at(
         CoreValueKind::Unit => CoreValueView::Unit(ty),
         CoreValueKind::Integer(constant) =>
             CoreValueView::Integer(ty, constant),
-        CoreValueKind::Local(local) => CoreValueView::Local(
+        CoreValueKind::Local(local, forced) => CoreValueView::Local(
             ty,
             local,
             if(*IndexVec::index(&value.transfer_candidates, id)) {
                 false
-            } else { true }
+            } else { true },
+            forced
         ),
         CoreValueKind::Projection(source, field) =>
             CoreValueView::Projection(
@@ -1167,6 +1989,25 @@ pub core_match_binding_local(
     value.local
 }
 
+pub core_match_binding_integer(
+    value: &CoreMatchBinding
+) -> Option<IntegerConstantId> {
+    value.integer
+}
+
+pub core_match_binding_integer_test(
+    value: CoreMatchBinding
+) -> Option<(u32, TypeId, IntegerConstantId)> {
+    handle value.integer {
+        None => None,
+        Option::Some(constant) => Option::Some((
+            value.field,
+            value.ty,
+            constant
+        ))
+    }
+}
+
 pub core_match_binding_type(value: &CoreMatchBinding) -> TypeId {
     value.ty
 }
@@ -1187,10 +2028,17 @@ pub typed_body_computation_at<'a>(
                 initializer,
                 remainder
             ),
-        CoreComputationKind::Call(shell, range) =>
+        CoreComputationKind::Call(shell, instance, range) =>
             CoreComputationView::Call(
                 ty,
                 shell,
+                instance,
+                typed_body_operands(value, range)
+            ),
+        CoreComputationKind::Primitive(primitive, range) =>
+            CoreComputationView::Primitive(
+                ty,
+                primitive,
                 typed_body_operands(value, range)
             ),
         CoreComputationKind::Construct(flavor, range) =>
@@ -1206,6 +2054,13 @@ pub typed_body_computation_at<'a>(
                 typed_body_match_arms(value, range)
             )
     }
+}
+
+pub typed_body_computation_type(
+    value: &TypedBody,
+    id: CoreComputationId
+) -> TypeId {
+    core_computation_at(&value.computations, id).ty
 }
 
 pub construction_field_ordinal(value: &ConstructionField) -> u32 {
@@ -1406,6 +2261,9 @@ type_to_scalar_kind(type_id: u32) -> u8 {
         10 => 10,
         11 => 11,
         12 => 6,
+        14 => 13,
+        15 => 14,
+        16 => 15,
         _ => 12
     }
 }
@@ -1423,12 +2281,15 @@ scalar_kind_to_type(kind: u8) -> u32 {
         9 => 9,
         10 => 10,
         11 => 11,
-        _ => 13
+        12 => 13,
+        13 => 14,
+        14 => 15,
+        _ => 16
     }
 }
 
 seed_scalar_types(value: &mut TypedInterfaces, type_id: u32) {
-    if(type_id <= 13) {
+    if(type_id <= 16) {
         alloc_type(value, TypeNode {
             kind: TypeKind::Scalar(type_to_scalar_kind(type_id)),
             copyable: true
@@ -1446,11 +2307,33 @@ seed_types(value: &mut TypedInterfaces) {
         kind: TypeKind::Never,
         copyable: true
     });
-    seed_scalar_types(value, 2)
+    seed_scalar_types(value, 2);
+    alloc_type(value, TypeNode {
+        kind: TypeKind::Text,
+        copyable: false
+    });
+    alloc_type(value, TypeNode {
+        kind: TypeKind::Bytes,
+        copyable: false
+    });
+    ()
 }
 
 scalar_kind(value: &String) -> Option<u8> {
-    if(String::eq(value, &"u8")) { Result::Ok(1) } else { if(String::eq(value, &"u16")) { Result::Ok(2) } else { if(String::eq(value, &"u32")) { Result::Ok(3) } else { if(String::eq(value, &"u64")) { Result::Ok(4) } else { if(String::eq(value, &"u128")) { Result::Ok(5) } else { if(String::eq(value, &"usize")) { Result::Ok(6) } else { signed_scalar_kind(value) } } } } } }
+    if(String::eq(value, &"u8")) { Result::Ok(1) } else { if(String::eq(value, &"u16")) { Result::Ok(2) } else { if(String::eq(value, &"u32")) { Result::Ok(3) } else { if(String::eq(value, &"u64")) { Result::Ok(4) } else { if(String::eq(value, &"u128")) { Result::Ok(5) } else { if(String::eq(value, &"usize")) { Result::Ok(6) } else { if(String::eq(value, &"f32")) { Result::Ok(13) } else { if(String::eq(value, &"f64")) { Result::Ok(14) } else { if(String::eq(value, &"char")) { Result::Ok(15) } else { signed_scalar_kind(value) } } } } } } } } }
+}
+
+signature_scalar_type(output: &mut TypedInterfaces, kind: u8) -> u32 {
+    output;
+    scalar_kind_to_type(kind)
+}
+
+named_builtin_type(value: &String) -> Option<u32> {
+    if(String::eq(value, &"Text")) { Result::Ok(17) } else {
+        if(String::eq(value, &"Bytes")) { Result::Ok(18) } else {
+            Result::Err(())
+        }
+    }
 }
 
 signed_scalar_kind(value: &String) -> Option<u8> {
@@ -1488,7 +2371,14 @@ type_name_target_in(
             super::scanner::def_search_first(&found),
             @type_name_target_in
         );
-        handle super::headers::def_kind_for_shell(nominal, shell) {
+        let declaration = try(
+            super::scanner::shell_at(declarations, shell),
+            @type_name_target_in
+        );
+        if(super::scanner::shell_kind(declaration)
+            is super::scanner::DeclarationKind::Effect) {
+            Result::Ok(TypeNameTarget::Effect(shell))
+        } else { handle super::headers::def_kind_for_shell(nominal, shell) {
             Result::Err(_) => Result::Err(()),
             Result::Ok(kind) => handle kind {
                 super::headers::HeaderOrder::Alias(index) =>
@@ -1499,8 +2389,369 @@ type_name_target_in(
                     Result::Ok(TypeNameTarget::Enum(index)),
                 _ => Result::Err(())
             }
-        }
+        } }
     } else { Result::Err(()) }
+}
+
+import_header_mentions(
+    headers: &super::headers::ParsedHeaders,
+    shell: &super::scanner::DeclarationShell,
+    name: u32,
+    token: usize
+) -> Bool {
+    let span = super::scanner::shell_header(shell);
+    if(token < super::syntax::token_end(span)) {
+        handle super::lexer::token_kind_at(
+            super::headers::parsed_source(headers),
+            token
+        ) {
+            TokenKind::Ident(found) => if(Id::to_u32(found) == name) {
+                true
+            } else {
+                import_header_mentions(headers, shell, name, token + 1)
+            },
+            _ => import_header_mentions(headers, shell, name, token + 1)
+        }
+    } else { false }
+}
+
+token_name_is(
+    headers: &super::headers::ParsedHeaders,
+    token: usize,
+    expected: &String
+) -> Bool {
+    handle super::lexer::token_kind_at(
+        super::headers::parsed_source(headers), token
+    ) {
+        TokenKind::Ident(name) => handle super::lexer::lexeme(
+            super::headers::parsed_source(headers), name
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(found) => String::eq(found, expected)
+        },
+        _ => false
+    }
+}
+
+resolve_direct_import_component(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    cursor: usize,
+    end: usize,
+    current: Option<ShellId>,
+    first: Bool,
+    desired: u32
+) -> Option<TypeNameTarget> {
+    if(cursor >= end) { Result::Err(()) } else { handle
+        super::lexer::token_kind_at(
+            super::headers::parsed_source(headers), cursor
+        ) {
+        TokenKind::Ident(name) => if(cursor + 1 < end) { handle
+            super::lexer::token_kind_at(
+                super::headers::parsed_source(headers), cursor + 1
+            ) {
+            TokenKind::Semicolon => if(Id::to_u32(name) == desired) {
+                type_name_target_in(
+                    headers, declarations, desired, current
+                )
+            } else { Result::Err(()) },
+            TokenKind::DoubleColon => {
+                let next = if(token_name_is(headers, cursor, &"crate")) {
+                    if(first) {
+                        Result::Ok(ResolvedModule { shell: None })
+                    } else { Result::Err(()) }
+                } else { if(token_name_is(headers, cursor, &"self")) {
+                    if(first) {
+                        Result::Ok(ResolvedModule { shell: current })
+                    } else { Result::Err(()) }
+                } else { if(token_name_is(headers, cursor, &"super")) {
+                    parent_module(declarations, current)
+                } else {
+                    let found = if(first) {
+                        module_named(
+                            declarations, Id::to_u32(name), current
+                        )
+                    } else {
+                        module_named_in(
+                            declarations, Id::to_u32(name), current
+                        )
+                    };
+                    Result::map(found, { shell => ResolvedModule {
+                        shell: Option::Some(shell)
+                    }})
+                } } };
+                let next = try(next, @resolve_direct_import_component);
+                resolve_direct_import_component(
+                    headers,
+                    declarations,
+                    cursor + 2,
+                    end,
+                    next.shell,
+                    false,
+                    desired
+                )
+            },
+            _ => Result::Err(())
+            }
+        } else { Result::Err(()) },
+        _ => Result::Err(())
+    } }
+}
+
+direct_import_type_target(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>,
+    name: u32,
+    ordinal: usize
+) -> Option<TypeNameTarget> {
+    if(ordinal < super::scanner::import_shell_count(declarations)) {
+        let id = super::scanner::import_shell_at(declarations, ordinal);
+        let shell = handle super::scanner::shell_at(declarations, id) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(*super::scanner::shell_parent(shell) == module) {
+            let span = super::scanner::shell_header(shell);
+            let start = super::syntax::token_start(span);
+            if(token_name_is(headers, start, &"use")) {
+                handle resolve_direct_import_component(
+                    headers,
+                    declarations,
+                    start + 1,
+                    super::syntax::token_end(span),
+                    module,
+                    true,
+                    name
+                ) {
+                    Result::Ok(found) => Result::Ok(found),
+                    Result::Err(_) => direct_import_type_target(
+                        headers,
+                        declarations,
+                        module,
+                        name,
+                        ordinal + 1
+                    )
+                }
+            } else { direct_import_type_target(
+                headers, declarations, module, name, ordinal + 1
+            ) }
+        } else { direct_import_type_target(
+            headers, declarations, module, name, ordinal + 1
+        ) }
+    } else { Result::Err(()) }
+}
+
+resolve_direct_import_module_component(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    cursor: usize,
+    end: usize,
+    current: Option<ShellId>,
+    first: Bool,
+    desired: u32
+) -> Option<ResolvedModule> {
+    if(cursor >= end) { Result::Err(()) } else { handle
+        super::lexer::token_kind_at(
+            super::headers::parsed_source(headers), cursor
+        ) {
+        TokenKind::Ident(name) => if(cursor + 1 < end) { handle
+            super::lexer::token_kind_at(
+                super::headers::parsed_source(headers), cursor + 1
+            ) {
+            TokenKind::Semicolon => if(Id::to_u32(name) == desired) {
+                let found = if(first) {
+                    module_named(declarations, desired, current)
+                } else {
+                    module_named_in(declarations, desired, current)
+                };
+                Result::map(found, { shell => ResolvedModule {
+                    shell: Option::Some(shell)
+                }})
+            } else { Result::Err(()) },
+            TokenKind::DoubleColon => {
+                let next = if(token_name_is(headers, cursor, &"crate")) {
+                    if(first) {
+                        Result::Ok(ResolvedModule { shell: None })
+                    } else { Result::Err(()) }
+                } else { if(token_name_is(headers, cursor, &"self")) {
+                    if(first) {
+                        Result::Ok(ResolvedModule { shell: current })
+                    } else { Result::Err(()) }
+                } else { if(token_name_is(headers, cursor, &"super")) {
+                    parent_module(declarations, current)
+                } else {
+                    let found = if(first) {
+                        module_named(
+                            declarations, Id::to_u32(name), current
+                        )
+                    } else {
+                        module_named_in(
+                            declarations, Id::to_u32(name), current
+                        )
+                    };
+                    Result::map(found, { shell => ResolvedModule {
+                        shell: Option::Some(shell)
+                    }})
+                } } };
+                let next = try(
+                    next, @resolve_direct_import_module_component
+                );
+                resolve_direct_import_module_component(
+                    headers,
+                    declarations,
+                    cursor + 2,
+                    end,
+                    next.shell,
+                    false,
+                    desired
+                )
+            },
+            _ => Result::Err(())
+            }
+        } else { Result::Err(()) },
+        _ => Result::Err(())
+    } }
+}
+
+direct_import_module(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>,
+    name: u32,
+    ordinal: usize
+) -> Option<ResolvedModule> {
+    if(ordinal < super::scanner::import_shell_count(declarations)) {
+        let id = super::scanner::import_shell_at(declarations, ordinal);
+        let shell = handle super::scanner::shell_at(declarations, id) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(*super::scanner::shell_parent(shell) == module) {
+            let span = super::scanner::shell_header(shell);
+            let start = super::syntax::token_start(span);
+            if(token_name_is(headers, start, &"use")) {
+                handle resolve_direct_import_module_component(
+                    headers,
+                    declarations,
+                    start + 1,
+                    super::syntax::token_end(span),
+                    module,
+                    true,
+                    name
+                ) {
+                    Result::Ok(found) => Result::Ok(found),
+                    Result::Err(_) => direct_import_module(
+                        headers,
+                        declarations,
+                        module,
+                        name,
+                        ordinal + 1
+                    )
+                }
+            } else { direct_import_module(
+                headers, declarations, module, name, ordinal + 1
+            ) }
+        } else { direct_import_module(
+            headers, declarations, module, name, ordinal + 1
+        ) }
+    } else { Result::Err(()) }
+}
+
+module_imports_name(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>,
+    name: u32,
+    ordinal: usize
+) -> Bool {
+    if(ordinal < super::scanner::import_shell_count(declarations)) {
+        let id = super::scanner::import_shell_at(declarations, ordinal);
+        let shell = handle super::scanner::shell_at(declarations, id) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if((*super::scanner::shell_parent(shell) == module) and { import_header_mentions(
+            headers,
+            shell,
+            name,
+            super::syntax::token_start(super::scanner::shell_header(shell))
+        ) }) { true } else {
+            module_imports_name(
+                headers, declarations, module, name, ordinal + 1
+            )
+        }
+    } else { false }
+}
+
+type_target_for_shell(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    shell: ShellId
+) -> Option<TypeNameTarget> {
+    let declaration = try(
+        super::scanner::shell_at(declarations, shell),
+        @type_target_for_shell
+    );
+    if(super::scanner::shell_kind(declaration)
+        is super::scanner::DeclarationKind::Effect) {
+        Result::Ok(TypeNameTarget::Effect(shell))
+    } else { handle super::headers::def_kind_for_shell(
+        super::headers::nominal_index(headers), shell
+    ) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(kind) => handle kind {
+            super::headers::HeaderOrder::Alias(index) =>
+                Result::Ok(TypeNameTarget::Alias(index)),
+            super::headers::HeaderOrder::Struct(index) =>
+                Result::Ok(TypeNameTarget::Struct(index)),
+            super::headers::HeaderOrder::Enum(index) =>
+                Result::Ok(TypeNameTarget::Enum(index)),
+            _ => Result::Err(())
+        }
+    } }
+}
+
+globally_unique_type_target(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    name: u32,
+    ordinal: usize,
+    found: Option<TypeNameTarget>
+) -> Option<TypeNameTarget> {
+    if(ordinal < super::scanner::shell_count(declarations)) {
+        let id = handle super::scanner::shell_id_at_ordinal(
+            declarations, ordinal
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let shell = handle super::scanner::shell_at(declarations, id) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let matches = handle super::scanner::shell_name(shell) {
+            Result::Err(_) => false,
+            Result::Ok(shell_name) => Id::to_u32(shell_name) == name
+        };
+        if(matches) { handle type_target_for_shell(headers, declarations, id) {
+            Result::Err(_) => globally_unique_type_target(
+                headers, declarations, name, ordinal + 1, found
+            ),
+            Result::Ok(target) => handle found {
+                Result::Err(_) => globally_unique_type_target(
+                    headers,
+                    declarations,
+                    name,
+                    ordinal + 1,
+                    Option::Some(target)
+                ),
+                Result::Ok(_) => Result::Err(())
+            }
+        } } else { globally_unique_type_target(
+            headers, declarations, name, ordinal + 1, found
+        ) }
+    } else { found }
 }
 
 type_name_target(
@@ -1512,13 +2763,35 @@ type_name_target(
     handle type_name_target_in(headers, declarations, name, module) {
         Result::Ok(found) => Result::Ok(found),
         Result::Err(_) => handle module {
-            Result::Err(_) => Result::Err(()),
-            Result::Ok(_) => type_name_target_in(
-                headers,
-                declarations,
-                name,
-                None
-            )
+            Result::Ok(_) => handle type_name_target_in(
+                headers, declarations, name, None
+            ) {
+                Result::Ok(found) => Result::Ok(found),
+                Result::Err(_) => handle direct_import_type_target(
+                    headers, declarations, module, name, 0
+                ) {
+                    Result::Ok(found) => Result::Ok(found),
+                    Result::Err(_) => if(module_imports_name(
+                        headers, declarations, module, name, 0
+                    )) {
+                        globally_unique_type_target(
+                            headers, declarations, name, 0, None
+                        )
+                    } else { Result::Err(()) }
+                }
+            },
+            Result::Err(_) => handle direct_import_type_target(
+                headers, declarations, None, name, 0
+            ) {
+                Result::Ok(found) => Result::Ok(found),
+                Result::Err(_) => if(module_imports_name(
+                    headers, declarations, None, name, 0
+                )) {
+                    globally_unique_type_target(
+                        headers, declarations, name, 0, None
+                    )
+                } else { Result::Err(()) }
+            }
         }
     }
 }
@@ -1548,10 +2821,39 @@ type_kinds_equal(left: TypeKind, right: TypeKind) -> Bool {
             TypeKind::Scalar(right_kind) => left_kind == right_kind,
             _ => false
         },
+        TypeKind::TypeParameter(left_owner, left_ordinal) => handle right {
+            TypeKind::TypeParameter(right_owner, right_ordinal) =>
+                left_owner == right_owner
+                    and { left_ordinal == right_ordinal },
+            _ => false
+        },
         TypeKind::Tuple(left_range) => handle right {
             TypeKind::Tuple(right_range) =>
                 left_range.start == right_range.start
                     and { left_range.count == right_range.count },
+            _ => false
+        },
+        TypeKind::Text => handle right {
+            TypeKind::Text => true,
+            _ => false
+        },
+        TypeKind::Bytes => handle right {
+            TypeKind::Bytes => true,
+            _ => false
+        },
+        TypeKind::Array(left_element) => handle right {
+            TypeKind::Array(right_element) => left_element == right_element,
+            _ => false
+        },
+        TypeKind::Application(left_constructor, left_range) => handle right {
+            TypeKind::Application(right_constructor, right_range) =>
+                left_constructor == right_constructor
+                    and { left_range.start == right_range.start }
+                    and { left_range.count == right_range.count },
+            _ => false
+        },
+        TypeKind::Effect(left_shell) => handle right {
+            TypeKind::Effect(right_shell) => left_shell == right_shell,
             _ => false
         },
         TypeKind::Nominal(left_id) => handle right {
@@ -1676,6 +2978,80 @@ intern_tuple_type(output: &mut TypedInterfaces, elements: &Vec<u32>) -> u32 {
     }
 }
 
+application_elements_equal(
+    output: &TypedInterfaces,
+    range: TypeElementRange,
+    elements: &Vec<u32>,
+    ordinal: usize
+) -> Bool {
+    if(ordinal < Vec::len(elements)) {
+        Id::to_u32(*Vec::index(
+            &output.type_elements,
+            usize_from_u32(range.start) + ordinal
+        )) == *Vec::index(elements, ordinal)
+            and { application_elements_equal(
+                output,
+                range,
+                elements,
+                ordinal + 1
+            ) }
+    } else { true }
+}
+
+find_application_type(
+    output: &TypedInterfaces,
+    constructor: TypeId,
+    elements: &Vec<u32>,
+    index: usize
+) -> Option<u32> {
+    if(index < interface_type_count(output)) {
+        let matches = handle type_kind_at(output, type_id_from_usize(index)) {
+            TypeKind::Application(found, range) =>
+                found == constructor
+                    and { usize_from_u32(range.count) == Vec::len(elements) }
+                    and { application_elements_equal(
+                        output,
+                        range,
+                        elements,
+                        0
+                    ) },
+            _ => false
+        };
+        if(matches) { Result::Ok(u32_from_usize(index)) } else {
+            find_application_type(output, constructor, elements, index + 1)
+        }
+    } else { Result::Err(()) }
+}
+
+intern_application_type(
+    output: &mut TypedInterfaces,
+    constructor: TypeId,
+    elements: &Vec<u32>
+) -> u32 {
+    handle find_application_type(&*output, constructor, elements, 0) {
+        Result::Ok(found) => found,
+        Result::Err(_) => {
+            let start = u32_from_usize(Vec::len(&output.type_elements));
+            append_type_ids(&mut output.type_elements, elements, 0);
+            push_interface_type(
+                output,
+                TypeKind::Application(
+                    constructor,
+                    super::syntax::id_range(
+                        usize_from_u32(start),
+                        usize_from_u32(start) + Vec::len(elements)
+                    )
+                ),
+                false
+            )
+        }
+    }
+}
+
+intern_array_type(output: &mut TypedInterfaces, element: TypeId) -> u32 {
+    intern_record_type(output, TypeKind::Array(element), false)
+}
+
 resolve_alias_type(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -1701,8 +3077,7 @@ resolve_alias_type(
                 Result::Ok(alias) => {
                     let shell = super::headers::alias_shell(alias);
                     let generics = super::headers::alias_generics(alias);
-                    if(super::headers::range_count(generics)
-                        == 0) { handle super::scanner::shell_at(
+                    handle super::scanner::shell_at(
                             declarations,
                             shell
                         ) {
@@ -1717,7 +3092,11 @@ resolve_alias_type(
                                     declarations,
                                     output,
                                     *super::headers::alias_target(alias),
-                                    shell_parent_module(owner)
+                                    shell_parent_module(owner),
+                                    Option::Some(signature_scope(
+                                        shell,
+                                        generics
+                                    ))
                                 ), @resolve_alias_type);
                                 *Vec::index_mut(
                                     &mut output.alias_states,
@@ -1727,11 +3106,7 @@ resolve_alias_type(
                                 );
                                 Result::Ok(ty)
                             }
-                        } } else { Result::Err(
-                            ElaborationError::GenericTypeAliasUnsupported(
-                                token
-                            )
-                        ) }
+                        }
                 }
             }
         }
@@ -1741,43 +3116,16 @@ resolve_alias_type(
 module_named_in(
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    parent: Option<ShellId>,
-    index: usize
+    parent: Option<ShellId>
 ) -> Option<ShellId> {
-    if(index < super::scanner::shell_count(declarations)) {
-        let shell_id = try(
-            super::scanner::shell_id_at_ordinal(declarations, index),
-            @module_named_in
-        );
-        let shell = try(
-            super::scanner::shell_at(declarations, shell_id),
-            @module_named_in
-        );
-        if((super::scanner::shell_kind(shell)
-            is super::scanner::DeclarationKind::Module) and {
-                same_module(shell_parent_module(shell), parent)
-            }) { handle Option::as_ref(
-                    super::scanner::shell_name(shell)
-                ) {
-                    Result::Err(_) => module_named_in(
-                        declarations,
-                        name,
-                        parent,
-                        index + 1
-                    ),
-                    Result::Ok(found) => if(Id::to_u32(*found) == name) { Result::Ok(shell_id) } else { module_named_in(
-                            declarations,
-                            name,
-                            parent,
-                            index + 1
-                        ) }
-                } } else { module_named_in(
-                    declarations,
-                    name,
-                    parent,
-                    index + 1
-                )
-        }
+    let found = super::scanner::def_search(
+        declarations,
+        parent,
+        Id::from_u32(name),
+        super::scanner::Namespace::Module
+    );
+    if(super::scanner::def_search_count(&found) == 1) {
+        super::scanner::def_search_first(&found)
     } else { Result::Err(()) }
 }
 
@@ -1786,17 +3134,147 @@ module_named(
     name: u32,
     parent: Option<ShellId>
 ) -> Option<ShellId> {
-    handle module_named_in(declarations, name, parent, 0) {
+    handle module_named_in(declarations, name, parent) {
         Result::Ok(found) => Result::Ok(found),
         Result::Err(_) => handle parent {
             Result::Err(_) => Result::Err(()),
             Result::Ok(_) => module_named_in(
                 declarations,
                 name,
-                None,
-                0
+                None
             )
         }
+    }
+}
+
+name_use_is(
+    headers: &super::headers::ParsedHeaders,
+    value: &super::headers::NameUse,
+    expected: &String
+) -> Bool {
+    handle super::lexer::lexeme(
+        super::headers::parsed_source(headers),
+        super::headers::name_use_name(value)
+    ) {
+        Result::Err(_) => false,
+        Result::Ok(found) => String::eq(found, expected)
+    }
+}
+
+parent_module(
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) -> Option<ResolvedModule> {
+    let current = try(module, @parent_module);
+    let shell = try(
+        super::scanner::shell_at(declarations, current),
+        @parent_module
+    );
+    Result::Ok(ResolvedModule {
+        shell: *super::scanner::shell_parent(shell)
+    })
+}
+
+resolve_type_path_module<'a>(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    names: Slice<'a, super::headers::NameUse>,
+    index: usize,
+    end: usize,
+    current: Option<ShellId>,
+    first: Bool
+) -> Option<ResolvedModule> {
+    if(index < end) {
+        let name = handle Slice::get(names, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(name_use_is(headers, name, &"crate")) {
+            if(first) {
+                resolve_type_path_module(
+                    headers, declarations, names, index + 1, end, None, false
+                )
+            } else { Result::Err(()) }
+        } else { if(name_use_is(headers, name, &"self")) {
+            if(first) {
+                resolve_type_path_module(
+                    headers, declarations, names, index + 1, end, current, false
+                )
+            } else { Result::Err(()) }
+        } else { if(name_use_is(headers, name, &"super")) {
+            let parent = try(
+                parent_module(declarations, current),
+                @resolve_type_path_module
+            );
+            resolve_type_path_module(
+                headers,
+                declarations,
+                names,
+                index + 1,
+                end,
+                parent.shell,
+                false
+            )
+        } else {
+            let raw = Id::to_u32(super::headers::name_use_name(name));
+            let found = if(first) {
+                handle module_named(declarations, raw, current) {
+                    Result::Ok(shell) => Result::Ok(ResolvedModule {
+                        shell: Option::Some(shell)
+                    }),
+                    Result::Err(_) => direct_import_module(
+                        headers, declarations, current, raw, 0
+                    )
+                }
+            } else {
+                Result::map(
+                    module_named_in(declarations, raw, current),
+                    { shell => ResolvedModule {
+                        shell: Option::Some(shell)
+                    }}
+                )
+            };
+            let module = try(found, @resolve_type_path_module);
+            resolve_type_path_module(
+                headers,
+                declarations,
+                names,
+                index + 1,
+                end,
+                module.shell,
+                false
+            )
+        } } }
+    } else { Result::Ok(ResolvedModule { shell: current }) }
+}
+
+resolve_qualified_type_target<'a>(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    names: Slice<'a, super::headers::NameUse>,
+    module: Option<ShellId>
+) -> Option<TypeNameTarget> {
+    let count = Slice::len(names);
+    if(count < 2) { Result::Err(()) } else {
+        let owner = try(resolve_type_path_module(
+            headers,
+            declarations,
+            names,
+            0,
+            count - 1,
+            module,
+            true
+        ), @resolve_qualified_type_target);
+        let name = handle Slice::get(names, count - 1) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        type_name_target_in(
+            headers,
+            declarations,
+            Id::to_u32(super::headers::name_use_name(name)),
+            owner.shell
+        )
     }
 }
 
@@ -1850,7 +3328,286 @@ resolve_type_name_target(
                     Result::Err(ElaborationError::MissingNominalType(token)),
                 Result::Ok(ty) => Result::Ok(Id::to_u32(ty))
             }
+        },
+        TypeNameTarget::Effect(shell) => Result::Ok(intern_record_type(
+            output,
+            TypeKind::Effect(shell),
+            false
+        ))
+    }
+}
+
+signature_scope(
+    owner: ShellId,
+    generics: &super::headers::HeaderRange
+) -> SignatureScope {
+    SignatureScope {
+        owner: owner,
+        start: super::headers::range_start(generics),
+        count: super::headers::range_count(generics)
+    }
+}
+
+generic_type_parameter(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureScope,
+    name: u32,
+    ordinal: u32
+) -> Option<u32> {
+    if(ordinal < scope.count) {
+        let at = scope.start + ordinal;
+        handle super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(at)
+        ) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(parameter) => if(
+                super::headers::generic_param_kind_code(parameter) == 1
+                    and {
+                        Id::to_u32(
+                            super::headers::generic_param_name(parameter)
+                        ) == name
+                    }
+            ) {
+                Result::Ok(ordinal)
+            } else {
+                generic_type_parameter(
+                    headers,
+                    scope,
+                    name,
+                    ordinal + 1
+                )
+            }
         }
+    } else { Result::Err(()) }
+}
+
+generic_lifetime_parameter(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureScope,
+    name: u32,
+    ordinal: u32
+) -> Bool {
+    if(ordinal < scope.count) {
+        let at = scope.start + ordinal;
+        handle super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(at)
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(parameter) => if(
+                super::headers::generic_param_kind_code(parameter) == 2
+                    and { Id::to_u32(
+                        super::headers::generic_param_name(parameter)
+                    ) == name }
+            ) { true } else {
+                generic_lifetime_parameter(
+                    headers, scope, name, ordinal + 1
+                )
+            }
+        }
+    } else { false }
+}
+
+reference_lifetime_valid(
+    headers: &super::headers::ParsedHeaders,
+    scope: Option<SignatureScope>,
+    lifetime: Option<usize>
+) -> Bool {
+    handle lifetime {
+        Result::Err(_) => true,
+        Result::Ok(token) => handle scope {
+            Result::Err(_) => false,
+            Result::Ok(scope) => handle super::lexer::token_kind_at(
+                super::headers::parsed_source(headers),
+                token
+            ) {
+                TokenKind::Lifetime(name) => generic_lifetime_parameter(
+                    headers, scope, Id::to_u32(name), 0
+                ),
+                _ => false
+            }
+        }
+    }
+}
+
+resolve_signature_arguments<'a>(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    arguments: Slice<'a, super::headers::TypeEdge>,
+    module: Option<ShellId>,
+    scope: Option<SignatureScope>,
+    ordinal: usize,
+    resolved: &mut Vec<u32>
+) -> Result<(), ElaborationError> {
+    if(ordinal < Slice::len(arguments)) {
+        let edge = handle Slice::get(arguments, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let ty = try(resolve_signature_type(
+            headers,
+            declarations,
+            output,
+            super::headers::type_edge_type(edge),
+            module,
+            scope
+        ), @resolve_signature_arguments);
+        Vec::push(resolved, ty);
+        resolve_signature_arguments(
+            headers,
+            declarations,
+            output,
+            arguments,
+            module,
+            scope,
+            ordinal + 1,
+            resolved
+        )
+    } else { Result::Ok(()) }
+}
+
+is_array_constructor(
+    headers: &super::headers::ParsedHeaders,
+    type_id: super::headers::TypeId
+) -> Bool {
+    handle super::headers::header_type_view(
+        super::headers::parsed_index(headers),
+        type_id
+    ) {
+        super::headers::HeaderTypeView::Path(_, names) =>
+            if(Slice::len(names) == 1) {
+                let name = handle Slice::first(names) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                };
+                handle super::lexer::lexeme(
+                    super::headers::parsed_source(headers),
+                    super::headers::name_use_name(name)
+                ) {
+                    Result::Err(_) => false,
+                    Result::Ok(found) => String::eq(found, &"Array")
+                }
+            } else { false },
+        _ => false
+    }
+}
+
+signature_type_name_target<'a>(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    type_id: super::headers::TypeId,
+    module: Option<ShellId>
+) -> Option<TypeNameTarget> {
+    handle super::headers::header_type_view(
+        super::headers::parsed_index(headers),
+        type_id
+    ) {
+        super::headers::HeaderTypeView::Path(_, names) => if(
+            Slice::len(names) == 1
+        ) {
+            let name = handle Slice::first(names) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            type_name_target_in(
+                headers,
+                declarations,
+                Id::to_u32(super::headers::name_use_name(name)),
+                module
+            )
+        } else {
+            resolve_qualified_type_target(
+                headers, declarations, names, module
+            )
+        },
+        _ => None
+    }
+}
+
+signature_generic_kind_count(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureScope,
+    kind: u8,
+    ordinal: u32
+) -> usize {
+    if(ordinal < scope.count) {
+        let parameter = handle super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(scope.start + ordinal)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let following = signature_generic_kind_count(
+            headers, scope, kind, ordinal + 1
+        );
+        if(super::headers::generic_param_kind_code(parameter) == kind) {
+            following + 1
+        } else { following }
+    } else { 0 }
+}
+
+resolve_alias_application(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    alias_id: super::headers::AliasHeaderId,
+    arguments: &Vec<u32>,
+    lifetime_count: usize,
+    token: usize
+) -> Result<u32, ElaborationError> {
+    let alias_index = Id::to_usize(alias_id);
+    let alias = handle super::headers::alias_at(
+        super::headers::nominal_index(headers),
+        alias_index
+    ) {
+        Result::Err(_) => @resolve_alias_application(Result::Err(
+            ElaborationError::MissingAliasHeader(token)
+        )),
+        Result::Ok(found) => found
+    };
+    let scope = signature_scope(
+        super::headers::alias_shell(alias),
+        super::headers::alias_generics(alias)
+    );
+    if(
+        Vec::len(arguments) != signature_generic_kind_count(
+            headers, scope, 1, 0
+        )
+        or { lifetime_count != signature_generic_kind_count(
+            headers, scope, 2, 0
+        ) }
+    ) {
+        Result::Err(ElaborationError::InvalidSignatureType(token))
+    } else {
+        let typed_arguments = Vec::new();
+        Slice::for_each(Vec::as_slice(arguments), { argument => {
+            Vec::push(&mut typed_arguments, type_id_from_u32(*argument))
+        }});
+        let substitutions = Vec::new();
+        append_nominal_substitutions(
+            headers,
+            scope,
+            &typed_arguments,
+            0,
+            0,
+            &mut substitutions
+        );
+        let target = try(resolve_alias_type(
+            headers,
+            declarations,
+            output,
+            alias_index,
+            token
+        ), @resolve_alias_application);
+        Result::Ok(Id::to_u32(instantiate_call_type(
+            output,
+            type_id_from_u32(target),
+            scope.owner,
+            &substitutions
+        )))
     }
 }
 
@@ -1859,7 +3616,8 @@ resolve_signature_type(
     declarations: &super::scanner::DeclarationIndex,
     output: &mut TypedInterfaces,
     type_id: super::headers::TypeId,
-    module: Option<ShellId>
+    module: Option<ShellId>,
+    scope: Option<SignatureScope>
 ) -> Result<u32, ElaborationError> {
     let index = super::headers::parsed_index(headers);
     handle super::headers::header_type_view(index, type_id) {
@@ -1871,13 +3629,36 @@ resolve_signature_type(
                 Result::Ok(found) => found
             };
             let raw = Id::to_u32(super::headers::name_use_name(name));
-            handle super::lexer::lexeme(
+            let parameter = handle scope {
+                Result::Err(_) => None,
+                Result::Ok(scope) => generic_type_parameter(
+                    headers,
+                    scope,
+                    raw,
+                    0
+                )
+            };
+            handle parameter {
+                Result::Ok(ordinal) => {
+                    let owner = handle scope {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(found) => found.owner
+                    };
+                    Result::Ok(intern_record_type(
+                        output,
+                        TypeKind::TypeParameter(owner, ordinal),
+                        false
+                    ))
+                },
+                Result::Err(_) => handle super::lexer::lexeme(
                 super::headers::parsed_source(headers),
                 super::headers::name_use_name(name)
             ) {
                 Result::Err(_) =>
                     Result::Err(ElaborationError::UnknownTypeName(token)),
-                Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle scalar_kind(name) {
+                Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle named_builtin_type(name) {
+                    Result::Ok(ty) => Result::Ok(ty),
+                    Result::Err(_) => handle scalar_kind(name) {
                         Result::Err(_) => handle type_name_target(
                             headers,
                             declarations,
@@ -1896,104 +3677,85 @@ resolve_signature_type(
                             )
                         },
                         Result::Ok(kind) => Result::Ok(
-                            scalar_kind_to_type(kind)
+                            signature_scalar_type(output, kind)
                         )
-                    } }
-            }
-        } else { if(Slice::len(names) == 2) {
-            let module_name = handle Slice::get(names, 0) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            };
-            let type_name = handle Slice::get(names, 1) {
+                    } } }
+            } }
+        } else {
+            let type_name = handle Slice::get(
+                names, Slice::len(names) - 1
+            ) {
                 Result::Err(_) => unreachable(),
                 Result::Ok(found) => found
             };
             let type_token = super::headers::name_use_token(type_name);
-            handle module_named(
-                declarations,
-                Id::to_u32(super::headers::name_use_name(module_name)),
-                module
+            handle resolve_qualified_type_target(
+                headers, declarations, names, module
             ) {
-                    Result::Err(_) =>
-                        Result::Err(
-                            ElaborationError::UnknownTypeModule(token)
-                        ),
-                    Result::Ok(module) => handle type_name_target(
-                        headers,
-                        declarations,
-                        Id::to_u32(
-                            super::headers::name_use_name(type_name)
-                        ),
-                        Option::Some(module)
-                    ) {
-                        Result::Err(_) =>
-                            Result::Err(
-                                ElaborationError::UnknownTypeName(type_token)
-                            ),
-                        Result::Ok(found) => resolve_type_name_target(
-                            headers,
-                            declarations,
-                            output,
-                            found,
-                            type_token
-                        )
-                    }
-                } } else { Result::Err(
-                    ElaborationError::InvalidSignatureType(token)
-        ) } },
+                Result::Err(_) => Result::Err(
+                    ElaborationError::UnknownTypeModule(token)
+                ),
+                Result::Ok(found) => resolve_type_name_target(
+                    headers,
+                    declarations,
+                    output,
+                    found,
+                    type_token
+                )
+            }
+        },
         super::headers::HeaderTypeView::SharedReference(
             _,
             lifetime,
             referent
-        ) => handle lifetime {
-            Result::Err(_) => {
+        ) => if(reference_lifetime_valid(headers, scope, lifetime)) {
                 let referent = try(resolve_signature_type(
                     headers,
                     declarations,
                     output,
                     referent,
-                    module
+                    module,
+                    scope
                 ), @resolve_signature_type);
                 Result::Ok(intern_record_type(
                     output,
                     TypeKind::SharedReference(type_id_from_u32(referent)),
                     true
                 ))
-            },
-            Result::Ok(lifetime_token) =>
-                Result::Err(
-                    ElaborationError::NamedReferenceLifetimeUnsupported(
-                        lifetime_token
-                    )
-                )
-        },
+        } else { Result::Err(
+            ElaborationError::NamedReferenceLifetimeUnsupported(
+                handle lifetime {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(token) => token
+                }
+            )
+        ) },
         super::headers::HeaderTypeView::UniqueReference(
             _,
             lifetime,
             referent
-        ) => handle lifetime {
-            Result::Err(_) => {
+        ) => if(reference_lifetime_valid(headers, scope, lifetime)) {
                 let referent = try(resolve_signature_type(
                     headers,
                     declarations,
                     output,
                     referent,
-                    module
+                    module,
+                    scope
                 ), @resolve_signature_type);
                 Result::Ok(intern_record_type(
                     output,
                     TypeKind::UniqueReference(type_id_from_u32(referent)),
                     false
                 ))
-            },
-            Result::Ok(lifetime_token) =>
-                Result::Err(
-                    ElaborationError::NamedReferenceLifetimeUnsupported(
-                        lifetime_token
-                    )
-                )
-        },
+        } else { Result::Err(
+            ElaborationError::NamedReferenceLifetimeUnsupported(
+                handle lifetime {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(token) => token
+                }
+            )
+        ) },
         super::headers::HeaderTypeView::Tuple(_, children) =>
             if(Slice::is_empty(children)) { Result::Ok(0) } else {
             let elements = Vec::new();
@@ -2003,7 +3765,8 @@ resolve_signature_type(
                     declarations,
                     &mut *output,
                     super::headers::type_edge_type(edge),
-                    module
+                    module,
+                    scope
                 ), @resolve_signature_type);
                 push_word(&mut elements, ty);
                 Result::Ok(())
@@ -2012,9 +3775,66 @@ resolve_signature_type(
         },
         super::headers::HeaderTypeView::Application(
             token,
-            _,
-            _
-        ) => Result::Err(ElaborationError::InvalidSignatureType(token)),
+            constructor,
+            lifetimes,
+            arguments
+        ) => {
+            let resolved = Vec::new();
+            try(resolve_signature_arguments(
+                headers,
+                declarations,
+                output,
+                arguments,
+                module,
+                scope,
+                0,
+                &mut resolved
+            ), @resolve_signature_type);
+            if(is_array_constructor(headers, constructor)) {
+                if(Vec::len(&resolved) == 1) {
+                    Result::Ok(intern_array_type(
+                        output,
+                        type_id_from_u32(*Vec::index(&resolved, 0))
+                    ))
+                } else {
+                    Result::Err(ElaborationError::InvalidSignatureType(token))
+                }
+            } else { handle signature_type_name_target(
+                headers, declarations, constructor, module
+            ) {
+                Option::Some(TypeNameTarget::Alias(alias)) =>
+                    resolve_alias_application(
+                        headers,
+                        declarations,
+                        output,
+                        alias,
+                        &resolved,
+                        Slice::len(lifetimes),
+                        token
+                    ),
+                _ => {
+                let constructor = try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    output,
+                    constructor,
+                    module,
+                    scope
+                ), @resolve_signature_type);
+                if(Vec::is_empty(&resolved)) {
+                    if(Slice::is_empty(lifetimes)) {
+                        Result::Err(
+                            ElaborationError::InvalidSignatureType(token)
+                        )
+                    } else { Result::Ok(constructor) }
+                } else { Result::Ok(intern_application_type(
+                        output,
+                        type_id_from_u32(constructor),
+                        &resolved
+                    )) }
+                }
+            } }
+        },
         super::headers::HeaderTypeView::Never(_) => Result::Ok(1)
     }
 }
@@ -2025,6 +3845,7 @@ collect_parameter_types(
     callable: &super::headers::CallableHeader,
     output: &mut TypedInterfaces,
     module: Option<ShellId>,
+    scope: SignatureScope,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     let range = super::headers::callable_parameters(callable);
@@ -2043,7 +3864,8 @@ collect_parameter_types(
                     declarations,
                     output,
                     super::headers::parameter_type(parameter),
-                    module
+                    module,
+                    Option::Some(scope)
                 ), @collect_parameter_types);
                 Vec::push(
                     &mut output.callable_parameters,
@@ -2055,11 +3877,58 @@ collect_parameter_types(
                     callable,
                     output,
                     module,
+                    scope,
                     ordinal + 1
                 )
             }
         }
     } else { Result::Ok(()) }
+}
+
+collect_callable_effects(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    callable: &super::headers::CallableHeader,
+    output: &mut TypedInterfaces,
+    module: Option<ShellId>,
+    scope: SignatureScope
+) -> Result<(TypeElementRange, Option<u32>), ElaborationError> {
+    let start = Vec::len(&output.callable_effects);
+    let row_tail = handle Option::as_ref(
+        super::headers::callable_effects(callable)
+    ) {
+        Result::Err(_) => None,
+        Result::Ok(row) => {
+            let effects = super::headers::effect_row_types(
+                super::headers::parsed_index(headers), row
+            );
+            try(Slice::try_for_each(effects, { edge => {
+                let ty = try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    &mut *output,
+                    super::headers::type_edge_type(edge),
+                    module,
+                    Option::Some(scope)
+                ), @collect_callable_effects);
+                Vec::push(
+                    &mut output.callable_effects,
+                    type_id_from_u32(ty)
+                );
+                Result::Ok(())
+            }}), @collect_callable_effects);
+            Option::map(
+                *super::headers::effect_row_tail(row),
+                { name => Id::to_u32(
+                    super::headers::name_use_name(&name)
+                )}
+            )
+        }
+    };
+    Result::Ok((
+        super::syntax::id_range(start, Vec::len(&output.callable_effects)),
+        row_tail
+    ))
 }
 
 collect_callables(
@@ -2073,24 +3942,27 @@ collect_callables(
             Result::Err(_) =>
                 Result::Err(ElaborationError::MissingCallableHeader(index)),
             Result::Ok(callable) => {
-                let unsupported =
-                    0 < super::headers::callable_generic_count(callable)
-                    or { super::headers::callable_has_effects(callable) };
-                if(unsupported) {
-                    let shell = super::headers::callable_shell(callable);
-                    Result::Err(
-                        ElaborationError::UnsupportedCallableSignature(
-                            shell
-                        )
-                    )
-                } else {
-                    handle super::headers::callable_result(callable) {
+                let shell = super::headers::callable_shell(callable);
+                let scope = signature_scope(
+                    shell,
+                    super::headers::callable_generics(callable)
+                );
+                let module = handle super::scanner::shell_at(
+                    declarations,
+                    shell
+                ) {
+                    Result::Err(_) => None,
+                    Result::Ok(owner) => shell_parent_module(owner)
+                };
+                handle super::headers::callable_result(callable) {
                         Result::Err(_) => collect_callable(
                             headers,
                             declarations,
                             output,
                             callable,
                             index,
+                            module,
+                            scope,
                             type_id_from_u32(0)
                         ),
                         Result::Ok(result_type) => {
@@ -2099,14 +3971,8 @@ collect_callables(
                             declarations,
                             output,
                             result_type,
-                            handle super::scanner::shell_at(
-                                declarations,
-                                super::headers::callable_shell(callable)
-                            ) {
-                                Result::Err(_) => None,
-                                Result::Ok(owner) =>
-                                    shell_parent_module(owner)
-                            }
+                            module,
+                            Option::Some(scope)
                         ), @collect_callables);
                         collect_callable(
                             headers,
@@ -2114,11 +3980,12 @@ collect_callables(
                             output,
                             callable,
                             index,
+                            module,
+                            scope,
                             type_id_from_u32(result)
                         )
                         }
                     }
-                }
             }
         } } else { Result::Ok(()) }
 }
@@ -2129,26 +3996,31 @@ collect_callable(
     output: &mut TypedInterfaces,
     callable: &super::headers::CallableHeader,
     index: usize,
+    module: Option<ShellId>,
+    scope: SignatureScope,
     result: TypeId
 ) -> Result<(), ElaborationError> {
     let shell = super::headers::callable_shell(callable);
     let parameters = super::headers::callable_parameters(callable);
     let start = u32_from_usize(Vec::len(&output.callable_parameters));
-    let module = handle super::scanner::shell_at(
-        declarations,
-        shell
-    ) {
-        Result::Err(_) => None,
-        Result::Ok(owner) => shell_parent_module(owner)
-    };
     try(collect_parameter_types(
         headers,
         declarations,
         callable,
         output,
         module,
+        scope,
         0
     ), @collect_callable);
+    let (effects, effect_tail) = try(collect_callable_effects(
+        headers,
+        declarations,
+        callable,
+        output,
+        module,
+        scope
+    ), @collect_callable);
+    let where_tokens = super::headers::callable_where_tokens(callable);
     let callable_id = alloc_interface_callable(
         output,
         InterfaceCallable {
@@ -2158,7 +4030,12 @@ collect_callable(
                 usize_from_u32(start),
                 usize_from_u32(start)
                     + usize_from_u32(super::headers::range_count(parameters))
-            )
+            ),
+            generics: scope,
+            effects: effects,
+            effect_tail: effect_tail,
+            where_start: super::syntax::token_start(where_tokens),
+            where_end: super::syntax::token_end(where_tokens)
         }
     );
     handle IndexVec::replace(
@@ -2180,26 +4057,29 @@ collect_callable(
 
 predeclared_nominal(
     nominal: &super::headers::NominalIndex,
+    shell: ShellId,
     header: super::headers::HeaderOrder
 ) -> Result<PredeclaredNominal, ()> {
     handle header {
         super::headers::HeaderOrder::Struct(index) => handle
             super::headers::struct_at(nominal, Id::to_usize(index)) {
             Result::Err(_) => Result::Err(()),
-            Result::Ok(found) => if(super::headers::range_count(
-                super::headers::struct_generics(found)
-            ) == 0) {
-                Result::Ok(PredeclaredNominal::Struct)
-            } else { Result::Err(()) }
+            Result::Ok(found) => Result::Ok(PredeclaredNominal::Struct(
+                signature_scope(
+                    shell,
+                    super::headers::struct_generics(found)
+                )
+            ))
         },
         super::headers::HeaderOrder::Enum(index) => handle
             super::headers::enum_at(nominal, Id::to_usize(index)) {
             Result::Err(_) => Result::Err(()),
-            Result::Ok(found) => if(super::headers::range_count(
-                super::headers::enum_generics(found)
-            ) == 0) {
-                Result::Ok(PredeclaredNominal::Enum)
-            } else { Result::Err(()) }
+            Result::Ok(found) => Result::Ok(PredeclaredNominal::Enum(
+                signature_scope(
+                    shell,
+                    super::headers::enum_generics(found)
+                )
+            ))
         },
         super::headers::HeaderOrder::Callable(_) =>
             Result::Ok(PredeclaredNominal::Skip),
@@ -2213,12 +4093,14 @@ predeclared_nominal(
 predeclare_nominal(
     output: &mut TypedInterfaces,
     shell: ShellId,
+    generics: SignatureScope,
     kind: InterfaceNominalKind
 ) {
     let nominal = alloc_interface_nominal(
         output,
         InterfaceNominal {
             shell: shell,
+            generics: generics,
             kind: kind,
             copy_state: NominalCopyState::Unresolved
         }
@@ -2248,6 +4130,7 @@ predeclare_nominals(
         let shell = super::headers::def_shell(nominal, ordinal);
         let declaration = predeclared_nominal(
             nominal,
+            shell,
             super::headers::header_at(nominal, ordinal)
         );
         handle declaration {
@@ -2257,18 +4140,20 @@ predeclare_nominals(
             Result::Ok(declaration) => {
                 handle declaration {
                     PredeclaredNominal::Skip => (),
-                    PredeclaredNominal::Struct =>
+                    PredeclaredNominal::Struct(generics) =>
                         predeclare_nominal(
                             output,
                             shell,
+                            generics,
                             InterfaceNominalKind::Struct(
                                 super::syntax::empty_id_range(0)
                             )
                         ),
-                    PredeclaredNominal::Enum =>
+                    PredeclaredNominal::Enum(generics) =>
                         predeclare_nominal(
                             output,
                             shell,
+                            generics,
                             InterfaceNominalKind::Enum(
                                 super::syntax::empty_id_range(0)
                             )
@@ -2323,6 +4208,7 @@ collect_struct_fields(
     owner: InterfaceNominalId,
     fields: &super::headers::HeaderRange,
     module: Option<ShellId>,
+    scope: SignatureScope,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     if(ordinal < super::headers::range_count(fields)) {
@@ -2340,7 +4226,8 @@ collect_struct_fields(
                     declarations,
                     output,
                     *super::headers::field_type(field),
-                    module
+                    module,
+                    Option::Some(scope)
                 ), @collect_struct_fields);
                 alloc_interface_field(output, InterfaceField {
                     owner: owner,
@@ -2356,6 +4243,7 @@ collect_struct_fields(
                     owner,
                     fields,
                     module,
+                    scope,
                     ordinal + 1
                 )
             }
@@ -2368,7 +4256,8 @@ collect_variant_payloads<'a>(
     declarations: &super::scanner::DeclarationIndex,
     output: &mut TypedInterfaces,
     fields: Slice<'a, super::headers::TypeEdge>,
-    module: Option<ShellId>
+    module: Option<ShellId>,
+    scope: SignatureScope
 ) -> Result<(), ElaborationError> {
     Slice::try_for_each(fields, { field => {
         let ty = try(resolve_signature_type(
@@ -2376,7 +4265,8 @@ collect_variant_payloads<'a>(
             declarations,
             &mut *output,
             super::headers::type_edge_type(field),
-            module
+            module,
+            Option::Some(scope)
         ), @collect_variant_payloads);
         Vec::push(
             &mut output.variant_payloads,
@@ -2393,6 +4283,7 @@ collect_enum_variants(
     owner: InterfaceNominalId,
     variants: &super::headers::HeaderRange,
     module: Option<ShellId>,
+    scope: SignatureScope,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     if(ordinal < super::headers::range_count(variants)) {
@@ -2417,7 +4308,8 @@ collect_enum_variants(
                     declarations,
                     output,
                     payloads,
-                    module
+                    module,
+                    scope
                 ), @collect_enum_variants);
                 alloc_interface_variant(output, InterfaceVariant {
                     owner: owner,
@@ -2435,6 +4327,7 @@ collect_enum_variants(
                     owner,
                     variants,
                     module,
+                    scope,
                     ordinal + 1
                 )
             }
@@ -2472,6 +4365,10 @@ collect_nominal_definitions(
                 ),
                 Result::Ok(found) => {
                     let fields = super::headers::struct_fields(found);
+                    let scope = signature_scope(
+                        shell,
+                        super::headers::struct_generics(found)
+                    );
                     let start = checked_u32_from_usize(
                         interface_field_count(&*output)
                     );
@@ -2482,6 +4379,7 @@ collect_nominal_definitions(
                         id,
                         fields,
                         module,
+                        scope,
                         0
                     ), @collect_nominal_definitions);
                     set_interface_nominal_kind(
@@ -2516,6 +4414,10 @@ collect_nominal_definitions(
                 ),
                 Result::Ok(found) => {
                     let variants = super::headers::enum_variants(found);
+                    let scope = signature_scope(
+                        shell,
+                        super::headers::enum_generics(found)
+                    );
                     let start = checked_u32_from_usize(
                         interface_variant_count(&*output)
                     );
@@ -2526,6 +4428,7 @@ collect_nominal_definitions(
                         id,
                         variants,
                         module,
+                        scope,
                         0
                     ), @collect_nominal_definitions);
                     set_interface_nominal_kind(
@@ -2561,6 +4464,7 @@ type_copyable(
         TypeKind::Unit => Result::Ok(true),
         TypeKind::Never => Result::Ok(true),
         TypeKind::Scalar(_) => Result::Ok(true),
+        TypeKind::TypeParameter(_, _) => Result::Ok(false),
         TypeKind::Tuple(range) => tuple_copyable(
             output,
             range.start,
@@ -2569,6 +4473,11 @@ type_copyable(
             token,
             ty
         ),
+        TypeKind::Text => Result::Ok(false),
+        TypeKind::Bytes => Result::Ok(false),
+        TypeKind::Array(_) => Result::Ok(false),
+        TypeKind::Application(_, _) => Result::Ok(false),
+        TypeKind::Effect(_) => Result::Ok(false),
         TypeKind::Nominal(nominal) => nominal_copyable(
             output,
             Id::to_u32(nominal),
@@ -2807,6 +4716,10 @@ pub collect_interfaces(
         variant_payloads: Vec::new(),
         callables: Arena::new(),
         callable_parameters: Vec::new(),
+        instances: Arena::new(),
+        instance_parameters: Vec::new(),
+        instance_substitutions: Vec::new(),
+        callable_effects: Vec::new(),
         shell_to_callable: IndexVec::new(),
         shell_to_nominal: IndexVec::new(),
         shell_to_type: IndexVec::new(),
@@ -2864,6 +4777,7 @@ resolved_target_kind(target: Option<ResolvedTarget>) -> u32 {
         Option::Some(ResolvedTarget::Parameter(_)) => 1,
         Option::Some(ResolvedTarget::Local(_)) => 2,
         Option::Some(ResolvedTarget::Function(_)) => 3,
+        Option::Some(ResolvedTarget::FunctionAlias(_)) => 6,
         Option::Some(ResolvedTarget::Struct(_)) => 4,
         Option::Some(ResolvedTarget::Variant(_)) => 5
     }
@@ -2953,7 +4867,7 @@ bind_operand(
             let core = push_value(
                 value,
                 found.type_id,
-                CoreValueKind::Local(local)
+                CoreValueKind::Local(local, false)
             );
             mark_transfer_candidate(value, core);
             core
@@ -2980,7 +4894,9 @@ check_expected(
     handle expected {
         Result::Err(_) => Result::Ok(found),
         Result::Ok(ty) =>
-            if(found.type_id == ty) { Result::Ok(found) } else { Result::Err(
+            if(type_satisfies_expected(found.type_id, ty)) {
+                Result::Ok(found)
+            } else { Result::Err(
                 ElaborationError::TypeMismatch(
                     token,
                     Id::to_u32(ty),
@@ -2997,7 +4913,7 @@ check_expected_type(
 ) -> Result<(), ElaborationError> {
     handle expected {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(ty) => if(found == ty) {
+        Result::Ok(ty) => if(type_satisfies_expected(found, ty)) {
             Result::Ok(())
         } else {
             Result::Err(ElaborationError::TypeMismatch(
@@ -3010,7 +4926,53 @@ check_expected_type(
 }
 
 expected_matches(expected: Option<TypeId>, found: TypeId) -> Bool {
-    Option::map(expected, { ty => ty == found }) else { true }
+    Option::map(expected, { ty => type_satisfies_expected(found, ty) })
+        else { true }
+}
+
+type_is_never(value: TypeId) -> Bool {
+    Id::to_u32(value) == 1
+}
+
+type_satisfies_expected(found: TypeId, expected: TypeId) -> Bool {
+    found == expected or { type_is_never(found) }
+}
+
+branch_expected(
+    expected: Option<TypeId>,
+    inferred: Option<TypeId>
+) -> Option<TypeId> {
+    handle expected {
+        Option::Some(_) => expected,
+        None => handle inferred {
+            Option::Some(found) => if(type_is_never(found)) {
+                None
+            } else {
+                inferred
+            },
+            None => None
+        }
+    }
+}
+
+join_branch_type(
+    inferred: Option<TypeId>,
+    found: TypeId
+) -> Option<TypeId> {
+    handle inferred {
+        Option::Some(previous) => if(type_is_never(previous)) {
+            Option::Some(found)
+        } else {
+            if(type_is_never(found)) {
+                Option::Some(previous)
+            } else {
+                // The branch was elaborated with `previous` as its expected
+                // type, so a non-bottom result is equal here.
+                Option::Some(previous)
+            }
+        },
+        None => Option::Some(found)
+    }
 }
 
 expected_word_or(expected: Option<TypeId>, fallback: TypeId) -> u32 {
@@ -3128,6 +5090,47 @@ push_integer_constant(
     }
 }
 
+integer_constant_for_token(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    value: &mut CoreBuilder,
+    token: usize,
+    ty_id: TypeId
+) -> Result<IntegerConstantId, ElaborationError> {
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) {
+            Result::Err(ElaborationError::FloatLiteralUnsupported(token))
+        } else {
+            let ty = Id::to_u32(ty_id);
+            if(2 <= ty and { ty <= 13 }) {
+                let digits = super::lexer::number_digits(&number);
+                handle parse_digits(
+                    String::as_bytes(original),
+                    super::lexer::span_start(&digits),
+                    super::lexer::span_end(&digits),
+                    number_radix(&number),
+                    wrapping_convert_to_u128(0)
+                ) {
+                    Result::Err(_) => Result::Err(
+                        ElaborationError::IntegerLiteralOutOfRange(token, ty)
+                    ),
+                    Result::Ok(magnitude) => {
+                        let kind = type_to_scalar_kind(ty);
+                        if(magnitude <= scalar_max(kind)) {
+                            Result::Ok(push_integer_constant(value, magnitude))
+                        } else { Result::Err(
+                            ElaborationError::IntegerLiteralOutOfRange(token, ty)
+                        ) }
+                    }
+                }
+            } else { Result::Err(
+                ElaborationError::TypeMismatch(token, ty, 10)
+            ) }
+        },
+        _ => Result::Err(ElaborationError::UnexpectedExpressionToken(token))
+    }
+}
+
 elaborate_integer(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -3145,46 +5148,22 @@ elaborate_integer(
             Result::Err(ElaborationError::FloatLiteralUnsupported(token))
         } else {
             let ty_id = expected else { type_id_from_u32(10) };
-            let ty = Id::to_u32(ty_id);
-            if(2 <= ty and { ty <= 13 }) {
-                let digits = super::lexer::number_digits(&number);
-                handle parse_digits(
-                    String::as_bytes(original),
-                    super::lexer::span_start(&digits),
-                    super::lexer::span_end(&digits),
-                    number_radix(&number),
-                    wrapping_convert_to_u128(0)
-                ) {
-                    Result::Err(_) => Result::Err(
-                        ElaborationError::IntegerLiteralOutOfRange(token, ty)
-                    ),
-                    Result::Ok(magnitude) => {
-                        let kind = type_to_scalar_kind(ty);
-                        if(magnitude <= scalar_max(kind)) {
-                            let constant = push_integer_constant(
-                                &mut value.core,
-                                magnitude
-                            );
-                            let core = push_value(
-                                &mut value.core,
-                                ty_id,
-                                CoreValueKind::Integer(constant)
-                            );
-                            Result::Ok(Elaborated {
-                                type_id: ty_id,
-                                form: ElaboratedForm::Value(core)
-                            })
-                        } else { Result::Err(
-                                ElaborationError::IntegerLiteralOutOfRange(
-                                    token,
-                                    ty
-                                )
-                            ) }
-                    }
-                }
-            } else { Result::Err(
-                ElaborationError::TypeMismatch(token, ty, 10)
-            ) }
+            let constant = try(integer_constant_for_token(
+                original,
+                super::headers::parsed_source(headers),
+                &mut value.core,
+                token,
+                ty_id
+            ), @elaborate_integer);
+            let core = push_value(
+                &mut value.core,
+                ty_id,
+                CoreValueKind::Integer(constant)
+            );
+            Result::Ok(Elaborated {
+                type_id: ty_id,
+                form: ElaboratedForm::Value(core)
+            })
         },
         _ => Result::Err(
             ElaborationError::UnexpectedExpressionToken(token)
@@ -3193,7 +5172,7 @@ elaborate_integer(
 }
 
 elaborate_identifier(
-    interfaces: &TypedInterfaces,
+    interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
     map: &ResolutionMap,
     value: &mut BodyContext,
@@ -3212,7 +5191,8 @@ elaborate_identifier(
             core_local_id_from_u32(Id::to_u32(id)),
             token,
             expected,
-            final_transfer
+            final_transfer,
+            false
         ),
         Option::Some(ResolvedTarget::Local(id)) => elaborate_local(
             interfaces,
@@ -3222,12 +5202,118 @@ elaborate_identifier(
             ),
             token,
             expected,
-            final_transfer
+            final_transfer,
+            false
         ),
         Option::Some(ResolvedTarget::Function(_)) =>
             Result::Err(ElaborationError::FunctionUsedAsValue(token)),
+        Option::Some(ResolvedTarget::FunctionAlias(shell)) =>
+            elaborate_function_alias(
+                interfaces,
+                value,
+                shell,
+                expected,
+                token
+            ),
         _ => Result::Err(
             ElaborationError::UnexpectedExpressionToken(token)
+        )
+    }
+}
+
+elaborate_function_alias(
+    interfaces: &mut TypedInterfaces,
+    value: &mut BodyContext,
+    shell: ShellId,
+    expected: Option<TypeId>,
+    token: usize
+) -> Result<Elaborated, ElaborationError> {
+    let callable = handle interface_callable_for_shell_id(
+        &*interfaces,
+        shell
+    ) {
+        None => @elaborate_function_alias(Result::Err(
+            ElaborationError::MissingCallableInterface(token, shell)
+        )),
+        Option::Some(found) => found
+    };
+    let valid = handle interface_callable_parameter_count(
+        &*interfaces,
+        callable
+    ) == 0 {
+        true => interface_callable_generic_count(&*interfaces, callable) == 0,
+        false => false
+    };
+    handle valid {
+        false => Result::Err(ElaborationError::FunctionUsedAsValue(token)),
+        true => {
+            let result = interface_callable_result(&*interfaces, callable);
+            try(check_expected_type(
+                result,
+                expected,
+                token
+            ), @elaborate_function_alias);
+            let substitutions = Vec::new();
+            let instance = intern_callable_instance(
+                interfaces,
+                callable,
+                &substitutions
+            );
+            let at = super::syntax::range_mark(&value.core.operands);
+            let operands = operand_range(at, at);
+            let computation = push_computation(
+                &mut value.core,
+                result,
+                CoreComputationKind::Call(shell, instance, operands)
+            );
+            Result::Ok(Elaborated {
+                type_id: result,
+                form: ElaboratedForm::Computation(computation)
+            })
+        }
+    }
+}
+
+elaborate_move(
+    interfaces: &TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    child: super::bodies::ExprId,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let child_raw = Id::to_u32(child);
+    let token = super::bodies::expression_token_start_at(body, expression);
+    handle super::bodies::expression_view(body, child_raw) {
+        super::bodies::BodyExpressionView::Identifier(_) =>
+            handle resolved_target_at(map, child_raw) {
+            Option::Some(ResolvedTarget::Parameter(id)) => elaborate_local(
+                interfaces,
+                value,
+                core_local_id_from_u32(Id::to_u32(id)),
+                token,
+                expected,
+                true,
+                true
+            ),
+            Option::Some(ResolvedTarget::Local(id)) => elaborate_local(
+                interfaces,
+                value,
+                core_local_id_from_u32(
+                    value.parameter_count + Id::to_u32(id)
+                ),
+                token,
+                expected,
+                true,
+                true
+            ),
+            _ => Result::Err(
+                ElaborationError::UnexpectedExpressionToken(token)
+            )
+            },
+        _ => Result::Err(
+            ElaborationError::UnsupportedExpression(token)
         )
     }
 }
@@ -3238,7 +5324,8 @@ elaborate_local(
     local: CoreLocalId,
     token: usize,
     expected: Option<TypeId>,
-    final_transfer: Bool
+    final_transfer: Bool,
+    forced_transfer: Bool
 ) -> Result<Elaborated, ElaborationError> {
     if(Id::to_usize(local) < IndexVec::len(&value.core.local_types)) {
         handle *IndexVec::index(&value.core.local_types, local) {
@@ -3246,13 +5333,13 @@ elaborate_local(
             Result::Err(ElaborationError::MissingLocalType(token)),
         Result::Ok(ty_id) => {
             let ty = Id::to_u32(ty_id);
-            let transfer = final_transfer and {
+            let transfer = forced_transfer or { final_transfer and {
                 type_is_copyable(interfaces, ty_id)
-            };
+            }};
             let core = push_value(
                 &mut value.core,
                 ty_id,
-                CoreValueKind::Local(local)
+                CoreValueKind::Local(local, forced_transfer)
             );
             if(transfer) {
                 mark_transfer_candidate(&mut value.core, core)
@@ -3269,6 +5356,616 @@ elaborate_local(
     } else { Result::Err(ElaborationError::MissingLocalType(token)) }
 }
 
+new_call_substitutions(count: u32) -> Vec<Option<TypeId>> {
+    let output = Vec::new();
+    for_range(Range::new(0, usize_from_u32(count)), { _ =>
+        Vec::push(&mut output, None)
+    });
+    output
+}
+
+call_substitution_at(
+    substitutions: &Vec<Option<TypeId>>,
+    ordinal: u32
+) -> Option<TypeId> {
+    if(usize_from_u32(ordinal) < Vec::len(substitutions)) {
+        *Vec::index(substitutions, usize_from_u32(ordinal))
+    } else { None }
+}
+
+infer_call_type_elements(
+    interfaces: &TypedInterfaces,
+    formal: TypeElementRange,
+    actual: TypeElementRange,
+    owner: ShellId,
+    substitutions: &mut Vec<Option<TypeId>>,
+    ordinal: u32
+) -> Bool {
+    if(ordinal < formal.count) {
+        let formal_element = *Vec::index(
+            &interfaces.type_elements,
+            usize_from_u32(formal.start + ordinal)
+        );
+        let actual_element = *Vec::index(
+            &interfaces.type_elements,
+            usize_from_u32(actual.start + ordinal)
+        );
+        infer_call_substitutions(
+            interfaces,
+            formal_element,
+            actual_element,
+            owner,
+            substitutions
+        ) and { infer_call_type_elements(
+            interfaces,
+            formal,
+            actual,
+            owner,
+            substitutions,
+            ordinal + 1
+        ) }
+    } else { true }
+}
+
+infer_call_substitutions(
+    interfaces: &TypedInterfaces,
+    formal: TypeId,
+    actual: TypeId,
+    owner: ShellId,
+    substitutions: &mut Vec<Option<TypeId>>
+) -> Bool {
+    handle type_kind_at(interfaces, formal) {
+        TypeKind::TypeParameter(parameter_owner, ordinal) => if(
+            parameter_owner == owner
+        ) {
+            handle call_substitution_at(substitutions, ordinal) {
+                Result::Ok(bound) => bound == actual,
+                Result::Err(_) => handle type_kind_at(interfaces, actual) {
+                    TypeKind::TypeParameter(actual_owner, actual_ordinal) => if(
+                        actual_owner == owner
+                            and { actual_ordinal == ordinal }
+                    ) { true } else {
+                        *Vec::index_mut(
+                            &mut *substitutions,
+                            usize_from_u32(ordinal)
+                        ) = Option::Some(actual);
+                        true
+                    },
+                    _ => {
+                        *Vec::index_mut(
+                            &mut *substitutions,
+                            usize_from_u32(ordinal)
+                        ) = Option::Some(actual);
+                        true
+                    }
+                }
+            }
+        } else { formal == actual },
+        TypeKind::Tuple(formal_range) => handle type_kind_at(
+            interfaces, actual
+        ) {
+            TypeKind::Tuple(actual_range) =>
+                formal_range.count == actual_range.count
+                    and { infer_call_type_elements(
+                        interfaces,
+                        formal_range,
+                        actual_range,
+                        owner,
+                        substitutions,
+                        0
+                    ) },
+            _ => false
+        },
+        TypeKind::Array(formal_element) => handle type_kind_at(
+            interfaces, actual
+        ) {
+            TypeKind::Array(actual_element) => infer_call_substitutions(
+                interfaces,
+                formal_element,
+                actual_element,
+                owner,
+                substitutions
+            ),
+            _ => false
+        },
+        TypeKind::Application(formal_constructor, formal_range) =>
+            handle type_kind_at(interfaces, actual) {
+                TypeKind::Application(actual_constructor, actual_range) =>
+                    formal_constructor == actual_constructor
+                        and { formal_range.count == actual_range.count }
+                        and { infer_call_type_elements(
+                            interfaces,
+                            formal_range,
+                            actual_range,
+                            owner,
+                            substitutions,
+                            0
+                        ) },
+                _ => false
+            },
+        TypeKind::SharedReference(formal_referent) => handle type_kind_at(
+            interfaces, actual
+        ) {
+            TypeKind::SharedReference(actual_referent) =>
+                infer_call_substitutions(
+                    interfaces,
+                    formal_referent,
+                    actual_referent,
+                    owner,
+                    substitutions
+                ),
+            _ => false
+        },
+        TypeKind::UniqueReference(formal_referent) => handle type_kind_at(
+            interfaces, actual
+        ) {
+            TypeKind::UniqueReference(actual_referent) =>
+                infer_call_substitutions(
+                    interfaces,
+                    formal_referent,
+                    actual_referent,
+                    owner,
+                    substitutions
+                ),
+            _ => false
+        },
+        _ => formal == actual
+    }
+}
+
+call_type_elements_have_unbound_parameter(
+    interfaces: &TypedInterfaces,
+    range: TypeElementRange,
+    owner: ShellId,
+    substitutions: &Vec<Option<TypeId>>,
+    ordinal: u32
+) -> Bool {
+    if(ordinal < range.count) {
+        let element = *Vec::index(
+            &interfaces.type_elements,
+            usize_from_u32(range.start + ordinal)
+        );
+        call_type_has_unbound_parameter(
+            interfaces,
+            element,
+            owner,
+            substitutions
+        ) or { call_type_elements_have_unbound_parameter(
+            interfaces,
+            range,
+            owner,
+            substitutions,
+            ordinal + 1
+        ) }
+    } else { false }
+}
+
+call_type_has_unbound_parameter(
+    interfaces: &TypedInterfaces,
+    ty: TypeId,
+    owner: ShellId,
+    substitutions: &Vec<Option<TypeId>>
+) -> Bool {
+    handle type_kind_at(interfaces, ty) {
+        TypeKind::TypeParameter(parameter_owner, ordinal) =>
+            parameter_owner == owner
+                and { Option::is_none(&call_substitution_at(
+                    substitutions, ordinal
+                )) },
+        TypeKind::Tuple(range) => call_type_elements_have_unbound_parameter(
+            interfaces, range, owner, substitutions, 0
+        ),
+        TypeKind::Array(element) => call_type_has_unbound_parameter(
+            interfaces, element, owner, substitutions
+        ),
+        TypeKind::Application(constructor, range) =>
+            call_type_has_unbound_parameter(
+                interfaces, constructor, owner, substitutions
+            ) or { call_type_elements_have_unbound_parameter(
+                interfaces, range, owner, substitutions, 0
+            ) },
+        TypeKind::SharedReference(referent) =>
+            call_type_has_unbound_parameter(
+                interfaces, referent, owner, substitutions
+            ),
+        TypeKind::UniqueReference(referent) =>
+            call_type_has_unbound_parameter(
+                interfaces, referent, owner, substitutions
+            ),
+        _ => false
+    }
+}
+
+instantiate_call_type_elements(
+    interfaces: &mut TypedInterfaces,
+    range: TypeElementRange,
+    owner: ShellId,
+    substitutions: &Vec<Option<TypeId>>,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) {
+    if(ordinal < range.count) {
+        let element = *Vec::index(
+            &interfaces.type_elements,
+            usize_from_u32(range.start + ordinal)
+        );
+        let instantiated = instantiate_call_type(
+            interfaces, element, owner, substitutions
+        );
+        Vec::push(&mut *output, Id::to_u32(instantiated));
+        instantiate_call_type_elements(
+            interfaces,
+            range,
+            owner,
+            substitutions,
+            ordinal + 1,
+            output
+        )
+    } else { () }
+}
+
+instantiate_call_type(
+    interfaces: &mut TypedInterfaces,
+    ty: TypeId,
+    owner: ShellId,
+    substitutions: &Vec<Option<TypeId>>
+) -> TypeId {
+    handle type_kind_at(&*interfaces, ty) {
+        TypeKind::TypeParameter(parameter_owner, ordinal) => if(
+            parameter_owner == owner
+        ) {
+            call_substitution_at(substitutions, ordinal) else { ty }
+        } else { ty },
+        TypeKind::Tuple(range) => {
+            let elements = Vec::new();
+            instantiate_call_type_elements(
+                interfaces,
+                range,
+                owner,
+                substitutions,
+                0,
+                &mut elements
+            );
+            type_id_from_u32(intern_tuple_type(interfaces, &elements))
+        },
+        TypeKind::Array(element) => {
+            let instantiated = instantiate_call_type(
+                interfaces, element, owner, substitutions
+            );
+            type_id_from_u32(intern_array_type(interfaces, instantiated))
+        },
+        TypeKind::Application(constructor, range) => {
+            let instantiated_constructor = instantiate_call_type(
+                interfaces, constructor, owner, substitutions
+            );
+            let elements = Vec::new();
+            instantiate_call_type_elements(
+                interfaces,
+                range,
+                owner,
+                substitutions,
+                0,
+                &mut elements
+            );
+            type_id_from_u32(intern_application_type(
+                interfaces,
+                instantiated_constructor,
+                &elements
+            ))
+        },
+        TypeKind::SharedReference(referent) => {
+            let instantiated = instantiate_call_type(
+                interfaces, referent, owner, substitutions
+            );
+            type_id_from_u32(intern_record_type(
+                interfaces,
+                TypeKind::SharedReference(instantiated),
+                true
+            ))
+        },
+        TypeKind::UniqueReference(referent) => {
+            let instantiated = instantiate_call_type(
+                interfaces, referent, owner, substitutions
+            );
+            type_id_from_u32(intern_record_type(
+                interfaces,
+                TypeKind::UniqueReference(instantiated),
+                false
+            ))
+        },
+        _ => ty
+    }
+}
+
+append_nominal_substitutions(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureScope,
+    arguments: &Vec<TypeId>,
+    generic_ordinal: u32,
+    argument_ordinal: usize,
+    output: &mut Vec<Option<TypeId>>
+) {
+    if(generic_ordinal < scope.count) {
+        let parameter = handle super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(scope.start + generic_ordinal)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(super::headers::generic_param_kind_code(parameter) == 1) {
+            let argument = *Vec::index(arguments, argument_ordinal);
+            Vec::push(&mut *output, Option::Some(argument));
+            append_nominal_substitutions(
+                headers,
+                scope,
+                arguments,
+                generic_ordinal + 1,
+                argument_ordinal + 1,
+                output
+            )
+        } else {
+            Vec::push(&mut *output, None);
+            append_nominal_substitutions(
+                headers,
+                scope,
+                arguments,
+                generic_ordinal + 1,
+                argument_ordinal,
+                output
+            )
+        }
+    } else { () }
+}
+
+copy_type_range(
+    interfaces: &TypedInterfaces,
+    range: TypeElementRange,
+    ordinal: u32,
+    output: &mut Vec<TypeId>
+) {
+    if(ordinal < range.count) {
+        Vec::push(
+            &mut *output,
+            *Vec::index(
+                &interfaces.type_elements,
+                usize_from_u32(range.start + ordinal)
+            )
+        );
+        copy_type_range(interfaces, range, ordinal + 1, output)
+    } else { () }
+}
+
+pub interface_application_nominal(
+    interfaces: &TypedInterfaces,
+    application: TypeId
+) -> Option<u32> {
+    handle type_kind_at(interfaces, application) {
+        TypeKind::Application(constructor, _) => handle type_kind_at(
+            interfaces, constructor
+        ) {
+            TypeKind::Nominal(nominal) => Option::Some(Id::to_u32(nominal)),
+            _ => None
+        },
+        _ => None
+    }
+}
+
+struct NominalApplicationData {
+    scope: SignatureScope,
+    arguments: Vec<TypeId>
+}
+
+nominal_application_data(
+    interfaces: &TypedInterfaces,
+    application: TypeId
+) -> Option<NominalApplicationData> {
+    handle type_kind_at(interfaces, application) {
+        TypeKind::Application(constructor, range) => handle type_kind_at(
+            interfaces, constructor
+        ) {
+            TypeKind::Nominal(nominal) => {
+                let scope = interface_nominal_at(interfaces, nominal).generics;
+                let arguments = Vec::new();
+                copy_type_range(
+                    interfaces, range, 0, &mut arguments
+                );
+                Option::Some(NominalApplicationData {
+                    scope: scope,
+                    arguments: arguments
+                })
+            },
+            _ => None
+        },
+        _ => None
+    }
+}
+
+pub instantiate_application_member_type(
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &mut TypedInterfaces,
+    application: TypeId,
+    member: TypeId
+) -> TypeId {
+    handle nominal_application_data(&*interfaces, application) {
+        Option::Some(data) => {
+                let NominalApplicationData { scope, arguments } = data;
+                let substitutions = Vec::new();
+                append_nominal_substitutions(
+                    headers,
+                    scope,
+                    &arguments,
+                    0,
+                    0,
+                    &mut substitutions
+                );
+                instantiate_call_type(
+                    interfaces,
+                    member,
+                    scope.owner,
+                    &substitutions
+                )
+        },
+        None => member
+    }
+}
+
+callable_substitutions_equal<'a>(
+    left: Slice<'a, Option<TypeId>>,
+    right: &Vec<Option<TypeId>>,
+    ordinal: usize
+) -> Bool {
+    if(ordinal < Slice::len(left)) {
+        let found = handle Slice::get(left, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(value) => *value
+        };
+        found == *Vec::index(right, ordinal)
+            and { callable_substitutions_equal(
+                left, right, ordinal + 1
+            ) }
+    } else { Slice::len(left) == Vec::len(right) }
+}
+
+find_callable_instance(
+    interfaces: &TypedInterfaces,
+    callable: InterfaceCallableId,
+    substitutions: &Vec<Option<TypeId>>,
+    index: usize
+) -> Option<CallableInstanceId> {
+    if(index < callable_instance_count(interfaces)) {
+        let id = handle Id::from_usize(index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let instance = callable_instance_at(interfaces, id);
+        if(instance.callable == callable and {
+            callable_substitutions_equal(
+                callable_instance_substitutions(interfaces, id),
+                substitutions,
+                0
+            )
+        }) { Option::Some(id) } else {
+            find_callable_instance(
+                interfaces, callable, substitutions, index + 1
+            )
+        }
+    } else { None }
+}
+
+append_instance_parameters(
+    interfaces: &mut TypedInterfaces,
+    source: CallableParameterRange,
+    owner: ShellId,
+    substitutions: &Vec<Option<TypeId>>,
+    ordinal: u32
+) {
+    if(ordinal < source.count) {
+        let parameter = callable_parameter_type_at(
+            &*interfaces,
+            usize_from_u32(source.start + ordinal)
+        );
+        let instantiated = instantiate_call_type(
+            interfaces, parameter, owner, substitutions
+        );
+        Vec::push(&mut interfaces.instance_parameters, instantiated);
+        append_instance_parameters(
+            interfaces,
+            source,
+            owner,
+            substitutions,
+            ordinal + 1
+        )
+    } else { () }
+}
+
+append_instance_substitutions(
+    output: &mut Vec<Option<TypeId>>,
+    source: &Vec<Option<TypeId>>,
+    ordinal: usize
+) {
+    if(ordinal < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, ordinal));
+        append_instance_substitutions(output, source, ordinal + 1)
+    } else { () }
+}
+
+pub intern_callable_instance(
+    interfaces: &mut TypedInterfaces,
+    callable: InterfaceCallableId,
+    substitutions: &Vec<Option<TypeId>>
+) -> CallableInstanceId {
+    handle find_callable_instance(
+        &*interfaces, callable, substitutions, 0
+    ) {
+        Option::Some(found) => found,
+        None => {
+            let owner = interface_callable_generics(
+                &*interfaces, callable
+            ).owner;
+            let declared_result = interface_callable_result(
+                &*interfaces, callable
+            );
+            let declared_parameters = interface_callable_parameters(
+                &*interfaces, callable
+            );
+            let result = instantiate_call_type(
+                interfaces,
+                declared_result,
+                owner,
+                substitutions
+            );
+            let parameter_start =
+                Vec::len(&interfaces.instance_parameters);
+            append_instance_parameters(
+                interfaces,
+                declared_parameters,
+                owner,
+                substitutions,
+                0
+            );
+            let parameter_end = Vec::len(&interfaces.instance_parameters);
+            let substitution_start =
+                Vec::len(&interfaces.instance_substitutions);
+            append_instance_substitutions(
+                &mut interfaces.instance_substitutions,
+                substitutions,
+                0
+            );
+            let substitution_end =
+                Vec::len(&interfaces.instance_substitutions);
+            handle Arena::alloc(
+                &mut interfaces.instances,
+                CallableInstance {
+                    callable: callable,
+                    result: result,
+                    parameters: super::syntax::id_range(
+                        parameter_start, parameter_end
+                    ),
+                    substitutions: super::syntax::id_range(
+                        substitution_start, substitution_end
+                    )
+                }
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(id) => id
+            }
+        }
+    }
+}
+
+callable_instance_substitution_vec(
+    interfaces: &TypedInterfaces,
+    instance: CallableInstanceId
+) -> Vec<Option<TypeId>> {
+    let output = Vec::new();
+    Slice::for_each(
+        callable_instance_substitutions(interfaces, instance),
+        { value => Vec::push(&mut output, *value) }
+    );
+    output
+}
+
 elaborate_call_arguments(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -3279,6 +5976,8 @@ elaborate_call_arguments(
     value: &mut BodyContext,
     expression: u32,
     callable: InterfaceCallableId,
+    generics: SignatureScope,
+    substitutions: &mut Vec<Option<TypeId>>,
     ordinal: u32,
     operands: &mut Vec<CoreValueId>
 ) -> Result<(), ElaborationError> {
@@ -3295,6 +5994,18 @@ elaborate_call_arguments(
             expression,
             ordinal + 1
         );
+        let instantiated = instantiate_call_type(
+            interfaces,
+            parameter,
+            generics.owner,
+            substitutions
+        );
+        let argument_expected = if(call_type_has_unbound_parameter(
+            &*interfaces,
+            instantiated,
+            generics.owner,
+            substitutions
+        )) { None } else { Option::Some(instantiated) };
         let argument = try(elaborate_expression(
             original,
             headers,
@@ -3304,7 +6015,33 @@ elaborate_call_arguments(
             map,
             value,
             child,
-            Option::Some(parameter)
+            argument_expected
+        ), @elaborate_call_arguments);
+        if(infer_call_substitutions(
+            &*interfaces,
+            parameter,
+            argument.type_id,
+            generics.owner,
+            substitutions
+        )) { () } else {
+            @elaborate_call_arguments(Result::Err(
+                ElaborationError::TypeMismatch(
+                    super::bodies::expression_token_start_at(body, child),
+                    Id::to_u32(instantiated),
+                    Id::to_u32(argument.type_id)
+                )
+            ))
+        };
+        let checked_parameter = instantiate_call_type(
+            interfaces,
+            parameter,
+            generics.owner,
+            substitutions
+        );
+        try(check_expected_type(
+            argument.type_id,
+            Option::Some(checked_parameter),
+            super::bodies::expression_token_start_at(body, child)
         ), @elaborate_call_arguments);
         let operand = embed_operand(&mut value.core, argument);
         Vec::push(&mut *operands, operand);
@@ -3318,6 +6055,8 @@ elaborate_call_arguments(
             value,
             expression,
             callable,
+            generics,
+            substitutions,
             ordinal + 1,
             operands
         )
@@ -3414,8 +6153,36 @@ elaborate_call(
                     super::bodies::expression_child_count_at(body, expression)
                         - 1;
                 if(expected_count == found_count) {
-                    let result =
+                    let declared_result =
                         interface_callable_result(interfaces, callable);
+                    let generics =
+                        interface_callable_generics(interfaces, callable);
+                    let substitutions =
+                        new_call_substitutions(generics.count);
+                    handle expected {
+                        Result::Err(_) => (),
+                        Result::Ok(expected_type) => if(
+                            type_is_never(declared_result)
+                        ) {
+                            ()
+                        } else {
+                            if(infer_call_substitutions(
+                                &*interfaces,
+                                declared_result,
+                                expected_type,
+                                generics.owner,
+                                &mut substitutions
+                            )) { () } else {
+                                @elaborate_call(Result::Err(
+                                    ElaborationError::TypeMismatch(
+                                        token,
+                                        Id::to_u32(expected_type),
+                                        Id::to_u32(declared_result)
+                                    )
+                                ))
+                            }
+                        }
+                    };
                     let arguments = Vec::new();
                     try(elaborate_call_arguments(
                         original,
@@ -3427,9 +6194,22 @@ elaborate_call(
                         value,
                         expression,
                         callable,
+                        generics,
+                        &mut substitutions,
                         0,
                         &mut arguments
                     ), @elaborate_call);
+                    let result = instantiate_call_type(
+                        interfaces,
+                        declared_result,
+                        generics.owner,
+                        &substitutions
+                    );
+                    let instance = intern_callable_instance(
+                        interfaces,
+                        callable,
+                        &substitutions
+                    );
                     try(check_expected_type(
                         result,
                         expected,
@@ -3447,7 +6227,11 @@ elaborate_call(
                     let call = push_computation(
                         &mut value.core,
                         result,
-                        CoreComputationKind::Call(shell, operands)
+                        CoreComputationKind::Call(
+                            shell,
+                            instance,
+                            operands
+                        )
                     );
                     Result::Ok(Elaborated {
                         type_id: result,
@@ -3707,7 +6491,7 @@ elaborate_tuple_elements(
         let element_expected = handle expected {
             Result::Err(_) => None,
             Result::Ok(ty) => Option::Some(tuple_expected_element(
-                &*interfaces,
+                interfaces,
                 ty,
                 ordinal
             ))
@@ -3899,6 +6683,56 @@ nominal_struct_field_type(
     ).ty)
 }
 
+nominal_id_for_type(
+    interfaces: &TypedInterfaces,
+    ty: TypeId
+) -> Option<InterfaceNominalId> {
+    handle type_kind_at(interfaces, ty) {
+        TypeKind::Nominal(nominal) => Option::Some(nominal),
+        TypeKind::Application(constructor, _) => handle type_kind_at(
+            interfaces, constructor
+        ) {
+            TypeKind::Nominal(nominal) => Option::Some(nominal),
+            _ => None
+        },
+        _ => None
+    }
+}
+
+nominal_instance_for_expected(
+    interfaces: &TypedInterfaces,
+    base: TypeId,
+    nominal: InterfaceNominalId,
+    expected: Option<TypeId>
+) -> TypeId {
+    handle expected {
+        Option::Some(found) => handle nominal_id_for_type(interfaces, found) {
+            Option::Some(found_nominal) => if(found_nominal == nominal) {
+                found
+            } else { base },
+            None => base
+        },
+        None => base
+    }
+}
+
+nominal_instance_member_type(
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &mut TypedInterfaces,
+    instance: TypeId,
+    member: TypeId
+) -> TypeId {
+    handle type_kind_at(&*interfaces, instance) {
+        TypeKind::Application(_, _) => instantiate_application_member_type(
+            headers,
+            interfaces,
+            instance,
+            member
+        ),
+        _ => member
+    }
+}
+
 struct_field_accessible(
     declarations: &super::scanner::DeclarationIndex,
     interfaces: &TypedInterfaces,
@@ -3983,6 +6817,7 @@ elaborate_struct_fields(
     value: &mut BodyContext,
     expression: u32,
     nominal: u32,
+    instance: TypeId,
     ordinal: u32,
     seen: &mut Vec<u32>,
     values: &mut Vec<Option<CoreValueId>>
@@ -4019,10 +6854,16 @@ elaborate_struct_fields(
                     field
                 ) }
             ) {
-                let field_type = nominal_struct_field_type(
+                let declared_field_type = nominal_struct_field_type(
                     &*interfaces,
                     nominal,
                     field
+                );
+                let field_type = nominal_instance_member_type(
+                    headers,
+                    interfaces,
+                    instance,
+                    type_id_from_u32(declared_field_type)
                 );
                 let field_value = try(elaborate_expression(
                     original,
@@ -4037,7 +6878,7 @@ elaborate_struct_fields(
                         expression,
                         ordinal
                     ),
-                    Option::Some(type_id_from_u32(field_type))
+                    Option::Some(field_type)
                 ), @elaborate_struct_fields);
                 // Construction fields are canonicalized into declaration
                 // order. Embed computations so their evaluation follows that
@@ -4061,6 +6902,7 @@ elaborate_struct_fields(
                     value,
                     expression,
                     nominal,
+                    instance,
                     ordinal + 1,
                     seen,
                     values
@@ -4104,7 +6946,6 @@ elaborate_struct(
                     Result::Err(_) => unreachable(),
                     Result::Ok(found) => found
                 };
-                let ty = Id::to_u32(ty_id);
                 let nominal_id = handle *IndexVec::index(
                     &interfaces.shell_to_nominal,
                     shell
@@ -4113,9 +6954,13 @@ elaborate_struct(
                     Result::Ok(found) => found
                 };
                 let nominal = Id::to_u32(nominal_id);
-                if(type_is_copyable(interfaces, ty_id) and {
-                    expected_matches(expected, ty_id)
-                }) {
+                let instance = nominal_instance_for_expected(
+                    &*interfaces,
+                    ty_id,
+                    nominal_id,
+                    expected
+                );
+                if(expected_matches(expected, instance)) {
                     let nominal_node = *interface_nominal_at(
                         interfaces,
                         nominal_id
@@ -4141,6 +6986,7 @@ elaborate_struct(
                         value,
                         expression,
                         nominal,
+                        instance,
                         0,
                         &mut seen,
                         &mut values
@@ -4154,7 +7000,7 @@ elaborate_struct(
                         );
                         Result::Ok(finish_construct(
                             &mut value.core,
-                            ty_id,
+                            instance,
                             ConstructionFlavor::Product,
                             &fields
                         ))
@@ -4170,8 +7016,8 @@ elaborate_struct(
                         ) }
                 } else { Result::Err(ElaborationError::TypeMismatch(
                     token,
-                    expected_word_or(expected, ty_id),
-                    ty
+                    expected_word_or(expected, instance),
+                    Id::to_u32(instance)
                 )) }
             }
         },
@@ -4191,15 +7037,22 @@ elaborate_enum_payloads(
     map: &ResolutionMap,
     value: &mut BodyContext,
     expression: u32,
+    instance: TypeId,
     payload_start: u32,
     payload_count: u32,
     ordinal: u32,
     fields: &mut Vec<ConstructionField>
 ) -> Result<(), ElaborationError> {
     if(ordinal < payload_count) {
-        let payload_type = *Vec::index(
+        let declared_payload_type = *Vec::index(
             &interfaces.variant_payloads,
             usize_from_u32(payload_start + ordinal)
+        );
+        let payload_type = nominal_instance_member_type(
+            headers,
+            interfaces,
+            instance,
+            declared_payload_type
         );
         let payload = try(elaborate_expression(
             original,
@@ -4230,6 +7083,7 @@ elaborate_enum_payloads(
             map,
             value,
             expression,
+            instance,
             payload_start,
             payload_count,
             ordinal + 1,
@@ -4274,13 +7128,17 @@ elaborate_enum_construct(
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
-        let ty = Id::to_u32(ty_id);
+        let instance = nominal_instance_for_expected(
+            &*interfaces,
+            ty_id,
+            variant.owner,
+            expected
+        );
         let found_count =
             super::bodies::expression_child_count_at(body, expression)
                 - 1;
         if(payload_count == found_count and {
-            type_is_copyable(interfaces, ty_id)
-                and { expected_matches(expected, ty_id) }
+            expected_matches(expected, instance)
         }) {
             let fields = Vec::new();
             try(elaborate_enum_payloads(
@@ -4292,6 +7150,7 @@ elaborate_enum_construct(
                 map,
                 value,
                 expression,
+                instance,
                 payload_start,
                 payload_count,
                 0,
@@ -4299,7 +7158,7 @@ elaborate_enum_construct(
             ), @elaborate_enum_construct);
             Result::Ok(finish_construct(
                 &mut value.core,
-                ty_id,
+                instance,
                 ConstructionFlavor::Variant(variant_ordinal),
                 &fields
             ))
@@ -4345,15 +7204,19 @@ elaborate_enum_bare(
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
-        let ty = Id::to_u32(ty_id);
+        let instance = nominal_instance_for_expected(
+            &*interfaces,
+            ty_id,
+            variant.owner,
+            expected
+        );
         if(payload_count == 0 and {
-            type_is_copyable(interfaces, ty_id)
-                and { expected_matches(expected, ty_id) }
+            expected_matches(expected, instance)
         }) {
             let fields = Vec::new();
             Result::Ok(finish_construct(
                 &mut value.core,
-                ty_id,
+                instance,
                 ConstructionFlavor::Variant(variant_ordinal),
                 &fields
             ))
@@ -4439,6 +7302,42 @@ elaborate_projection(
                         }
                     } else { Result::Err(()) }
                   } else { Result::Err(()) },
+                TypeKind::Application(_, _) =>
+                  if(name_kind == 1) {
+                    handle nominal_id_for_type(
+                        &*interfaces,
+                        subject_type
+                    ) {
+                        Option::Some(nominal_id) => {
+                            let nominal = Id::to_u32(nominal_id);
+                            if(interface_nominal_is_struct(
+                                interfaces,
+                                nominal_id
+                            )) {
+                                handle field_ordinal_by_name(
+                                    &*interfaces,
+                                    nominal,
+                                    name,
+                                    0
+                                ) {
+                                    Result::Err(_) => Result::Err(()),
+                                    Result::Ok(field) => if(
+                                        struct_field_accessible(
+                                            declarations,
+                                            &*interfaces,
+                                            super::bodies::body_shell(body),
+                                            nominal,
+                                            field
+                                        )
+                                    ) { Result::Ok(field) } else {
+                                        Result::Err(())
+                                    }
+                                }
+                            } else { Result::Err(()) }
+                        },
+                        None => Result::Err(())
+                    }
+                  } else { Result::Err(()) },
                 _ => Result::Err(())
     };
             handle field {
@@ -4462,6 +7361,25 @@ elaborate_projection(
                                 Id::to_u32(nominal),
                                 field_index
                             )),
+                        TypeKind::Application(_, _) => {
+                            let nominal = nominal_id_for_type(
+                                &*interfaces,
+                                subject_type
+                            ) else { unreachable() };
+                            let declared = type_id_from_u32(
+                                nominal_struct_field_type(
+                                    &*interfaces,
+                                    Id::to_u32(nominal),
+                                    field_index
+                                )
+                            );
+                            nominal_instance_member_type(
+                                headers,
+                                interfaces,
+                                subject_type,
+                                declared
+                            )
+                        },
                         _ => unreachable()
                     };
                     let result_type_word = Id::to_u32(result_type);
@@ -4518,17 +7436,26 @@ match_variants_complete(
 }
 
 elaborate_handle_binders<'a>(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
     value: &mut BodyContext,
-    interfaces: &TypedInterfaces,
+    interfaces: &mut TypedInterfaces,
+    instance: TypeId,
     binders: Slice<'a, ResolvedPatternBinder>,
     payloads: VariantPayloadRange,
     ordinal: u32,
     output: &mut Vec<CoreMatchBinding>
-) {
+) -> Result<(), ElaborationError> {
     if(ordinal < payloads.count) {
-        let ty = variant_payload_type_at(
-            interfaces,
+        let declared_ty = variant_payload_type_at(
+            &*interfaces,
             usize_from_u32(payloads.start + ordinal)
+        );
+        let ty = nominal_instance_member_type(
+            headers,
+            interfaces,
+            instance,
+            declared_ty
         );
         let binder = *handle Slice::get(binders, usize_from_u32(ordinal)) {
             Result::Err(_) => unreachable(),
@@ -4536,6 +7463,7 @@ elaborate_handle_binders<'a>(
         };
         let local = handle binder {
             ResolvedPatternBinder::Wildcard => None,
+            ResolvedPatternBinder::Integer(_) => None,
             ResolvedPatternBinder::Local(source) => {
                 let core = core_local_id_from_u32(
                     value.parameter_count + Id::to_u32(source)
@@ -4547,20 +7475,53 @@ elaborate_handle_binders<'a>(
                 Option::Some(core)
             }
         };
+        let integer = handle binder {
+            ResolvedPatternBinder::Integer(token) => Option::Some(try(
+                integer_constant_for_token(
+                    original,
+                    super::headers::parsed_source(headers),
+                    &mut value.core,
+                    token,
+                    ty
+                ),
+                @elaborate_handle_binders
+            )),
+            _ => None
+        };
         Vec::push(&mut *output, CoreMatchBinding {
             field: ordinal,
             local: local,
+            integer: integer,
             ty: ty
         });
         elaborate_handle_binders(
+            original,
+            headers,
             value,
             interfaces,
+            instance,
             binders,
             payloads,
             ordinal + 1,
             output
         )
-    } else { () }
+    } else { Result::Ok(()) }
+}
+
+pattern_binders_irrefutable<'a>(
+    binders: Slice<'a, ResolvedPatternBinder>,
+    index: usize
+) -> Bool {
+    if(index < Slice::len(binders)) {
+        let binder = handle Slice::get(binders, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        handle *binder {
+            ResolvedPatternBinder::Integer(_) => false,
+            _ => pattern_binders_irrefutable(binders, index + 1)
+        }
+    } else { true }
 }
 
 elaborate_handle_arms(
@@ -4573,9 +7534,11 @@ elaborate_handle_arms(
     value: &mut BodyContext,
     expression: u32,
     nominal: InterfaceNominalId,
+    instance: TypeId,
     variants: InterfaceVariantRange,
     ordinal: usize,
     expected: Option<TypeId>,
+    inferred: Option<TypeId>,
     seen: &mut Vec<Bool>,
     output_arms: &mut Vec<CoreMatchArm>,
     output_bindings: &mut Vec<CoreMatchBinding>
@@ -4612,6 +7575,10 @@ elaborate_handle_arms(
                 variant_range_contains(variants, variant_index)
             }) {
                 let variant_ordinal = variant_index - variant_start;
+                let binders = super::resolution::resolved_handle_binders(
+                    map,
+                    arm
+                );
                 if(*Vec::index(seen, usize_from_u32(variant_ordinal))) {
                     Result::Err(ElaborationError::DuplicateMatchVariant(
                         token,
@@ -4619,28 +7586,30 @@ elaborate_handle_arms(
                         u32_from_usize(Slice::len(source_arms))
                     ))
                 } else {
-                    let binders = super::resolution::resolved_handle_binders(
-                        map,
-                        arm
-                    );
                     let binder_count = u32_from_usize(Slice::len(binders));
                     let payload_count =
                         variant_payload_range_count(variant.payloads);
                     if(binder_count == payload_count) {
-                        *Vec::index_mut(
-                            &mut *seen,
-                            usize_from_u32(variant_ordinal)
-                        ) = true;
+                        if(pattern_binders_irrefutable(binders, 0)) {
+                            *Vec::index_mut(
+                                &mut *seen,
+                                usize_from_u32(variant_ordinal)
+                            ) = true;
+                            ()
+                        } else { () };
                         let binding_start =
                             super::syntax::range_mark(&*output_bindings);
-                        elaborate_handle_binders(
+                        try(elaborate_handle_binders(
+                            original,
+                            headers,
                             value,
-                            &*interfaces,
+                            interfaces,
+                            instance,
                             binders,
                             variant.payloads,
                             0,
                             output_bindings
-                        );
+                        ), @elaborate_handle_arms);
                         let arm_body = try(elaborate_expression(
                             original,
                             headers,
@@ -4652,7 +7621,7 @@ elaborate_handle_arms(
                             Id::to_u32(
                                 super::bodies::handle_arm_body(source_arm)
                             ),
-                            expected
+                            branch_expected(expected, inferred)
                         ), @elaborate_handle_arms);
                         let arm_type = arm_body.type_id;
                         let arm_computation = as_computation(
@@ -4677,9 +7646,11 @@ elaborate_handle_arms(
                             value,
                             expression,
                             nominal,
+                            instance,
                             variants,
                             ordinal + 1,
-                            Option::Some(arm_type),
+                            expected,
+                            join_branch_type(inferred, arm_type),
                             seen,
                             output_arms,
                             output_bindings
@@ -4704,16 +7675,19 @@ elaborate_handle_arms(
         ) }
     } else {
         handle expected {
-            Result::Err(_) => Result::Err(
-                ElaborationError::MissingMatchVariants(
-                    super::bodies::expression_token_start_at(
-                        body,
-                        expression
-                    ),
-                    variant_count,
-                    0
-                )
-            ),
+            Result::Err(_) => handle inferred {
+                Result::Err(_) => Result::Err(
+                    ElaborationError::MissingMatchVariants(
+                        super::bodies::expression_token_start_at(
+                            body,
+                            expression
+                        ),
+                        variant_count,
+                        0
+                    )
+                ),
+                Result::Ok(found) => Result::Ok(found)
+            },
             Result::Ok(found) => Result::Ok(found)
         }
     }
@@ -4742,8 +7716,9 @@ elaborate_handle(
         super::bodies::expression_child_at(body, expression, 0),
         None
     ), @elaborate_handle);
-    handle type_kind_at(&*interfaces, subject.type_id) {
-        TypeKind::Nominal(nominal) => {
+    handle nominal_id_for_type(&*interfaces, subject.type_id) {
+        Option::Some(nominal) => {
+            let subject_type = subject.type_id;
             let nominal_node = *interface_nominal_at(&*interfaces, nominal);
             handle nominal_node.kind {
                 InterfaceNominalKind::Struct(_) => Result::Err(
@@ -4759,7 +7734,7 @@ elaborate_handle(
                             expression
                         );
                     if(u32_from_usize(Slice::len(source_arms))
-                        == variants.count) {
+                        >= variants.count) {
                         let prefix = new_core_prefix();
                         let subject_value = bind_operand(
                             &mut value.core,
@@ -4783,9 +7758,11 @@ elaborate_handle(
                             value,
                             expression,
                             nominal,
+                            subject_type,
                             variants,
                             0,
                             expected,
+                            None,
                             &mut seen,
                             &mut arms,
                             &mut bindings
@@ -4845,9 +7822,318 @@ elaborate_handle(
                 }
             }
         },
-        _ => Result::Err(ElaborationError::ExpectedEnumType(
+        None => Result::Err(ElaborationError::ExpectedEnumType(
             token,
             Id::to_u32(subject.type_id)
+        ))
+    }
+}
+
+struct IntegerOperator {
+    primitive: u32,
+    comparison: Bool
+}
+
+integer_infix_operator(kind: TokenKind) -> Option<IntegerOperator> {
+    handle kind {
+        TokenKind::Plus => Option::Some(IntegerOperator {
+            primitive: 0,
+            comparison: false
+        }),
+        TokenKind::Minus => Option::Some(IntegerOperator {
+            primitive: 1,
+            comparison: false
+        }),
+        TokenKind::Star => Option::Some(IntegerOperator {
+            primitive: 2,
+            comparison: false
+        }),
+        TokenKind::Slash => Option::Some(IntegerOperator {
+            primitive: 3,
+            comparison: false
+        }),
+        TokenKind::Percent => Option::Some(IntegerOperator {
+            primitive: 4,
+            comparison: false
+        }),
+        TokenKind::EqEq => Option::Some(IntegerOperator {
+            primitive: 14,
+            comparison: true
+        }),
+        TokenKind::BangEq => Option::Some(IntegerOperator {
+            primitive: 15,
+            comparison: true
+        }),
+        TokenKind::Lt => Option::Some(IntegerOperator {
+            primitive: 16,
+            comparison: true
+        }),
+        TokenKind::LtEq => Option::Some(IntegerOperator {
+            primitive: 17,
+            comparison: true
+        }),
+        TokenKind::Gt => Option::Some(IntegerOperator {
+            primitive: 18,
+            comparison: true
+        }),
+        TokenKind::GtEq => Option::Some(IntegerOperator {
+            primitive: 19,
+            comparison: true
+        }),
+        _ => None
+    }
+}
+
+integer_type(value: TypeId) -> Bool {
+    let raw = Id::to_u32(value);
+    2 <= raw and { raw <= 13 }
+}
+
+expression_is_number(
+    body: &super::bodies::ParsedBody,
+    expression: u32
+) -> Bool {
+    super::bodies::expression_view(body, expression)
+        is super::bodies::BodyExpressionView::Number(_)
+}
+
+append_primitive_operands(
+    value: &mut CoreBuilder,
+    left: CoreValueId,
+    right: CoreValueId
+) -> OperandRange {
+    let start = super::syntax::range_mark(&value.operands);
+    Vec::push(&mut value.operands, left);
+    Vec::push(&mut value.operands, right);
+    operand_range(start, Vec::len(&value.operands))
+}
+
+find_callable_named(
+    interfaces: &TypedInterfaces,
+    declarations: &super::scanner::DeclarationIndex,
+    name: Id<String>,
+    index: usize
+) -> Option<InterfaceCallableId> {
+    if(index < interface_callable_count(interfaces)) {
+        let callable = Id::from_u32(u32_from_usize(index));
+        let shell = interface_callable_shell(interfaces, callable);
+        let matches = handle super::scanner::shell_at(declarations, shell) {
+            None => false,
+            Option::Some(found) => handle super::scanner::shell_name(found) {
+                None => false,
+                Option::Some(found_name) => found_name == name
+            }
+        };
+        handle matches {
+            true => Option::Some(callable),
+            false => find_callable_named(
+                    interfaces,
+                    declarations,
+                    name,
+                    index + 1
+                )
+        }
+    } else { None }
+}
+
+wrap_raw_bool(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    value: &mut BodyContext,
+    raw: CoreComputationId,
+    expected: Option<TypeId>,
+    token: usize
+) -> Result<Elaborated, ElaborationError> {
+    let name = super::lexer::lexeme_id(
+        super::headers::parsed_source(headers),
+        &"__g1_bool_from_u32"
+    ) else { @wrap_raw_bool(Result::Err(
+        ElaborationError::UnsupportedExpression(token)
+    )) };
+    let callable = find_callable_named(
+        &*interfaces,
+        declarations,
+        name,
+        0
+    ) else { @wrap_raw_bool(Result::Err(
+        ElaborationError::UnsupportedExpression(token)
+    )) };
+    let shape_valid = handle
+        interface_callable_parameter_count(&*interfaces, callable) == 1 {
+        true => interface_callable_generic_count(
+            &*interfaces,
+            callable
+        ) == 0,
+        false => false
+    };
+    handle shape_valid {
+    true => {
+        let raw_value = push_value(
+            &mut value.core,
+            type_id_from_u32(4),
+            CoreValueKind::Embedded(raw)
+        );
+        let operand_start = super::syntax::range_mark(&value.core.operands);
+        Vec::push(&mut value.core.operands, raw_value);
+        let operands = operand_range(
+            operand_start,
+            Vec::len(&value.core.operands)
+        );
+        let substitutions = Vec::new();
+        let instance = intern_callable_instance(
+            interfaces,
+            callable,
+            &substitutions
+        );
+        let result = interface_callable_result(&*interfaces, callable);
+        try(check_expected_type(
+            result,
+            expected,
+            token
+        ), @wrap_raw_bool);
+        let computation = push_computation(
+            &mut value.core,
+            result,
+            CoreComputationKind::Call(
+                interface_callable_shell(&*interfaces, callable),
+                instance,
+                operands
+            )
+        );
+        Result::Ok(Elaborated {
+            type_id: result,
+            form: ElaboratedForm::Computation(computation)
+        })
+    },
+    false => {
+        Result::Err(ElaborationError::UnsupportedExpression(token))
+    }
+    }
+}
+
+elaborate_integer_infix(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    operator: IntegerOperator,
+    left: u32,
+    right: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    let left_number = expression_is_number(body, left);
+    let right_number = expression_is_number(body, right);
+    let values = if(left_number and { not(right_number) }) {
+        let right_value = try(elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            right,
+            None
+        ), @elaborate_integer_infix);
+        let left_value = try(elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            left,
+            Option::Some(right_value.type_id)
+        ), @elaborate_integer_infix);
+        (left_value, right_value)
+    } else {
+        let operand_expected = if(operator.comparison) {
+            None
+        } else {
+            expected
+        };
+        let left_value = try(elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            left,
+            operand_expected
+        ), @elaborate_integer_infix);
+        let right_value = try(elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            right,
+            Option::Some(left_value.type_id)
+        ), @elaborate_integer_infix);
+        (left_value, right_value)
+    };
+    let left_value = move values.0;
+    let right_value = move values.1;
+    if(integer_type(left_value.type_id) and {
+        left_value.type_id == right_value.type_id
+    }) {
+        let operand_type = left_value.type_id;
+        let left_operand = embed_operand(&mut value.core, left_value);
+        let right_operand = embed_operand(&mut value.core, right_value);
+        let operands = append_primitive_operands(
+            &mut value.core,
+            left_operand,
+            right_operand
+        );
+        let result = if(operator.comparison) {
+            type_id_from_u32(4)
+        } else {
+            operand_type
+        };
+        if(operator.comparison) { () } else {
+            try(check_expected_type(
+                result,
+                expected,
+                token
+            ), @elaborate_integer_infix)
+        };
+        let primitive = push_computation(
+            &mut value.core,
+            result,
+            CoreComputationKind::Primitive(operator.primitive, operands)
+        );
+        if(operator.comparison) {
+            wrap_raw_bool(
+                headers,
+                declarations,
+                interfaces,
+                value,
+                primitive,
+                expected,
+                token
+            )
+        } else {
+            Result::Ok(Elaborated {
+                type_id: result,
+                form: ElaboratedForm::Computation(primitive)
+            })
+        }
+    } else {
+        Result::Err(ElaborationError::TypeMismatch(
+            token,
+            Id::to_u32(left_value.type_id),
+            Id::to_u32(right_value.type_id)
         ))
     }
 }
@@ -4875,7 +8161,7 @@ elaborate_expression(
                 expected
             ),
             _ => elaborate_identifier(
-                &*interfaces,
+                interfaces,
                 body,
                 map,
                 value,
@@ -4921,14 +8207,44 @@ elaborate_expression(
             Id::to_u32(child),
             expected
         ),
+        super::bodies::BodyExpressionView::Move(child) => elaborate_move(
+            &*interfaces,
+            body,
+            map,
+            value,
+            expression,
+            child,
+            expected
+        ),
         super::bodies::BodyExpressionView::Prefix(_, _) => Result::Err(
             ElaborationError::UnsupportedExpression(
             super::bodies::expression_token_start_at(body, expression)
         )),
-        super::bodies::BodyExpressionView::Infix(_, _, _) => Result::Err(
-            ElaborationError::UnsupportedExpression(
-            super::bodies::expression_token_start_at(body, expression)
-        )),
+        super::bodies::BodyExpressionView::Infix(operator, left, right) =>
+            handle integer_infix_operator(
+                super::lexer::token_kind_at(
+                    super::headers::parsed_source(headers),
+                    super::syntax::token_start(&operator)
+                )
+            ) {
+                None => Result::Err(ElaborationError::UnsupportedExpression(
+                    super::bodies::expression_token_start_at(body, expression)
+                )),
+                Option::Some(found) => elaborate_integer_infix(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    map,
+                    value,
+                    expression,
+                    found,
+                    Id::to_u32(left),
+                    Id::to_u32(right),
+                    expected
+                )
+            },
         super::bodies::BodyExpressionView::Call(_, _) => elaborate_call(
             original,
             headers,
@@ -5001,22 +8317,23 @@ elaborate_expression(
 
 seed_parameter_locals(
     interfaces: &TypedInterfaces,
-    callable: InterfaceCallableId,
+    instance: CallableInstanceId,
     output: &mut IndexVec<CoreLocalTag, Option<TypeId>>,
     ordinal: u32
 ) {
-    let parameters = interface_callable_parameters(interfaces, callable);
-    if(ordinal < parameters.count) {
+    let count = callable_instance_parameter_count(interfaces, instance);
+    if(ordinal < count) {
         push_local_type(
             &mut *output,
-            Option::Some(callable_parameter_type_at(
+            Option::Some(callable_instance_parameter_at(
                 interfaces,
-                usize_from_u32(parameters.start + ordinal)
+                instance,
+                usize_from_u32(ordinal)
             ))
         );
         seed_parameter_locals(
             interfaces,
-            callable,
+            instance,
             output,
             ordinal + 1
         )
@@ -5262,33 +8579,28 @@ build_place_flow(
     output
 }
 
-pub elaborate_function_body(
+pub elaborate_function_instance_body(
     original: &String,
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
-    resolved: &super::resolution::ResolvedBody
+    resolved: &super::resolution::ResolvedBody,
+    instance: CallableInstanceId
 ) -> Result<TypedBody, ElaborationError> {
     let shell = super::bodies::body_shell(body);
-    handle interface_callable_for_shell_id(interfaces, shell) {
-        Result::Err(_) => Result::Err(
-            ElaborationError::MissingBodyCallable(shell)
-        ),
-        Result::Ok(callable) => {
-            let result =
-                interface_callable_result(interfaces, callable);
+    let callable = callable_instance_callable(interfaces, instance);
+    let callable_shell = interface_callable_shell(interfaces, callable);
+    if(callable_shell == shell) {
+            let result = callable_instance_result(interfaces, instance);
             let locals = IndexVec::new();
-            seed_parameter_locals(interfaces, callable, &mut locals, 0);
+            seed_parameter_locals(interfaces, instance, &mut locals, 0);
             seed_untyped_locals(
                 &mut locals,
                 super::resolution::local_count(resolved)
             );
             let parameter_count =
-                interface_callable_parameters(
-                    interfaces,
-                    callable
-                ).count;
+                callable_instance_parameter_count(interfaces, instance);
             let builder = new_body_context(
                 parameter_count,
                 build_place_flow(
@@ -5308,7 +8620,7 @@ pub elaborate_function_body(
                 &mut builder,
                 super::bodies::body_root_index(body),
                 Option::Some(result)
-            ), @elaborate_function_body);
+            ), @elaborate_function_instance_body);
             let computation =
                 as_computation(&mut builder.core, root);
             let local_types = IndexVec::new();
@@ -5334,7 +8646,7 @@ pub elaborate_function_body(
                 match_bindings,
                 integer_constants
             } = core;
-            Result::Ok(TypedBody {
+            let output = TypedBody {
                 shell: shell,
                 result_type: result,
                 root: computation,
@@ -5347,7 +8659,42 @@ pub elaborate_function_body(
                 match_arms: match_arms,
                 match_bindings: match_bindings,
                 integer_constants: integer_constants
-            })
+            };
+            Result::Ok(__g1_identity_rewrite_core(
+                move output,
+                @elaborate_function_instance_body
+            ))
+    } else { Result::Err(ElaborationError::MissingBodyCallable(shell)) }
+}
+
+pub elaborate_function_body(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    resolved: &super::resolution::ResolvedBody
+) -> Result<TypedBody, ElaborationError> {
+    let shell = super::bodies::body_shell(body);
+    handle interface_callable_for_shell_id(interfaces, shell) {
+        Result::Err(_) => Result::Err(
+            ElaborationError::MissingBodyCallable(shell)
+        ),
+        Result::Ok(callable) => {
+            let generics = interface_callable_generics(interfaces, callable);
+            let substitutions = new_call_substitutions(generics.count);
+            let instance = intern_callable_instance(
+                interfaces, callable, &substitutions
+            );
+            elaborate_function_instance_body(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                resolved,
+                instance
+            )
         }
     }
 }

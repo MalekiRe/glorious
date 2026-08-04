@@ -132,9 +132,24 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             );
             write_type_edges(output, parsed, children)
         },
-        HeaderTypeView::Application(_, constructor, arguments) => {
+        HeaderTypeView::Application(_, constructor, lifetimes, arguments) => {
             ByteBuf::push(output, 5);
             write_type(output, parsed, constructor);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(Slice::len(lifetimes))
+            );
+            for_range(Range::new(0, Slice::len(lifetimes)), { current => {
+                let lifetime = handle Slice::get(lifetimes, current) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                };
+                write_name(
+                    output,
+                    super::super::frontend::headers::parsed_source(parsed),
+                    super::super::frontend::headers::name_use_name(lifetime)
+                )
+            }});
             ByteBuf::write_u32_le(
                 output,
                 wrapping_convert_to_u32(Slice::len(arguments))

@@ -209,7 +209,17 @@ fn optional_cancellation_cleans_up_affine_custom_drop_capture() {
         main() -> { () }
     "#;
     let artifact = compile_source_to_bytecode("affine-cancel-capture.glorious", source).unwrap();
-    assert_eq!(artifact.drop_glue.len(), 1);
+    assert_eq!(
+        artifact
+            .drop_glue
+            .iter()
+            .filter(|glue| matches!(
+                artifact.types[glue.ty as usize].representation(),
+                Type::Struct { name, .. } if name == "Resource"
+            ))
+            .count(),
+        1
+    );
     let selected = artifact
         .functions
         .iter()
@@ -268,7 +278,17 @@ fn optional_cancellation_releases_whole_and_projected_loans_before_their_owners(
         main() -> { () }
     "#;
     let artifact = compile_source_to_bytecode("optional-cancel-loans.glorious", source).unwrap();
-    assert_eq!(artifact.drop_glue.len(), 1);
+    assert_eq!(
+        artifact
+            .drop_glue
+            .iter()
+            .filter(|glue| matches!(
+                artifact.types[glue.ty as usize].representation(),
+                Type::Struct { name, .. } if name == "Resource"
+            ))
+            .count(),
+        1
+    );
     let functions = ["shared", "unique_with_drop", "projected"].map(|name| {
         artifact
             .functions

@@ -17,9 +17,9 @@ use grandiose_vm::{
 use super::{
     BasicBlock, BlockKind, BlockParam, BlockParamRole, CleanupAction, CleanupEdge, CleanupPlanFact,
     CleanupPlanId, DropGlueKind, Edge, FlowProvenance, Function, HandlerSiteFact, Instruction,
-    InstructionKind, LabelId, LoanId, LocalFact, MovePathId, MovePaths, Operand, OwnershipCategory,
-    PerformSiteFact, Program, Projection, RegionId, Register, RegisterUseKind, ResumptionSiteFact,
-    ScopeId, SourceInfoId, Terminator, UseMode, analysis,
+    InstructionKind, JoinSiteFact, LabelId, LoanId, LocalFact, MovePathId, MovePaths, Operand,
+    OwnershipCategory, PerformSiteFact, Program, Projection, RegionId, Register, RegisterUseKind,
+    ResumptionSiteFact, ScopeId, SourceInfoId, Terminator, UseMode, analysis,
 };
 use crate::compiler_mir::analyses::{
     AnalysisErrorKind, ControlFlowAnalysis, EdgeLiveness, PhysicalRegisterAllocation,
@@ -314,6 +314,7 @@ pub(crate) fn infer_feature_bits(function: &Function) -> FeatureBits {
                 | InstructionKind::ProjectBorrow { .. }
                 | InstructionKind::Reborrow { .. }
                 | InstructionKind::DerefCopy { .. }
+                | InstructionKind::DerefReborrow { .. }
                 | InstructionKind::DerefMove { .. }
                 | InstructionKind::DerefStore { .. }
                 | InstructionKind::EndBorrow { .. } => features.insert(FeatureBits::LOANS),
@@ -494,8 +495,8 @@ fn validate_edge(
                 function,
                 Some(source),
                 format!(
-                    "edge to block {} moves r{} more than once",
-                    edge.target, argument.register
+                    "edge to block {} moves r{} more than once; arguments={:?}; parameters={:?}",
+                    edge.target, argument.register, edge.args, target.params
                 ),
             ));
         }
@@ -893,6 +894,42 @@ fn validate_statements(
                     ));
                 }
             }
+            InstructionKind::DerefReborrow { dst, src, unique } => {
+                let outer = match types[ty(*src)? as usize].representation() {
+                    Type::RefUnique { referent } => *referent,
+                    Type::RefShared { referent } if !*unique => *referent,
+                    _ => {
+                        return Err(error(
+                            function,
+                            Some(block.id),
+                            "DerefReborrow source lacks compatible outer reference authority",
+                        ));
+                    }
+                };
+                let inner = match types[outer as usize].representation() {
+                    Type::RefUnique { referent } => *referent,
+                    Type::RefShared { referent } if !*unique => *referent,
+                    _ => {
+                        return Err(error(
+                            function,
+                            Some(block.id),
+                            "DerefReborrow referent is not a compatible stored reference",
+                        ));
+                    }
+                };
+                let expected = if *unique {
+                    Type::RefUnique { referent: inner }
+                } else {
+                    Type::RefShared { referent: inner }
+                };
+                if types[ty(*dst)? as usize].representation() != &expected {
+                    return Err(error(
+                        function,
+                        Some(block.id),
+                        "DerefReborrow destination type mismatch",
+                    ));
+                }
+            }
             InstructionKind::DerefMove { dst, src } => {
                 let referent = match types[ty(*src)? as usize].representation() {
                     Type::RefUnique { referent } => *referent,
@@ -1168,12 +1205,15 @@ fn validate_statements(
                     })?;
                 if fact.destination != *target
                     || ty(*result)? != fact.result_type
-                    || destination.params.as_slice()
-                        != [BlockParam {
+                    || destination.params.first()
+                        != Some(&BlockParam {
                             register: *result,
                             ty: fact.result_type,
                             role: BlockParamRole::ProtectedExitValue,
-                        }]
+                        })
+                    || destination.params[1..]
+                        .iter()
+                        .any(|parameter| parameter.role != BlockParamRole::Ordinary)
                 {
                     return Err(error(
                         function,
@@ -1984,10 +2024,14 @@ fn validate_terminator(
                 .get(&target.target)
                 .ok_or_else(|| error(function, Some(block.id), "Leave target block is missing"))?;
             if fact.destination != target.target
-                || target.args.len() != 1
-                || destination.params.len() != 1
-                || destination.params[0].role != BlockParamRole::ProtectedExitValue
-                || destination.params[0].ty != fact.result_type
+                || target.args.len() != destination.params.len()
+                || destination.params.first().is_none_or(|parameter| {
+                    parameter.role != BlockParamRole::ProtectedExitValue
+                        || parameter.ty != fact.result_type
+                })
+                || destination.params[1..]
+                    .iter()
+                    .any(|parameter| parameter.role != BlockParamRole::Ordinary)
             {
                 return Err(error(
                     function,
@@ -2100,6 +2144,7 @@ fn replace_block_uses(block: &mut BasicBlock, from: Register, to: Register) {
             | InstructionKind::ProjectBorrow { src, .. }
             | InstructionKind::Reborrow { src, .. }
             | InstructionKind::DerefCopy { src, .. }
+            | InstructionKind::DerefReborrow { src, .. }
             | InstructionKind::DerefMove { src, .. }
             | InstructionKind::EndBorrow { reference: src }
             | InstructionKind::Deconstruct { src }
@@ -3228,6 +3273,16 @@ fn scalarize_locals(function: &mut Function, types: &[Type], budget: u64) -> (Pa
                 continue;
             };
             if field_types.len() != fields.len()
+                // Storing a reference in an aggregate deliberately detaches
+                // it from the named parent handle while retaining its exact
+                // referent provenance. Replacing that store with an ordinary
+                // SSA `Move` would instead keep the parent/child reborrow
+                // edge live and can make a following `EndBorrow` invalid.
+                // Scalar reference carriers need a dedicated provenance
+                // transfer operation before they can participate here.
+                || field_types
+                    .iter()
+                    .any(|field| type_carries_reference(types, *field))
                 || fields.iter().zip(&field_types).any(|(field, expected)| {
                     function.register_types.get(field.register as usize) != Some(expected)
                 })
@@ -4169,6 +4224,7 @@ fn sparse_statement_value(
         | InstructionKind::ProjectBorrow { .. }
         | InstructionKind::Reborrow { .. }
         | InstructionKind::DerefCopy { .. }
+        | InstructionKind::DerefReborrow { .. }
         | InstructionKind::DerefMove { .. }
         | InstructionKind::Construct { .. }
         | InstructionKind::ProjectCopy { .. }
@@ -4203,6 +4259,7 @@ fn sparse_statement_variant(
         | InstructionKind::ProjectBorrow { .. }
         | InstructionKind::Reborrow { .. }
         | InstructionKind::DerefCopy { .. }
+        | InstructionKind::DerefReborrow { .. }
         | InstructionKind::DerefMove { .. }
         | InstructionKind::Construct { variant: None, .. }
         | InstructionKind::ProjectCopy { .. }
@@ -4458,6 +4515,55 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
         .enumerate()
         .map(|(index, block)| (block.id, index))
         .collect::<BTreeMap<_, _>>();
+    // SCCP reasons about the currently executable predecessor subset. Some
+    // protected-control and cleanup predecessors deliberately remain in MIR
+    // even when that subset excludes them, so a fact derived through a
+    // multi-predecessor parameter cannot be baked into the retained code.
+    // Propagate that structural join dependency through values and use it as
+    // a fail-closed barrier for branch and instruction folding.
+    let mut predecessor_counts = BTreeMap::<u32, usize>::new();
+    for block in &scratch.blocks {
+        for_each_edge(&block.terminator, |edge| {
+            *predecessor_counts.entry(edge.target).or_default() += 1;
+        });
+    }
+    let mut join_dependencies = vec![Vec::<Register>::new(); scratch.register_types.len()];
+    let mut structurally_joined = vec![false; scratch.register_types.len()];
+    for block in &scratch.blocks {
+        if predecessor_counts.get(&block.id).copied().unwrap_or(0) > 1 {
+            for parameter in &block.params {
+                structurally_joined[parameter.register as usize] = true;
+            }
+        }
+        for statement in &block.statements {
+            if let Some(destination) = statement.kind.destination() {
+                statement.kind.for_each_register_use(|source, _| {
+                    join_dependencies[source as usize].push(destination);
+                });
+            }
+        }
+        for_each_edge(&block.terminator, |edge| {
+            let parameters = &scratch.blocks[block_indices[&edge.target]].params;
+            let implicit = parameters.len().saturating_sub(edge.args.len());
+            for (parameter, argument) in parameters[implicit..].iter().zip(&edge.args) {
+                join_dependencies[argument.register as usize].push(parameter.register);
+            }
+        });
+    }
+    let mut joined_work = std::collections::VecDeque::new();
+    for (register, joined) in structurally_joined.iter().copied().enumerate() {
+        if joined {
+            joined_work.push_back(register as Register);
+        }
+    }
+    while let Some(source) = joined_work.pop_front() {
+        for &destination in &join_dependencies[source as usize] {
+            if !structurally_joined[destination as usize] {
+                structurally_joined[destination as usize] = true;
+                joined_work.push_back(destination);
+            }
+        }
+    }
     let mut reachable = vec![false; scratch.blocks.len()];
     let mut users = vec![BTreeSet::<usize>::new(); scratch.register_types.len()];
     for (block_index, block) in scratch.blocks.iter().enumerate() {
@@ -4503,7 +4609,11 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
                 discr,
                 cases,
                 otherwise,
-            } => match sparse_operand(&facts, discr) {
+            } => match if structurally_joined[discr.register as usize] {
+                SparseConstant::Overdefined
+            } else {
+                sparse_operand(&facts, discr)
+            } {
                 SparseConstant::Constant(value) => vec![
                     cases
                         .iter()
@@ -4564,12 +4674,16 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
 
     for block in &mut scratch.blocks {
         for statement in &mut block.statements {
+            let destination_is_joined = statement
+                .kind
+                .destination()
+                .is_some_and(|destination| structurally_joined[destination as usize]);
             let replacement = match &statement.kind {
                 InstructionKind::Primitive {
                     dst,
                     primitive,
                     args,
-                } => match &facts[*dst as usize] {
+                } if !destination_is_joined => match &facts[*dst as usize] {
                     SparseConstant::Constant(value) => Some(InstructionKind::Const {
                         dst: *dst,
                         value: value.clone(),
@@ -4585,7 +4699,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
                         )
                     }
                 },
-                InstructionKind::EnumTag { dst, .. } => {
+                InstructionKind::EnumTag { dst, .. } if !destination_is_joined => {
                     if let SparseConstant::Constant(value) = &facts[*dst as usize] {
                         Some(InstructionKind::Const {
                             dst: *dst,
@@ -4609,6 +4723,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
         } = &block.terminator
             && types[scratch.register_types[discr.register as usize] as usize]
                 .claimed_zero_use_allowed()
+            && !structurally_joined[discr.register as usize]
             && let SparseConstant::Constant(value) = &facts[discr.register as usize]
         {
             let selected = cases
@@ -5519,6 +5634,7 @@ fn simple_block_exit_states(function: &Function) -> Option<BTreeMap<u32, Vec<boo
                 | InstructionKind::ProjectBorrow { dst, src, .. }
                 | InstructionKind::Reborrow { dst, src, .. }
                 | InstructionKind::DerefCopy { dst, src }
+                | InstructionKind::DerefReborrow { dst, src, .. }
                 | InstructionKind::DerefMove { dst, src }
                 | InstructionKind::EnumTag { dst, src } => {
                     read(&state, *src)?;
@@ -5760,6 +5876,8 @@ fn discover_tail_calls(
     direct_custom_drop_types: &BTreeSet<TypeId>,
     budget: u64,
 ) -> (PassOutcome, u64) {
+    let trace = std::env::var("G1_TAIL_CALL_TRACE")
+        .is_ok_and(|fragment| !fragment.is_empty() && function.name.contains(&fragment));
     let work = body_size(function)
         .saturating_add(function.blocks.len() as u64 * function.register_types.len() as u64);
     if work > budget {
@@ -5873,29 +5991,35 @@ fn discover_tail_calls(
                 }
             }
             for statement in &continuation.statements {
-                let InstructionKind::Drop { owner } = statement.kind else {
-                    return None;
-                };
-                let origin = origins
-                    .get(&owner.register)
-                    .copied()
-                    .unwrap_or(owner.register);
-                if owner.mode != UseMode::Move
-                    || owner.register == result
-                    || !cleanup_free_drop(owner.register)
-                    || !dropped.insert(origin)
-                {
-                    return None;
+                match statement.kind {
+                    InstructionKind::Drop { owner } => {
+                        let origin = origins
+                            .get(&owner.register)
+                            .copied()
+                            .unwrap_or(owner.register);
+                        if owner.mode != UseMode::Move
+                            || owner.register == result
+                            || !cleanup_free_drop(owner.register)
+                            || !dropped.insert(origin)
+                        {
+                            return None;
+                        }
+                        cleanup.push(Instruction {
+                            span: statement.span,
+                            kind: InstructionKind::Drop {
+                                owner: Operand {
+                                    register: origin,
+                                    mode: UseMode::Move,
+                                },
+                            },
+                        });
+                    }
+                    // A local label cannot escape in a verified program. Pop
+                    // it before replacing the complete caller frame just as
+                    // the ordinary return continuation would have done.
+                    InstructionKind::LabelPop { .. } => cleanup.push(statement.clone()),
+                    _ => return None,
                 }
-                cleanup.push(Instruction {
-                    span: statement.span,
-                    kind: InstructionKind::Drop {
-                        owner: Operand {
-                            register: origin,
-                            mode: UseMode::Move,
-                        },
-                    },
-                });
             }
             match &continuation.terminator {
                 Terminator::Return {
@@ -5942,7 +6066,7 @@ fn discover_tail_calls(
                             .get(&argument.register)
                             .copied()
                             .unwrap_or(argument.register);
-                        if argument.mode != UseMode::Move
+                        if (position == result_position && argument.mode != UseMode::Move)
                             || function.register_types.get(argument.register as usize)
                                 != Some(&parameter.ty)
                             || !edge_origins.insert(origin)
@@ -5955,21 +6079,15 @@ fn discover_tail_calls(
                         }
                     }
                     let next = &next_block.params[result_position];
-                    if incoming.get(&edge.target) != Some(&1)
-                        && !matches!(
-                            &next_block.terminator,
-                            Terminator::Return {
-                                value:
-                                    Some(Operand {
-                                        register,
-                                        mode: UseMode::Move,
-                                    }),
-                            } if *register == next.register
-                        )
-                    {
-                        return None;
-                    }
-                    origins = next_origins;
+                    // Shared cleanup blocks are safe to specialize along this
+                    // incoming edge. The traversal below accepts only exact
+                    // origin-preserving forwarding, cleanup, and an eventual
+                    // return, and `visited` rejects cycles.
+                    // MIR registers are single-assignment. Keep mappings for
+                    // values that stay live through a block without being
+                    // repeated as that block's parameters, while adding the
+                    // newly introduced parameter identities.
+                    origins.extend(next_origins);
                     result = next.register;
                     expected_role = next.role;
                     if !matches!(
@@ -6016,16 +6134,19 @@ fn discover_tail_calls(
                 state[operand.register as usize] = false;
             }
             for statement in cleanup {
-                let InstructionKind::Drop { owner } = statement.kind else {
-                    return false;
-                };
-                if owner.mode != UseMode::Move
-                    || !moved.insert(owner.register)
-                    || !state.get(owner.register as usize).copied().unwrap_or(false)
-                {
-                    return false;
+                match statement.kind {
+                    InstructionKind::Drop { owner } => {
+                        if owner.mode != UseMode::Move
+                            || !moved.insert(owner.register)
+                            || !state.get(owner.register as usize).copied().unwrap_or(false)
+                        {
+                            return false;
+                        }
+                        state[owner.register as usize] = false;
+                    }
+                    InstructionKind::LabelPop { .. } => {}
+                    _ => return false,
                 }
-                state[owner.register as usize] = false;
             }
             state.iter().enumerate().all(|(register, initialized)| {
                 !*initialized
@@ -6074,17 +6195,20 @@ fn discover_tail_calls(
             state[operand.register as usize] = false;
         }
         for statement in cleanup {
-            let InstructionKind::Drop { owner } = statement.kind else {
-                return false;
-            };
-            if owner.mode != UseMode::Move
-                || owner.register == 0
-                || !moved.insert(owner.register)
-                || !state.get(owner.register as usize).copied().unwrap_or(false)
-            {
-                return false;
+            match statement.kind {
+                InstructionKind::Drop { owner } => {
+                    if owner.mode != UseMode::Move
+                        || owner.register == 0
+                        || !moved.insert(owner.register)
+                        || !state.get(owner.register as usize).copied().unwrap_or(false)
+                    {
+                        return false;
+                    }
+                    state[owner.register as usize] = false;
+                }
+                InstructionKind::LabelPop { .. } => {}
+                _ => return false,
             }
-            state[owner.register as usize] = false;
         }
         state
             .into_iter()
@@ -6107,8 +6231,18 @@ fn discover_tail_calls(
             } => {
                 let continuation =
                     exact_return_continuation(&normal, result, BlockParamRole::CallResult);
+                let exact = continuation.is_some();
+                let complete = continuation
+                    .as_ref()
+                    .is_some_and(|cleanup| consumes_complete_frame(state, &args, cleanup));
+                if trace {
+                    eprintln!(
+                        "g1-tail-call function={:?} block={} target={} exact_return={} complete_frame={}",
+                        function.name, block.id, target, exact, complete,
+                    );
+                }
                 continuation.and_then(|cleanup| {
-                    consumes_complete_frame(state, &args, &cleanup).then_some((
+                    complete.then_some((
                         Terminator::TailCall {
                             function: target,
                             args,
@@ -6832,6 +6966,7 @@ fn global_simplify_exact_callables(
             | InstructionKind::ProjectBorrow { .. }
             | InstructionKind::Reborrow { .. }
             | InstructionKind::DerefCopy { .. }
+            | InstructionKind::DerefReborrow { .. }
             | InstructionKind::DerefMove { .. }
             | InstructionKind::DerefStore { .. }
             | InstructionKind::EndBorrow { .. }
@@ -7218,6 +7353,7 @@ fn remap_instruction(kind: &mut InstructionKind, registers: &[Option<Register>])
         | InstructionKind::ProjectBorrow { src, .. }
         | InstructionKind::Reborrow { src, .. }
         | InstructionKind::DerefCopy { src, .. }
+        | InstructionKind::DerefReborrow { src, .. }
         | InstructionKind::DerefMove { src, .. }
         | InstructionKind::EndBorrow { reference: src }
         | InstructionKind::Deconstruct { src }
@@ -7823,11 +7959,11 @@ pub(crate) fn compact_live_registers_for_emission(
         scratch
             .flow
             .drop_flags
-            .sort_by_key(|fact| (fact.flag, fact.owner));
+            .sort_by_key(|fact| (fact.flag, fact.owner, fact.field));
         scratch
             .flow
             .drop_flags
-            .dedup_by_key(|fact| (fact.flag, fact.owner));
+            .dedup_by_key(|fact| (fact.flag, fact.owner, fact.field));
         rebuild_site_facts(&mut scratch);
         scratch.flow.move_paths = derive_move_paths(&scratch);
         scratch.invalid_analyses = 0;
@@ -11202,9 +11338,13 @@ fn rebuild_site_facts(function: &mut Function) {
     let mut handlers = Vec::new();
     let mut performs = Vec::new();
     let mut resumptions = Vec::new();
+    let mut incoming = BTreeMap::<u32, Vec<u32>>::new();
     let mut ordered = function.blocks.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|block| block.id);
-    for block in ordered {
+    for block in &ordered {
+        for target in successors(&block.terminator) {
+            incoming.entry(target).or_default().push(block.id);
+        }
         match &block.terminator {
             Terminator::Handle { .. } => handlers.push(HandlerSiteFact {
                 block: block.id,
@@ -11230,9 +11370,18 @@ fn rebuild_site_facts(function: &mut Function) {
             _ => {}
         }
     }
+    let joins = incoming
+        .into_iter()
+        .filter_map(|(block, mut incoming)| {
+            incoming.sort_unstable();
+            incoming.dedup();
+            (incoming.len() > 1).then_some(JoinSiteFact { block, incoming })
+        })
+        .collect();
     function.flow.handlers = handlers;
     function.flow.performs = performs;
     function.flow.resumptions = resumptions;
+    function.flow.joins = joins;
 }
 
 /// The elaborated cleanup plans of one body plus their site attachments.
@@ -11362,7 +11511,15 @@ fn derive_cleanup_elaboration_with_array_calls(
         strict: strict_flow(function),
         refine_enum_switches: true,
     };
-    let solution = regions::solve(&context).map_err(|error| flow_to_validation(function, error))?;
+    let solution = regions::solve(&context).map_err(|flow_error| {
+        if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
+            let program = Program {
+                functions: vec![function.clone()],
+            };
+            eprintln!("{}", program.canonical_text());
+        }
+        flow_to_validation(function, flow_error)
+    })?;
     let mut elaboration = CleanupElaboration {
         plans: Vec::new(),
         perform_plans: BTreeMap::new(),
@@ -11837,9 +11994,25 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     program: &mut Program,
     types: &[Type],
 ) -> Result<u64, ValidationError> {
+    let mir_snapshot_path = std::env::var_os("G1_PRE_EDGE_MIR");
+    if let Some(path) = &mir_snapshot_path {
+        std::fs::write(&path, program.canonical_text()).map_err(|write_error| ValidationError {
+            function: "<program>".into(),
+            block: None,
+            message: format!(
+                "could not write pre-edge MIR snapshot `{}`: {write_error}",
+                std::path::Path::new(&path).display()
+            ),
+        })?;
+    }
     let mut changed = 0_u64;
     for function in &mut program.functions {
         let changed_before = changed;
+        let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
+            .is_some_and(|filter| function.name.contains(&filter.to_string_lossy().as_ref()));
+        let trace_register = std::env::var("G1_EDGE_COPY_REGISTER")
+            .ok()
+            .and_then(|register| register.parse::<Register>().ok());
         // This is ordinary backwards liveness, independent of the current
         // edge transfer modes. In particular, a Copy argument cannot make its
         // own source appear live at the destination and thereby defeat
@@ -11880,6 +12053,20 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
                     }
                 }
                 for index in final_dead_copy.into_values() {
+                    let argument = edge.args[index];
+                    if trace_edge_copies
+                        && trace_register.is_none_or(|register| register == argument.register)
+                    {
+                        eprintln!(
+                            "edge-copy canonicalization (liveness): {} b{} -> b{} r{}: live={}, overwritten={}",
+                            function.name,
+                            block.id,
+                            edge.target,
+                            argument.register,
+                            independently_live.contains(&argument.register),
+                            overwritten.contains(&argument.register),
+                        );
+                    }
                     edge.args[index].mode = UseMode::Move;
                     changed += 1;
                 }
@@ -11899,6 +12086,20 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     let cleanup_lists = derive_program_serialization_cleanup_lists(program, types)?;
     for (function, lists) in program.functions.iter_mut().zip(cleanup_lists) {
         let function_name = function.name.clone();
+        let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
+            .is_some_and(|filter| function_name.contains(filter.to_string_lossy().as_ref()));
+        let trace_register = std::env::var("G1_EDGE_COPY_REGISTER")
+            .ok()
+            .and_then(|register| register.parse::<Register>().ok());
+        // Cleanup states are path-sensitive ownership facts, whereas emitted
+        // bytecode must remain valid along every structurally reachable
+        // successor. A conditionally present handle can therefore be absent
+        // from the merged cleanup state while still having a later use on
+        // the path which introduced it. Recompute structural liveness after
+        // the first transfer rewrite and never let cleanup reconciliation
+        // consume such a handle.
+        let liveness = EdgeLiveness::compute(function, u64::MAX)
+            .map_err(|analysis| error(function, None, analysis.to_string()))?;
         let mut next_block = function
             .blocks
             .iter()
@@ -11913,6 +12114,59 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
             .iter()
             .map(|fact| fact.ownership)
             .collect::<Vec<_>>();
+        let cfg = ControlFlowAnalysis::compute(function, u64::MAX)
+            .map_err(|analysis| error(function, None, analysis.to_string()))?;
+        let uses = register_uses(function);
+        let mut edge_uses = vec![0_u32; function.register_types.len()];
+        let mut end_blocks = vec![Vec::<super::BlockId>::new(); function.register_types.len()];
+        for block in &function.blocks {
+            for statement in &block.statements {
+                if let InstructionKind::EndBorrow { reference } = statement.kind {
+                    end_blocks[reference as usize].push(super::BlockId(block.id));
+                }
+            }
+            for_each_edge_with_implicit(&block.terminator, |edge, _| {
+                for argument in &edge.args {
+                    edge_uses[argument.register as usize] =
+                        edge_uses[argument.register as usize].saturating_add(1);
+                }
+            });
+        }
+        let cleanup_references = function
+            .flow
+            .cleanup_plans
+            .iter()
+            .flat_map(|plan| &plan.actions)
+            .filter_map(|action| match action {
+                CleanupAction::EndBorrow(loan) => function
+                    .flow
+                    .loans
+                    .get(loan.index())
+                    .map(|loan| loan.reference),
+                _ => None,
+            })
+            .chain(function.return_cleanup.iter().copied())
+            .collect::<BTreeSet<_>>();
+        // A predecessor-local shared handle whose sole dynamic transport is
+        // one edge and whose remaining uses are proof-only EndBorrow markers
+        // can be transferred into the join parameter. Keeping both aliases
+        // would make the old handle conditionally initialized after a merge;
+        // bytecode state is intentionally structural and does not retain the
+        // predecessor/tag correlation needed to validate that hole.
+        let transferable_proof_aliases = uses
+            .iter()
+            .enumerate()
+            .filter_map(|(register, &use_count)| {
+                let end_count = end_blocks[register].len() as u32;
+                (ownerships.get(register) == Some(&OwnershipCategory::SharedRef)
+                    && edge_uses[register] == 1
+                    && end_count != 0
+                    && use_count == edge_uses[register].saturating_add(end_count)
+                    && !cleanup_references.contains(&(register as Register)))
+                .then_some(register as Register)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut transferred_proof_aliases = BTreeSet::<Register>::new();
         let params_by_block = function
             .blocks
             .iter()
@@ -11929,16 +12183,69 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
                     return Ok(());
                 };
                 let destination = destination.iter().copied().collect::<BTreeSet<_>>();
+                let structurally_live = liveness
+                    .live_in(super::BlockId(edge.target))
+                    .cloned()
+                    .unwrap_or_default();
                 let overwritten = params_by_block
                     .get(&edge.target)
                     .into_iter()
                     .flatten()
                     .map(|parameter| parameter.register)
                     .collect::<BTreeSet<_>>();
-                let transferred = edge
+                let already_moved = edge
                     .args
                     .iter()
                     .filter(|argument| argument.mode == UseMode::Move)
+                    .map(|argument| argument.register)
+                    .collect::<BTreeSet<_>>();
+                let mut final_dead_copy = BTreeMap::<Register, usize>::new();
+                for (index, argument) in edge.args.iter().enumerate() {
+                    let transferable_proof_alias = transferable_proof_aliases
+                        .contains(&argument.register)
+                        && end_blocks[argument.register as usize]
+                            .iter()
+                            .all(|block| cfg.dominates(super::BlockId(edge.target), *block));
+                    if argument.mode == UseMode::Copy
+                        && !already_moved.contains(&argument.register)
+                        && (overwritten.contains(&argument.register)
+                            || (!destination.contains(&argument.register)
+                                && (!structurally_live.contains(&argument.register)
+                                    || transferable_proof_alias)))
+                    {
+                        final_dead_copy.insert(argument.register, index);
+                    }
+                }
+                for index in final_dead_copy.into_values() {
+                    let argument = edge.args[index];
+                    if trace_edge_copies
+                        && trace_register.is_none_or(|register| register == argument.register)
+                    {
+                        eprintln!(
+                            "edge-copy canonicalization (cleanup): {} b{} -> b{} r{}: live={}, destination={}, overwritten={}",
+                            function_name,
+                            block_id,
+                            edge.target,
+                            argument.register,
+                            structurally_live.contains(&argument.register),
+                            destination.contains(&argument.register),
+                            overwritten.contains(&argument.register),
+                        );
+                    }
+                    edge.args[index].mode = UseMode::Move;
+                    if transferable_proof_aliases.contains(&argument.register) {
+                        transferred_proof_aliases.insert(argument.register);
+                    }
+                    changed += 1;
+                }
+                // Cleanup executes before the forwarded edge. Every operand
+                // must remain initialized until the edge snapshots it. A
+                // dead copied source was converted to a final Move above;
+                // any remaining Copy is independently live at the target and
+                // therefore cannot be retired in this predecessor block.
+                let carried = edge
+                    .args
+                    .iter()
                     .map(|argument| argument.register)
                     .collect::<BTreeSet<_>>();
                 let retire = source
@@ -11946,7 +12253,7 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
                     .copied()
                     .filter(|register| {
                         (!destination.contains(register) || overwritten.contains(register))
-                            && !transferred.contains(register)
+                            && !carried.contains(register)
                     })
                     .filter(|register| {
                         ownerships.get(*register as usize).is_some_and(|ownership| {
@@ -12134,6 +12441,20 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
                 }
             }
         }
+        if !transferred_proof_aliases.is_empty() {
+            for block in &mut function.blocks {
+                let before = block.statements.len();
+                block.statements.retain(|statement| {
+                    !matches!(
+                        statement.kind,
+                        InstructionKind::EndBorrow { reference }
+                            if transferred_proof_aliases.contains(&reference)
+                    )
+                });
+                changed += (before - block.statements.len()) as u64;
+            }
+            function.invalid_analyses |= analysis::ALL;
+        }
         if !cleanup_blocks.is_empty() {
             function.blocks.extend(cleanup_blocks);
             function.invalid_analyses |= analysis::ALL;
@@ -12143,6 +12464,20 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     // No emission-only assumption bypasses the ordinary ownership, loan, or
     // physical-switch checks.
     derive_program_serialization_cleanup_lists(program, types)?;
+    if let Some(path) = mir_snapshot_path {
+        let mut post_path = path;
+        post_path.push(".post");
+        std::fs::write(&post_path, program.canonical_text()).map_err(|write_error| {
+            ValidationError {
+                function: "<program>".into(),
+                block: None,
+                message: format!(
+                    "could not write post-edge MIR snapshot `{}`: {write_error}",
+                    std::path::Path::new(&post_path).display()
+                ),
+            }
+        })?;
+    }
     Ok(changed)
 }
 
@@ -12248,6 +12583,7 @@ fn derive_leave_cleanup_boundaries(
         let protected_sources = target
             .args
             .iter()
+            .filter(|operand| operand.mode == UseMode::Move)
             .map(|operand| operand.register)
             .collect::<BTreeSet<_>>();
         let target_block = function
@@ -12255,10 +12591,13 @@ fn derive_leave_cleanup_boundaries(
             .iter()
             .find(|candidate| candidate.id == target.target)
             .ok_or_else(|| error(function, Some(block.id), "Leave target block is missing"))?;
+        // Every moved LEAVE argument is atomically transferred to the matching
+        // destination parameter before cleanup. A copied argument also
+        // initializes its parameter, but its source identity remains live
+        // and therefore still belongs to the cleanup suffix.
         let protected_targets = target_block
             .params
             .iter()
-            .filter(|parameter| parameter.role == BlockParamRole::ProtectedExitValue)
             .map(|parameter| parameter.register)
             .collect::<BTreeSet<_>>();
         let mut source = source_points
@@ -12277,6 +12616,32 @@ fn derive_leave_cleanup_boundaries(
             .collect::<Vec<_>>();
         if !source.ends_with(&target) {
             let target_set = target.iter().copied().collect::<BTreeSet<_>>();
+            let target_is_copy_only = target.iter().all(|register| {
+                function
+                    .flow
+                    .locals
+                    .get(*register as usize)
+                    .is_some_and(|fact| {
+                        matches!(
+                            fact.ownership,
+                            OwnershipCategory::CopyValue | OwnershipCategory::ZstErased
+                        ) && fact.drop_glue != DropGlueKind::Custom
+                    })
+            });
+            let target_is_commutable = target.iter().all(|register| {
+                function
+                    .flow
+                    .locals
+                    .get(*register as usize)
+                    .is_some_and(|fact| {
+                        matches!(
+                            fact.ownership,
+                            OwnershipCategory::CopyValue
+                                | OwnershipCategory::ZstErased
+                                | OwnershipCategory::SharedRef
+                        ) && fact.drop_glue != DropGlueKind::Custom
+                    })
+            });
             let reordered = source
                 .iter()
                 .enumerate()
@@ -12293,11 +12658,18 @@ fn derive_leave_cleanup_boundaries(
                             target_set.contains(register)
                                 || function.flow.locals.get(*register as usize).is_some_and(
                                     |fact| {
-                                        matches!(
+                                        (matches!(
                                             fact.ownership,
                                             OwnershipCategory::CopyValue
                                                 | OwnershipCategory::ZstErased
-                                        ) && fact.drop_glue != DropGlueKind::Custom
+                                        ) || (target_is_commutable
+                                            && fact.ownership == OwnershipCategory::SharedRef)
+                                            || (target_is_copy_only
+                                                && matches!(
+                                                    fact.ownership,
+                                                    OwnershipCategory::UniqueRef
+                                                )))
+                                            && fact.drop_glue != DropGlueKind::Custom
                                     },
                                 )
                         })
@@ -12316,6 +12688,12 @@ fn derive_leave_cleanup_boundaries(
                 })
                 .next();
             let Some(reordered) = reordered else {
+                if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
+                    let program = Program {
+                        functions: vec![function.clone()],
+                    };
+                    eprintln!("{}", program.canonical_text());
+                }
                 return Err(error(
                     function,
                     Some(block.id),
@@ -12333,9 +12711,10 @@ fn derive_leave_cleanup_boundaries(
 
 /// Produce the exact bytecode cleanup lists for each public `LEAVE` source and
 /// destination after proving the normalized MIR owner suffix relation. The
-/// source protected value remains present in the source anchor because the VM
-/// atomically takes it before running the cleanup prefix; the destination
-/// protected slot replaces it in the serialized suffix.
+/// VM atomically transfers the protected value before running the cleanup
+/// prefix, so the source anchor substitutes the destination protected slot for
+/// the moved source identity. This makes the serialized source and target
+/// suffixes describe the post-transfer frame exactly.
 pub(crate) fn derive_leave_cleanup_anchors(
     function: &Function,
     lists: &BTreeMap<u32, Vec<Vec<Register>>>,
@@ -12353,36 +12732,29 @@ pub(crate) fn derive_leave_cleanup_anchors(
         };
         let destination = target_points.first().cloned().unwrap_or_default();
         let boundary = &boundaries[&block.id];
-        let protected_targets = function
-            .blocks
-            .iter()
-            .find(|candidate| candidate.id == target.target)
-            .into_iter()
-            .flat_map(|target| &target.params)
-            .filter(|parameter| parameter.role == BlockParamRole::ProtectedExitValue)
-            .map(|parameter| parameter.register)
-            .collect::<BTreeSet<_>>();
-        let mut augmented_destination = Vec::new();
-        let mut inserted_boundary = false;
-        for register in &destination {
-            if protected_targets.contains(register) {
-                augmented_destination.push(*register);
-            } else if !inserted_boundary {
-                augmented_destination.extend(boundary.target.iter().copied());
-                inserted_boundary = true;
-            }
-        }
-        if !inserted_boundary {
-            augmented_destination.extend(boundary.target.iter().copied());
-        }
-        let destination = augmented_destination;
+        debug_assert_eq!(
+            destination
+                .iter()
+                .copied()
+                .filter(|register| boundary.target.contains(register))
+                .collect::<Vec<_>>(),
+            boundary.target,
+        );
         let destination_registers = destination.iter().copied().collect::<BTreeSet<_>>();
+        let transferred_sources = target
+            .args
+            .iter()
+            .filter(|argument| argument.mode == UseMode::Move)
+            .map(|argument| argument.register)
+            .collect::<BTreeSet<_>>();
         let mut source = source_points
             .last()
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter(|register| !destination_registers.contains(register))
+            .filter(|register| {
+                !destination_registers.contains(register) && !transferred_sources.contains(register)
+            })
             .collect::<Vec<_>>();
         source.extend(destination.iter().copied());
         result.insert(
@@ -12954,6 +13326,48 @@ mod tests {
             terminator_register_use_count(&body.blocks[0].terminator, 1),
             1
         );
+    }
+
+    #[test]
+    fn emission_keeps_a_copied_reference_handle_live_for_later_end_borrow() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+
+        let mut entry = block(
+            0,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![operand(2)],
+            }),
+        );
+        entry.statements.push(instruction(InstructionKind::Borrow {
+            dst: 2,
+            src: 1,
+            unique: false,
+        }));
+        let mut target = block(1, Terminator::Return { value: None });
+        target.params.push(BlockParam {
+            register: 3,
+            ty: shared,
+            role: BlockParamRole::Ordinary,
+        });
+        target.statements.extend([
+            instruction(InstructionKind::EndBorrow { reference: 2 }),
+            instruction(InstructionKind::EndBorrow { reference: 3 }),
+        ]);
+        let mut body = function(vec![entry, target], vec![UNIT, I64, shared, shared]);
+        body.params = vec![I64];
+        body.features = infer_feature_bits(&body);
+        let mut candidate = program(body);
+
+        optimize_program(&mut candidate, &types, OptimizationLevel::O0).unwrap();
+        canonicalize_dead_edge_copies_for_emission(&mut candidate, &types).unwrap();
+
+        let Terminator::Goto(edge) = &candidate.functions[0].blocks[0].terminator else {
+            panic!("reference transport must remain an ordinary edge");
+        };
+        assert_eq!(edge.args, vec![operand(2)]);
     }
 
     #[test]
@@ -15026,6 +15440,75 @@ mod tests {
     }
 
     #[test]
+    fn sparse_simplify_does_not_fold_across_a_retained_structural_predecessor() {
+        let mut types = Type::predefined();
+        let choice = types.len() as TypeId;
+        types.push(Type::Enum {
+            name: "Choice".into(),
+            variants: vec![
+                EnumVariant {
+                    name: "Left".into(),
+                    fields: vec![],
+                },
+                EnumVariant {
+                    name: "Right".into(),
+                    fields: vec![],
+                },
+            ],
+            copy: true,
+        });
+        let predecessor = |id, register, variant| {
+            let mut predecessor = block(
+                id,
+                Terminator::Goto(Edge {
+                    target: 2,
+                    args: vec![Operand {
+                        register,
+                        mode: UseMode::Move,
+                    }],
+                }),
+            );
+            predecessor
+                .statements
+                .push(instruction(InstructionKind::Construct {
+                    dst: register,
+                    ty: choice,
+                    variant: Some(variant),
+                    fields: vec![],
+                }));
+            predecessor
+        };
+        let join = BasicBlock {
+            id: 2,
+            params: vec![BlockParam {
+                register: 2,
+                ty: choice,
+                role: BlockParamRole::ProtectedExitValue,
+            }],
+            statements: vec![instruction(InstructionKind::EnumTag { dst: 3, src: 2 })],
+            terminator: Terminator::Return {
+                value: Some(Operand {
+                    register: 3,
+                    mode: UseMode::Move,
+                }),
+            },
+        };
+        let mut body = function(
+            vec![predecessor(0, 0, 0), predecessor(1, 1, 1), join],
+            vec![choice, choice, choice, U32],
+        );
+        body.result = U32;
+
+        let _ = sparse_simplify(&mut body, &types, u64::MAX);
+
+        assert!(body.blocks.iter().any(|block| {
+            block.statements.iter().any(|statement| {
+                matches!(statement.kind, InstructionKind::EnumTag { dst: 3, src: 2 })
+            })
+        }));
+    }
+
+    #[test]
     fn sparse_simplify_folds_narrow_wrapping_arithmetic() {
         let body = optimize_expression(
             vec![I8, I8, I8],
@@ -15887,7 +16370,8 @@ mod tests {
     fn tail_discovery_discards_cleanup_free_values_through_a_shared_return() {
         let types = Type::predefined();
         let mut body = direct_tail_discovery_fixture();
-        body.register_types.extend([I64, U32, I64, I64, U32]);
+        body.register_types
+            .extend([I64, U32, I64, I64, U32, I64, I64]);
         body.blocks[0]
             .statements
             .push(instruction(InstructionKind::Const {
@@ -15902,7 +16386,7 @@ mod tests {
             }));
         body.blocks[1].terminator = Terminator::Goto(Edge {
             target: 2,
-            args: vec![move_operand(2), move_operand(3), move_operand(4)],
+            args: vec![move_operand(2), operand(3), operand(4)],
         });
         body.blocks.push(BasicBlock {
             id: 2,
@@ -15923,17 +16407,11 @@ mod tests {
                     role: BlockParamRole::Ordinary,
                 },
             ],
-            statements: vec![
-                instruction(InstructionKind::Drop {
-                    owner: move_operand(7),
-                }),
-                instruction(InstructionKind::Drop {
-                    owner: move_operand(6),
-                }),
-            ],
-            terminator: Terminator::Return {
-                value: Some(move_operand(5)),
-            },
+            statements: vec![],
+            terminator: Terminator::Goto(Edge {
+                target: 5,
+                args: vec![move_operand(5)],
+            }),
         });
         body.blocks.push(block(
             3,
@@ -15942,6 +16420,39 @@ mod tests {
                 args: vec![move_operand(1), move_operand(3), move_operand(4)],
             }),
         ));
+        body.blocks.push(BasicBlock {
+            id: 4,
+            params: vec![BlockParam {
+                register: 8,
+                ty: I64,
+                role: BlockParamRole::ProtectedExitValue,
+            }],
+            statements: vec![],
+            terminator: Terminator::Return {
+                value: Some(move_operand(8)),
+            },
+        });
+        body.blocks.push(BasicBlock {
+            id: 5,
+            params: vec![BlockParam {
+                register: 9,
+                ty: I64,
+                role: BlockParamRole::ProtectedExitValue,
+            }],
+            statements: vec![
+                instruction(InstructionKind::Drop {
+                    owner: move_operand(7),
+                }),
+                instruction(InstructionKind::Drop {
+                    owner: move_operand(6),
+                }),
+                instruction(InstructionKind::LabelPop { label: LabelId(0) }),
+            ],
+            terminator: Terminator::Goto(Edge {
+                target: 4,
+                args: vec![move_operand(9)],
+            }),
+        });
         body.flow.locals = body
             .register_types
             .iter()
@@ -15971,6 +16482,10 @@ mod tests {
                     kind: InstructionKind::Drop {
                         owner: Operand { register: 3, .. },
                     },
+                    ..
+                },
+                Instruction {
+                    kind: InstructionKind::LabelPop { label: LabelId(0) },
                     ..
                 },
             ]
@@ -19469,6 +19984,18 @@ mod tests {
         candidate.functions[0].params = vec![I64];
         candidate.functions[0].result = I64;
         candidate.functions[0].return_cleanup = vec![9, 7];
+        candidate.functions[0].flow.drop_flags.extend([
+            crate::compiler_mir::DropFlagFact {
+                flag: 4,
+                owner: 7,
+                field: Some(0),
+            },
+            crate::compiler_mir::DropFlagFact {
+                flag: 4,
+                owner: 7,
+                field: Some(1),
+            },
+        ]);
         candidate.functions[0].phase = MirPhase::Optimized;
         candidate.functions[0].features = infer_feature_bits(&candidate.functions[0]);
 
@@ -19479,6 +20006,22 @@ mod tests {
             vec![UNIT, I64, I64, I64, I64, I64, I64]
         );
         assert_eq!(compact.return_cleanup, vec![4, 3]);
+        assert_eq!(
+            compact.flow.drop_flags,
+            vec![
+                crate::compiler_mir::DropFlagFact {
+                    flag: 2,
+                    owner: 3,
+                    field: Some(0),
+                },
+                crate::compiler_mir::DropFlagFact {
+                    flag: 2,
+                    owner: 3,
+                    field: Some(1),
+                },
+            ],
+            "register compaction must retain distinct per-field drop flags",
+        );
         assert_eq!(compact.blocks[1].params[0].register, 5);
         assert_eq!(compact.blocks[1].params[1].register, 6);
         assert!(matches!(
@@ -20230,7 +20773,7 @@ mod tests {
         assert_eq!(
             anchors.get(&0),
             Some(&LeaveCleanupAnchors {
-                source: vec![1, 2],
+                source: vec![2],
                 target: vec![2],
             })
         );
@@ -20305,8 +20848,8 @@ mod tests {
         assert_eq!(boundaries[&1].target, [1, 2]);
 
         let anchors = derive_leave_cleanup_anchors(&body, &lists).unwrap();
-        assert_eq!(anchors[&0].source, [5, 3, 7, 1, 2]);
-        assert_eq!(anchors[&1].source, [6, 4, 7, 1, 2]);
+        assert_eq!(anchors[&0].source, [3, 7, 1, 2]);
+        assert_eq!(anchors[&1].source, [4, 7, 1, 2]);
         assert_eq!(anchors[&0].target, [7, 1, 2]);
         assert_eq!(anchors[&1].target, [7, 1, 2]);
 
@@ -20315,6 +20858,55 @@ mod tests {
         assert!(error.message.contains("not a suffix"), "{error}");
         body.flow.locals[3].ownership = OwnershipCategory::CopyValue;
         body.flow.locals[3].drop_glue = DropGlueKind::Custom;
+        let error = derive_leave_cleanup_boundaries(&body, &lists).unwrap_err();
+        assert!(error.message.contains("not a suffix"), "{error}");
+    }
+
+    #[test]
+    fn leave_boundary_commutes_shared_proof_handles_but_not_unique_ones() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let unique = types.len() as TypeId;
+        types.push(Type::RefUnique { referent: I64 });
+        let label = LabelId(0);
+        let destination = BasicBlock {
+            id: 1,
+            params: vec![BlockParam {
+                register: 7,
+                ty: I64,
+                role: BlockParamRole::ProtectedExitValue,
+            }],
+            statements: vec![],
+            terminator: Terminator::Return {
+                value: Some(move_operand(7)),
+            },
+        };
+        let mut body = function(
+            vec![
+                block(
+                    0,
+                    Terminator::Leave {
+                        label,
+                        target: Edge {
+                            target: 1,
+                            args: vec![move_operand(5)],
+                        },
+                    },
+                ),
+                destination,
+            ],
+            vec![UNIT, shared, shared, shared, I64, I64, I64, I64],
+        );
+        body.flow.locals = bridged_locals(&body, &types);
+        let lists = BTreeMap::from([(0, vec![vec![5, 1, 3, 2]]), (1, vec![vec![7, 1, 2]])]);
+
+        let boundaries = derive_leave_cleanup_boundaries(&body, &lists).unwrap();
+        assert_eq!(boundaries[&0].source, [3, 1, 2]);
+        assert_eq!(boundaries[&0].target, [1, 2]);
+
+        body.register_types[3] = unique;
+        body.flow.locals = bridged_locals(&body, &types);
         let error = derive_leave_cleanup_boundaries(&body, &lists).unwrap_err();
         assert!(error.message.contains("not a suffix"), "{error}");
     }

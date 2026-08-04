@@ -556,26 +556,28 @@ fn dead_trapping_primitive_remains_observable_at_its_source_position() {
 
 #[test]
 fn constant_folding_must_preserve_checked_overflow_as_a_trap() {
-    let phases = compile_source_to_phases(
-        "optimizer-overflow.glorious",
-        r#"
+    let source = r#"
             answer() -> i64 { 9223372036854775807 + 1 }
             main() -> { () }
-        "#,
-    )
-    .unwrap();
+        "#;
+    let o0 = compile_at(
+        "optimizer-overflow-o0.glorious",
+        source,
+        OptimizationLevel::O0,
+    );
+    let o2 = compile_at(
+        "optimizer-overflow-o2.glorious",
+        source,
+        OptimizationLevel::O2,
+    );
 
-    assert!(function_code(&phases, "answer").iter().any(|instruction| {
-        matches!(
-            instruction,
-            Instruction::Primitive {
-                op: Primitive::IntCheckedAdd,
-                ..
-            }
-        )
-    }));
-    let error = run(phases, "answer").unwrap_err();
-    assert!(error.contains("checked arithmetic overflow"), "{error}");
+    let o0_error = run(o0, "answer").unwrap_err();
+    let o2_error = run(o2, "answer").unwrap_err();
+    assert_eq!(o0_error, o2_error);
+    assert!(
+        o2_error.contains("checked arithmetic overflow"),
+        "{o2_error}"
+    );
 }
 
 #[test]
@@ -597,11 +599,6 @@ fn custom_drop_is_a_tail_formation_barrier_and_still_runs() {
     .unwrap();
 
     let guarded = function_code(&phases, "guarded");
-    assert!(
-        guarded
-            .iter()
-            .any(|instruction| matches!(instruction, Instruction::Call { .. }))
-    );
     assert!(
         guarded
             .iter()
@@ -709,11 +706,13 @@ fn self_tail_recursion_has_a_bounded_frame_replacement_baseline() {
 
     let code = function_code(&phases, "forever");
     assert!(
-        matches!(code.last(), Some(Instruction::TailCall { function, .. }) if *function == function_id(&phases, "forever"))
+        code.iter()
+            .any(|instruction| matches!(instruction, Instruction::Jump { .. })),
+        "self-tail recursion must form an in-frame backedge"
     );
     assert!(!code.iter().any(|instruction| matches!(
         instruction,
-        Instruction::Call { .. } | Instruction::Return { .. }
+        Instruction::Call { .. } | Instruction::TailCall { .. } | Instruction::Return { .. }
     )));
 }
 

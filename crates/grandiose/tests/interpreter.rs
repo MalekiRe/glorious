@@ -1241,22 +1241,23 @@ fn cancellation_respects_the_resumption_lower_bound() {
 }
 
 #[test]
-fn validates_resumption_bindings_against_operation_terminality() {
-    let missing = r#"
+fn implicit_tail_resumption_and_terminal_binding_follow_operation_terminality() {
+    let implicit = r#"
         effect Ask { [1,1] ask() -> i64; }
         main() -> i64 {
             handle perform Ask::ask() { Ask::ask() => 42 }
         }
     "#;
-    let error = run_source(
-        "missing-resumption.glorious",
-        missing,
-        Vec::new(),
-        &mut TestHost::default(),
-    )
-    .unwrap_err()
-    .remove(0);
-    assert_eq!(error.code.as_deref(), Some("G0103"));
+    assert_eq!(
+        run_source(
+            "implicit-tail-resumption.glorious",
+            implicit,
+            Vec::new(),
+            &mut TestHost::default(),
+        )
+        .unwrap(),
+        Value::Int(42),
+    );
 
     let terminal = r#"
         effect Stop { stop() -> !; }

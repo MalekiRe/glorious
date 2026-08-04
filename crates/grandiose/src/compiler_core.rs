@@ -24,6 +24,25 @@ pub struct Program {
     /// Canonical interprocedural continuation-performance evidence used by
     /// ownership multiplication during Core lowering.
     pub performance_summaries: Vec<CallablePerformanceSummary>,
+    /// Structural control-fusion decisions, excluded from executable
+    /// fingerprints but available to diagnostics and `--emit control-plan`.
+    pub control_plans: Vec<ControlPlan>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlPlan {
+    pub helper: String,
+    pub call_span: Span,
+    pub static_labels: Vec<String>,
+    pub static_callbacks: Vec<String>,
+    pub forwarded_effects: Vec<String>,
+    pub callback_quantities: Vec<(usize, u32, Option<u32>)>,
+    pub direct_exit_sites: usize,
+    pub tail_recursive_cycle: bool,
+    pub formed_control_loop: Option<u32>,
+    pub residual_callable_allocation: bool,
+    pub residual_effect_handler: bool,
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -218,6 +237,11 @@ pub enum ExprKind {
         label: LabelId,
         has_leave: bool,
         function_boundary: bool,
+        /// Core locals proven live across this destination. Synthetic
+        /// control handlers can introduce one of these inside `body`, after
+        /// the MIR label is pushed, so entry-register snapshots alone are not
+        /// sufficient cleanup evidence.
+        preserved_locals: Vec<LocalId>,
         body: Box<Expr>,
     },
     /// Abandon the intervening lexical scopes and transfer `value` to the
@@ -477,6 +501,94 @@ pub struct AssignmentProjection {
 }
 
 impl Program {
+    pub fn control_plan_text(&self) -> String {
+        let mut output = String::new();
+        use std::fmt::Write as _;
+        for plan in &self.control_plans {
+            writeln!(output, "helper: {}", plan.helper).unwrap();
+            writeln!(
+                output,
+                "call span: {}..{}",
+                plan.call_span.start, plan.call_span.end
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "static labels: {}",
+                display_list(&plan.static_labels)
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "static callbacks: {}",
+                display_list(&plan.static_callbacks)
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "forwarded effects: {}",
+                display_list(&plan.forwarded_effects)
+            )
+            .unwrap();
+            let quantities = plan
+                .callback_quantities
+                .iter()
+                .map(|(index, lower, upper)| {
+                    format!(
+                        "#{index}=[{lower}, {}]",
+                        upper.map_or_else(|| "infinity".to_owned(), |value| value.to_string())
+                    )
+                })
+                .collect::<Vec<_>>();
+            writeln!(output, "callback quantity: {}", display_list(&quantities)).unwrap();
+            writeln!(output, "direct exit sites: {}", plan.direct_exit_sites).unwrap();
+            writeln!(
+                output,
+                "tail-recursive cycle: {}",
+                if plan.tail_recursive_cycle {
+                    "yes"
+                } else {
+                    "no"
+                }
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "formed control loop: {}",
+                plan.formed_control_loop
+                    .map_or_else(|| "no".to_owned(), |loop_id| format!("control#{loop_id}"))
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "residual callable allocation: {}",
+                if plan.residual_callable_allocation {
+                    "yes"
+                } else {
+                    "no"
+                }
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "residual effect handler: {}",
+                if plan.residual_effect_handler {
+                    "yes"
+                } else {
+                    "no"
+                }
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "failure reason: {}\n",
+                plan.failure_reason.as_deref().unwrap_or("—")
+            )
+            .unwrap();
+        }
+        output
+    }
+
     pub fn canonical_text(&self) -> String {
         let mut output = String::new();
         use std::fmt::Write as _;
@@ -496,6 +608,14 @@ impl Program {
 
     pub fn fingerprint(&self) -> u64 {
         stable_fingerprint(self.canonical_text().as_bytes())
+    }
+}
+
+fn display_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "—".to_owned()
+    } else {
+        values.join(", ")
     }
 }
 
@@ -696,11 +816,12 @@ impl Expr {
                 label,
                 has_leave,
                 function_boundary,
+                preserved_locals,
                 body,
             } => {
                 writeln!(
                     output,
-                    "label-destination label#{label} leaves={has_leave} function-boundary={function_boundary}"
+                    "label-destination label#{label} leaves={has_leave} function-boundary={function_boundary} preserved={preserved_locals:?}"
                 )
                 .unwrap();
                 body.write(output, depth + 1);

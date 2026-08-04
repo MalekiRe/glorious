@@ -25,10 +25,11 @@ use grandiose_vm::{
 
 use crate::{
     ast::{
-        AssignmentPlace, AssignmentPlaceKind, BinaryOp, EffectRowSyntax, EnumDecl, Expr, ExprKind,
-        ExprVisitor, FieldVisibility, Function, GenericParamKind, GlobalBinding, GoalArgument,
-        GoalPolarity, HandlerClause, Param, Pattern, PatternKind, Program, Stmt, StructDecl,
-        TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index, walk_expr,
+        AssignmentPlace, AssignmentPlaceKind, AssociatedBindingValue, BinaryOp, EffectRowSyntax,
+        EnumDecl, Expr, ExprKind, ExprVisitor, FieldVisibility, Function, GenericParamKind,
+        GlobalBinding, GoalArgument, GoalPolarity, HandlerClause, Param, Pattern, PatternKind,
+        Program, Stmt, StructDecl, TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index,
+        walk_expr,
     },
     ast_visit::{TypeSyntaxFolder, TypeSyntaxVisitor, type_syntax_any},
     compiler_core as core, compiler_mir as mir, compiler_regions,
@@ -56,6 +57,15 @@ const HANDLER_ENV_UNIQUE_CODE: &str = "G1HE002";
 const HANDLER_ENV_REPLAY_CODE: &str = "G1HE003";
 const PATTERN_WARNING_CODE: &str = "G1PW001";
 const REDUNDANT_MOVE_CODE: &str = "G1RM001";
+const CONTROL_HELPER_NOT_FUSED_CODE: &str = "control_helper_not_fused";
+const CONTROL_CALLBACK_EFFECT_WIDENED_CODE: &str = "control_callback_effect_widened";
+const MANUAL_RESULT_PROPAGATION_CODE: &str = "manual_result_propagation";
+const MANUAL_OPTION_MATCH_CODE: &str = "manual_option_match";
+const MANUAL_RANGE_WALK_CODE: &str = "manual_range_walk";
+const MANUAL_FOLD_CODE: &str = "manual_fold";
+const MANUAL_FIND_CODE: &str = "manual_find";
+const MANUAL_BUILDER_RANGE_CODE: &str = "manual_builder_range";
+const MANUAL_SCOPE_RESTORE_CODE: &str = "manual_scope_restore";
 const ENTRY_CODE: &str = "G1BC003";
 const PARSE_CODE: &str = "G1BC004";
 const REFERENCES_G1: u64 = 1 << 1;
@@ -579,6 +589,14 @@ struct SyntheticFunction {
     body_instance: Option<specialization::BodyInstanceKey>,
     expression_ordinals: BTreeMap<usize, u32>,
     recursive_receiver: Option<RecursiveReceiverContext>,
+    /// Proof-only environment for a handler computation or clause synthesized
+    /// while a generic control helper is being beta-reduced. These entries
+    /// guide lowering only and are never stored in the runtime environment.
+    static_labels: BTreeMap<String, crate::ast::LabelSyntax>,
+    static_closures: BTreeMap<String, StaticClosure>,
+    late_inline_type_substitutions: BTreeMap<String, TypeId>,
+    late_inline_functions: Vec<String>,
+    handled_terminal_performs: BTreeSet<(u32, u32)>,
 }
 
 #[derive(Clone)]
@@ -609,8 +627,11 @@ enum SyntheticBody {
 struct EffectLowering {
     operations: BTreeMap<(String, String), EffectOperationInfo>,
     operation_sites: BTreeMap<(usize, usize), EffectOperationInfo>,
+    instance_operations: BTreeMap<(EffectInstanceKey, String), EffectOperationInfo>,
+    site_operations: BTreeMap<(usize, usize), String>,
     specialized_operation_sites:
         BTreeMap<(specialization::SpecializationKey, usize, usize), EffectOperationInfo>,
+    label_branded_protocols: BTreeSet<u32>,
     protocols: Vec<Protocol>,
     handler_defs: Vec<HandlerDef>,
     extra_types: Vec<Type>,
@@ -623,6 +644,7 @@ struct EffectLowering {
     late_nominals: BTreeMap<TypeId, LateNominalInfo>,
     runtime_reference_plans: BTreeMap<TypeId, (u32, ReferenceReturnPlan)>,
     warnings: Vec<Diagnostic>,
+    control_plans: Vec<core::ControlPlan>,
 }
 
 impl EffectLowering {
@@ -960,6 +982,721 @@ struct ResolvedNominalInfo {
 struct UseInterval {
     lower: u32,
     upper: Option<u32>,
+}
+
+/// Structural, name-independent control facts derived from source templates.
+///
+/// These are template facts rather than optimization promises: a particular
+/// specialization still has to supply exact static labels/callbacks and pass
+/// Core/MIR validation before it may form a control loop.
+#[derive(Clone, Debug, Default)]
+struct ControlSummary {
+    static_label_parameters: BTreeSet<usize>,
+    static_callback_parameters: BTreeSet<usize>,
+    callback_call_quantities: BTreeMap<usize, UseInterval>,
+    callback_effect_rows: BTreeMap<usize, EffectRowSyntax>,
+    state_parameters: BTreeSet<usize>,
+    control_input_parameters: BTreeSet<usize>,
+    direct_exits: BTreeMap<usize, BTreeSet<(usize, usize)>>,
+    tail_recursive_edges: BTreeSet<(usize, usize)>,
+    recursive_edges_are_tail: bool,
+    callback_escapes: BTreeSet<usize>,
+    label_escapes: BTreeSet<usize>,
+    static_parameters_unchanged: bool,
+    captured_environment_access: bool,
+    can_form_control_loop: bool,
+    /// This template either forms a loop itself or structurally calls another
+    /// template which does. Generic wrappers carrying static callbacks must be
+    /// control-inlined so the recursive kernel remains visible to Core.
+    reaches_control_loop: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ControlSummaries {
+    templates: BTreeMap<String, ControlSummary>,
+}
+
+impl ControlSummaries {
+    fn analyze(program: &Program) -> Self {
+        fn relation_parameter(function: &Function, relation: &str) -> BTreeMap<String, usize> {
+            function
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(index, parameter)| {
+                    let binder = parameter.ty.simple_name()?;
+                    function
+                        .where_clause
+                        .iter()
+                        .flat_map(|clause| &clause.goals)
+                        .any(|goal| {
+                            goal.subject.simple_name() == Some(binder)
+                                && goal.relation.path.len() == 1
+                                && goal.relation.path[0].name == relation
+                        })
+                        .then(|| (parameter.name.clone(), index))
+                })
+                .collect()
+        }
+
+        struct Uses<'a> {
+            function: &'a str,
+            callbacks: &'a BTreeMap<String, usize>,
+            labels: &'a BTreeMap<String, usize>,
+            calls: BTreeMap<usize, u32>,
+            exits: BTreeMap<usize, BTreeSet<(usize, usize)>>,
+            escapes: BTreeSet<usize>,
+            label_escapes: BTreeSet<usize>,
+        }
+
+        impl<'ast> ExprVisitor<'ast> for Uses<'_> {
+            type Break = ();
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                if let ExprKind::Call(callee, arguments) = &expression.kind
+                    && let ExprKind::Variable(path) = &callee.kind
+                    && let [name] = path.as_ref()
+                {
+                    if let Some(index) = self.callbacks.get(name.as_ref()) {
+                        *self.calls.entry(*index).or_default() += 1;
+                        for argument in arguments.iter() {
+                            let forwards_static_label = matches!(&argument.kind,
+                                ExprKind::Variable(path) if path.len() == 1
+                                    && self.labels.contains_key(path[0].as_ref()));
+                            if !forwards_static_label {
+                                let _ = self.visit_expr(argument);
+                            }
+                        }
+                        return ControlFlow::Continue(());
+                    }
+                    if let Some(index) = self.labels.get(name.as_ref()) {
+                        self.exits
+                            .entry(*index)
+                            .or_default()
+                            .insert((expression.span.start, expression.span.end));
+                        for argument in arguments.iter() {
+                            let _ = self.visit_expr(argument);
+                        }
+                        return ControlFlow::Continue(());
+                    }
+                    if name.as_ref() == self.function {
+                        for (argument_index, argument) in arguments.iter().enumerate() {
+                            let forwarded_static = match &argument.kind {
+                                ExprKind::Variable(path) if path.len() == 1 => self
+                                    .callbacks
+                                    .get(path[0].as_ref())
+                                    .or_else(|| self.labels.get(path[0].as_ref()))
+                                    .is_some_and(|index| *index == argument_index),
+                                _ => false,
+                            };
+                            if !forwarded_static {
+                                let _ = self.visit_expr(argument);
+                            }
+                        }
+                        return ControlFlow::Continue(());
+                    }
+                }
+                if let ExprKind::Variable(path) = &expression.kind
+                    && let [name] = path.as_ref()
+                    && let Some(index) = self.callbacks.get(name.as_ref())
+                {
+                    self.escapes.insert(*index);
+                }
+                if let ExprKind::Variable(path) = &expression.kind
+                    && let [name] = path.as_ref()
+                    && let Some(index) = self.labels.get(name.as_ref())
+                {
+                    self.label_escapes.insert(*index);
+                }
+                walk_expr(self, expression)
+            }
+        }
+
+        let mut templates = BTreeMap::new();
+        for function in &program.functions {
+            let callbacks = relation_parameter(function, "Fn");
+            let labels = relation_parameter(function, "Label");
+            let mut uses = Uses {
+                function: &function.name,
+                callbacks: &callbacks,
+                labels: &labels,
+                calls: BTreeMap::new(),
+                exits: BTreeMap::new(),
+                escapes: BTreeSet::new(),
+                label_escapes: BTreeSet::new(),
+            };
+            let _ = uses.visit_expr(&function.body);
+            let callback_effect_rows = callbacks
+                .values()
+                .filter_map(|index| {
+                    let binder = function.params[*index].ty.simple_name()?;
+                    let effects = function
+                        .where_clause
+                        .iter()
+                        .flat_map(|clause| &clause.goals)
+                        .find(|goal| {
+                            goal.subject.simple_name() == Some(binder)
+                                && goal.relation.path.len() == 1
+                                && goal.relation.path[0].name == "Fn"
+                        })?
+                        .relation
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.name == "Effects")?;
+                    let AssociatedBindingValue::EffectRow(row) = &effects.value else {
+                        return None;
+                    };
+                    Some((*index, row.clone()))
+                })
+                .collect();
+            let static_callback_parameters = callbacks.values().copied().collect::<BTreeSet<_>>();
+            let static_label_parameters = labels.values().copied().collect::<BTreeSet<_>>();
+            let state_parameters = (0..function.params.len())
+                .filter(|index| {
+                    !static_callback_parameters.contains(index)
+                        && !static_label_parameters.contains(index)
+                })
+                .collect();
+            let callback_call_quantities = callbacks
+                .values()
+                .map(|index| {
+                    let upper = uses.calls.get(index).copied().unwrap_or(0);
+                    (
+                        *index,
+                        UseInterval {
+                            lower: 0,
+                            upper: Some(upper),
+                        },
+                    )
+                })
+                .collect();
+            let control_input_parameters = {
+                fn sole_expression(expression: &Expr) -> &Expr {
+                    match &expression.kind {
+                        ExprKind::Block(statements) | ExprKind::ContextBlock(statements)
+                            if matches!(statements.as_slice(), [Stmt::Expr(_)]) =>
+                        {
+                            let [Stmt::Expr(expression)] = statements.as_slice() else {
+                                unreachable!()
+                            };
+                            sole_expression(expression)
+                        }
+                        _ => expression,
+                    }
+                }
+                let mut inputs = match &sole_expression(&function.body).kind {
+                    ExprKind::Handle { computation, .. } => match &computation.kind {
+                        ExprKind::Variable(path) if path.len() == 1 => function
+                            .params
+                            .iter()
+                            .position(|parameter| parameter.name == path[0].as_ref())
+                            .into_iter()
+                            .collect(),
+                        ExprKind::Move(value) => match &value.kind {
+                            ExprKind::Variable(path) if path.len() == 1 => function
+                                .params
+                                .iter()
+                                .position(|parameter| parameter.name == path[0].as_ref())
+                                .into_iter()
+                                .collect(),
+                            _ => BTreeSet::new(),
+                        },
+                        _ => BTreeSet::new(),
+                    },
+                    _ => BTreeSet::new(),
+                };
+
+                // `handle value { ... }` is parser-lowered into a lexical
+                // snapshot followed by `is` refinements. Recover that same
+                // structural fact without depending on the generated local's
+                // spelling or on the source-level control functions used to
+                // express the decision tree.
+                struct RefinementUses<'a> {
+                    binding: &'a str,
+                    seen: bool,
+                    valid: bool,
+                }
+                impl<'ast> ExprVisitor<'ast> for RefinementUses<'_> {
+                    type Break = ();
+
+                    fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                        if let ExprKind::Is { subject, .. } = &expression.kind
+                            && matches!(&subject.kind, ExprKind::Variable(path)
+                                if path.len() == 1 && path[0].as_ref() == self.binding)
+                        {
+                            self.seen = true;
+                            return ControlFlow::Continue(());
+                        }
+                        if matches!(&expression.kind, ExprKind::Variable(path)
+                            if path.len() == 1 && path[0].as_ref() == self.binding)
+                        {
+                            self.valid = false;
+                            return ControlFlow::Break(());
+                        }
+                        walk_expr(self, expression)
+                    }
+                }
+                fn refinement_snapshots<'a>(
+                    expression: &'a Expr,
+                    output: &mut Vec<(&'a str, &'a str)>,
+                ) {
+                    let (ExprKind::Block(statements) | ExprKind::ContextBlock(statements)) =
+                        &expression.kind
+                    else {
+                        return;
+                    };
+                    for statement in statements.iter() {
+                        match statement {
+                            Stmt::Let { name, value, .. } => {
+                                let source = match &value.kind {
+                                    ExprKind::Variable(path) if path.len() == 1 => {
+                                        Some(path[0].as_ref())
+                                    }
+                                    ExprKind::Move(value) => match &value.kind {
+                                        ExprKind::Variable(path) if path.len() == 1 => {
+                                            Some(path[0].as_ref())
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                if let Some(source) = source {
+                                    output.push((name, source));
+                                }
+                            }
+                            Stmt::Expr(value) => refinement_snapshots(value, output),
+                            Stmt::Deconstruct { .. } | Stmt::Assign { .. } => {}
+                        }
+                    }
+                }
+                let mut snapshots = Vec::new();
+                refinement_snapshots(&function.body, &mut snapshots);
+                for (binding, source) in snapshots {
+                    let Some(index) = function
+                        .params
+                        .iter()
+                        .position(|parameter| parameter.name == source)
+                    else {
+                        continue;
+                    };
+                    let mut uses = RefinementUses {
+                        binding,
+                        seen: false,
+                        valid: true,
+                    };
+                    let _ = uses.visit_expr(&function.body);
+                    if uses.seen && uses.valid {
+                        inputs.insert(index);
+                    }
+                }
+                inputs
+            };
+            templates.insert(
+                function.name.clone(),
+                ControlSummary {
+                    static_label_parameters,
+                    static_callback_parameters,
+                    callback_call_quantities,
+                    callback_effect_rows,
+                    state_parameters,
+                    control_input_parameters,
+                    direct_exits: uses.exits,
+                    tail_recursive_edges: BTreeSet::new(),
+                    recursive_edges_are_tail: false,
+                    callback_escapes: uses.escapes,
+                    label_escapes: uses.label_escapes,
+                    static_parameters_unchanged: false,
+                    captured_environment_access: false,
+                    can_form_control_loop: false,
+                    reaches_control_loop: false,
+                },
+            );
+        }
+        let mut summaries = Self { templates };
+        for function in &program.functions {
+            let (tail_recursive_edges, tail_recursive) =
+                control_recursion_shape(&summaries, &function.body, &function.name);
+            let Some(existing) = summaries.templates.get(&function.name) else {
+                continue;
+            };
+            let callback_names = existing
+                .static_callback_parameters
+                .iter()
+                .map(|index| (function.params[*index].name.clone(), *index))
+                .collect::<BTreeMap<_, _>>();
+            let label_names = existing
+                .static_label_parameters
+                .iter()
+                .map(|index| (function.params[*index].name.clone(), *index))
+                .collect::<BTreeMap<_, _>>();
+            let (callback_escapes, label_escapes) =
+                static_parameter_escapes(&function.body, &callback_names, &label_names, &summaries);
+            let static_parameters = existing
+                .static_label_parameters
+                .union(&existing.static_callback_parameters)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let static_parameters_unchanged = recursive_static_parameters_unchanged(
+                function,
+                &tail_recursive_edges,
+                &static_parameters,
+            );
+            let Some(summary) = summaries.templates.get_mut(&function.name) else {
+                continue;
+            };
+            if !tail_recursive_edges.is_empty() {
+                for quantity in summary.callback_call_quantities.values_mut() {
+                    if quantity.upper != Some(0) {
+                        quantity.upper = None;
+                    }
+                }
+            }
+            summary.tail_recursive_edges = tail_recursive_edges;
+            summary.recursive_edges_are_tail = tail_recursive;
+            summary.callback_escapes = callback_escapes;
+            summary.label_escapes = label_escapes;
+            summary.static_parameters_unchanged = static_parameters_unchanged;
+            summary.can_form_control_loop = !summary.tail_recursive_edges.is_empty()
+                && tail_recursive
+                && static_parameters_unchanged
+                && summary.callback_escapes.is_empty()
+                && summary.label_escapes.is_empty()
+                && !summary.captured_environment_access;
+            summary.reaches_control_loop = summary.can_form_control_loop;
+        }
+        // Propagate control reachability through ordinary source calls. This
+        // makes thin generic wrappers such as `for_range -> fold_until ->
+        // fold_until_step` inline structurally, without recognizing any helper
+        // name. The fixed point also handles arbitrarily many wrapper layers.
+        loop {
+            let control_templates = summaries
+                .templates
+                .iter()
+                .filter_map(|(name, summary)| summary.reaches_control_loop.then_some(name.clone()))
+                .collect::<BTreeSet<_>>();
+            struct Reaches<'a> {
+                targets: &'a BTreeSet<String>,
+                found: bool,
+            }
+            impl<'ast> ExprVisitor<'ast> for Reaches<'_> {
+                type Break = ();
+
+                fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                    if let ExprKind::Call(callee, _) = &expression.kind
+                        && matches!(&callee.kind, ExprKind::Variable(path)
+                            if path.len() == 1 && self.targets.contains(path[0].as_ref()))
+                    {
+                        self.found = true;
+                        return ControlFlow::Break(());
+                    }
+                    walk_expr(self, expression)
+                }
+            }
+            let newly_reaching = program
+                .functions
+                .iter()
+                .filter(|function| {
+                    !summaries
+                        .templates
+                        .get(&function.name)
+                        .is_some_and(|summary| summary.reaches_control_loop)
+                })
+                .filter_map(|function| {
+                    let mut reaches = Reaches {
+                        targets: &control_templates,
+                        found: false,
+                    };
+                    let _ = reaches.visit_expr(&function.body);
+                    reaches.found.then_some(function.name.clone())
+                })
+                .collect::<Vec<_>>();
+            if newly_reaching.is_empty() {
+                break;
+            }
+            for name in newly_reaching {
+                if let Some(summary) = summaries.templates.get_mut(&name) {
+                    summary.reaches_control_loop = true;
+                }
+            }
+        }
+        summaries
+    }
+
+    fn get(&self, name: &str) -> Option<&ControlSummary> {
+        self.templates.get(name)
+    }
+}
+
+fn recursive_static_parameters_unchanged(
+    function: &Function,
+    recursive_edges: &BTreeSet<(usize, usize)>,
+    static_parameters: &BTreeSet<usize>,
+) -> bool {
+    struct Forwarding<'a> {
+        function: &'a Function,
+        recursive_edges: &'a BTreeSet<(usize, usize)>,
+        static_parameters: &'a BTreeSet<usize>,
+        valid: bool,
+    }
+
+    impl<'ast> ExprVisitor<'ast> for Forwarding<'_> {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            if self
+                .recursive_edges
+                .contains(&(expression.span.start, expression.span.end))
+            {
+                let ExprKind::Call(_, arguments) = &expression.kind else {
+                    self.valid = false;
+                    return ControlFlow::Break(());
+                };
+                for index in self.static_parameters {
+                    let expected = &self.function.params[*index].name;
+                    let unchanged = arguments.get(*index).is_some_and(|argument| {
+                        matches!(&argument.kind, ExprKind::Variable(path)
+                            if path.len() == 1 && path[0].as_ref() == expected)
+                    });
+                    if !unchanged {
+                        self.valid = false;
+                        return ControlFlow::Break(());
+                    }
+                }
+            }
+            walk_expr(self, expression)
+        }
+    }
+
+    let mut forwarding = Forwarding {
+        function,
+        recursive_edges,
+        static_parameters,
+        valid: true,
+    };
+    let _ = forwarding.visit_expr(&function.body);
+    forwarding.valid
+}
+
+fn static_parameter_escapes(
+    expression: &Expr,
+    callbacks: &BTreeMap<String, usize>,
+    labels: &BTreeMap<String, usize>,
+    summaries: &ControlSummaries,
+) -> (BTreeSet<usize>, BTreeSet<usize>) {
+    struct Escapes<'a> {
+        callbacks: &'a BTreeMap<String, usize>,
+        labels: &'a BTreeMap<String, usize>,
+        summaries: &'a ControlSummaries,
+        callback_escapes: BTreeSet<usize>,
+        label_escapes: BTreeSet<usize>,
+    }
+
+    impl<'ast> ExprVisitor<'ast> for Escapes<'_> {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            if let ExprKind::Call(callee, arguments) = &expression.kind {
+                let direct_name = match &callee.kind {
+                    ExprKind::Variable(path) if path.len() == 1 => Some(path[0].as_ref()),
+                    _ => None,
+                };
+                if direct_name.is_some_and(|name| self.callbacks.contains_key(name)) {
+                    for argument in arguments.iter() {
+                        let static_label = matches!(&argument.kind, ExprKind::Variable(path)
+                            if path.len() == 1 && self.labels.contains_key(path[0].as_ref()));
+                        if !static_label {
+                            let _ = self.visit_expr(argument);
+                        }
+                    }
+                    return ControlFlow::Continue(());
+                }
+                if direct_name.is_some_and(|name| self.labels.contains_key(name)) {
+                    for argument in arguments.iter() {
+                        let _ = self.visit_expr(argument);
+                    }
+                    return ControlFlow::Continue(());
+                }
+                if direct_name.is_none() {
+                    let _ = self.visit_expr(callee);
+                }
+                let target = direct_name.and_then(|name| self.summaries.get(name));
+                for (index, argument) in arguments.iter().enumerate() {
+                    let forwarded_callback = matches!(&argument.kind,
+                        ExprKind::Variable(path) if path.len() == 1
+                            && self.callbacks.contains_key(path[0].as_ref()))
+                        && target.is_some_and(|summary| {
+                            summary.static_callback_parameters.contains(&index)
+                        });
+                    let forwarded_label = matches!(&argument.kind,
+                        ExprKind::Variable(path) if path.len() == 1
+                            && self.labels.contains_key(path[0].as_ref()))
+                        && target.is_some_and(|summary| {
+                            summary.static_label_parameters.contains(&index)
+                        });
+                    if !forwarded_callback && !forwarded_label {
+                        let _ = self.visit_expr(argument);
+                    }
+                }
+                return ControlFlow::Continue(());
+            }
+            if let ExprKind::Variable(path) = &expression.kind
+                && let [name] = path.as_ref()
+            {
+                if let Some(index) = self.callbacks.get(name.as_ref()) {
+                    self.callback_escapes.insert(*index);
+                }
+                if let Some(index) = self.labels.get(name.as_ref()) {
+                    self.label_escapes.insert(*index);
+                }
+            }
+            walk_expr(self, expression)
+        }
+    }
+
+    let mut escapes = Escapes {
+        callbacks,
+        labels,
+        summaries,
+        callback_escapes: BTreeSet::new(),
+        label_escapes: BTreeSet::new(),
+    };
+    let _ = escapes.visit_expr(expression);
+    (escapes.callback_escapes, escapes.label_escapes)
+}
+
+fn control_recursion_shape(
+    summaries: &ControlSummaries,
+    expression: &Expr,
+    name: &str,
+) -> (BTreeSet<(usize, usize)>, bool) {
+    fn visit(
+        summaries: &ControlSummaries,
+        expression: &Expr,
+        name: &str,
+        tail: bool,
+        found: &mut BTreeSet<(usize, usize)>,
+        valid: &mut bool,
+    ) {
+        match &expression.kind {
+            ExprKind::Call(callee, arguments) => {
+                let direct = matches!(&callee.kind, ExprKind::Variable(path)
+                    if path.len() == 1 && path[0].as_ref() == name);
+                if direct {
+                    found.insert((expression.span.start, expression.span.end));
+                    *valid &= tail;
+                    for argument in arguments.iter() {
+                        visit(summaries, argument, name, false, found, valid);
+                    }
+                    return;
+                }
+                visit(summaries, callee, name, false, found, valid);
+                let static_control = match &callee.kind {
+                    ExprKind::Variable(path) if path.len() == 1 => summaries.get(path[0].as_ref()),
+                    _ => None,
+                };
+                for (index, argument) in arguments.iter().enumerate() {
+                    let static_tail =
+                        tail && static_control.is_some_and(|summary| {
+                            summary.static_callback_parameters.contains(&index)
+                                || summary.control_input_parameters.contains(&index)
+                        }) && static_control.is_some_and(|summary| {
+                            (!summary.static_callback_parameters.contains(&index)
+                                || !summary.callback_escapes.contains(&index))
+                                && (!summary.static_callback_parameters.contains(&index)
+                                    || summary
+                                        .callback_call_quantities
+                                        .get(&index)
+                                        .is_some_and(|quantity| quantity.upper != Some(0)))
+                        });
+                    visit(summaries, argument, name, static_tail, found, valid);
+                }
+            }
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                for (index, statement) in statements.iter().enumerate() {
+                    let last = index + 1 == statements.len();
+                    match statement {
+                        Stmt::Expr(value) => {
+                            visit(summaries, value, name, tail && last, found, valid)
+                        }
+                        Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } => {
+                            visit(summaries, value, name, false, found, valid)
+                        }
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => {
+                            visit(summaries, value, name, false, found, valid);
+                            if let Some(reference) = assignment_place_reference(destination) {
+                                visit(summaries, reference, name, false, found, valid);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                visit(summaries, computation, name, false, found, valid);
+                for clause in clauses.iter() {
+                    visit(summaries, &clause.body, name, tail, found, valid);
+                }
+            }
+            ExprKind::LabelDestination { body, .. } => {
+                visit(summaries, body, name, tail, found, valid)
+            }
+            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                visit(summaries, body, name, false, found, valid)
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => {
+                for value in values.iter() {
+                    visit(summaries, value, name, false, found, valid);
+                }
+            }
+            ExprKind::Struct { fields, .. } => {
+                for (_, value) in fields.iter() {
+                    visit(summaries, value, name, false, found, valid);
+                }
+            }
+            ExprKind::Field(subject, _)
+            | ExprKind::Move(subject)
+            | ExprKind::Is { subject, .. }
+            | ExprKind::Unary {
+                operand: subject, ..
+            } => visit(summaries, subject, name, false, found, valid),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                visit(summaries, lhs, name, false, found, valid);
+                visit(summaries, rhs, name, false, found, valid);
+            }
+            ExprKind::Perform { args, .. } => {
+                for argument in args.iter() {
+                    visit(summaries, argument, name, false, found, valid);
+                }
+            }
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                visit(summaries, resumption, name, false, found, valid);
+                if let Some(value) = value {
+                    visit(summaries, value, name, false, found, valid);
+                }
+            }
+            ExprKind::Cancel { resumption } => {
+                visit(summaries, resumption, name, false, found, valid)
+            }
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::String(_)
+            | ExprKind::Variable(_)
+            | ExprKind::LabelReference(_) => {}
+        }
+    }
+
+    let mut found = BTreeSet::new();
+    let mut valid = true;
+    visit(summaries, expression, name, true, &mut found, &mut valid);
+    (found, valid)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1415,6 +2152,9 @@ struct ActiveCoreLabel {
     result: TypeId,
     /// Locals that outlive the destination and must not be cleaned by a leave.
     outer_locals: BTreeSet<core::LocalId>,
+    /// Intersection of outer locals still live on every lowered LEAVE edge.
+    /// `None` means no leave has been observed yet.
+    live_outer_on_leaves: Option<BTreeSet<core::LocalId>>,
     /// Reference provenance transferred by leave edges. All live edges must
     /// agree because the compact Core expression exposes one result contract.
     transferred_references: Option<BTreeMap<Vec<u32>, core::ReferenceOrigin>>,
@@ -1431,7 +2171,7 @@ struct TransparentFinalUseLimit {
     allowed: BTreeSet<(String, usize, usize)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum LateInlineLetExpectation {
     Fixed(TypeId),
     Binder(String),
@@ -1441,7 +2181,7 @@ enum LateInlineLetExpectation {
 struct LateInlineKey {
     name: String,
     span: (usize, usize),
-    static_labels: Vec<Option<String>>,
+    static_labels: Vec<Option<core::LabelId>>,
     static_closures: Vec<Option<(usize, usize)>>,
 }
 
@@ -1450,13 +2190,32 @@ struct ActiveLateControlLoop {
     control: core::ControlLoopId,
     inline_depth: usize,
     runtime_parameters: Vec<(usize, TypeId)>,
-    static_labels: Vec<Option<String>>,
+    static_labels: Vec<Option<core::LabelId>>,
     static_closures: Vec<Option<(usize, usize)>>,
+    /// Runtime parameters and overlap-staging temporaries belong to the
+    /// current iteration rather than the caller frame.
     /// Candidate caller locals and their use counts before the helper body.
     /// Final loop capture retains candidates referenced by the generated body
     /// plus the caller continuation's independently live locals.
     outer_locals: Vec<(core::LocalId, u64, bool)>,
     continuation_locals: BTreeSet<core::LocalId>,
+}
+
+#[derive(Clone)]
+struct InlineTerminalClause {
+    patterns: Vec<crate::ast::Pattern>,
+    payload_types: Vec<TypeId>,
+    body: Expr,
+}
+
+#[derive(Clone)]
+struct ActiveInlineTerminalHandler {
+    label: core::LabelId,
+    result: TypeId,
+    outer_locals: BTreeSet<core::LocalId>,
+    transferred_references: Option<BTreeMap<Vec<u32>, core::ReferenceOrigin>>,
+    clauses: BTreeMap<(u32, u32), InlineTerminalClause>,
+    has_leave: bool,
 }
 
 #[derive(Clone)]
@@ -1466,6 +2225,16 @@ struct StaticClosure {
     /// Lexical free-name bindings captured before generic helper parameters
     /// can shadow them during static beta reduction.
     captures: BTreeMap<String, CoreLocal>,
+    /// Proof-only lexical bindings need the same shadowing discipline as
+    /// runtime locals. Retain exact callback and label identities so a nested
+    /// control wrapper cannot accidentally resolve a free name to one of its
+    /// own parameters.
+    static_closure_captures: BTreeMap<String, Box<StaticClosure>>,
+    static_label_captures: BTreeMap<String, crate::ast::LabelSyntax>,
+    /// Direct `@label` references retain the destination itself. They must not
+    /// be represented as name-based static label parameters because an
+    /// ordinary function may legally have the same source name.
+    active_label_captures: BTreeMap<String, ActiveCoreLabel>,
     /// Original call-site identities for expressions cloned into the static
     /// callback body. Span fallback alone is intentionally ambiguous when a
     /// helper expansion repeats source syntax.
@@ -1474,6 +2243,26 @@ struct StaticClosure {
     /// instance even when the closure is later proven static and beta-reduced
     /// into its caller.
     body_instance: Option<specialization::BodyInstanceKey>,
+}
+
+impl StaticClosure {
+    fn collect_runtime_capture_names(&self, names: &mut BTreeSet<String>) {
+        names.extend(self.captures.keys().cloned());
+        for closure in self.static_closure_captures.values() {
+            closure.collect_runtime_capture_names(names);
+        }
+    }
+
+    fn remap_runtime_captures(&mut self, locals: &BTreeMap<String, CoreLocal>) {
+        for (name, capture) in &mut self.captures {
+            if let Some(local) = locals.get(name) {
+                *capture = local.clone();
+            }
+        }
+        for closure in self.static_closure_captures.values_mut() {
+            closure.remap_runtime_captures(locals);
+        }
+    }
 }
 
 struct CoreLowerer<'a> {
@@ -1498,6 +2287,7 @@ struct CoreLowerer<'a> {
     privacy_domains: &'a PrivacyDomains,
     runtime_bindings: &'a RuntimeBindings,
     performance_summaries: &'a PerformanceSummaries,
+    control_summaries: &'a ControlSummaries,
     closure_runtimes: &'a BTreeMap<specialization::ClosureRequest, ClosureRuntime>,
     closure_nominal_types: &'a BTreeMap<specialization::ClosureNominalInstance, TypeId>,
     reference_return_summaries: &'a BTreeMap<u32, ReferenceReturnSummary>,
@@ -1580,6 +2370,17 @@ struct CoreLowerer<'a> {
     late_inline_stack: BTreeSet<LateInlineKey>,
     next_control_loop: u32,
     active_late_control_loops: BTreeMap<String, ActiveLateControlLoop>,
+    /// Function-local hygienic identities for source label destinations. Type
+    /// checking brands are only unique within their original lexical body;
+    /// late static inlining can place several ordinal-zero destinations in one
+    /// Core function, so Core must allocate a fresh identity at the point each
+    /// destination is materialized.
+    next_source_label: core::LabelId,
+    /// Lexical terminal handlers whose operation set and binding patterns are
+    /// statically known. A matching perform is lowered in this frame as the
+    /// clause result followed by a direct leave, avoiding a runtime handler.
+    inline_terminal_handlers: Vec<ActiveInlineTerminalHandler>,
+    next_inline_terminal_label: core::LabelId,
     /// Source names live after the statement currently being lowered.
     current_live_after: BTreeSet<String>,
     /// Caller-continuation locals propagated through nested late inlining.
@@ -1589,6 +2390,11 @@ struct CoreLowerer<'a> {
     /// synthetic lets without imposing their context on user-written lets.
     late_inline_let_expectations: BTreeMap<(usize, usize), LateInlineLetExpectation>,
     late_inline_type_substitutions: BTreeMap<String, TypeId>,
+    /// Innermost-first lookup context for generic effect paths cloned from a
+    /// control-inlined helper. `body_instance` remains the caller there, so
+    /// effect operation resolution must use this lexical helper stack rather
+    /// than the caller specialization key.
+    late_inline_functions: Vec<String>,
     /// Lexically active direct destinations, keyed by source spelling. The
     /// value carries the allocation-independent typeck brand into Core.
     active_labels: BTreeMap<String, ActiveCoreLabel>,
@@ -1626,6 +2432,7 @@ struct CoreTables<'a> {
     privacy_domains: &'a PrivacyDomains,
     runtime_bindings: &'a RuntimeBindings,
     performance_summaries: &'a PerformanceSummaries,
+    control_summaries: &'a ControlSummaries,
     closure_runtimes: &'a BTreeMap<specialization::ClosureRequest, ClosureRuntime>,
     closure_nominal_types: &'a BTreeMap<specialization::ClosureNominalInstance, TypeId>,
     reference_return_summaries: &'a BTreeMap<u32, ReferenceReturnSummary>,
@@ -2941,6 +3748,63 @@ enum ClosureReferenceSource {
     Capture(String),
 }
 
+/// Prove the narrow source shape whose tail can never return: a direct call
+/// to a function whose own tail is an unconditional direct self call. This is
+/// intentionally not a general termination analysis; it is the same bounded
+/// proof used when selecting an exact closure reference route.
+fn source_expression_is_directly_nonreturning(program: &Program, expression: &Expr) -> bool {
+    fn tail(expression: &Expr) -> &Expr {
+        match &expression.kind {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => statements
+                .last()
+                .and_then(|statement| match statement {
+                    Stmt::Expr(value) => Some(tail(value)),
+                    _ => None,
+                })
+                .unwrap_or(expression),
+            ExprKind::Move(value) => tail(value),
+            _ => expression,
+        }
+    }
+    let call = tail(expression);
+    let ExprKind::Call(callee, _) = &call.kind else {
+        return false;
+    };
+    let ExprKind::Variable(path) = &callee.kind else {
+        return false;
+    };
+    let [target] = path.as_ref() else {
+        return false;
+    };
+    // Resolution represents source-defined `if`/`else` and completion
+    // matches with synthetic calls whose callee span covers the complete
+    // control expression.  Such a call is not evidence that the user wrote a
+    // direct invocation of the coincidentally named function.  Requiring the
+    // callee span to be exactly the identifier also keeps this deliberately
+    // narrow proof independent of declaration names.
+    if callee.span.end.saturating_sub(callee.span.start) != target.len() {
+        return false;
+    }
+    let Some(function) = program
+        .functions
+        .iter()
+        .find(|function| function.name == target.as_ref())
+    else {
+        return false;
+    };
+    if function.uses_implicit_label() {
+        return false;
+    }
+    let recursive_call = tail(&function.body);
+    let ExprKind::Call(recur, _) = &recursive_call.kind else {
+        return false;
+    };
+    matches!(&recur.kind, ExprKind::Variable(path)
+        if path.len() == 1
+            && path[0].as_ref() == function.name
+            && recur.span.end.saturating_sub(recur.span.start) == function.name.len())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ClosureReferenceRoute {
     source: ClosureReferenceSource,
@@ -2978,42 +3842,6 @@ fn direct_closure_reference_route(
         aliases: &BTreeMap<String, (String, Vec<u32>)>,
         known: Option<&BTreeMap<typeck::DeclarationKey, ReferenceReturnPlan>>,
     ) -> Option<(String, Vec<u32>)> {
-        fn tail(expression: &Expr) -> &Expr {
-            match &expression.kind {
-                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => statements
-                    .last()
-                    .and_then(|statement| match statement {
-                        Stmt::Expr(value) => Some(tail(value)),
-                        _ => None,
-                    })
-                    .unwrap_or(expression),
-                ExprKind::Move(value) => tail(value),
-                _ => expression,
-            }
-        }
-        fn is_directly_nonreturning(program: &Program, expression: &Expr) -> bool {
-            let ExprKind::Call(callee, _) = &tail(expression).kind else {
-                return false;
-            };
-            let ExprKind::Variable(path) = &callee.kind else {
-                return false;
-            };
-            let [target] = path.as_ref() else {
-                return false;
-            };
-            let Some(function) = program
-                .functions
-                .iter()
-                .find(|function| function.name == target.as_ref())
-            else {
-                return false;
-            };
-            let ExprKind::Call(recur, _) = &tail(&function.body).kind else {
-                return false;
-            };
-            matches!(&recur.kind, ExprKind::Variable(path)
-                if path.len() == 1 && path[0].as_ref() == function.name)
-        }
         fn positive_variant_aliases(
             program: &Program,
             condition: &Expr,
@@ -3124,7 +3952,7 @@ fn direct_closure_reference_route(
                     let positive_aliases =
                         positive_variant_aliases(program, condition, aliases, known)?;
                     let positive = selected(program, positive, &positive_aliases, known)?;
-                    if is_directly_nonreturning(program, negative) {
+                    if source_expression_is_directly_nonreturning(program, negative) {
                         return Some(positive);
                     }
                     return (selected(program, negative, aliases, known)? == positive)
@@ -3208,6 +4036,7 @@ fn higher_order_specialization_reference_plan(
         captures,
         environment,
         active_labels,
+        static_captures,
     ) = substitutions.get(binder)?
     else {
         return None;
@@ -3218,6 +4047,7 @@ fn higher_order_specialization_reference_plan(
         captures: captures.clone(),
         param_env: environment.clone(),
         active_labels: active_labels.clone(),
+        static_captures: static_captures.clone(),
     };
     let kind = *closure_bodies.get(&request)?;
     let (closure_params, closure_body) = specialization::closure_body(program, &request, kind)?;
@@ -4266,6 +5096,10 @@ fn compile_stream_phases_with_manifest_and_domains(
             .collect::<Vec<_>>()
     })?;
     timings.mark("parse");
+    // Manual-control rewrites are source-shape lints. Capture them before
+    // resolution replaces operators and completion matches with semantic
+    // calls, but publish them only if the complete compilation succeeds.
+    let manual_control_diagnostics = manual_control_lints(&program, bundle);
     let interface_program = include_interfaces.then(|| program.clone());
     let has_modules = !program.modules.is_empty();
     let resolved = if include_interfaces {
@@ -4323,6 +5157,8 @@ fn compile_stream_phases_with_manifest_and_domains(
         mut diagnostics,
     ) = compiled?;
     timings.mark("compile-program");
+    diagnostics.extend(control_plan_diagnostics(&core.control_plans));
+    diagnostics.extend(manual_control_diagnostics);
     diagnostics.retain(|diagnostic| {
         diagnostic.code.as_deref() != Some(REDUNDANT_MOVE_CODE)
             || !diagnostic
@@ -4341,6 +5177,857 @@ fn compile_stream_phases_with_manifest_and_domains(
         },
         interfaces,
     ))
+}
+
+/// Turn unsuccessful structural control plans into ordinary, localized source
+/// diagnostics. The plan remains the detailed inspection authority; these
+/// lints make a missed fusion visible during normal compiler development.
+fn control_plan_diagnostics(plans: &[core::ControlPlan]) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for plan in plans {
+        let Some(reason) = plan.failure_reason.as_deref() else {
+            continue;
+        };
+        diagnostics.push(
+            Diagnostic::warning(
+                "control helper not fused",
+                format!("`{}` retained runtime control machinery: {reason}", plan.helper),
+                plan.call_span,
+            )
+            .with_code(CONTROL_HELPER_NOT_FUSED_CODE)
+            .with_help(
+                "keep labels and callbacks static, preserve exact callback quantities and effects, and keep recursive edges in tail position",
+            ),
+        );
+        if plan.residual_effect_handler {
+            diagnostics.push(
+                Diagnostic::warning(
+                    "control callback effect widened",
+                    format!(
+                        "`{}` left a generic effect handler after control inlining",
+                        plan.helper
+                    ),
+                    plan.call_span,
+                )
+                .with_code(CONTROL_CALLBACK_EFFECT_WIDENED_CODE)
+                .with_help(
+                    "forward the callback's open effect row exactly through the helper and avoid adding an opaque handler around the callback",
+                ),
+            );
+        }
+    }
+    diagnostics
+}
+
+/// Recognize exact value-handler propagation idioms for which the control
+/// kernel has a semantics-preserving one-expression replacement. Keeping this
+/// pass deliberately narrow makes every emitted edit machine-applicable: near
+/// misses remain untouched instead of receiving a speculative suggestion.
+fn manual_control_lints(program: &Program, bundle: &SourceBundle) -> Vec<Diagnostic> {
+    fn sole_expression(expression: &Expr) -> &Expr {
+        match &expression.kind {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements)
+                if matches!(statements.as_slice(), [Stmt::Expr(_)]) =>
+            {
+                let [Stmt::Expr(expression)] = statements.as_slice() else {
+                    unreachable!()
+                };
+                sole_expression(expression)
+            }
+            _ => expression,
+        }
+    }
+
+    fn binding_variant<'a>(pattern: &'a Pattern, owner: &str, variant: &str) -> Option<&'a str> {
+        let PatternKind::Variant { path, fields, rest } = &pattern.kind else {
+            return None;
+        };
+        let matches_path = path.last().is_some_and(|found| found == variant)
+            && path.iter().rev().nth(1).is_none_or(|found| found == owner);
+        if !matches_path || rest.is_some() {
+            return None;
+        }
+        let [
+            Pattern {
+                kind: PatternKind::Binding(binding),
+                ..
+            },
+        ] = fields.as_slice()
+        else {
+            return None;
+        };
+        Some(binding)
+    }
+
+    fn empty_variant(pattern: &Pattern, owner: &str, variant: &str) -> bool {
+        if matches!(&pattern.kind, PatternKind::Binding(found) if found == variant) {
+            return true;
+        }
+        let PatternKind::Variant { path, fields, rest } = &pattern.kind else {
+            return false;
+        };
+        (path.last().is_some_and(|found| found == variant)
+            && path.iter().rev().nth(1).is_none_or(|found| found == owner))
+            && fields.is_empty()
+            && rest.is_none()
+    }
+
+    fn clause_binding_variant<'a>(
+        clause: &'a HandlerClause,
+        owner: &str,
+        variant: &str,
+    ) -> Option<&'a str> {
+        if clause.effect.rsplit("::").next() == Some(owner)
+            && clause.operation == variant
+            && clause.resumption.is_none()
+        {
+            let [
+                Pattern {
+                    kind: PatternKind::Binding(binding),
+                    ..
+                },
+            ] = clause.patterns.as_slice()
+            else {
+                return None;
+            };
+            return Some(binding);
+        }
+        (clause.effect.is_empty() && clause.operation.is_empty() && clause.resumption.is_none())
+            .then(|| {
+                let [pattern] = clause.patterns.as_slice() else {
+                    return None;
+                };
+                binding_variant(pattern, owner, variant)
+            })
+            .flatten()
+    }
+
+    fn clause_empty_variant(clause: &HandlerClause, owner: &str, variant: &str) -> bool {
+        (clause.effect.rsplit("::").next() == Some(owner)
+            && clause.operation == variant
+            && clause.patterns.is_empty()
+            && clause.resumption.is_none())
+            || (clause.effect.is_empty()
+                && clause.operation.is_empty()
+                && clause.resumption.is_none()
+                && matches!(clause.patterns.as_slice(), [pattern]
+                    if empty_variant(pattern, owner, variant)))
+    }
+
+    fn is_variable(expression: &Expr, expected: &str) -> bool {
+        matches!(&sole_expression(expression).kind,
+            ExprKind::Variable(path) if matches!(path.as_ref(), [name] if name.as_ref() == expected))
+    }
+
+    fn direct_call(expression: &Expr) -> Option<(&Expr, &[Expr])> {
+        let ExprKind::Call(callee, arguments) = &sole_expression(expression).kind else {
+            return None;
+        };
+        Some((callee, arguments))
+    }
+
+    fn named_call<'a>(expression: &'a Expr, expected: &str) -> Option<&'a [Expr]> {
+        let (callee, arguments) = direct_call(expression)?;
+        matches!(&callee.kind, ExprKind::Variable(path)
+            if path.iter().map(|segment| segment.as_ref()).eq(expected.split("::")))
+        .then_some(arguments)
+    }
+
+    fn lazy_if(expression: &Expr) -> Option<(&Expr, &Expr, &Expr)> {
+        let arguments = named_call(expression, "else")?;
+        let [conditional, negative] = arguments else {
+            return None;
+        };
+        let conditional = named_call(conditional, "if")?;
+        let [condition, positive] = conditional else {
+            return None;
+        };
+        Some((
+            condition,
+            sole_expression(positive),
+            sole_expression(negative),
+        ))
+    }
+
+    fn equality_of_variables(expression: &Expr, left: &str, right: &str) -> bool {
+        matches!(&expression.kind, ExprKind::Binary {
+            op: BinaryOp::Eq,
+            lhs,
+            rhs,
+        } if (is_variable(lhs, left) && is_variable(rhs, right))
+            || (is_variable(lhs, right) && is_variable(rhs, left)))
+            || named_call(expression, "Equal::==").is_some_and(|arguments| {
+                matches!(arguments, [lhs, rhs]
+                    if (is_variable(lhs, left) && is_variable(rhs, right))
+                        || (is_variable(lhs, right) && is_variable(rhs, left)))
+            })
+    }
+
+    fn increment_of(expression: &Expr, name: &str) -> bool {
+        matches!(&expression.kind, ExprKind::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } if (is_variable(lhs, name) && matches!(rhs.kind, ExprKind::Int(1)))
+            || (matches!(lhs.kind, ExprKind::Int(1)) && is_variable(rhs, name)))
+            || named_call(expression, "Add::+").is_some_and(|arguments| {
+                matches!(arguments, [lhs, rhs]
+                    if (is_variable(lhs, name) && matches!(rhs.kind, ExprKind::Int(1)))
+                        || (matches!(lhs.kind, ExprKind::Int(1)) && is_variable(rhs, name)))
+            })
+    }
+
+    fn recursive_arguments_forward(arguments: &[Expr], parameters: &[Param], first: &str) -> bool {
+        arguments.len() == parameters.len()
+            && increment_of(&arguments[0], first)
+            && arguments
+                .iter()
+                .zip(parameters)
+                .skip(1)
+                .all(|(argument, parameter)| is_variable(argument, &parameter.name))
+    }
+
+    fn label_callee(expression: &Expr) -> bool {
+        matches!(expression.kind, ExprKind::LabelReference(_))
+    }
+
+    fn result_error_leave<'a>(expression: &'a Expr, error: &str) -> Option<&'a Expr> {
+        let (label, payloads) = direct_call(expression)?;
+        let [payload] = payloads else {
+            return None;
+        };
+        let (constructor, fields) = direct_call(payload)?;
+        let ExprKind::Variable(path) = &constructor.kind else {
+            return None;
+        };
+        let constructor_matches = matches!(path.as_ref(), [owner, variant]
+            if owner.as_ref() == "Result" && variant.as_ref() == "Err")
+            || matches!(path.as_ref(), [variant] if variant.as_ref() == "Err");
+        if !label_callee(label)
+            || !constructor_matches
+            || !matches!(fields, [field] if is_variable(field, error))
+        {
+            return None;
+        }
+        Some(label)
+    }
+
+    fn arbitrary_leave(expression: &Expr) -> Option<(&Expr, &Expr)> {
+        let (label, payloads) = direct_call(expression)?;
+        let [payload] = payloads else {
+            return None;
+        };
+        label_callee(label).then_some((label, payload))
+    }
+
+    fn source<'a>(bundle: &'a SourceBundle, span: Span) -> Option<&'a str> {
+        bundle.source().get(span.start..span.end)
+    }
+
+    fn manual_recursive_lint(function: &Function, bundle: &SourceBundle) -> Option<Diagnostic> {
+        if bundle.is_trusted_distributed_standard_span(function.span) || function.params.len() < 2 {
+            return None;
+        }
+        let index = &function.params[0].name;
+        let end = &function.params[1].name;
+        let (condition, complete, step) = lazy_if(sole_expression(&function.body))?;
+        if !equality_of_variables(condition, index, end) {
+            return None;
+        }
+
+        // Canonical accumulator recursion:
+        // `if(i == end) { accumulator } else { recurse(i + 1, end,
+        // update) }`, optionally with a forwarded callback parameter.
+        if function.params.len() == 3 || function.params.len() == 4 {
+            let accumulator = &function.params[2].name;
+            if let Some(recursive) = named_call(step, &function.name) {
+                let direct_callback = function.params.get(3).is_some_and(|callback| {
+                    recursive.len() == 4
+                        && is_variable(&recursive[3], &callback.name)
+                        && named_call(&recursive[2], &callback.name).is_some_and(|arguments| {
+                            matches!(arguments, [left, right]
+                                if is_variable(left, accumulator) && is_variable(right, index))
+                        })
+                });
+                let inline_update = (recursive.len() == 3)
+                    .then(|| source(bundle, recursive[2].span))
+                    .flatten();
+                if is_variable(complete, accumulator)
+                    && increment_of(&recursive[0], index)
+                    && is_variable(&recursive[1], end)
+                    && (direct_callback || inline_update.is_some())
+                {
+                    let callback = function
+                        .params
+                        .get(3)
+                        .map(|callback| callback.name.clone())
+                        .unwrap_or_else(|| {
+                            format!(
+                                "{{ {accumulator}, {index} => {} }}",
+                                inline_update.expect("checked above")
+                            )
+                        });
+                    return Some(
+                        Diagnostic::advice(
+                            "manual fold",
+                            "this exact accumulator recursion is provided by the range control kernel",
+                            function.body.span,
+                        )
+                        .with_code(MANUAL_FOLD_CODE)
+                        .with_help("replace the recursive engine with `fold_range`")
+                        .with_fix(
+                            function.body.span,
+                            format!(
+                                "{{ fold_range(Range::new({index}, {end}), {accumulator}, {callback}) }}"
+                            ),
+                        ),
+                    );
+                }
+            }
+        }
+
+        // Canonical first-match recursion.
+        if function.params.len() == 3 {
+            let none = matches!(&complete.kind,
+                ExprKind::Variable(path) if path.last().is_some_and(|name| name.as_ref() == "None"));
+            if none
+                && let Some((test, found, missing)) = lazy_if(step)
+                && named_call(found, "Option::Some")
+                    .or_else(|| named_call(found, "Some"))
+                    .is_some_and(
+                        |arguments| matches!(arguments, [value] if is_variable(value, index)),
+                    )
+                && named_call(missing, &function.name).is_some_and(|arguments| {
+                    recursive_arguments_forward(arguments, &function.params, index)
+                })
+            {
+                let test = source(bundle, test.span)?;
+                return Some(
+                    Diagnostic::advice(
+                        "manual find",
+                        "this exact first-match recursion is provided by the range control kernel",
+                        function.body.span,
+                    )
+                    .with_code(MANUAL_FIND_CODE)
+                    .with_help("replace the recursive search with `find_range`")
+                    .with_fix(
+                        function.body.span,
+                        format!(
+                            "{{ find_range(Range::new({index}, {end}), {{ {index} => {test} }}) }}"
+                        ),
+                    ),
+                );
+            }
+        }
+
+        // Canonical unit traversal with one step followed by the tail call.
+        let (ExprKind::Block(statements) | ExprKind::ContextBlock(statements)) = &step.kind else {
+            return None;
+        };
+        let [Stmt::Expr(body), Stmt::Expr(recursion)] = statements.as_slice() else {
+            return None;
+        };
+        let recursive = named_call(recursion, &function.name)?;
+        if !matches!(complete.kind, ExprKind::Unit)
+            || !recursive_arguments_forward(recursive, &function.params, index)
+        {
+            return None;
+        }
+        let body = source(bundle, body.span)?;
+        Some(
+            Diagnostic::advice(
+                "manual range walk",
+                "this exact tail-recursive range traversal is provided by the control kernel",
+                function.body.span,
+            )
+            .with_code(MANUAL_RANGE_WALK_CODE)
+            .with_help("replace the recursive engine with `for_range`")
+            .with_fix(
+                function.body.span,
+                format!("{{ for_range(Range::new({index}, {end}), {{ {index} => {body} }}) }}"),
+            ),
+        )
+    }
+
+    fn root_variable(expression: &Expr) -> Option<&str> {
+        match &expression.kind {
+            ExprKind::Variable(path) if matches!(path.as_ref(), [_]) => Some(path[0].as_ref()),
+            ExprKind::Move(value)
+            | ExprKind::Unary {
+                op: UnaryOp::BorrowShared | UnaryOp::BorrowUnique | UnaryOp::Dereference,
+                operand: value,
+            } => root_variable(value),
+            _ => None,
+        }
+    }
+
+    fn vec_len_root(expression: &Expr) -> Option<&str> {
+        let arguments = named_call(expression, "Vec::len")?;
+        let [value] = arguments else {
+            return None;
+        };
+        root_variable(value)
+    }
+
+    fn statement_source(bundle: &SourceBundle, statement: &Stmt) -> Option<String> {
+        let span = match statement {
+            Stmt::Let { span, .. } | Stmt::Deconstruct { span, .. } | Stmt::Assign { span, .. } => {
+                *span
+            }
+            Stmt::Expr(expression) => expression.span,
+        };
+        Some(format!("{};", source(bundle, span)?))
+    }
+
+    fn manual_builder_range_lint(function: &Function, bundle: &SourceBundle) -> Option<Diagnostic> {
+        if bundle.is_trusted_distributed_standard_span(function.span) {
+            return None;
+        }
+        let ExprKind::Block(statements) = &function.body.kind else {
+            return None;
+        };
+        if statements.len() < 4 {
+            return None;
+        }
+        let Stmt::Let {
+            name: start,
+            value: start_value,
+            ..
+        } = &statements[0]
+        else {
+            return None;
+        };
+        let Stmt::Let {
+            name: end,
+            value: end_value,
+            ..
+        } = &statements[statements.len() - 2]
+        else {
+            return None;
+        };
+        let Stmt::Expr(result) = &statements[statements.len() - 1] else {
+            return None;
+        };
+        let start_root = vec_len_root(start_value)?;
+        if vec_len_root(end_value) != Some(start_root) {
+            return None;
+        }
+        let ExprKind::Struct { name, fields } = &result.kind else {
+            return None;
+        };
+        if name.as_ref() != "Range" || fields.len() != 2 {
+            return None;
+        }
+        let start_matches = fields
+            .iter()
+            .any(|(field, value)| field == "start" && is_variable(value, start));
+        let end_matches = fields
+            .iter()
+            .any(|(field, value)| field == "end" && is_variable(value, end));
+        if !start_matches || !end_matches {
+            return None;
+        }
+        let body = statements[1..statements.len() - 2]
+            .iter()
+            .map(|statement| statement_source(bundle, statement))
+            .collect::<Option<Vec<_>>>()?
+            .join(" ");
+        Some(
+            Diagnostic::advice(
+                "manual builder range",
+                "this exact append-and-measure block is provided by `with_range`",
+                function.body.span,
+            )
+            .with_code(MANUAL_BUILDER_RANGE_CODE)
+            .with_help("replace the manual length bookkeeping with a transactional range builder")
+            .with_fix(
+                function.body.span,
+                format!("{{ with_range({start_root}, {{ {start_root} => {{ {body} }} }}) }}"),
+            ),
+        )
+    }
+
+    fn manual_scope_restore_lint(function: &Function, bundle: &SourceBundle) -> Option<Diagnostic> {
+        if bundle.is_trusted_distributed_standard_span(function.span) {
+            return None;
+        }
+        let ExprKind::Block(statements) = &function.body.kind else {
+            return None;
+        };
+        if statements.len() < 4 {
+            return None;
+        }
+        let Stmt::Let {
+            name: mark,
+            value: mark_value,
+            ..
+        } = &statements[0]
+        else {
+            return None;
+        };
+        let root = vec_len_root(mark_value)?;
+        let Stmt::Expr(restore) = &statements[statements.len() - 2] else {
+            return None;
+        };
+        let restore_arguments = named_call(restore, "Vec::truncate")?;
+        if !matches!(restore_arguments, [value, saved]
+            if root_variable(value) == Some(root) && is_variable(saved, mark))
+        {
+            return None;
+        }
+        let Stmt::Expr(result) = &statements[statements.len() - 1] else {
+            return None;
+        };
+        let body = statements[1..statements.len() - 2]
+            .iter()
+            .map(|statement| statement_source(bundle, statement))
+            .collect::<Option<Vec<_>>>()?
+            .join(" ");
+        let result = source(bundle, result.span)?;
+        Some(
+            Diagnostic::advice(
+                "manual scope restore",
+                "this explicit vector restoration runs only on the normal path",
+                function.body.span,
+            )
+            .with_code(MANUAL_SCOPE_RESTORE_CODE)
+            .with_help(
+                "replace the save/restore sequence with `with_vec_rollback` so cleanup also runs on labeled and effectful exits",
+            )
+            .with_fix(
+                function.body.span,
+                format!(
+                    "{{ with_vec_rollback({root}, {{ {root} => {{ {body} {result} }} }}) }}"
+                ),
+            ),
+        )
+    }
+
+    struct Finder<'a> {
+        bundle: &'a SourceBundle,
+        diagnostics: Vec<Diagnostic>,
+    }
+
+    impl Finder<'_> {
+        fn emit_propagation_lint(
+            &mut self,
+            expression: &Expr,
+            computation: &Expr,
+            arms: &[(&Pattern, &Expr)],
+        ) {
+            let computation_source = source(self.bundle, computation.span);
+            let mut result_ok = None;
+            let mut result_err = None;
+            let mut option_some = None;
+            let mut option_none = None;
+            for (pattern, body) in arms {
+                if let Some(binding) = binding_variant(pattern, "Result", "Ok")
+                    && is_variable(body, binding)
+                {
+                    result_ok = Some(());
+                }
+                if let Some(binding) = binding_variant(pattern, "Result", "Err")
+                    && let Some(label) = result_error_leave(body, binding)
+                {
+                    result_err = Some(label);
+                }
+                if let Some(binding) = binding_variant(pattern, "Option", "Some")
+                    && is_variable(body, binding)
+                {
+                    option_some = Some(());
+                }
+                if empty_variant(pattern, "Option", "None")
+                    && let Some(leave) = arbitrary_leave(body)
+                {
+                    option_none = Some(leave);
+                }
+            }
+            if result_ok.is_some()
+                && let (Some(computation), Some(label)) = (
+                    computation_source,
+                    result_err.and_then(|label| source(self.bundle, label.span)),
+                )
+            {
+                self.diagnostics.push(
+                    Diagnostic::advice(
+                        "manual result propagation",
+                        "this exact Result handler is equivalent to branded control-kernel propagation",
+                        expression.span,
+                    )
+                    .with_code(MANUAL_RESULT_PROPAGATION_CODE)
+                    .with_help("replace the handler with `ok_or_leave` so propagation control-inlines to a direct leave")
+                    .with_fix(expression.span, format!("ok_or_leave({computation}, {label})")),
+                );
+                return;
+            }
+            if option_some.is_some()
+                && let (Some(computation), Some((label, payload))) =
+                    (computation_source, option_none)
+                && let (Some(label), Some(payload)) = (
+                    source(self.bundle, label.span),
+                    source(self.bundle, payload.span),
+                )
+            {
+                self.diagnostics.push(
+                    Diagnostic::advice(
+                        "manual option match",
+                        "this exact Option handler is equivalent to a control-kernel leave helper",
+                        expression.span,
+                    )
+                    .with_code(MANUAL_OPTION_MATCH_CODE)
+                    .with_help(
+                        "replace the handler with `some_or_leave` to make the early exit explicit",
+                    )
+                    .with_fix(
+                        expression.span,
+                        format!("some_or_leave({computation}, {payload}, {label})"),
+                    ),
+                );
+            }
+        }
+
+        fn inspect_completion_match(&mut self, expression: &Expr, statements: &[Stmt]) {
+            if self
+                .bundle
+                .is_trusted_distributed_standard_span(expression.span)
+            {
+                return;
+            }
+            let [
+                Stmt::Let {
+                    name,
+                    value: computation,
+                    ..
+                },
+                Stmt::Expr(next),
+            ] = statements
+            else {
+                return;
+            };
+            if !name.starts_with("$handle$result$") {
+                return;
+            }
+            let mut next = sole_expression(next);
+            let mut arms = Vec::new();
+            loop {
+                let Some((else_callee, else_arguments)) = direct_call(next) else {
+                    return;
+                };
+                if !matches!(&else_callee.kind,
+                    ExprKind::Variable(path) if matches!(path.as_ref(), [found] if found.as_ref() == "else"))
+                {
+                    return;
+                }
+                let [conditional, negative] = else_arguments else {
+                    return;
+                };
+                let Some((if_callee, if_arguments)) = direct_call(conditional) else {
+                    return;
+                };
+                if !matches!(&if_callee.kind,
+                    ExprKind::Variable(path) if matches!(path.as_ref(), [found] if found.as_ref() == "if"))
+                {
+                    return;
+                }
+                let [condition, positive] = if_arguments else {
+                    return;
+                };
+                let ExprKind::Is { subject, pattern } = &condition.kind else {
+                    return;
+                };
+                if !matches!(&subject.kind,
+                    ExprKind::Variable(path) if matches!(path.as_ref(), [found] if found.as_ref() == name))
+                {
+                    return;
+                }
+                arms.push((pattern.as_ref(), sole_expression(positive)));
+                next = sole_expression(negative);
+                if direct_call(next).is_some_and(|(callee, arguments)| {
+                    arguments.is_empty()
+                        && matches!(&callee.kind,
+                            ExprKind::Variable(path) if matches!(path.as_ref(), [found]
+                                if found.as_ref() == "unreachable"))
+                }) {
+                    break;
+                }
+            }
+            self.emit_propagation_lint(expression, computation, &arms);
+        }
+
+        fn inspect_handle(
+            &mut self,
+            expression: &Expr,
+            computation: &Expr,
+            clauses: &[HandlerClause],
+        ) {
+            if self
+                .bundle
+                .is_trusted_distributed_standard_span(expression.span)
+                || clauses.len() != 2
+            {
+                return;
+            }
+            let computation_source = source(self.bundle, computation.span);
+            let mut result_ok = None;
+            let mut result_err = None;
+            let mut option_some = None;
+            let mut option_none = None;
+            for clause in clauses {
+                if let Some(binding) = clause_binding_variant(clause, "Result", "Ok")
+                    && is_variable(&clause.body, binding)
+                {
+                    result_ok = Some(());
+                }
+                if let Some(binding) = clause_binding_variant(clause, "Result", "Err")
+                    && let Some(label) = result_error_leave(&clause.body, binding)
+                {
+                    result_err = Some(label);
+                }
+                if let Some(binding) = clause_binding_variant(clause, "Option", "Some")
+                    && is_variable(&clause.body, binding)
+                {
+                    option_some = Some(());
+                }
+                if clause_empty_variant(clause, "Option", "None")
+                    && let Some(leave) = arbitrary_leave(&clause.body)
+                {
+                    option_none = Some(leave);
+                }
+            }
+            if result_ok.is_some()
+                && let (Some(computation), Some(label)) = (
+                    computation_source,
+                    result_err.and_then(|label| source(self.bundle, label.span)),
+                )
+            {
+                self.diagnostics.push(
+                    Diagnostic::advice(
+                        "manual result propagation",
+                        "this exact Result handler is equivalent to branded control-kernel propagation",
+                        expression.span,
+                    )
+                    .with_code(MANUAL_RESULT_PROPAGATION_CODE)
+                    .with_help("replace the handler with `ok_or_leave` so propagation control-inlines to a direct leave")
+                    .with_fix(expression.span, format!("ok_or_leave({computation}, {label})")),
+                );
+                return;
+            }
+            if option_some.is_some()
+                && let (Some(computation), Some((label, payload))) =
+                    (computation_source, option_none)
+                && let (Some(label), Some(payload)) = (
+                    source(self.bundle, label.span),
+                    source(self.bundle, payload.span),
+                )
+            {
+                self.diagnostics.push(
+                    Diagnostic::advice(
+                        "manual option match",
+                        "this exact Option handler is equivalent to a control-kernel leave helper",
+                        expression.span,
+                    )
+                    .with_code(MANUAL_OPTION_MATCH_CODE)
+                    .with_help(
+                        "replace the handler with `some_or_leave` to make the early exit explicit",
+                    )
+                    .with_fix(
+                        expression.span,
+                        format!("some_or_leave({computation}, {payload}, {label})"),
+                    ),
+                );
+            }
+        }
+    }
+
+    impl<'ast> ExprVisitor<'ast> for Finder<'_> {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            if let ExprKind::Handle {
+                computation,
+                clauses,
+            } = &expression.kind
+            {
+                self.inspect_handle(expression, computation, clauses);
+            }
+            if let ExprKind::Block(statements) | ExprKind::ContextBlock(statements) =
+                &expression.kind
+            {
+                self.inspect_completion_match(expression, statements);
+            }
+            walk_expr(self, expression)
+        }
+    }
+
+    let mut finder = Finder {
+        bundle,
+        diagnostics: program
+            .functions
+            .iter()
+            .filter_map(|function| {
+                manual_recursive_lint(function, bundle)
+                    .or_else(|| manual_builder_range_lint(function, bundle))
+                    .or_else(|| manual_scope_restore_lint(function, bundle))
+            })
+            .collect(),
+    };
+    for function in &program.functions {
+        let _ = finder.visit_expr(&function.body);
+    }
+    for binding in &program.globals {
+        let _ = finder.visit_expr(&binding.value);
+    }
+    finder.diagnostics
+}
+
+#[cfg(test)]
+mod control_plan_lint_tests {
+    use super::*;
+
+    fn failed_plan() -> core::ControlPlan {
+        core::ControlPlan {
+            helper: "walk".to_owned(),
+            call_span: Span::new(11, 19),
+            static_labels: vec!["@done".to_owned()],
+            static_callbacks: vec!["closure@20..30".to_owned()],
+            forwarded_effects: vec!["#3={ | e }".to_owned()],
+            callback_quantities: vec![(3, 0, None)],
+            direct_exit_sites: 1,
+            tail_recursive_cycle: true,
+            formed_control_loop: None,
+            residual_callable_allocation: false,
+            residual_effect_handler: true,
+            failure_reason: Some("residual effect handler remained".to_owned()),
+        }
+    }
+
+    #[test]
+    fn failed_control_plans_emit_the_named_development_lints() {
+        let diagnostics = control_plan_diagnostics(&[failed_plan()]);
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics[0].code.as_deref(),
+            Some(CONTROL_HELPER_NOT_FUSED_CODE)
+        );
+        assert_eq!(
+            diagnostics[1].code.as_deref(),
+            Some(CONTROL_CALLBACK_EFFECT_WIDENED_CODE)
+        );
+        assert!(diagnostics.iter().all(|diagnostic| {
+            diagnostic.severity == crate::diagnostic::Severity::Warning
+                && diagnostic.span == Some(Span::new(11, 19))
+                && diagnostic.help.is_some()
+        }));
+    }
+
+    #[test]
+    fn successful_control_plans_are_silent() {
+        let mut plan = failed_plan();
+        plan.formed_control_loop = Some(4);
+        plan.residual_effect_handler = false;
+        plan.failure_reason = None;
+        assert!(control_plan_diagnostics(&[plan]).is_empty());
+    }
 }
 
 fn bind_runtime_manifest(
@@ -5018,6 +6705,7 @@ fn compile_program_with_phases(
     let nominal_templates = program.structs.clone();
     let enum_templates = program.enums.clone();
     let mut rounds = 0_usize;
+    let pre_drop_request_count = discovery.graph.requests.len();
     let normalized_program = loop {
         let normalized = instantiate_ground_nominals(
             program,
@@ -5042,7 +6730,14 @@ fn compile_program_with_phases(
             break normalized;
         }
         rounds += 1;
-        if rounds > 64 || discovery.graph.requests.len() > 1024 {
+        if rounds > 64
+            || discovery
+                .graph
+                .requests
+                .len()
+                .saturating_sub(pre_drop_request_count)
+                > 1024
+        {
             return Err(vec![type_error(
                 program
                     .drops
@@ -6551,7 +8246,7 @@ fn compile_program_with_phases(
                     }
                 };
                 for binder in &template.effectful_callable_binders {
-                    let Some(specialization::SpecializationArgument::Closure(_, shape, _, _, _)) =
+                    let Some(specialization::SpecializationArgument::Closure(_, shape, _, _, _, _)) =
                         substitutions.get(binder)
                     else {
                         continue;
@@ -6596,7 +8291,7 @@ fn compile_program_with_phases(
                             ));
                             continue;
                         };
-                        if !parameter_name.is_some_and(|parameter| {
+                        let escapes = parameter_name.is_some_and(|parameter| {
                             specialization::callable_effect_escapes(
                                 program,
                                 function,
@@ -6619,7 +8314,8 @@ fn compile_program_with_phases(
                                     )
                                 },
                             )
-                        }) {
+                        });
+                        if !escapes {
                             continue;
                         }
                         outward_protocols.push(*protocol);
@@ -6953,10 +8649,24 @@ fn compile_program_with_phases(
     {
         artifact.required_features |= REFERENCES_G1;
     }
+    let label_branded_protocols = resolved_effects
+        .instances
+        .iter()
+        .filter(|(instance, _)| {
+            instance
+                .static_arguments
+                .iter()
+                .any(|argument| matches!(argument, EffectStaticArgument::LabelBrand(..)))
+        })
+        .map(|(_, protocol)| *protocol)
+        .collect();
     let mut effect_lowering = EffectLowering {
         operations: resolved_effects.operations,
         operation_sites: resolved_effects.operation_sites,
+        instance_operations: resolved_effects.instance_operations,
+        site_operations: resolved_effects.site_operations,
         specialized_operation_sites,
+        label_branded_protocols,
         protocols: artifact.protocols.clone(),
         handler_defs: Vec::new(),
         extra_types: Vec::new(),
@@ -6974,6 +8684,7 @@ fn compile_program_with_phases(
         late_nominals: BTreeMap::new(),
         runtime_reference_plans: BTreeMap::new(),
         warnings: Vec::new(),
+        control_plans: Vec::new(),
     };
     for function in &program.functions {
         struct ImplicitLabelShadowFinder<'a> {
@@ -7190,6 +8901,7 @@ fn compile_program_with_phases(
         }
     }
     let performance_summaries = PerformanceSummaries::analyze(program, &effect_lowering, &nominals);
+    let control_summaries = ControlSummaries::analyze(program);
     let emitted_performance_evidence = ordered
         .iter()
         .map(|(wire_name, _, emission)| {
@@ -7373,6 +9085,7 @@ fn compile_program_with_phases(
         privacy_domains,
         runtime_bindings: &runtime_bindings,
         performance_summaries: &performance_summaries,
+        control_summaries: &control_summaries,
         closure_runtimes: &closure_runtimes,
         closure_nominal_types: &reserved_closure_nominal_types,
         reference_return_summaries: &reference_return_summaries,
@@ -7683,19 +9396,15 @@ fn compile_program_with_phases(
     while synthetic_index < effect_lowering.synthetics.len() {
         let synthetic = effect_lowering.synthetics[synthetic_index].clone();
         synthetic_index += 1;
-        let allowed_performs = (!synthetic.outward_protocols.is_empty()).then(|| {
-            synthetic
-                .outward_protocols
+        let mut allowed_performs = synthetic.handled_terminal_performs.clone();
+        allowed_performs.extend(synthetic.outward_protocols.iter().flat_map(|protocol| {
+            effect_lowering.protocols[*protocol as usize]
+                .operations
                 .iter()
-                .flat_map(|protocol| {
-                    effect_lowering.protocols[*protocol as usize]
-                        .operations
-                        .iter()
-                        .enumerate()
-                        .map(move |(operation, _)| (*protocol, operation as u32))
-                })
-                .collect()
-        });
+                .enumerate()
+                .map(move |(operation, _)| (*protocol, operation as u32))
+        }));
+        let allowed_performs = (!allowed_performs.is_empty()).then_some(allowed_performs);
         let runtime_reference_plan = effect_lowering
             .runtime_reference_plans
             .values()
@@ -7731,6 +9440,13 @@ fn compile_program_with_phases(
         }
         lowerer.expression_ordinals = synthetic.expression_ordinals.clone();
         lowerer.recursive_receiver = synthetic.recursive_receiver.clone();
+        lowerer.static_labels = synthetic.static_labels.clone();
+        lowerer.static_closures = synthetic.static_closures.clone();
+        lowerer.late_inline_type_substitutions = synthetic.late_inline_type_substitutions.clone();
+        lowerer.late_inline_functions = synthetic.late_inline_functions.clone();
+        for closure in lowerer.static_closures.values_mut() {
+            closure.remap_runtime_captures(&lowerer.locals);
+        }
         lowerer.defer_perform_reference_result =
             matches!(&synthetic.body, SyntheticBody::Expr { .. })
                 && synthetic.name.starts_with("$handler$")
@@ -7874,7 +9590,11 @@ fn compile_program_with_phases(
     let mut drop_unsafe_calls = program
         .functions
         .iter()
-        .filter(|function| function.effectful || contains_effect_control(&function.body))
+        // Source `handle` syntax also expresses ordinary Result/Option
+        // refinement, so syntax alone is not proof of suspension. Seed exact
+        // declared effects here; the Core fixed point below structurally
+        // discovers real handlers, performs, host calls, and nonlocal control.
+        .filter(|function| function.effectful)
         .filter_map(|function| signatures.get(&function.name).map(|signature| signature.id))
         .collect::<BTreeSet<_>>();
     drop_unsafe_calls.extend(
@@ -7891,17 +9611,33 @@ fn compile_program_with_phases(
                     .functions
                     .iter()
                     .find(|function| &function.name == name)?;
-                (template.effectful
-                    || contains_effect_control(&template.body)
-                    || !signature.outward_protocols.is_empty())
-                .then_some(signature.id)
+                (template.effectful || !signature.outward_protocols.is_empty())
+                    .then_some(signature.id)
             }),
     );
+    let core_function_bodies = core_functions
+        .iter()
+        .map(|function| (function.declaration, function))
+        .collect::<BTreeMap<_, _>>();
+    let typed_pattern_bodies = typed_pattern_functions
+        .iter()
+        .map(|function| (function.declaration, function))
+        .collect::<BTreeMap<_, _>>();
     loop {
         let newly_unsafe = core_functions
             .iter()
             .filter(|function| !drop_unsafe_calls.contains(&function.declaration))
-            .filter(|function| drop_body_reaches_unsafe_control(&function.body, &drop_unsafe_calls))
+            .filter(|function| {
+                drop_body_reaches_unsafe_control(
+                    &function.body,
+                    &drop_unsafe_calls,
+                    &core_function_bodies,
+                    &typed_pattern_bodies,
+                    &effect_lowering.handler_defs,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                )
+            })
             .map(|function| function.declaration)
             .collect::<Vec<_>>();
         if newly_unsafe.is_empty() {
@@ -7975,6 +9711,12 @@ fn compile_program_with_phases(
         )
     });
     artifact.types.extend(effect_lowering.extra_types);
+    // Late generic control inlining can instantiate effect protocols after
+    // the initial resolved table was copied into the artifact. Refresh the
+    // complete table here; its final canonical ordering is established after
+    // bytecode emission, when every protocol-bearing structure is available
+    // for one consistent ID remap.
+    artifact.protocols = effect_lowering.protocols.clone();
     artifact.handler_defs = effect_lowering.handler_defs;
     if has_references {
         artifact.required_features |= REFERENCES_G1;
@@ -8000,6 +9742,7 @@ fn compile_program_with_phases(
     let core_program = core::Program {
         functions: core_functions,
         performance_summaries: emitted_performance_evidence,
+        control_plans: effect_lowering.control_plans.clone(),
     };
     artifact.drop_glue = drop_glue;
     let custom_drop_types = artifact
@@ -8034,6 +9777,17 @@ fn compile_program_with_phases(
     let mut mir_program = mir::Program {
         functions: mir_functions,
     };
+    if let Some(path) = std::env::var_os("G1_RAW_MIR") {
+        std::fs::write(&path, mir_program.canonical_text()).map_err(|error| {
+            vec![
+                Diagnostic::plain(format!(
+                    "could not write raw MIR snapshot `{}`: {error}",
+                    std::path::Path::new(&path).display()
+                ))
+                .with_code("G1MIR998"),
+            ]
+        })?;
+    }
     mir_program
         .validate_continuation_captures(&artifact.types, &artifact.protocols)
         .map_err(|error| {
@@ -8045,14 +9799,14 @@ fn compile_program_with_phases(
             ]
         })?;
     timings.mark("lower-mir");
-    let mut optimization_report = mir::optimizer::optimize_program_with_control_tables(
+    let optimization_result = mir::optimizer::optimize_program_with_control_tables(
         &mut mir_program,
         &artifact.types,
         &artifact.protocols,
         &artifact.handler_defs,
         options.optimization_level,
-    )
-    .map_err(|error| {
+    );
+    let mut optimization_report = optimization_result.map_err(|error| {
         vec![
             Diagnostic::plain(format!(
                 "the ownership-aware MIR optimizer rejected its input or output: {error}"
@@ -8350,6 +10104,8 @@ fn compile_program_with_phases(
         artifact.required_features |= BYTES_UTF8_VALID_UP_TO_G1;
     }
 
+    canonicalize_protocols(&mut artifact);
+
     artifact.cleanups = serialize_mir_cleanup_plans(&artifact, &mir_program, &peephole_pc_maps)
         .map_err(|error| {
             vec![
@@ -8371,24 +10127,106 @@ fn compile_program_with_phases(
         ]
     })?;
     timings.mark("serialize-and-crosscheck-cleanups");
+    // Cleanup plans are register-layout metadata. Preserve the MIR identity
+    // cross-check above, then complete the plans only after the final dense
+    // register rename so the oracle and the final verifier analyze the same
+    // namespace.
+    let registers_compacted_after_peephole =
+        compact_artifact_registers_after_peephole(&mut artifact);
     let has_leave = artifact
         .code
         .iter()
         .any(|instruction| matches!(instruction, Instruction::Leave { .. }));
+    let oracle_function_names = artifact
+        .functions
+        .iter()
+        .map(|function| function.name.clone())
+        .collect::<Vec<_>>();
+    let oracle_debug_artifact = std::env::var_os("GRANDIOSE_DEBUG_FLOW")
+        .is_some()
+        .then(|| artifact.clone());
+    if let Some(path) = std::env::var_os("G1_PRE_ORACLE_ARTIFACT") {
+        // Artifact encoding requires canonical table order. The real pipeline
+        // deliberately canonicalizes constants after the cleanup oracle, so
+        // canonicalize only the debug clone: constant-id renaming is a
+        // semantics-preserving bijection and does not alter verifier state.
+        let mut replay = artifact.clone();
+        canonicalize_constants(&mut replay);
+        std::fs::write(&path, replay.encode()).map_err(|error| {
+            vec![
+                Diagnostic::plain(format!(
+                    "failed to write the pre-oracle debug artifact `{}`: {error}",
+                    std::path::Path::new(&path).display()
+                ))
+                .with_code("G1BC999"),
+            ]
+        })?;
+        let mut register_types = b"G1RT1\0\0\0".to_vec();
+        register_types.extend_from_slice(&(artifact.functions.len() as u32).to_le_bytes());
+        for function in &artifact.functions {
+            register_types.extend_from_slice(&(function.register_types.len() as u32).to_le_bytes());
+            for ty in &function.register_types {
+                register_types.extend_from_slice(&ty.to_le_bytes());
+            }
+        }
+        let mut register_type_path = path.clone();
+        register_type_path.push(".types");
+        std::fs::write(&register_type_path, register_types).map_err(|error| {
+            vec![
+                Diagnostic::plain(format!(
+                    "failed to write the pre-oracle register types `{}`: {error}",
+                    std::path::Path::new(&register_type_path).display()
+                ))
+                .with_code("G1BC999"),
+            ]
+        })?;
+    }
     artifact = if has_leave {
         grandiose_vm::verify::with_compiler_seeded_cleanup_plans_unverified(artifact)
     } else {
         grandiose_vm::verify::with_generated_cleanup_plans_unverified(artifact)
     }
     .map_err(|error| {
-        let function = match &error {
-            grandiose_vm::VerifyError::InvalidFunction(function) => mir_program
-                .functions
-                .get(*function as usize)
-                .map(|body| format!(" (`{}`)", body.name))
-                .unwrap_or_default(),
-            _ => String::new(),
+        let function_index = match &error {
+            grandiose_vm::VerifyError::InvalidFunction(function)
+            | grandiose_vm::VerifyError::Fallthrough { function }
+            | grandiose_vm::VerifyError::InvalidRegister { function, .. }
+            | grandiose_vm::VerifyError::InvalidTarget { function, .. }
+            | grandiose_vm::VerifyError::TypeMismatch { function, .. }
+            | grandiose_vm::VerifyError::UseOfEmpty { function, .. }
+            | grandiose_vm::VerifyError::Overwrite { function, .. }
+            | grandiose_vm::VerifyError::IllegalCopy { function, .. }
+            | grandiose_vm::VerifyError::InvalidAggregate { function, .. }
+            | grandiose_vm::VerifyError::InvalidPrimitive { function, .. }
+            | grandiose_vm::VerifyError::StateMismatch { function, .. }
+            | grandiose_vm::VerifyError::LiveValueAtExit { function, .. }
+            | grandiose_vm::VerifyError::BorrowConflict { function, .. } => Some(*function),
+            _ => None,
         };
+        let function = function_index
+            .and_then(|function| oracle_function_names.get(function as usize))
+            .map(|name| format!(" (`{name}`)"))
+            .unwrap_or_default();
+        if let (Some(function_index), Some(debug)) = (function_index, &oracle_debug_artifact)
+            && let Some(function) = debug.functions.get(function_index as usize)
+        {
+            let start = function.code_start as usize;
+            let end = start.saturating_add(function.code_len as usize);
+            eprintln!(
+                "cleanup-oracle bytecode for function {function_index} `{}`; register types {:?}:",
+                function.name, function.register_types
+            );
+            for (pc, instruction) in debug.code[start..end].iter().enumerate() {
+                eprintln!("  {pc}: {instruction:?}");
+            }
+            for cleanup in debug
+                .cleanups
+                .iter()
+                .filter(|cleanup| cleanup.function == function_index)
+            {
+                eprintln!("  cleanup: {cleanup:?}");
+            }
+        }
         vec![
             Diagnostic::plain(format!(
                 "the VM cleanup oracle rejected compiler-emitted MIR anchors: {error}{function}"
@@ -8397,8 +10235,6 @@ fn compile_program_with_phases(
         ]
     })?;
     timings.mark("cleanup-oracle");
-    let registers_compacted_after_peephole =
-        compact_artifact_registers_after_peephole(&mut artifact);
 
     let constants_before_canonicalization = artifact.constants.clone();
     canonicalize_constants(&mut artifact);
@@ -8561,6 +10397,34 @@ fn compile_program_with_phases(
                 + artifact.types.len() as u64
                 + artifact.cleanups.len() as u64,
         });
+    if let Some(path) = std::env::var_os("G1_VM_FUNCTION_MAP") {
+        let mut map = String::from("artifact\tdeclaration\tname\tcode_start\tcode_len\n");
+        for (index, (artifact_function, mir_function)) in artifact
+            .functions
+            .iter()
+            .zip(&mir_program.functions)
+            .enumerate()
+        {
+            writeln!(
+                map,
+                "{index}\t{}\t{:?}\t{}\t{}",
+                mir_function.declaration,
+                mir_function.name,
+                artifact_function.code_start,
+                artifact_function.code_len
+            )
+            .expect("writing a String cannot fail");
+        }
+        std::fs::write(&path, map).map_err(|error| {
+            vec![
+                Diagnostic::plain(format!(
+                    "could not write VM function map `{}`: {error}",
+                    std::path::Path::new(&path).display()
+                ))
+                .with_code("G1MIR997"),
+            ]
+        })?;
+    }
     timings.mark("emit-and-verify");
     Ok((
         artifact,
@@ -10312,6 +12176,11 @@ pub(crate) fn normalize_ground_trait_methods(
         for method in &implementation.methods {
             let Some(body) = &method.body else { continue };
             let wire_name = format!("$trait${trait_name}${receiver}${}", method.name);
+            let method_result = method
+                .return_type
+                .as_ref()
+                .and_then(|result| canonical_source_receiver_type(program, result))
+                .unwrap_or_else(|| ReceiverType::Tuple(Vec::new()));
             if let Some(access) = receiver_access(method) {
                 dot_methods.push(DotMethod {
                     trait_name: trait_name.clone(),
@@ -10322,17 +12191,12 @@ pub(crate) fn normalize_ground_trait_methods(
                     access,
                 });
             }
-            if method.params.is_empty()
-                && let Some(result) = method
-                    .return_type
-                    .as_ref()
-                    .and_then(|result| canonical_source_receiver_type(program, result))
-            {
+            if method.params.is_empty() {
                 receiverless_methods
                     .entry((
                         trait_name.clone(),
                         method.name.clone(),
-                        receiver_key(&result),
+                        receiver_key(&method_result),
                     ))
                     .or_default()
                     .insert(wire_name.clone());
@@ -10347,10 +12211,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     trait_name: trait_name.clone(),
                     method: method.name.clone(),
                     receiver: receiver_type.clone(),
-                    result: method
-                        .return_type
-                        .as_ref()
-                        .and_then(|result| canonical_source_receiver_type(program, result)),
+                    result: Some(method_result),
                     binders: impl_binders.clone(),
                     target: wire_name.clone(),
                     access: receiver_access(method),
@@ -10601,10 +12462,20 @@ pub(crate) fn normalize_ground_trait_methods(
         let [name] = path.as_ref() else {
             return None;
         };
-        let ReceiverType::Name(binder) = locals.get(name.as_ref())? else {
-            return None;
-        };
-        locals.get(&format!("$callable$output${binder}")).cloned()
+        match locals.get(name.as_ref())? {
+            ReceiverType::Application(constructor, arguments)
+                if constructor.as_ref() == &ReceiverType::Name("$callable".into()) =>
+            {
+                let [output] = arguments.as_slice() else {
+                    return None;
+                };
+                Some(output.clone())
+            }
+            ReceiverType::Name(binder) => {
+                locals.get(&format!("$callable$output${binder}")).cloned()
+            }
+            _ => None,
+        }
     }
 
     /// Infer the result of an ordinary generic direct call from the ground
@@ -11023,7 +12894,7 @@ pub(crate) fn normalize_ground_trait_methods(
         errors: &mut Vec<Diagnostic>,
     ) -> Option<ReceiverType> {
         let expression_span = expression.span;
-        let mut scalar_comparison = None;
+        let mut scalar_operator = None;
         let result = match &mut expression.kind {
             ExprKind::Variable(path) if path.len() == 1 => locals.get(path[0].as_ref()).cloned(),
             ExprKind::Struct { name, fields } => {
@@ -11153,7 +13024,13 @@ pub(crate) fn normalize_ground_trait_methods(
                         expected,
                         errors,
                     );
-                    return positive_ty.or(negative_ty).or_else(|| expected.cloned());
+                    let both_diverge = matches!(positive_ty, Some(ReceiverType::Never))
+                        && matches!(negative_ty, Some(ReceiverType::Never));
+                    return positive_ty
+                        .filter(|ty| !matches!(ty, ReceiverType::Never))
+                        .or_else(|| negative_ty.filter(|ty| !matches!(ty, ReceiverType::Never)))
+                        .or_else(|| expected.cloned())
+                        .or_else(|| both_diverge.then_some(ReceiverType::Never));
                 }
                 let dot_call = match &mut Rc::make_mut(callee).kind {
                     ExprKind::Field(subject, method) => {
@@ -11681,6 +13558,33 @@ pub(crate) fn normalize_ground_trait_methods(
                                     && candidate.method.as_str() == method.as_str()
                             })
                     });
+                if qualified_trait_call
+                    && let Some(divergent) = argument_types
+                        .iter()
+                        .position(|ty| matches!(ty, Some(ReceiverType::Never)))
+                {
+                    // Qualified operator calls are evaluated left-to-right.
+                    // Once an operand diverges, method selection and every
+                    // later operand are unreachable; trying to select the
+                    // operator for receiver `!` is both spurious and loses
+                    // the nearer terminal-control edge. Preserve only the
+                    // already evaluated prefix and the divergent operand.
+                    let mut evaluated = args
+                        .iter()
+                        .take(divergent + 1)
+                        .cloned()
+                        .map(Stmt::Expr)
+                        .collect::<Vec<_>>();
+                    let terminal = match evaluated.len() {
+                        1 => match evaluated.pop().unwrap() {
+                            Stmt::Expr(expression) => expression.kind,
+                            _ => unreachable!(),
+                        },
+                        _ => ExprKind::Block(evaluated.into()),
+                    };
+                    expression.kind = terminal;
+                    return Some(ReceiverType::Never);
+                }
                 let comparison_trait_call = qualified
                     .as_ref()
                     .is_some_and(|(name, _)| matches!(name.as_str(), "Equal" | "Less" | "Greater"));
@@ -11775,7 +13679,7 @@ pub(crate) fn normalize_ground_trait_methods(
                             (matches.len() == 1).then(|| matches.pop_first().unwrap())
                         });
                     if let Some(target) = target {
-                        if comparison_trait_call
+                        if (comparison_trait_call || trait_name == "Add")
                             && receiver.as_ref().map(receiver_subject_type).is_some_and(
                                 |receiver| {
                                     matches!(
@@ -11793,12 +13697,13 @@ pub(crate) fn normalize_ground_trait_methods(
                             && let [lhs, rhs] = args.as_slice()
                         {
                             let op = match trait_name.as_str() {
+                                "Add" => BinaryOp::Add,
                                 "Equal" => BinaryOp::Eq,
                                 "Less" => BinaryOp::Lt,
                                 "Greater" => BinaryOp::Gt,
                                 _ => unreachable!("comparison trait was classified above"),
                             };
-                            scalar_comparison = Some(ExprKind::Binary {
+                            scalar_operator = Some(ExprKind::Binary {
                                 op,
                                 lhs: Rc::new(lhs.clone()),
                                 rhs: Rc::new(rhs.clone()),
@@ -12093,9 +13998,45 @@ pub(crate) fn normalize_ground_trait_methods(
                 *locals = saved;
                 result
             }
-            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+            ExprKind::TypedClosure {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
                 let saved = locals.clone();
-                rewrite(
+                for parameter in params.iter() {
+                    if let Some(ty) = source_receiver_type(program, &parameter.ty) {
+                        locals.insert(parameter.name.clone(), ty);
+                    }
+                }
+                let declared_result = return_type
+                    .as_deref()
+                    .and_then(|result| source_receiver_type(program, result));
+                let inferred_result = rewrite(
+                    Rc::make_mut(body),
+                    locals,
+                    program,
+                    methods,
+                    receiverless_methods,
+                    generic_methods,
+                    dot_methods,
+                    deferred_evidence,
+                    trusted_standard_range,
+                    declared_result.as_ref(),
+                    errors,
+                );
+                *locals = saved;
+                declared_result.or(inferred_result).map(|result| {
+                    ReceiverType::Application(
+                        Box::new(ReceiverType::Name("$callable".into())),
+                        vec![result],
+                    )
+                })
+            }
+            ExprKind::Closure { body, .. } => {
+                let saved = locals.clone();
+                let result = rewrite(
                     Rc::make_mut(body),
                     locals,
                     program,
@@ -12109,7 +14050,12 @@ pub(crate) fn normalize_ground_trait_methods(
                     errors,
                 );
                 *locals = saved;
-                None
+                result.map(|result| {
+                    ReceiverType::Application(
+                        Box::new(ReceiverType::Name("$callable".into())),
+                        vec![result],
+                    )
+                })
             }
             ExprKind::List(values) => {
                 for value in Rc::make_mut(values) {
@@ -12202,7 +14148,22 @@ pub(crate) fn normalize_ground_trait_methods(
                     errors,
                 );
                 let mut result = None;
-                for clause in Rc::make_mut(clauses) {
+                let mut divergent_clause = false;
+                let clauses = Rc::make_mut(clauses);
+                // A bare numeric clause is contextual: it must not choose the
+                // complete handler's result before a typed sibling has had a
+                // chance to establish that context. Traverse typed clauses
+                // first while preserving the source order within each group.
+                // The stored clause order, matching, and diagnostics remain
+                // unchanged.
+                let clause_order = (0..clauses.len())
+                    .filter(|index| !two_phase_contextual_numeric_literal(&clauses[*index].body))
+                    .chain((0..clauses.len()).filter(|index| {
+                        two_phase_contextual_numeric_literal(&clauses[*index].body)
+                    }))
+                    .collect::<Vec<_>>();
+                for index in clause_order {
+                    let clause = &mut clauses[index];
                     let saved = locals.clone();
                     let resumption_argument = bind_handler_clause_patterns(
                         program,
@@ -12212,8 +14173,14 @@ pub(crate) fn normalize_ground_trait_methods(
                     );
                     let clause_expected = result
                         .as_ref()
+                        .filter(|result| !matches!(result, ReceiverType::Never))
                         .or(expected)
-                        .or_else(|| resumption_argument.as_ref().and(computation_ty.as_ref()));
+                        .or_else(|| {
+                            resumption_argument
+                                .as_ref()
+                                .and(computation_ty.as_ref())
+                                .filter(|result| !matches!(result, ReceiverType::Never))
+                        });
                     if let (Some(name), Some(argument), Some(result)) = (
                         clause.resumption.as_ref(),
                         resumption_argument,
@@ -12234,12 +14201,16 @@ pub(crate) fn normalize_ground_trait_methods(
                         clause_expected,
                         errors,
                     );
-                    if result.is_none() {
-                        result = clause_result;
+                    match clause_result {
+                        Some(ReceiverType::Never) => divergent_clause = true,
+                        Some(clause_result) if result.is_none() => result = Some(clause_result),
+                        _ => {}
                     }
                     *locals = saved;
                 }
-                result.or_else(|| expected.cloned())
+                result
+                    .or_else(|| expected.cloned())
+                    .or_else(|| divergent_clause.then_some(ReceiverType::Never))
             }
             ExprKind::Binary { op, lhs, rhs } => {
                 fn numeric_literal(expression: &Expr) -> bool {
@@ -12445,7 +14416,7 @@ pub(crate) fn normalize_ground_trait_methods(
             ExprKind::String(_) => Some(ReceiverType::Name("Text".into())),
             ExprKind::Variable(_) | ExprKind::LabelReference(_) => None,
         };
-        if let Some(replacement) = scalar_comparison {
+        if let Some(replacement) = scalar_operator {
             expression.kind = replacement;
         }
         result
@@ -12511,6 +14482,75 @@ pub(crate) fn normalize_ground_trait_methods(
                 .as_ref()
                 .and_then(|result| source_receiver_type(program, result))
                 .as_ref(),
+            &mut errors,
+        );
+    }
+    // Recovery interpretation selects methods from `Program::impls`, whereas
+    // bytecode emission calls the generated ordinary functions. Mirror the
+    // already-normalized generated bodies back into their source method
+    // entries so both execution paths observe exactly the same resolved trait
+    // calls (including operators nested inside a method body).
+    let normalized_method_bodies = normalized
+        .functions
+        .iter()
+        .filter(|function| function.name.starts_with("$trait$"))
+        .map(|function| (function.name.clone(), function.body.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for implementation in &mut normalized.impls {
+        if implementation.polarity != GoalPolarity::Positive
+            || implementation.trait_ref.path.len() != 1
+        {
+            continue;
+        }
+        let Some(receiver) = canonical_source_receiver_type(program, &implementation.self_ty)
+        else {
+            continue;
+        };
+        let trait_name = &implementation.trait_ref.path[0].name;
+        let receiver = receiver_key(&receiver);
+        for method in &mut implementation.methods {
+            let wire_name = format!("$trait${trait_name}${receiver}${}", method.name);
+            if let (Some(body), Some(normalized_body)) = (
+                method.body.as_mut(),
+                normalized_method_bodies.get(&wire_name),
+            ) {
+                *body = normalized_body.clone();
+            }
+        }
+    }
+    // Dedicated Drop declarations are not ordinary entries in `Program::impls`,
+    // so normalize their bodies explicitly. Otherwise source operators such
+    // as `+` remain qualified `Add::+` calls and are later mistaken for enum
+    // constructors when the dedicated drop glue is lowered.
+    for declaration in &mut normalized.drops {
+        let Some(target) = canonical_source_receiver_type(program, &declaration.target_type) else {
+            continue;
+        };
+        let deferred_evidence = declaration
+            .where_clause
+            .iter()
+            .flat_map(|clause| &clause.goals)
+            .filter(|goal| goal.polarity == GoalPolarity::Positive && goal.relation.path.len() == 1)
+            .filter_map(|goal| {
+                Some((
+                    goal.subject.simple_name()?.to_owned(),
+                    goal.relation.path[0].name.clone(),
+                ))
+            })
+            .collect::<BTreeSet<_>>();
+        let mut locals =
+            BTreeMap::from([("self".to_owned(), ReceiverType::Unique(Box::new(target)))]);
+        rewrite(
+            &mut declaration.body,
+            &mut locals,
+            program,
+            &methods,
+            &receiverless_methods,
+            &generic_methods,
+            &dot_methods,
+            &deferred_evidence,
+            trusted_standard_range,
+            Some(&ReceiverType::Name("Unit".into())),
             &mut errors,
         );
     }
@@ -15424,7 +17464,7 @@ fn canonical_nominal_instance(instance: &typeck::NominalInstanceKey) -> typeck::
     }
 }
 
-fn decode_nominal_instance(name: &str) -> Option<typeck::NominalInstanceKey> {
+pub(crate) fn decode_nominal_instance(name: &str) -> Option<typeck::NominalInstanceKey> {
     let mut rest = name.strip_prefix(GENERIC_NOMINAL_PREFIX)?;
     fn take_length(rest: &mut &str) -> Option<usize> {
         let colon = rest.find(':')?;
@@ -17923,7 +19963,8 @@ fn instantiate_ground_nominals(
                 &monomorphic,
                 &generic_heads,
                 trait_db,
-            );
+            ) || (goal.polarity == crate::ast::GoalPolarity::Positive
+                && intrinsic_use_goal(relation, trait_db).is_some_and(|goal| goal.is_ok()));
             if !supported
                 || !supported_drop_goal_subject(
                     &goal.subject,
@@ -17935,7 +19976,7 @@ fn instantiate_ground_nominals(
                 errors.push(unsupported(
                     goal.span,
                     "generic Drop where goal",
-                    "conditional Drop accepts only a declared marker trait with supported type arguments and no associated bindings",
+                    "conditional Drop accepts only a declared marker trait or intrinsic Use interval with supported arguments and no associated bindings",
                 ));
             }
         }
@@ -19808,6 +21849,74 @@ fn resolve_effects(
         }
     }
 
+    // Static control callbacks are beta-reduced into their destination frame
+    // and intentionally do not create ordinary emitted function requests.
+    // Their exact callable shapes nevertheless carry every outward protocol
+    // instance needed while lowering the inlined body. Collect those ground
+    // rows directly so a label-indexed user-defined control helper does not
+    // depend on a residual runtime closure or a helper-name special case.
+    let mut closure_requests = discovery
+        .graph
+        .closure_bodies
+        .keys()
+        .chain(
+            discovery
+                .graph
+                .static_closure_bodies
+                .values()
+                .map(|plan| &plan.request),
+        )
+        .chain(
+            discovery
+                .graph
+                .late_closures
+                .values()
+                .map(|plan| &plan.request),
+        )
+        .chain(discovery.graph.callable_calls.values())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    // A control-inlined callback can itself statically capture callbacks which
+    // never become ordinary emitted closure requests. Their exact callable
+    // rows still contribute protocol instances used by nested source-library
+    // control helpers, so walk the sealed static-capture graph to a fixed
+    // point rather than considering only its top-level roots.
+    let mut pending_closures = closure_requests.iter().cloned().collect::<Vec<_>>();
+    while let Some(closure) = pending_closures.pop() {
+        for nested in closure.static_captures.values().flatten() {
+            if closure_requests.insert(nested.clone()) {
+                pending_closures.push(nested.clone());
+            }
+        }
+    }
+    for closure in &closure_requests {
+        for effect in &closure.shape.effects {
+            if !declarations.contains_key(effect.declaration.0.as_str()) {
+                continue;
+            }
+            let mut runtime_arguments = Vec::new();
+            let mut static_arguments = Vec::new();
+            let mut valid = true;
+            for (position, ty) in effect.arguments.iter().enumerate() {
+                if typeck::label_payload_type(ty).is_some() {
+                    static_arguments.push(EffectStaticArgument::LabelBrand(position, ty.clone()));
+                } else if let Some(resolved) = provisional_to_resolved(ty, ids, array_name) {
+                    runtime_arguments.push(reference_types.intern(&resolved));
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
+                requested.insert(EffectInstanceKey {
+                    declaration: effect.declaration.0.clone(),
+                    arguments: runtime_arguments,
+                    static_arguments,
+                });
+            }
+        }
+    }
+
     let mut protocols = Vec::new();
     let mut operations = BTreeMap::new();
     let mut instance_operations = BTreeMap::new();
@@ -21583,6 +23692,38 @@ fn provisional_to_resolved(
             let typeck::ProvisionalType::Nominal(canonical) = canonical else {
                 unreachable!()
             };
+            fn has_symbolic_runtime_argument(ty: &typeck::ProvisionalType) -> bool {
+                match ty {
+                    typeck::ProvisionalType::Param(_) | typeck::ProvisionalType::Callable(_) => {
+                        true
+                    }
+                    typeck::ProvisionalType::Nominal(instance) => {
+                        instance.arguments.iter().any(has_symbolic_runtime_argument)
+                    }
+                    typeck::ProvisionalType::Tuple(elements) => {
+                        elements.iter().any(has_symbolic_runtime_argument)
+                    }
+                    typeck::ProvisionalType::Shared(referent)
+                    | typeck::ProvisionalType::Unique(referent) => {
+                        has_symbolic_runtime_argument(referent)
+                    }
+                    typeck::ProvisionalType::Predefined(_) | typeck::ProvisionalType::Const(_) => {
+                        false
+                    }
+                }
+            }
+            if canonical
+                .arguments
+                .iter()
+                .any(has_symbolic_runtime_argument)
+            {
+                // Callable shapes remain structured specialization evidence;
+                // they are not part of the stable nominal-name codec. The
+                // emitted Core already carries the grounded runtime callable
+                // descriptor, so this optional provisional agreement check
+                // must defer instead of trying to encode the symbolic shape.
+                return None;
+            }
             nominal_ids
                 .get(
                     if canonical.arguments.is_empty() {
@@ -21742,6 +23883,7 @@ fn generated_shapes(
                     captures,
                     environment,
                     active_labels,
+                    static_captures,
                 )) = substitutions.get(binder)
                 else {
                     return Err(vec![unsupported(
@@ -21756,6 +23898,7 @@ fn generated_shapes(
                     captures: captures.clone(),
                     param_env: environment.clone(),
                     active_labels: active_labels.clone(),
+                    static_captures: static_captures.clone(),
                 };
                 if template.result_binder.as_ref() == Some(binder)
                     || template
@@ -21857,6 +24000,7 @@ fn generated_shapes(
                 captures,
                 environment,
                 active_labels,
+                static_captures,
             ) = substitutions.get(binder)?
             else {
                 return None;
@@ -21867,6 +24011,7 @@ fn generated_shapes(
                 captures: captures.clone(),
                 param_env: environment.clone(),
                 active_labels: active_labels.clone(),
+                static_captures: static_captures.clone(),
             })
         });
         let retained_nominal =
@@ -21885,6 +24030,7 @@ fn generated_shapes(
                                     captures,
                                     environment,
                                     active_labels,
+                                    static_captures,
                                 ) => Some(specialization::ClosureTupleField::Closure(
                                     specialization::ClosureRequest {
                                         site: site.clone(),
@@ -21892,6 +24038,7 @@ fn generated_shapes(
                                         captures: captures.clone(),
                                         param_env: environment.clone(),
                                         active_labels: active_labels.clone(),
+                                        static_captures: static_captures.clone(),
                                     },
                                 )),
                                 specialization::SpecializationArgument::Type(ty) => {
@@ -22077,9 +24224,7 @@ fn generated_shapes(
                     value = match value {
                         ResolvedType::Tuple(fields) => fields.get(field as usize)?,
                         ResolvedType::Concrete(id) => {
-                            let (_, info) = nominal_shapes.iter().find(|(identity, info)| {
-                                info.id == *id && decode_nominal_instance(identity).is_some()
-                            })?;
+                            let info = nominal_shapes.values().find(|info| info.id == *id)?;
                             let ResolvedNominalKind::Struct(fields) = &info.kind else {
                                 return None;
                             };
@@ -22124,7 +24269,7 @@ fn generated_shapes(
             if compatible != 1 && exact_route.is_none() {
                 return Err(vec![type_error(
                     body.span,
-                    "a reference-returning closure wrapper must have exactly one compatible reference parameter or nonescaping capture",
+                    "a reference-returning closure must select exactly one compatible parameter or nonescaping capture through an exact symbolic reference route",
                 )]);
             }
         }
@@ -22364,56 +24509,6 @@ fn assignment_place_reference(place: &AssignmentPlace) -> Option<&Expr> {
     match &place.kind {
         AssignmentPlaceKind::Local { .. } => None,
         AssignmentPlaceKind::Dereference { reference, .. } => Some(reference),
-    }
-}
-
-fn contains_effect_control(expression: &Expr) -> bool {
-    match &expression.kind {
-        ExprKind::Perform { .. } | ExprKind::Handle { .. } => true,
-        ExprKind::Closure { body, .. }
-        | ExprKind::TypedClosure { body, .. }
-        | ExprKind::Move(body) => contains_effect_control(body),
-        ExprKind::List(values) | ExprKind::Tuple(values) => {
-            values.iter().any(contains_effect_control)
-        }
-        ExprKind::Struct { fields, .. } => fields
-            .iter()
-            .any(|(_, value)| contains_effect_control(value)),
-        ExprKind::Field(subject, _) => contains_effect_control(subject),
-        ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-            statements.iter().any(|statement| match statement {
-                Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                    contains_effect_control(value)
-                }
-                Stmt::Assign {
-                    destination, value, ..
-                } => {
-                    contains_effect_control(value)
-                        || assignment_place_reference(destination)
-                            .is_some_and(contains_effect_control)
-                }
-            })
-        }
-        ExprKind::Call(callee, args) if matches!(callee.kind, ExprKind::LabelReference(_)) => true,
-        ExprKind::Call(callee, args) => {
-            contains_effect_control(callee) || args.iter().any(contains_effect_control)
-        }
-        ExprKind::Unary { operand, .. } => contains_effect_control(operand),
-        ExprKind::Binary { lhs, rhs, .. } => {
-            contains_effect_control(lhs) || contains_effect_control(rhs)
-        }
-        ExprKind::LabelDestination { body, .. } => contains_effect_control(body),
-        ExprKind::Is { subject, .. } => contains_effect_control(subject),
-        ExprKind::Unit
-        | ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::Char(_)
-        | ExprKind::Byte(_)
-        | ExprKind::ByteString(_)
-        | ExprKind::String(_)
-        | ExprKind::Variable(_) => false,
-        ExprKind::LabelReference(_) => false,
-        ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => true,
     }
 }
 
@@ -24072,6 +26167,64 @@ fn prove_resumption_consumption(
             .iter()
             .any(|alias| expression_mentions_name(expression, alias))
     }
+    fn transports_origin(expression: &Expr, aliases: &BTreeSet<String>) -> bool {
+        let transports_all =
+            |values: &[Expr]| values.iter().any(|value| transports_origin(value, aliases));
+        match &expression.kind {
+            ExprKind::Variable(path) => path.len() == 1 && aliases.contains(path[0].as_ref()),
+            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                mentions_origin(body, aliases)
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => transports_all(values),
+            ExprKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| transports_origin(value, aliases)),
+            ExprKind::Field(subject, _) | ExprKind::Move(subject) => {
+                transports_origin(subject, aliases)
+            }
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                statements.last().is_some_and(|statement| match statement {
+                    Stmt::Let { value, .. }
+                    | Stmt::Deconstruct { value, .. }
+                    | Stmt::Expr(value)
+                    | Stmt::Assign { value, .. } => transports_origin(value, aliases),
+                })
+            }
+            ExprKind::Call(callee, args) => {
+                transports_origin(callee, aliases) || transports_all(args)
+            }
+            ExprKind::Perform { args, .. } => transports_all(args),
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                transports_origin(computation, aliases)
+                    || clauses
+                        .iter()
+                        .any(|clause| transports_origin(&clause.body, aliases))
+            }
+            ExprKind::Unary { operand, .. } => transports_origin(operand, aliases),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                transports_origin(lhs, aliases) || transports_origin(rhs, aliases)
+            }
+            ExprKind::LabelDestination { body, .. } => transports_origin(body, aliases),
+            // `is` evaluates and inspects its subject but produces only a
+            // Boolean proof. Generated decision trees must not make that
+            // proof appear to carry the matched value or its resumptions.
+            ExprKind::Is { .. }
+            | ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::String(_)
+            | ExprKind::LabelReference(_)
+            | ExprKind::Resume { .. }
+            | ExprKind::TailResume { .. }
+            | ExprKind::Cancel { .. } => false,
+        }
+    }
     fn count(
         expression: &Expr,
         binder: &str,
@@ -24173,6 +26326,55 @@ fn prove_resumption_consumption(
                         .iter()
                         .find(|function| function.name == name && function.generics.is_some())
                 }) {
+                    let transported = args
+                        .iter()
+                        .zip(&function.params)
+                        .enumerate()
+                        .filter(|(_, (argument, _))| transports_origin(argument, aliases))
+                        .collect::<Vec<_>>();
+                    if transported.is_empty() {
+                        return Ok(uses);
+                    }
+                    let callable_parameters = function
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, parameter)| {
+                            let binder = parameter.ty.simple_name()?;
+                            function
+                                .where_clause
+                                .iter()
+                                .flat_map(|clause| &clause.goals)
+                                .any(|goal| {
+                                    goal.subject.simple_name() == Some(binder)
+                                        && goal.relation.path.len() == 1
+                                        && goal.relation.path[0].name == "Fn"
+                                })
+                                .then_some(index)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let mut ordinary_transport = Vec::new();
+                    for (index, (argument, param)) in transported {
+                        if callable_parameters.contains(&index) {
+                            let invocations = named_calls(&function.body, &param.name);
+                            if invocations > 1 {
+                                let argument_uses = count(
+                                    argument,
+                                    binder,
+                                    aliases,
+                                    allow_cancel,
+                                    functions,
+                                    visiting,
+                                )?;
+                                uses += (invocations - 1) * argument_uses;
+                            }
+                        } else {
+                            ordinary_transport.push(param);
+                        }
+                    }
+                    if ordinary_transport.is_empty() {
+                        return Ok(uses);
+                    }
                     if !visiting.insert(function.name.clone()) {
                         return Err(unsupported(
                             expression.span,
@@ -24180,19 +26382,17 @@ fn prove_resumption_consumption(
                             "recursive generic calls transporting a resumption require a finite quantity summary",
                         ));
                     }
-                    for (argument, param) in args.iter().zip(&function.params) {
-                        if mentions_origin(argument, aliases) {
-                            let mut param_aliases = BTreeSet::from([param.name.clone()]);
-                            collect_aliases(&function.body, &mut param_aliases);
-                            uses += count(
-                                &function.body,
-                                &param.name,
-                                &param_aliases,
-                                allow_cancel,
-                                functions,
-                                visiting,
-                            )?;
-                        }
+                    for param in ordinary_transport {
+                        let mut param_aliases = BTreeSet::from([param.name.clone()]);
+                        collect_aliases(&function.body, &mut param_aliases);
+                        uses += count(
+                            &function.body,
+                            &param.name,
+                            &param_aliases,
+                            allow_cancel,
+                            functions,
+                            visiting,
+                        )?;
                     }
                     visiting.remove(&function.name);
                 }
@@ -24734,12 +26934,391 @@ fn prove_resumption_consumption(
 }
 
 impl<'a> CoreLowerer<'a> {
+    /// Materialize a protocol instance discovered only after static control
+    /// callbacks have been beta-reduced into their destination frame.
+    ///
+    /// Ordinary specialization discovers effect instances before Core. A
+    /// proof-only label/callback chain, however, can remain symbolic until
+    /// late control inlining grounds its state and result types. Such an
+    /// instance is still a normal source-declared protocol: register every
+    /// operation together so handlers are exhaustive independently of which
+    /// operation happened to expose the instance first.
+    fn ensure_late_effect_instance(&mut self, key: &EffectInstanceKey) -> bool {
+        if self
+            .effects
+            .instance_operations
+            .keys()
+            .any(|(candidate, _)| candidate == key)
+        {
+            return true;
+        }
+        let Some(effect) = self
+            .program
+            .effects
+            .iter()
+            .find(|effect| effect.name == key.declaration)
+            .cloned()
+        else {
+            return false;
+        };
+        let type_parameters = effect
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter(|parameter| parameter.kind == GenericParamKind::Type)
+            .collect::<Vec<_>>();
+        let static_positions = key
+            .static_arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                EffectStaticArgument::LabelBrand(position, _) => Some(*position),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let runtime_parameters = type_parameters
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !static_positions.contains(position))
+            .map(|(_, parameter)| parameter.name.clone())
+            .collect::<Vec<_>>();
+        if runtime_parameters.len() != key.arguments.len() {
+            return false;
+        }
+        let substitutions = runtime_parameters
+            .into_iter()
+            .zip(key.arguments.iter().copied())
+            .collect::<BTreeMap<_, _>>();
+        let protocol = self.effects.protocols.len() as u32;
+        let mut bytecode_operations = Vec::with_capacity(effect.operations.len());
+        let mut operation_infos = Vec::with_capacity(effect.operations.len());
+        for operation in &effect.operations {
+            let operation_type_parameters = operation
+                .generics
+                .iter()
+                .flat_map(|generics| &generics.params)
+                .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                .map(|parameter| parameter.name.as_str())
+                .collect::<BTreeSet<_>>();
+            let mut operation_label_bounds = BTreeMap::new();
+            for goal in operation
+                .where_clause
+                .iter()
+                .flat_map(|where_clause| &where_clause.goals)
+            {
+                let Some(parameter) = goal.subject.simple_name().filter(|name| {
+                    goal.polarity == GoalPolarity::Positive
+                        && goal.relation.path.len() == 1
+                        && goal.relation.path[0].name == "Label"
+                        && operation_type_parameters.contains(name)
+                }) else {
+                    continue;
+                };
+                let [GoalArgument::Type(payload)] = goal.relation.arguments.as_slice() else {
+                    return false;
+                };
+                operation_label_bounds.insert(parameter.to_owned(), payload.clone());
+            }
+            let mut params = Vec::new();
+            let mut static_label_params = Vec::new();
+            let mut static_label_payloads = BTreeMap::new();
+            for (position, parameter) in operation.params.iter().enumerate() {
+                if let Some(payload) = parameter
+                    .ty
+                    .simple_name()
+                    .and_then(|name| operation_label_bounds.get(name))
+                {
+                    let Some(payload) = self.substituted_source_type(payload, &substitutions)
+                    else {
+                        return false;
+                    };
+                    static_label_params.push(position);
+                    static_label_payloads.insert(position, payload);
+                    continue;
+                }
+                let effect_position = type_parameters
+                    .iter()
+                    .position(|generic| parameter.ty.simple_name() == Some(generic.name.as_str()));
+                if effect_position.is_some_and(|position| static_positions.contains(&position)) {
+                    static_label_params.push(position);
+                    continue;
+                }
+                let Some(ty) = self.substituted_source_type(&parameter.ty, &substitutions) else {
+                    return false;
+                };
+                if ty == NEVER {
+                    return false;
+                }
+                params.push(ty);
+            }
+            let result = if operation.terminal {
+                NEVER
+            } else if let Some(result) = &operation.return_type {
+                let Some(result) = self.substituted_source_type(result, &substitutions) else {
+                    return false;
+                };
+                if result == NEVER {
+                    return false;
+                }
+                result
+            } else {
+                UNIT
+            };
+            let operation_id = bytecode_operations.len() as u32;
+            let resumption_lower = if operation.terminal {
+                0
+            } else {
+                operation.resumption_lower as u32
+            };
+            let resumption_upper = if operation.terminal {
+                Some(0)
+            } else {
+                operation.resumption_upper.map(|upper| upper as u32)
+            };
+            operation_infos.push((
+                operation.name.clone(),
+                EffectOperationInfo {
+                    protocol,
+                    operation: operation_id,
+                    params: params.clone(),
+                    result,
+                    terminal: operation.terminal,
+                    resumption_lower,
+                    resumption_upper,
+                    static_label_params,
+                    static_label_payloads,
+                    span: operation.span,
+                },
+            ));
+            bytecode_operations.push(Operation {
+                name: operation.name.clone(),
+                payload_signature: BytecodeSignature {
+                    params,
+                    result: UNIT,
+                    outward_protocols: vec![],
+                },
+                result_type: result,
+                resumption_lower,
+                resumption_upper,
+                terminal: operation.terminal,
+            });
+        }
+        self.effects.protocols.push(Protocol {
+            display_name: effect_protocol_display_name(key),
+            type_arguments: key.arguments.clone(),
+            operations: bytecode_operations,
+        });
+        if !static_positions.is_empty() {
+            self.effects.label_branded_protocols.insert(protocol);
+        }
+        for (operation, info) in operation_infos {
+            self.effects
+                .instance_operations
+                .insert((key.clone(), operation), info);
+        }
+        true
+    }
+
+    fn late_effect_operation_info(
+        &mut self,
+        span: Span,
+        operation: &str,
+    ) -> Option<EffectOperationInfo> {
+        let function = self.late_inline_functions.last()?;
+        let path = self
+            .program
+            .effect_paths
+            .iter()
+            .find(|path| path.site.start == span.start && path.site.end == span.end)?;
+        let TypeSyntaxKind::Application {
+            constructor,
+            arguments,
+            ..
+        } = &path.effect.kind
+        else {
+            return None;
+        };
+        let declaration = constructor.simple_name()?;
+        let mut runtime_arguments = Vec::new();
+        let mut static_arguments = effect_static_arguments(self.program, &path.effect).ok()?;
+        for (position, argument) in arguments.iter().enumerate() {
+            if let Some(binder) = argument.simple_name() {
+                let label_parameter = self
+                    .function_templates
+                    .iter()
+                    .find(|template| template.name == *function)
+                    .and_then(|template| {
+                        let summary = self.control_summaries.get(function)?;
+                        summary.static_label_parameters.iter().find_map(|index| {
+                            (template.params[*index].ty.simple_name() == Some(binder))
+                                .then_some(template.params[*index].name.as_str())
+                        })
+                    });
+                let label = self
+                    .static_labels
+                    .get(binder)
+                    .or_else(|| label_parameter.and_then(|name| self.static_labels.get(name)));
+                if let Some(label) = label {
+                    let exact = self.label_evidence.iter().find_map(|(owner, labels)| {
+                        labels
+                            .iter()
+                            .find(|evidence| {
+                                evidence.name == label.name.as_ref()
+                                    && (evidence.binder_span == label.span
+                                        || evidence.references.contains(&label.span)
+                                        || evidence
+                                            .leaves
+                                            .iter()
+                                            .any(|leave| leave.span == label.span))
+                            })
+                            .map(|evidence| (owner, evidence))
+                    });
+                    let mut named = self.label_evidence.iter().flat_map(|(owner, labels)| {
+                        labels
+                            .iter()
+                            .filter(|evidence| evidence.name == label.name.as_ref())
+                            .map(move |evidence| (owner, evidence))
+                    });
+                    let first = named.next();
+                    let unique = first.filter(|_| named.next().is_none());
+                    let (owner, evidence) = exact.or(unique)?;
+                    let mut payload = evidence.destination_result.clone()?;
+                    if let typeck::ProvisionalType::Nominal(instance) = &payload
+                        && instance.arguments.is_empty()
+                        && let Some(ty) = self.late_inline_named_type_id(&instance.declaration.0)
+                        && let Some(ground) = self.provisional_runtime_type_id(ty)
+                    {
+                        payload = ground;
+                    }
+                    if let typeck::ProvisionalType::Nominal(instance) = &payload
+                        && instance.arguments.is_empty()
+                        && let Some(ty) = self.specialized_named_type(&instance.declaration.0)
+                        && let Some(ground) = self.ground_late_closure_type(&ty)
+                    {
+                        payload = ground;
+                    }
+                    let binder = crate::ast::LabelSyntax {
+                        name: evidence.name.clone().into(),
+                        span: evidence.binder_span,
+                    };
+                    static_arguments.push(EffectStaticArgument::LabelBrand(
+                        position,
+                        typeck::label_provisional_type(owner, &binder, payload),
+                    ));
+                    continue;
+                }
+            }
+            let ty = if let Some(binder) = argument.simple_name() {
+                self.late_inline_type_substitutions
+                    .get(&format!("{function}::{binder}"))
+                    .copied()
+                    .or_else(|| {
+                        resolve_source_type(
+                            argument,
+                            self.nominal_ids,
+                            self.aliases,
+                            self.runtime_bindings.array_name(),
+                        )
+                        .ok()
+                        .and_then(|ty| self.existing_structural_type_id(&ty))
+                    })
+            } else {
+                let mut ids = self
+                    .nominal_ids
+                    .iter()
+                    .map(|(name, id)| (*name, *id))
+                    .collect::<BTreeMap<&str, TypeId>>();
+                let prefix = format!("{function}::");
+                for (name, ty) in &self.late_inline_type_substitutions {
+                    if let Some(name) = name.strip_prefix(&prefix) {
+                        ids.insert(name, *ty);
+                    }
+                }
+                resolve_source_type(
+                    argument,
+                    &ids,
+                    self.aliases,
+                    self.runtime_bindings.array_name(),
+                )
+                .ok()
+                .and_then(|ty| self.existing_structural_type_id(&ty))
+            };
+            let ty = ty?;
+            runtime_arguments.push(ty);
+        }
+        let key = EffectInstanceKey {
+            declaration: declaration.to_owned(),
+            static_arguments,
+            arguments: runtime_arguments,
+        };
+        let mut result = self
+            .effects
+            .instance_operations
+            .get(&(key.clone(), operation.to_owned()))
+            .cloned();
+        if result.is_none() {
+            fn same_static_identity(
+                left: &EffectStaticArgument,
+                right: &EffectStaticArgument,
+            ) -> bool {
+                fn label_identity(brand: &typeck::ProvisionalType) -> Option<&str> {
+                    match brand {
+                        typeck::ProvisionalType::Nominal(instance) => {
+                            Some(instance.declaration.0.as_str())
+                        }
+                        _ => None,
+                    }
+                }
+                match (left, right) {
+                    (
+                        EffectStaticArgument::LabelBrand(left_position, left_brand),
+                        EffectStaticArgument::LabelBrand(right_position, right_brand),
+                    ) => {
+                        left_position == right_position
+                            && label_identity(left_brand) == label_identity(right_brand)
+                    }
+                    _ => left == right,
+                }
+            }
+            let mut candidates = self.effects.instance_operations.iter().filter_map(
+                |((candidate, candidate_operation), info)| {
+                    (candidate_operation == operation
+                        && candidate.declaration == key.declaration
+                        && candidate.arguments == key.arguments
+                        && candidate.static_arguments.len() == key.static_arguments.len()
+                        && candidate
+                            .static_arguments
+                            .iter()
+                            .zip(&key.static_arguments)
+                            .all(|(left, right)| same_static_identity(left, right)))
+                    .then_some(info)
+                },
+            );
+            let first = candidates.next().cloned();
+            result = first.filter(|first| {
+                candidates.all(|candidate| {
+                    candidate.protocol == first.protocol && candidate.operation == first.operation
+                })
+            });
+        }
+        if result.is_none() && self.ensure_late_effect_instance(&key) {
+            result = self
+                .effects
+                .instance_operations
+                .get(&(key, operation.to_owned()))
+                .cloned();
+        }
+        result
+    }
+
     fn operation_info(
-        &self,
+        &mut self,
         span: Span,
         effect: &str,
         operation: &str,
     ) -> Option<EffectOperationInfo> {
+        if let Some(info) = self.late_effect_operation_info(span, operation) {
+            return Some(info);
+        }
         if let Some(specialization::BodyInstanceKey::Specialization(key)) = &self.body_instance
             && let Some(info) =
                 self.effects
@@ -24757,14 +27336,58 @@ impl<'a> CoreLowerer<'a> {
                     .get(&(effect.to_owned(), operation.to_owned()))
             })
             .cloned()
+            .or_else(|| {
+                let allowed = self.allow_terminal_perform.as_ref()?;
+                let mut candidates = allowed.iter().filter_map(|(protocol, operation_id)| {
+                    let protocol_descriptor = self.effects.protocols.get(*protocol as usize)?;
+                    let operation_descriptor =
+                        protocol_descriptor.operations.get(*operation_id as usize)?;
+                    (operation_descriptor.name == operation
+                        && (protocol_descriptor.display_name == effect
+                            || protocol_descriptor
+                                .display_name
+                                .starts_with(&format!("{effect}<"))))
+                    .then_some((*protocol, *operation_id))
+                });
+                let candidate = candidates.next()?;
+                if candidates.next().is_some() {
+                    return None;
+                }
+                self.effects
+                    .instance_operations
+                    .values()
+                    .find(|info| info.protocol == candidate.0 && info.operation == candidate.1)
+                    .cloned()
+            })
     }
 
-    fn body_operation_sites(&self) -> BTreeMap<(usize, usize), EffectOperationInfo> {
+    fn body_operation_sites(&mut self) -> BTreeMap<(usize, usize), EffectOperationInfo> {
         let mut sites = self.effects.operation_sites.clone();
         if let Some(specialization::BodyInstanceKey::Specialization(key)) = &self.body_instance {
             for ((candidate, start, end), info) in &self.effects.specialized_operation_sites {
                 if candidate == key {
                     sites.insert((*start, *end), info.clone());
+                }
+            }
+        }
+        if !self.late_inline_functions.is_empty() {
+            let paths = self
+                .program
+                .effect_paths
+                .iter()
+                .map(|path| path.site)
+                .collect::<Vec<_>>();
+            for site in paths {
+                let Some(operation) = self
+                    .effects
+                    .site_operations
+                    .get(&(site.start, site.end))
+                    .cloned()
+                else {
+                    continue;
+                };
+                if let Some(info) = self.late_effect_operation_info(site, &operation) {
+                    sites.insert((site.start, site.end), info);
                 }
             }
         }
@@ -24835,6 +27458,7 @@ impl<'a> CoreLowerer<'a> {
         }
         match ty {
             ResolvedType::Concrete(id) => *id,
+            ResolvedType::Tuple(elements) if elements.is_empty() => UNIT,
             ResolvedType::Tuple(elements) => {
                 let fields = elements
                     .iter()
@@ -24885,6 +27509,7 @@ impl<'a> CoreLowerer<'a> {
         };
         let (children, kind) = match ty {
             ResolvedType::Concrete(id) => return Some(*id),
+            ResolvedType::Tuple(elements) if elements.is_empty() => return Some(UNIT),
             ResolvedType::Tuple(elements) => (
                 elements
                     .iter()
@@ -24908,7 +27533,7 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn infer_late_substitutions(
-        &self,
+        &mut self,
         syntax: &TypeSyntax,
         actual: TypeId,
         generic_names: &BTreeSet<String>,
@@ -24972,43 +27597,6 @@ impl<'a> CoreLowerer<'a> {
                 },
                 ResolvedType::Concrete(_),
             ) => {
-                fn ground_id(
-                    this: &CoreLowerer<'_>,
-                    ty: &typeck::ProvisionalType,
-                ) -> Option<TypeId> {
-                    match ty {
-                        typeck::ProvisionalType::Predefined(name) => scalar_type(name)
-                            .or_else(|| this.nominals.get(name).map(|info| info.id)),
-                        typeck::ProvisionalType::Nominal(instance) => {
-                            let name = if instance.arguments.is_empty() {
-                                instance.declaration.0.clone()
-                            } else {
-                                encode_nominal_instance(instance)
-                            };
-                            this.nominals.get(&name).map(|info| info.id)
-                        }
-                        typeck::ProvisionalType::Tuple(elements) => {
-                            let elements = elements
-                                .iter()
-                                .map(|element| ground_id(this, element).map(ResolvedType::Concrete))
-                                .collect::<Option<Vec<_>>>()?;
-                            this.existing_structural_type_id(&ResolvedType::Tuple(elements))
-                        }
-                        typeck::ProvisionalType::Shared(referent)
-                        | typeck::ProvisionalType::Unique(referent) => {
-                            let referent = ground_id(this, referent)?;
-                            let resolved = if matches!(ty, typeck::ProvisionalType::Shared(_)) {
-                                ResolvedType::Shared(Box::new(ResolvedType::Concrete(referent)))
-                            } else {
-                                ResolvedType::Unique(Box::new(ResolvedType::Concrete(referent)))
-                            };
-                            this.existing_structural_type_id(&resolved)
-                        }
-                        typeck::ProvisionalType::Param(_)
-                        | typeck::ProvisionalType::Const(_)
-                        | typeck::ProvisionalType::Callable(_) => None,
-                    }
-                }
                 let late_arguments = self.effects.late_nominals.get(&actual).and_then(|late| {
                     (constructor.simple_name() == Some(late.declaration.as_str()))
                         .then(|| late.arguments.clone())
@@ -25028,7 +27616,7 @@ impl<'a> CoreLowerer<'a> {
                         instance
                             .arguments
                             .iter()
-                            .map(|argument| ground_id(self, argument))
+                            .map(|argument| self.late_closure_type_id(argument))
                             .collect::<Option<Vec<_>>>()
                     })
                     .or_else(|| {
@@ -25038,7 +27626,7 @@ impl<'a> CoreLowerer<'a> {
                                 (*id == actual
                                     && constructor.simple_name()
                                         == Some(instance.declaration.as_str()))
-                                .then_some(instance)
+                                .then(|| instance.clone())
                             })
                             .and_then(|instance| {
                                 instance
@@ -25046,7 +27634,7 @@ impl<'a> CoreLowerer<'a> {
                                     .iter()
                                     .map(|argument| match argument {
                                         specialization::ClosureTupleField::Type(ty) => {
-                                            ground_id(self, ty)
+                                            self.late_closure_type_id(ty)
                                         }
                                         specialization::ClosureTupleField::Closure(request) => self
                                             .closure_runtimes
@@ -25064,17 +27652,18 @@ impl<'a> CoreLowerer<'a> {
                                     .collect::<Option<Vec<_>>>()
                             })
                     });
-                late_arguments.or(sealed_arguments).is_some_and(|actuals| {
-                    arguments.len() == actuals.len()
-                        && arguments.iter().zip(actuals).all(|(formal, actual)| {
-                            self.infer_late_substitutions(
-                                formal,
-                                actual,
-                                generic_names,
-                                substitutions,
-                            )
-                        })
-                })
+                let Some(actuals) = late_arguments.or(sealed_arguments) else {
+                    // A generated or erased concrete nominal may not have a
+                    // reversible source-instance spelling in these tables.
+                    // Type checking and the specialization request already
+                    // validated the application; absence of extra structural
+                    // evidence is not a contradiction.
+                    return true;
+                };
+                arguments.len() == actuals.len()
+                    && arguments.iter().zip(actuals).all(|(formal, actual)| {
+                        self.infer_late_substitutions(formal, actual, generic_names, substitutions)
+                    })
             }
             _ => true,
         }
@@ -25097,6 +27686,155 @@ impl<'a> CoreLowerer<'a> {
     ) -> (Self, Vec<core::Param>, Vec<core::Param>) {
         let (expression_ordinals, expression_span_ordinals) = expression_ordinals;
         let final_use_control_spans = final_use_control_spans(final_use_root);
+        fn forwards_parameter_across_self_recursion(function: &Function, parameter: &str) -> bool {
+            struct Forwarding<'a> {
+                function: &'a str,
+                parameter: &'a str,
+                found: bool,
+            }
+            impl<'ast> ExprVisitor<'ast> for Forwarding<'_> {
+                type Break = ();
+
+                fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                    if let ExprKind::Call(callee, arguments) = &expression.kind
+                        && matches!(&callee.kind, ExprKind::Variable(path)
+                            if path.len() == 1 && path[0].as_ref() == self.function)
+                        && arguments.iter().any(|argument| match &argument.kind {
+                            ExprKind::Variable(path) => {
+                                path.len() == 1 && path[0].as_ref() == self.parameter
+                            }
+                            ExprKind::Move(value) => matches!(&value.kind, ExprKind::Variable(path)
+                                if path.len() == 1 && path[0].as_ref() == self.parameter),
+                            _ => false,
+                        })
+                    {
+                        self.found = true;
+                        return ControlFlow::Break(());
+                    }
+                    walk_expr(self, expression)
+                }
+            }
+            let mut forwarding = Forwarding {
+                function: &function.name,
+                parameter,
+                found: false,
+            };
+            let _ = forwarding.visit_expr(&function.body);
+            forwarding.found
+        }
+        fn forwards_parameter_into_label_control(
+            function: &Function,
+            parameter: &str,
+            summaries: &ControlSummaries,
+        ) -> bool {
+            struct Forwarding<'a> {
+                parameter: &'a str,
+                summaries: &'a ControlSummaries,
+                found: bool,
+            }
+            impl<'ast> ExprVisitor<'ast> for Forwarding<'_> {
+                type Break = ();
+
+                fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                    if let ExprKind::Call(callee, arguments) = &expression.kind
+                        && let ExprKind::Variable(path) = &callee.kind
+                        && let [target] = path.as_ref()
+                        && self
+                            .summaries
+                            .get(target.as_ref())
+                            .is_some_and(|summary| !summary.static_label_parameters.is_empty())
+                        && arguments
+                            .iter()
+                            .any(|argument| expression_mentions_name(argument, self.parameter))
+                    {
+                        self.found = true;
+                        return ControlFlow::Break(());
+                    }
+                    walk_expr(self, expression)
+                }
+            }
+            let mut forwarding = Forwarding {
+                parameter,
+                summaries,
+                found: false,
+            };
+            let _ = forwarding.visit_expr(&function.body);
+            forwarding.found
+        }
+        let static_callback_requests = match &body_instance {
+            specialization::BodyInstanceKey::Specialization(key) => tables
+                .specialization_graph
+                .templates
+                .get(&key.template)
+                .and_then(|template| {
+                    let substitutions = specialization::substitutions_for_key(template, key);
+                    let typeck::DeclarationKey::Function(name) = &key.template else {
+                        return None;
+                    };
+                    let function = tables
+                        .program
+                        .functions
+                        .iter()
+                        .find(|function| &function.name == name)?;
+                    let has_reference_parameters = function.params.iter().any(|parameter| {
+                        matches!(
+                            parameter.ty.kind,
+                            TypeSyntaxKind::SharedReference { .. }
+                                | TypeSyntaxKind::UniqueReference { .. }
+                        )
+                    });
+                    Some(
+                        function
+                            .params
+                            .iter()
+                            .zip(&template.parameter_binders)
+                            .filter_map(|(parameter, binder)| {
+                                let binder = binder.as_ref()?;
+                                let forwards_into_label_control =
+                                    forwards_parameter_into_label_control(
+                                        function,
+                                        &parameter.name,
+                                        tables.control_summaries,
+                                    );
+                                if (!forwards_parameter_across_self_recursion(
+                                    function,
+                                    &parameter.name,
+                                ) && !forwards_into_label_control)
+                                    || (has_reference_parameters && !forwards_into_label_control)
+                                {
+                                    return None;
+                                }
+                                let specialization::SpecializationArgument::Closure(
+                                    site,
+                                    shape,
+                                    captures,
+                                    environment,
+                                    active_labels,
+                                    static_captures,
+                                ) = substitutions.get(binder)?
+                                else {
+                                    return None;
+                                };
+                                Some((
+                                    parameter.name.clone(),
+                                    specialization::ClosureRequest {
+                                        site: site.clone(),
+                                        shape: shape.clone(),
+                                        captures: captures.clone(),
+                                        param_env: environment.clone(),
+                                        active_labels: active_labels.clone(),
+                                        static_captures: static_captures.clone(),
+                                    },
+                                ))
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap_or_default(),
+            specialization::BodyInstanceKey::Root(_)
+            | specialization::BodyInstanceKey::Drop(_)
+            | specialization::BodyInstanceKey::Closure(_) => Vec::new(),
+        };
         let environment_capture_modes = match &body_instance {
             specialization::BodyInstanceKey::Closure(request) => request
                 .captures
@@ -25210,101 +27948,182 @@ impl<'a> CoreLowerer<'a> {
             .values()
             .map(|local| (local.local, local.ty))
             .collect();
-        (
-            Self {
-                program: tables.program,
-                nominal_ids: tables.nominal_ids,
-                aliases: tables.aliases,
-                function_templates: tables.function_templates,
-                nominal_templates: tables.nominal_templates,
-                enum_templates: tables.enum_templates,
-                signatures: tables.signatures,
-                globals: tables.globals,
-                nominals: tables.nominals,
-                copy_types: tables.copy_types,
-                custom_drop_types: tables.custom_drop_types,
-                principal_uses: tables.principal_uses,
-                erased_types: tables.erased_types,
-                references: tables.references,
-                generated_signatures: tables.generated_signatures,
-                generated_shapes: tables.generated_shapes,
-                specialization_graph: tables.specialization_graph,
-                nominal_privacy: tables.nominal_privacy,
-                privacy_domains: tables.privacy_domains,
-                runtime_bindings: tables.runtime_bindings,
-                performance_summaries: tables.performance_summaries,
-                closure_runtimes: tables.closure_runtimes,
-                closure_nominal_types: tables.closure_nominal_types,
-                reference_return_summaries: tables.reference_return_summaries,
-                reference_return_plans: tables.reference_return_plans,
-                active_reference_return_plan: None,
-                defer_perform_reference_result: false,
-                label_evidence: tables.label_evidence,
-                provisional_types: tables.provisional_types,
-                body_instance: Some(body_instance),
-                direct_source_body: true,
-                environment_capture_modes,
-                expression_ordinals,
-                expression_span_ordinals,
-                inferred_final_uses: BTreeSet::new(),
-                inherited_final_uses: Vec::new(),
-                transparent_final_use_limits: Vec::new(),
-                final_use_control_spans,
-                final_use_barrier_depth: 0,
-                final_use_block_depth: 0,
-                branch_final_use_scopes: Vec::new(),
-                effects,
-                allow_terminal_perform: allowance.terminal_performs,
-                outward_protocols: allowance.outward_protocols,
-                noncancelling_operations: allowance.noncancelling_operations,
-                allow_handler: allowance.allow_handler,
-                locals,
-                borrow_only_captures: BTreeMap::new(),
-                owner_types,
-                next_local: (params.len() + parameter_contract.receiver_captures.len())
-                    as core::LocalId,
-                moved: BTreeSet::new(),
-                actual_uses: BTreeMap::new(),
-                actual_use_lowers: BTreeMap::new(),
-                resumption_use_weights: BTreeMap::new(),
-                resumption_use_weight_lowers: BTreeMap::new(),
-                moved_paths: BTreeMap::new(),
-                empty_referents: BTreeSet::new(),
-                loans: BTreeMap::new(),
-                projected_loans: BTreeMap::new(),
-                active_variant_proofs: BTreeMap::new(),
-                suspended: BTreeSet::new(),
-                uniquely_suspended: BTreeSet::new(),
-                regions: parameter_contract
-                    .regions
-                    .universal_facts
-                    .iter()
-                    .cloned()
-                    .map(|fact| (fact.region, fact))
-                    .collect(),
-                next_region: parameter_contract
-                    .regions
-                    .universal_facts
-                    .last()
-                    .map_or(1, |fact| fact.region + 1),
-                next_point: 1,
-                current_point: 0,
-                defer_branch_region_ends: 0,
-                late_inline_stack: BTreeSet::new(),
-                next_control_loop: 0,
-                active_late_control_loops: BTreeMap::new(),
-                current_live_after: BTreeSet::new(),
-                late_inline_continuation_locals: Vec::new(),
-                late_inline_let_expectations: BTreeMap::new(),
-                late_inline_type_substitutions: BTreeMap::new(),
-                active_labels: BTreeMap::new(),
-                static_labels: BTreeMap::new(),
-                static_closures: BTreeMap::new(),
-                recursive_receiver: None,
-            },
-            core_params,
-            core_receiver_captures,
-        )
+        let mut lowerer = Self {
+            program: tables.program,
+            nominal_ids: tables.nominal_ids,
+            aliases: tables.aliases,
+            function_templates: tables.function_templates,
+            nominal_templates: tables.nominal_templates,
+            enum_templates: tables.enum_templates,
+            signatures: tables.signatures,
+            globals: tables.globals,
+            nominals: tables.nominals,
+            copy_types: tables.copy_types,
+            custom_drop_types: tables.custom_drop_types,
+            principal_uses: tables.principal_uses,
+            erased_types: tables.erased_types,
+            references: tables.references,
+            generated_signatures: tables.generated_signatures,
+            generated_shapes: tables.generated_shapes,
+            specialization_graph: tables.specialization_graph,
+            nominal_privacy: tables.nominal_privacy,
+            privacy_domains: tables.privacy_domains,
+            runtime_bindings: tables.runtime_bindings,
+            performance_summaries: tables.performance_summaries,
+            control_summaries: tables.control_summaries,
+            closure_runtimes: tables.closure_runtimes,
+            closure_nominal_types: tables.closure_nominal_types,
+            reference_return_summaries: tables.reference_return_summaries,
+            reference_return_plans: tables.reference_return_plans,
+            active_reference_return_plan: None,
+            defer_perform_reference_result: false,
+            label_evidence: tables.label_evidence,
+            provisional_types: tables.provisional_types,
+            body_instance: Some(body_instance),
+            direct_source_body: true,
+            environment_capture_modes,
+            expression_ordinals,
+            expression_span_ordinals,
+            inferred_final_uses: BTreeSet::new(),
+            inherited_final_uses: Vec::new(),
+            transparent_final_use_limits: Vec::new(),
+            final_use_control_spans,
+            final_use_barrier_depth: 0,
+            final_use_block_depth: 0,
+            branch_final_use_scopes: Vec::new(),
+            effects,
+            allow_terminal_perform: allowance.terminal_performs,
+            outward_protocols: allowance.outward_protocols,
+            noncancelling_operations: allowance.noncancelling_operations,
+            allow_handler: allowance.allow_handler,
+            locals,
+            borrow_only_captures: BTreeMap::new(),
+            owner_types,
+            next_local: (params.len() + parameter_contract.receiver_captures.len())
+                as core::LocalId,
+            moved: BTreeSet::new(),
+            actual_uses: BTreeMap::new(),
+            actual_use_lowers: BTreeMap::new(),
+            resumption_use_weights: BTreeMap::new(),
+            resumption_use_weight_lowers: BTreeMap::new(),
+            moved_paths: BTreeMap::new(),
+            empty_referents: BTreeSet::new(),
+            loans: BTreeMap::new(),
+            projected_loans: BTreeMap::new(),
+            active_variant_proofs: BTreeMap::new(),
+            suspended: BTreeSet::new(),
+            uniquely_suspended: BTreeSet::new(),
+            regions: parameter_contract
+                .regions
+                .universal_facts
+                .iter()
+                .cloned()
+                .map(|fact| (fact.region, fact))
+                .collect(),
+            next_region: parameter_contract
+                .regions
+                .universal_facts
+                .last()
+                .map_or(1, |fact| fact.region + 1),
+            next_point: 1,
+            current_point: 0,
+            defer_branch_region_ends: 0,
+            late_inline_stack: BTreeSet::new(),
+            next_control_loop: 0,
+            active_late_control_loops: BTreeMap::new(),
+            next_source_label: 0,
+            inline_terminal_handlers: Vec::new(),
+            next_inline_terminal_label: core::LabelId::MAX,
+            current_live_after: BTreeSet::new(),
+            late_inline_continuation_locals: Vec::new(),
+            late_inline_let_expectations: BTreeMap::new(),
+            late_inline_type_substitutions: BTreeMap::new(),
+            late_inline_functions: Vec::new(),
+            active_labels: BTreeMap::new(),
+            static_labels: BTreeMap::new(),
+            static_closures: BTreeMap::new(),
+            recursive_receiver: None,
+        };
+        fn static_closure_from_request(
+            tables: CoreTables<'_>,
+            lowerer: &mut CoreLowerer<'_>,
+            request: specialization::ClosureRequest,
+        ) -> Option<StaticClosure> {
+            let body_kind = tables
+                .specialization_graph
+                .closure_bodies
+                .get(&request)
+                .copied()
+                .or_else(|| {
+                    tables
+                        .specialization_graph
+                        .static_closure_bodies
+                        .values()
+                        .find(|plan| plan.request == request)
+                        .map(|plan| plan.body_kind)
+                })?;
+            let (parameters, body) =
+                specialization::closure_body(tables.program, &request, body_kind)?;
+            let captures = request
+                .captures
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, capture)| {
+                    let lifted =
+                        specialization::ClosureCapture::lifted_name(&request.site, ordinal);
+                    lowerer
+                        .locals
+                        .get(&lifted)
+                        .cloned()
+                        .or_else(|| lowerer.locals.get(&capture.name).cloned())
+                        .map(|local| (capture.name.clone(), local))
+                })
+                .collect();
+            let static_closure_captures = request
+                .static_captures
+                .iter()
+                .filter_map(|(name, producers)| {
+                    let [producer] = producers.as_slice() else {
+                        return None;
+                    };
+                    static_closure_from_request(tables, lowerer, producer.clone())
+                        .map(|closure| (name.clone(), Box::new(closure)))
+                })
+                .collect::<BTreeMap<_, _>>();
+            if static_closure_captures.len() != request.static_captures.len() {
+                return None;
+            }
+            let root =
+                specialization::body_root(tables.program, &request.site.owner).unwrap_or(body);
+            let (_, closure_ordinals) = specialization::expression_ordinal_maps(root);
+            let result = lowerer.late_closure_type_id(&request.shape.result);
+            Some(StaticClosure {
+                source: Expr {
+                    kind: ExprKind::Closure {
+                        params: parameters
+                            .into_iter()
+                            .map(Rc::<str>::from)
+                            .collect::<Vec<_>>()
+                            .into(),
+                        body: Rc::new(body.clone()),
+                    },
+                    span: body.span,
+                },
+                result,
+                captures,
+                static_closure_captures,
+                static_label_captures: BTreeMap::new(),
+                active_label_captures: BTreeMap::new(),
+                expression_ordinals: closure_ordinals,
+                body_instance: Some(specialization::BodyInstanceKey::Closure(request)),
+            })
+        }
+        for (name, request) in static_callback_requests {
+            if let Some(closure) = static_closure_from_request(tables, &mut lowerer, request) {
+                lowerer.static_closures.insert(name, closure);
+            }
+        }
+        (lowerer, core_params, core_receiver_captures)
     }
 
     fn new_synthetic(
@@ -25444,6 +28263,7 @@ impl<'a> CoreLowerer<'a> {
                 privacy_domains: tables.privacy_domains,
                 runtime_bindings: tables.runtime_bindings,
                 performance_summaries: tables.performance_summaries,
+                control_summaries: tables.control_summaries,
                 closure_runtimes: tables.closure_runtimes,
                 closure_nominal_types: tables.closure_nominal_types,
                 reference_return_summaries: tables.reference_return_summaries,
@@ -25493,10 +28313,14 @@ impl<'a> CoreLowerer<'a> {
                 late_inline_stack: BTreeSet::new(),
                 next_control_loop: 0,
                 active_late_control_loops: BTreeMap::new(),
+                next_source_label: 0,
+                inline_terminal_handlers: Vec::new(),
+                next_inline_terminal_label: core::LabelId::MAX,
                 current_live_after: BTreeSet::new(),
                 late_inline_continuation_locals: Vec::new(),
                 late_inline_let_expectations: BTreeMap::new(),
                 late_inline_type_substitutions: BTreeMap::new(),
+                late_inline_functions: Vec::new(),
                 active_labels: BTreeMap::new(),
                 static_labels: BTreeMap::new(),
                 static_closures: BTreeMap::new(),
@@ -26145,6 +28969,27 @@ impl<'a> CoreLowerer<'a> {
         })
     }
 
+    /// Whether matching this pattern can fail without disproving any enum
+    /// variant established by an enclosing decision.  This deliberately
+    /// remains structural and conservative: a nested variant is refutable
+    /// unless a separate nominal proof establishes that it has only one
+    /// possible constructor.
+    fn decision_pattern_is_irrefutable(pattern: &core::DecisionPattern) -> bool {
+        match &pattern.kind {
+            core::DecisionPatternKind::Wildcard
+            | core::DecisionPatternKind::Binding { .. }
+            | core::DecisionPatternKind::Unit => true,
+            core::DecisionPatternKind::Aggregate { fields } => {
+                fields.iter().all(Self::decision_pattern_is_irrefutable)
+            }
+            core::DecisionPatternKind::Variant { .. }
+            | core::DecisionPatternKind::Int(_)
+            | core::DecisionPatternKind::Float(_)
+            | core::DecisionPatternKind::Char(_)
+            | core::DecisionPatternKind::String(_) => false,
+        }
+    }
+
     fn install_decision_bindings(
         &mut self,
         pattern: &core::DecisionPattern,
@@ -26717,18 +29562,43 @@ impl<'a> CoreLowerer<'a> {
                 body,
                 expression_ordinal,
             })?;
-        target
-            .arguments
-            .iter()
-            .any(|argument| {
-                matches!(argument,
+        let name = match &target.template {
+            typeck::DeclarationKey::Function(name) => name.clone(),
+            typeck::DeclarationKey::Global(_) => return None,
+        };
+        let transports_late_value = target.arguments.iter().any(|argument| {
+            matches!(argument,
                     specialization::SpecializationArgument::Type(ty)
                         if specialization::contains_late_callable(ty))
-            })
-            .then(|| match &target.template {
-                typeck::DeclarationKey::Function(name) => Some(name.clone()),
-                typeck::DeclarationKey::Global(_) => None,
-            })?
+                || matches!(argument,
+                        specialization::SpecializationArgument::Closure(
+                            _, _, _, _, active_labels, _
+                        ) if !active_labels.is_empty())
+        });
+        let transports_structural_control = self
+            .control_summaries
+            .get(&name)
+            .is_some_and(|summary| summary.reaches_control_loop)
+            && match &expression.kind {
+                ExprKind::Call(_, arguments) => self
+                    .control_summaries
+                    .get(&name)
+                    .into_iter()
+                    .flat_map(|summary| &summary.static_callback_parameters)
+                    .any(|index| {
+                        arguments.get(*index).is_some_and(|argument| {
+                            matches!(
+                                argument.kind,
+                                ExprKind::Closure { .. }
+                                    | ExprKind::TypedClosure { .. }
+                                    | ExprKind::Block(_)
+                                    | ExprKind::ContextBlock(_)
+                            ) || self.static_closure_argument(argument).is_some()
+                        })
+                    }),
+                _ => false,
+            };
+        (transports_late_value || transports_structural_control).then_some(name)
     }
 
     fn planned_direct_call_result(&self, expression: &Expr) -> Option<TypeId> {
@@ -26806,7 +29676,32 @@ impl<'a> CoreLowerer<'a> {
         .is_break()
     }
 
-    fn multishot_perform_in(&self, expression: &Expr) -> Option<Span> {
+    fn expression_captures_static_control(&self, expression: &Expr) -> bool {
+        let (parameters, body) = match &expression.kind {
+            ExprKind::Closure { params, body } => (
+                params.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                body.as_ref(),
+            ),
+            ExprKind::TypedClosure { params, body, .. } => (
+                params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<Vec<_>>(),
+                body.as_ref(),
+            ),
+            ExprKind::Block(_) | ExprKind::ContextBlock(_) => (Vec::new(), expression),
+            _ => return false,
+        };
+        let proof_bindings = self
+            .static_closures
+            .keys()
+            .chain(self.static_labels.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        !specialization::captured_outer_uses(body, &proof_bindings, &parameters).is_empty()
+    }
+
+    fn multishot_perform_in(&mut self, expression: &Expr) -> Option<Span> {
         struct Collector {
             operations: Vec<(Span, String, String)>,
         }
@@ -26860,6 +29755,24 @@ impl<'a> CoreLowerer<'a> {
                 walk_expr(self, expression)
             }
         }
+        struct DirectActiveLabelCollector<'labels> {
+            active: &'labels BTreeMap<String, ActiveCoreLabel>,
+            labels: BTreeMap<String, crate::ast::LabelSyntax>,
+        }
+        impl<'ast> ExprVisitor<'ast> for DirectActiveLabelCollector<'_> {
+            type Break = ();
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                if let ExprKind::LabelReference(label) = &expression.kind
+                    && self.active.contains_key(label.name.as_ref())
+                {
+                    self.labels
+                        .entry(label.name.to_string())
+                        .or_insert_with(|| label.clone());
+                }
+                walk_expr(self, expression)
+            }
+        }
         let (parameters, body) = match &expression.kind {
             ExprKind::Closure { params, body } => (
                 params.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -26875,10 +29788,55 @@ impl<'a> CoreLowerer<'a> {
             ExprKind::Block(_) | ExprKind::ContextBlock(_) => (Vec::new(), expression),
             _ => unreachable!("only a source closure can be captured statically"),
         };
-        let outer = self.locals.keys().cloned().collect::<BTreeSet<_>>();
-        let captures = specialization::captured_outer_uses(body, &outer, &parameters)
-            .into_iter()
-            .filter_map(|(name, _)| self.locals.get(&name).cloned().map(|local| (name, local)))
+        let outer = self
+            .locals
+            .keys()
+            .chain(self.static_closures.keys())
+            .chain(self.static_labels.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut direct_active_labels = DirectActiveLabelCollector {
+            active: &self.active_labels,
+            labels: BTreeMap::new(),
+        };
+        let _ = direct_active_labels.visit_expr(body);
+        let captured = specialization::captured_outer_uses(body, &outer, &parameters);
+        let captures = captured
+            .iter()
+            .filter_map(|(name, _)| {
+                self.locals
+                    .get(name)
+                    .cloned()
+                    .map(|local| (name.clone(), local))
+            })
+            .collect();
+        let static_closure_captures = captured
+            .iter()
+            .filter_map(|(name, _)| {
+                self.static_closures
+                    .get(name)
+                    .cloned()
+                    .map(|closure| (name.clone(), Box::new(closure)))
+            })
+            .collect();
+        let static_label_captures = captured
+            .iter()
+            .filter_map(|(name, _)| {
+                self.static_labels
+                    .get(name)
+                    .cloned()
+                    .map(|label| (name.clone(), label))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let active_label_captures: BTreeMap<String, ActiveCoreLabel> = direct_active_labels
+            .labels
+            .into_keys()
+            .filter_map(|name| {
+                self.active_labels
+                    .get(&name)
+                    .cloned()
+                    .map(|label| (name, label))
+            })
             .collect();
         let mut ordinals = OrdinalCollector {
             lowerer: self,
@@ -26901,6 +29859,9 @@ impl<'a> CoreLowerer<'a> {
             source: expression.clone(),
             result: None,
             captures,
+            static_closure_captures,
+            static_label_captures,
+            active_label_captures,
             expression_ordinals: ordinals.ordinals,
             body_instance,
         }
@@ -26908,8 +29869,12 @@ impl<'a> CoreLowerer<'a> {
 
     fn static_closure_argument(&self, expression: &Expr) -> Option<StaticClosure> {
         match &expression.kind {
-            ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
-                if self.expression_contains_active_label(expression) =>
+            ExprKind::Closure { .. }
+            | ExprKind::TypedClosure { .. }
+            | ExprKind::Block(_)
+            | ExprKind::ContextBlock(_)
+                if self.expression_contains_active_label(expression)
+                    || self.expression_captures_static_control(expression) =>
             {
                 Some(self.capture_static_closure(expression))
             }
@@ -27128,7 +30093,7 @@ impl<'a> CoreLowerer<'a> {
             return false;
         }
         let (recursive_call_sites, tail_recursive) =
-            Self::late_control_recursion_shape(&target.body, &target.name);
+            self.late_control_recursion_shape(&target.body, &target.name);
         let forwarded_callbacks = forwarded
             .iter()
             .enumerate()
@@ -27150,6 +30115,152 @@ impl<'a> CoreLowerer<'a> {
         eligible
     }
 
+    fn static_closure_outward_protocols(&mut self, closure: &StaticClosure) -> Vec<u32> {
+        let callback_request = match closure.body_instance.as_ref() {
+            Some(specialization::BodyInstanceKey::Closure(request)) => Some(request.clone()),
+            _ => None,
+        };
+        let mut protocols = match callback_request.as_ref() {
+            Some(request) => self
+                .closure_runtimes
+                .get(request)
+                .and_then(|runtime| self.effects.extra_type(runtime.callable_type))
+                .and_then(|ty| match ty.representation() {
+                    Type::Callable { signature, .. } => Some(signature.outward_protocols.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if protocols.is_empty()
+            && let Some(request) = callback_request
+        {
+            for effect in &request.shape.effects {
+                let Some(arguments) = effect
+                    .arguments
+                    .iter()
+                    .map(|argument| self.late_closure_type_id(argument))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                if let Some(protocol) = self.effects.protocols.iter().position(|protocol| {
+                    protocol.display_name == effect.declaration.0
+                        && protocol.type_arguments == arguments
+                }) {
+                    protocols.push(protocol as u32);
+                }
+            }
+        }
+        protocols.sort_unstable();
+        protocols.dedup();
+        protocols
+    }
+
+    /// Restrict a proof-only callback's declared row to the effects which can
+    /// actually leave the source helper currently being control-inlined.
+    ///
+    /// Handler computations are lowered before their static callbacks are
+    /// beta-reduced.  Charging the callback's complete declared row here
+    /// therefore widens the synthetic computation ABI even when a nearer
+    /// handler in the helper consumes an effect.  Ordinary specializations
+    /// already use `callable_effect_escapes`; apply the same structural proof
+    /// to a direct active-helper parameter.  Captures which are not direct
+    /// parameters, or whose protocol identity cannot be reconstructed, stay
+    /// conservative.
+    fn static_closure_escaping_protocols(
+        &mut self,
+        binding: &str,
+        closure: &StaticClosure,
+    ) -> Vec<u32> {
+        let protocols = self.static_closure_outward_protocols(closure);
+        let Some(helper_name) = self.late_inline_functions.last().cloned() else {
+            return protocols;
+        };
+        let Some(function) = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == helper_name)
+            .cloned()
+        else {
+            return protocols;
+        };
+        if !function
+            .params
+            .iter()
+            .any(|parameter| parameter.name == binding)
+        {
+            return protocols;
+        }
+        let Some(specialization::BodyInstanceKey::Closure(request)) =
+            closure.body_instance.as_ref()
+        else {
+            return protocols;
+        };
+
+        let mut effects_by_protocol = BTreeMap::new();
+        for effect in &request.shape.effects {
+            let Some(arguments) = effect
+                .arguments
+                .iter()
+                .map(|argument| self.late_closure_type_id(argument))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let mut candidates = protocols.iter().copied().filter(|protocol| {
+                self.effects
+                    .protocols
+                    .get(*protocol as usize)
+                    .is_some_and(|descriptor| {
+                        descriptor.type_arguments == arguments
+                            && descriptor
+                                .display_name
+                                .split('<')
+                                .next()
+                                .is_some_and(|name| name == effect.declaration.0)
+                    })
+            });
+            let Some(protocol) = candidates.next() else {
+                continue;
+            };
+            if candidates.next().is_none() {
+                effects_by_protocol.insert(protocol, effect.clone());
+            }
+        }
+
+        protocols
+            .into_iter()
+            .filter(|protocol| {
+                let Some(effect) = effects_by_protocol.get(protocol) else {
+                    return true;
+                };
+                specialization::callable_effect_escapes(
+                    self.program,
+                    &function,
+                    binding,
+                    effect,
+                    &|clauses, _| {
+                        handler_pattern_matrix_closes_protocol(
+                            clauses,
+                            *protocol,
+                            &self.effects.protocols,
+                            &self.effects.operation_sites,
+                            self.nominals,
+                            &|ty| match self.references.resolved(ty) {
+                                ResolvedType::Tuple(elements) => elements
+                                    .iter()
+                                    .map(|element| self.references.get_id(element))
+                                    .collect(),
+                                _ => None,
+                            },
+                        )
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn inline_static_closure(
         &mut self,
         closure: &StaticClosure,
@@ -27157,6 +30268,19 @@ impl<'a> CoreLowerer<'a> {
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let parameter_types = match closure.body_instance.as_ref() {
+            Some(specialization::BodyInstanceKey::Closure(request))
+                if request.shape.params.len() == arguments.len() =>
+            {
+                request
+                    .shape
+                    .params
+                    .iter()
+                    .map(|ty| self.late_closure_type_id(ty))
+                    .collect::<Option<Vec<_>>>()
+            }
+            _ => None,
+        };
         let (parameters, body) = match &closure.source.kind {
             ExprKind::Closure { params, body } => (
                 params.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -27182,21 +30306,44 @@ impl<'a> CoreLowerer<'a> {
             return Err(vec![type_error(
                 span,
                 format!(
-                    "inlined closure expects {} arguments, got {}",
+                    "inlined closure from {}..{} expects {} arguments, got {}; captured callbacks={:?}",
+                    closure.source.span.start,
+                    closure.source.span.end,
                     parameters.len(),
-                    arguments.len()
+                    arguments.len(),
+                    closure.static_closure_captures.keys().collect::<Vec<_>>()
                 ),
             )]);
         }
-        let mut statements = parameters
+        let mut statements = Vec::with_capacity(arguments.len() + 1);
+        let mut static_label_parameters = Vec::new();
+        let mut static_closure_parameters = Vec::new();
+        let mut runtime_parameter_expectations = Vec::new();
+        for (index, (name, value)) in parameters
             .into_iter()
             .zip(arguments.iter().cloned())
-            .map(|(name, value)| Stmt::Let {
-                name,
-                span: value.span,
-                value,
-            })
-            .collect::<Vec<_>>();
+            .enumerate()
+        {
+            if let Some(label) = self.static_label_argument(&value) {
+                static_label_parameters.push((name, label));
+            } else if let Some(callback) = self.static_closure_argument(&value) {
+                static_closure_parameters.push((name, callback));
+            } else {
+                if let Some(ty) = parameter_types
+                    .as_ref()
+                    .and_then(|types| types.get(index))
+                    .copied()
+                {
+                    runtime_parameter_expectations.push((value.span, ty));
+                }
+                statements.push(Stmt::Let {
+                    name,
+                    span: value.span,
+                    value,
+                });
+            }
+        }
+        let runtime_parameter_count = statements.len();
         match &body.kind {
             ExprKind::Block(body) | ExprKind::ContextBlock(body) => {
                 statements.extend(body.iter().cloned())
@@ -27212,6 +30359,11 @@ impl<'a> CoreLowerer<'a> {
             .last()
             .cloned()
             .unwrap_or_default();
+        // Preserve the caller frame itself, not only source names selected by
+        // the local live-out graph. Argument staging can temporarily hide a
+        // caller binding while a control-inlined helper creates a nested
+        // label, even though the caller's MIR owner remains live.
+        continuation_locals.extend(self.locals.values().map(|binding| binding.local));
         continuation_locals.extend(
             self.current_live_after
                 .iter()
@@ -27219,20 +30371,139 @@ impl<'a> CoreLowerer<'a> {
                 .map(|binding| binding.local),
         );
         continuation_locals.extend(closure.captures.values().map(|capture| capture.local));
+        for (name, captured) in &closure.active_label_captures {
+            let Some(active) = self.active_labels.get(name) else {
+                return Err(vec![unsupported(
+                    span,
+                    "static label capture outside its destination frame",
+                    format!(
+                        "callback retains `@{name}`, but that generative destination is no longer active"
+                    ),
+                )]);
+            };
+            if active.label != captured.label || active.result != captured.result {
+                return Err(vec![unsupported(
+                    span,
+                    "static label capture identity mismatch",
+                    format!(
+                        "callback destination `@{name}` does not match the currently active generative label"
+                    ),
+                )]);
+            }
+        }
+        let mut previous_active_labels = Vec::with_capacity(closure.active_label_captures.len());
+        for (name, label) in &closure.active_label_captures {
+            let mut installed = label.clone();
+            let previous = self
+                .active_labels
+                .remove(name)
+                .expect("captured active label was validated above");
+            // The callback may have been captured before earlier leave edges
+            // were lowered. Start from the live destination's accumulated
+            // provenance, then merge this callback's edges back on return.
+            installed.transferred_references = previous.transferred_references.clone();
+            self.active_labels.insert(name.clone(), installed);
+            previous_active_labels.push((name.clone(), previous));
+        }
+        let mut previous_captured_labels = Vec::with_capacity(closure.static_label_captures.len());
+        for (name, label) in &closure.static_label_captures {
+            previous_captured_labels.push((
+                name.clone(),
+                self.static_labels.insert(name.clone(), label.clone()),
+            ));
+        }
+        let mut previous_captured_closures =
+            Vec::with_capacity(closure.static_closure_captures.len());
+        for (name, callback) in &closure.static_closure_captures {
+            previous_captured_closures.push((
+                name.clone(),
+                self.static_closures
+                    .insert(name.clone(), callback.as_ref().clone()),
+            ));
+        }
+        let mut previous_labels = Vec::with_capacity(static_label_parameters.len());
+        for (name, label) in static_label_parameters {
+            previous_labels.push((name.clone(), self.static_labels.insert(name, label)));
+        }
+        let mut previous_closures = Vec::with_capacity(static_closure_parameters.len());
+        for (name, callback) in static_closure_parameters {
+            previous_closures.push((name.clone(), self.static_closures.insert(name, callback)));
+        }
         self.late_inline_continuation_locals
             .push(continuation_locals);
+        let added_protocols = self
+            .static_closure_outward_protocols(closure)
+            .into_iter()
+            .filter(|protocol| self.outward_protocols.insert(*protocol))
+            .collect::<Vec<_>>();
+        let mut previous_parameter_expectations =
+            Vec::with_capacity(runtime_parameter_expectations.len());
+        for (span, ty) in runtime_parameter_expectations {
+            let key = (span.start, span.end);
+            previous_parameter_expectations.push((
+                key,
+                self.late_inline_let_expectations
+                    .insert(key, LateInlineLetExpectation::Fixed(ty)),
+            ));
+        }
         let result = self.static_closure_block(
             &statements,
-            arguments.len(),
+            runtime_parameter_count,
             &closure.captures,
             &closure.expression_ordinals,
             closure.body_instance.as_ref(),
             span,
             expected,
         );
+        for (key, previous) in previous_parameter_expectations.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.late_inline_let_expectations.insert(key, previous);
+            } else {
+                self.late_inline_let_expectations.remove(&key);
+            }
+        }
+        for protocol in added_protocols {
+            self.outward_protocols.remove(&protocol);
+        }
         self.late_inline_continuation_locals
             .pop()
             .expect("static-closure continuation stack must remain balanced");
+        for (name, previous) in previous_closures.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.static_closures.insert(name, previous);
+            } else {
+                self.static_closures.remove(&name);
+            }
+        }
+        for (name, previous) in previous_labels.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.static_labels.insert(name, previous);
+            } else {
+                self.static_labels.remove(&name);
+            }
+        }
+        for (name, previous) in previous_captured_closures.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.static_closures.insert(name, previous);
+            } else {
+                self.static_closures.remove(&name);
+            }
+        }
+        for (name, previous) in previous_captured_labels.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.static_labels.insert(name, previous);
+            } else {
+                self.static_labels.remove(&name);
+            }
+        }
+        for (name, mut previous) in previous_active_labels.into_iter().rev() {
+            let completed = self
+                .active_labels
+                .remove(&name)
+                .expect("captured active label remains installed while its callback lowers");
+            previous.transferred_references = completed.transferred_references;
+            self.active_labels.insert(name, previous);
+        }
         result
     }
 
@@ -27331,173 +30602,234 @@ impl<'a> CoreLowerer<'a> {
         Some(result)
     }
 
-    fn inline_standard_try(
+    fn inline_terminal_handler(
         &mut self,
-        arguments: &[Expr],
-        label: crate::ast::LabelSyntax,
+        computation: &Expr,
+        clauses: &[HandlerClause],
         span: Span,
-        expected: Option<TypeId>,
-    ) -> Result<core::Expr, Vec<Diagnostic>> {
-        let [value, _] = arguments else {
-            return Err(vec![type_error(span, "`try` expects a value and a label")]);
-        };
-        let function = self
-            .function_templates
-            .iter()
-            .find(|function| function.name == "try")
-            .ok_or_else(|| {
-                vec![unsupported(
-                    span,
-                    "static try lowering",
-                    "the distributed `try` source template is unavailable",
-                )]
-            })?;
-        fn fuse(
-            expression: &mut Expr,
-            value: &Expr,
-            label: &crate::ast::LabelSyntax,
-            replaced_value: &mut bool,
-            replaced_exit: &mut bool,
-        ) {
-            if matches!(&expression.kind, ExprKind::Variable(path)
-                if path.len() == 1 && path[0].as_ref() == "value")
+        result: TypeId,
+    ) -> Option<Result<core::Expr, Vec<Diagnostic>>> {
+        // Ordinary source handlers retain the established handler lowering
+        // and optimization pipeline. This direct route is justified only
+        // while a structurally summarized tail-recursive helper is being
+        // fused into a compiler-owned control loop.
+        if self.active_late_control_loops.is_empty() || clauses.is_empty() {
+            return None;
+        }
+        let mut routed = BTreeMap::new();
+        for clause in clauses {
+            let info = self.operation_info(clause.span, &clause.effect, &clause.operation)?;
+            let label_branded = self
+                .effects
+                .label_branded_protocols
+                .contains(&info.protocol);
+            if !info.terminal
+                || !label_branded
+                || clause.resumption.is_some()
+                || clause.patterns.len() != info.params.len()
+                || clause
+                    .patterns
+                    .iter()
+                    .any(|pattern| !matches!(pattern.kind, PatternKind::Binding(_)))
             {
-                *expression = value.clone();
-                *replaced_value = true;
-                return;
+                return None;
             }
-            if let ExprKind::Call(callee, arguments) = &expression.kind
-                && matches!(&callee.kind, ExprKind::Variable(path)
-                    if path.len() == 1 && path[0].as_ref() == "exit")
-                && let [payload] = arguments.as_slice()
+            let key = (info.protocol, info.operation);
+            if routed
+                .insert(
+                    key,
+                    InlineTerminalClause {
+                        patterns: clause.patterns.clone(),
+                        payload_types: info.params.clone(),
+                        body: clause.body.clone(),
+                    },
+                )
+                .is_some()
             {
-                let mut payload = payload.clone();
-                fuse(&mut payload, value, label, replaced_value, replaced_exit);
-                expression.kind = ExprKind::Call(
-                    Rc::new(Expr {
-                        kind: ExprKind::LabelReference(label.clone()),
-                        span: label.span,
-                    }),
-                    Rc::new(vec![payload]),
-                );
-                *replaced_exit = true;
-                return;
-            }
-            match &mut expression.kind {
-                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                    for statement in Rc::make_mut(statements) {
-                        let nested = match statement {
-                            Stmt::Let { value, .. }
-                            | Stmt::Deconstruct { value, .. }
-                            | Stmt::Expr(value)
-                            | Stmt::Assign { value, .. } => value,
-                        };
-                        fuse(nested, value, label, replaced_value, replaced_exit);
-                    }
-                }
-                ExprKind::Call(callee, arguments) => {
-                    fuse(
-                        Rc::make_mut(callee),
-                        value,
-                        label,
-                        replaced_value,
-                        replaced_exit,
-                    );
-                    for argument in Rc::make_mut(arguments) {
-                        fuse(argument, value, label, replaced_value, replaced_exit);
-                    }
-                }
-                ExprKind::Is { subject, .. }
-                | ExprKind::Field(subject, _)
-                | ExprKind::Move(subject)
-                | ExprKind::Unary {
-                    operand: subject, ..
-                } => fuse(
-                    Rc::make_mut(subject),
-                    value,
-                    label,
-                    replaced_value,
-                    replaced_exit,
-                ),
-                ExprKind::Binary { lhs, rhs, .. } => {
-                    fuse(
-                        Rc::make_mut(lhs),
-                        value,
-                        label,
-                        replaced_value,
-                        replaced_exit,
-                    );
-                    fuse(
-                        Rc::make_mut(rhs),
-                        value,
-                        label,
-                        replaced_value,
-                        replaced_exit,
-                    );
-                }
-                _ => {}
+                // Multiple rows for one operation require the ordinary
+                // pattern matrix. The direct path intentionally handles only
+                // the structurally total binding case.
+                return None;
             }
         }
 
-        let value_binding = "$control_try_value";
-        let value_reference = Expr {
-            kind: ExprKind::Variable(Rc::from([Rc::<str>::from(value_binding)])),
-            span: value.span,
+        let label = self.next_inline_terminal_label;
+        self.next_inline_terminal_label = self.next_inline_terminal_label.wrapping_sub(1);
+        self.inline_terminal_handlers
+            .push(ActiveInlineTerminalHandler {
+                label,
+                result,
+                outer_locals: self
+                    .locals
+                    .iter()
+                    .filter(|(_, local)| !self.moved.contains(&local.local))
+                    .map(|(_, local)| local.local)
+                    .collect(),
+                transferred_references: None,
+                clauses: routed,
+                has_leave: false,
+            });
+        let lowered = self.expression(computation, Some(result));
+        let completed = self
+            .inline_terminal_handlers
+            .pop()
+            .expect("inline terminal handler stack remains balanced");
+        let body = match lowered {
+            Ok(body) => body,
+            Err(errors) => return Some(Err(errors)),
         };
-        let mut fused = function.body.clone();
-        let mut replaced_value = false;
-        let mut replaced_exit = false;
-        fuse(
-            &mut fused,
-            &value_reference,
-            &label,
-            &mut replaced_value,
-            &mut replaced_exit,
-        );
-        if !replaced_value || !replaced_exit {
-            return Err(vec![unsupported(
-                span,
-                "static try lowering",
-                "the distributed `try` template no longer has its canonical value/label shape",
-            )]);
-        }
-        while let ExprKind::Block(statements) = &fused.kind
-            && let [Stmt::Expr(inner)] = statements.as_slice()
-        {
-            fused = inner.clone();
-        }
-        fused = Expr {
-            kind: ExprKind::Block(Rc::new(vec![
-                Stmt::Let {
-                    name: value_binding.into(),
-                    value: value.clone(),
-                    span: value.span,
-                },
-                Stmt::Expr(fused),
-            ])),
+
+        let normal_references = (body.ty != NEVER)
+            .then(|| Self::expression_reference_fields(&body))
+            .filter(|fields| !fields.is_empty());
+        let reference_fields = match (normal_references, completed.transferred_references) {
+            (Some(mut normal), Some(transferred)) => {
+                if !Self::merge_reference_fields(&mut normal, transferred) {
+                    return Some(Err(self.borrow_error(
+                        span,
+                        "normal and terminal-handler exits have incompatible reference origins",
+                    )));
+                }
+                normal
+            }
+            (Some(normal), None) => normal,
+            (_, Some(transferred)) => transferred,
+            (None, None) => BTreeMap::new(),
+        };
+        let mut expression = self.typed(
             span,
+            result,
+            core::ExprKind::LabelDestination {
+                label: completed.label,
+                has_leave: completed.has_leave,
+                function_boundary: false,
+                preserved_locals: completed.outer_locals.iter().copied().collect(),
+                body: Box::new(body),
+            },
+        );
+        Self::set_expression_reference_fields(&mut expression, reference_fields);
+        Some(Ok(expression))
+    }
+
+    fn inline_terminal_perform(
+        &mut self,
+        protocol: u32,
+        operation: u32,
+        arguments: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Option<Result<core::Expr, Vec<Diagnostic>>> {
+        let handler_index = self
+            .inline_terminal_handlers
+            .iter()
+            .rposition(|handler| handler.clauses.contains_key(&(protocol, operation)))?;
+        let mut handler = self.inline_terminal_handlers.remove(handler_index);
+        let clause = handler.clauses[&(protocol, operation)].clone();
+        if clause.patterns.len() != arguments.len() {
+            self.inline_terminal_handlers.insert(handler_index, handler);
+            return Some(Err(vec![type_error(
+                span,
+                "terminal operation payload arity changed during control inlining",
+            )]));
+        }
+        let mut statements = Vec::with_capacity(arguments.len() + 1);
+        let mut previous_expectations = Vec::with_capacity(arguments.len());
+        for ((pattern, value), ty) in clause
+            .patterns
+            .iter()
+            .zip(arguments)
+            .zip(&clause.payload_types)
+        {
+            let PatternKind::Binding(name) = &pattern.kind else {
+                unreachable!("inline terminal handlers retain binding-only clauses")
+            };
+            let key = (pattern.span.start, pattern.span.end);
+            previous_expectations.push((
+                key,
+                self.late_inline_let_expectations
+                    .insert(key, LateInlineLetExpectation::Fixed(*ty)),
+            ));
+            statements.push(Stmt::Let {
+                name: name.clone(),
+                value: value.clone(),
+                span: pattern.span,
+            });
+        }
+        statements.push(Stmt::Expr(clause.body));
+        let lowered = self.block(&statements, span, Some(handler.result));
+        for (key, previous) in previous_expectations.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.late_inline_let_expectations.insert(key, previous);
+            } else {
+                self.late_inline_let_expectations.remove(&key);
+            }
+        }
+        self.inline_terminal_handlers
+            .insert(handler_index, handler.clone());
+        let value = match lowered {
+            Ok(value) => value,
+            Err(errors) => return Some(Err(errors)),
         };
-        let ExprKind::Block(statements) = &fused.kind else {
-            unreachable!("standard try fusion always builds one compiler-owned block")
+        if value.ty == NEVER {
+            return Some(Ok(value));
+        }
+        if let Err(errors) = self.validate_anonymous_use(&value, 1, "terminal handler result") {
+            return Some(Err(errors));
+        }
+        let destination = ActiveCoreLabel {
+            label: handler.label,
+            result: handler.result,
+            outer_locals: handler.outer_locals.clone(),
+            live_outer_on_leaves: None,
+            transferred_references: handler.transferred_references.clone(),
         };
-        // This block exists only to evaluate `value` once before the
-        // canonical Ok/Err discrimination. Keep it at the caller's source
-        // block depth so an already-proven final use at the original argument
-        // occurrence remains eligible for transfer inference.
-        self.transparent_block(statements, span, expected)
+        if let Err(errors) = self.validate_leave_cleanup(&destination, span) {
+            return Some(Err(errors));
+        }
+        let mut references = Self::expression_reference_fields(&value);
+        if let Some(previous) = &handler.transferred_references {
+            let mut merged = previous.clone();
+            if !Self::merge_reference_fields(&mut merged, references) {
+                return Some(Err(self.borrow_error(
+                    span,
+                    "terminal-handler exits have incompatible reference origins",
+                )));
+            }
+            references = merged;
+        }
+        handler.transferred_references = Some(references);
+        handler.has_leave = true;
+        self.inline_terminal_handlers[handler_index] = handler;
+        if let Err(errors) = self.check(span, expected, NEVER) {
+            return Some(Err(errors));
+        }
+        Some(Ok(self.typed(
+            span,
+            NEVER,
+            core::ExprKind::Leave {
+                label: destination.label,
+                value: Box::new(value),
+            },
+        )))
     }
 
     /// Count direct self-recursive occurrences and prove that each is in a
     /// source position which remains tail after the compiler's static-control
-    /// beta reductions. This deliberately recognizes only the small control
-    /// vocabulary used by the distributed range walkers; an ordinary call
-    /// argument, initializer, assignment, or nested runtime closure is not a
-    /// tail position.
+    /// beta reductions. Callback positions come from structural summaries of
+    /// the callee template; no source helper name is part of this proof.
     fn late_control_recursion_shape(
+        &self,
         expression: &Expr,
         name: &str,
     ) -> (BTreeSet<(usize, usize)>, bool) {
+        if let Some(summary) = self.control_summaries.get(name) {
+            return (
+                summary.tail_recursive_edges.clone(),
+                summary.recursive_edges_are_tail,
+            );
+        }
         fn visit(
+            summaries: &ControlSummaries,
             expression: &Expr,
             name: &str,
             tail: bool,
@@ -27512,35 +30844,45 @@ impl<'a> CoreLowerer<'a> {
                         found.insert((expression.span.start, expression.span.end));
                         *valid &= tail;
                         for argument in arguments.iter() {
-                            visit(argument, name, false, found, valid);
+                            visit(summaries, argument, name, false, found, valid);
                         }
                         return;
                     }
-                    visit(callee, name, false, found, valid);
+                    visit(summaries, callee, name, false, found, valid);
                     let static_control = match &callee.kind {
                         ExprKind::Variable(path) if path.len() == 1 => {
-                            Some(path[0].as_ref()).filter(|name| matches!(*name, "if" | "else"))
+                            summaries.get(path[0].as_ref())
                         }
                         _ => None,
                     };
                     for (index, argument) in arguments.iter().enumerate() {
-                        let static_tail = tail
-                            && static_control.is_some_and(|control| {
-                                (control == "if" && index == 1)
-                                    || (control == "else" && matches!(index, 0 | 1))
+                        let static_tail =
+                            tail && static_control.is_some_and(|summary| {
+                                summary.static_callback_parameters.contains(&index)
+                                    || summary.control_input_parameters.contains(&index)
+                            }) && static_control.is_some_and(|summary| {
+                                (!summary.static_callback_parameters.contains(&index)
+                                    || !summary.callback_escapes.contains(&index))
+                                    && (!summary.static_callback_parameters.contains(&index)
+                                        || summary
+                                            .callback_call_quantities
+                                            .get(&index)
+                                            .is_some_and(|quantity| quantity.upper != Some(0)))
                             });
                         match &argument.kind {
                             ExprKind::Closure { body, .. }
                             | ExprKind::TypedClosure { body, .. }
                                 if static_tail =>
                             {
-                                visit(body, name, true, found, valid)
+                                visit(summaries, body, name, true, found, valid)
                             }
                             ExprKind::Block(_) | ExprKind::ContextBlock(_) if static_tail => {
-                                visit(argument, name, true, found, valid)
+                                visit(summaries, argument, name, true, found, valid)
                             }
-                            _ if static_tail => visit(argument, name, true, found, valid),
-                            _ => visit(argument, name, false, found, valid),
+                            _ if static_tail => {
+                                visit(summaries, argument, name, true, found, valid)
+                            }
+                            _ => visit(summaries, argument, name, false, found, valid),
                         }
                     }
                 }
@@ -27548,16 +30890,18 @@ impl<'a> CoreLowerer<'a> {
                     for (index, statement) in statements.iter().enumerate() {
                         let last = index + 1 == statements.len();
                         match statement {
-                            Stmt::Expr(value) => visit(value, name, tail && last, found, valid),
+                            Stmt::Expr(value) => {
+                                visit(summaries, value, name, tail && last, found, valid)
+                            }
                             Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } => {
-                                visit(value, name, false, found, valid)
+                                visit(summaries, value, name, false, found, valid)
                             }
                             Stmt::Assign {
                                 destination, value, ..
                             } => {
-                                visit(value, name, false, found, valid);
+                                visit(summaries, value, name, false, found, valid);
                                 if let Some(reference) = assignment_place_reference(destination) {
-                                    visit(reference, name, false, found, valid);
+                                    visit(summaries, reference, name, false, found, valid);
                                 }
                             }
                         }
@@ -27567,23 +30911,25 @@ impl<'a> CoreLowerer<'a> {
                     computation,
                     clauses,
                 } => {
-                    visit(computation, name, false, found, valid);
+                    visit(summaries, computation, name, false, found, valid);
                     for clause in clauses.iter() {
-                        visit(&clause.body, name, tail, found, valid);
+                        visit(summaries, &clause.body, name, tail, found, valid);
                     }
                 }
-                ExprKind::LabelDestination { body, .. } => visit(body, name, tail, found, valid),
+                ExprKind::LabelDestination { body, .. } => {
+                    visit(summaries, body, name, tail, found, valid)
+                }
                 ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                    visit(body, name, false, found, valid)
+                    visit(summaries, body, name, false, found, valid)
                 }
                 ExprKind::List(values) | ExprKind::Tuple(values) => {
                     for value in values.iter() {
-                        visit(value, name, false, found, valid);
+                        visit(summaries, value, name, false, found, valid);
                     }
                 }
                 ExprKind::Struct { fields, .. } => {
                     for (_, value) in fields.iter() {
-                        visit(value, name, false, found, valid);
+                        visit(summaries, value, name, false, found, valid);
                     }
                 }
                 ExprKind::Field(subject, _)
@@ -27591,24 +30937,26 @@ impl<'a> CoreLowerer<'a> {
                 | ExprKind::Is { subject, .. }
                 | ExprKind::Unary {
                     operand: subject, ..
-                } => visit(subject, name, false, found, valid),
+                } => visit(summaries, subject, name, false, found, valid),
                 ExprKind::Binary { lhs, rhs, .. } => {
-                    visit(lhs, name, false, found, valid);
-                    visit(rhs, name, false, found, valid);
+                    visit(summaries, lhs, name, false, found, valid);
+                    visit(summaries, rhs, name, false, found, valid);
                 }
                 ExprKind::Perform { args, .. } => {
                     for argument in args.iter() {
-                        visit(argument, name, false, found, valid);
+                        visit(summaries, argument, name, false, found, valid);
                     }
                 }
                 ExprKind::Resume { resumption, value }
                 | ExprKind::TailResume { resumption, value } => {
-                    visit(resumption, name, false, found, valid);
+                    visit(summaries, resumption, name, false, found, valid);
                     if let Some(value) = value {
-                        visit(value, name, false, found, valid);
+                        visit(summaries, value, name, false, found, valid);
                     }
                 }
-                ExprKind::Cancel { resumption } => visit(resumption, name, false, found, valid),
+                ExprKind::Cancel { resumption } => {
+                    visit(summaries, resumption, name, false, found, valid)
+                }
                 ExprKind::Unit
                 | ExprKind::Int(_)
                 | ExprKind::Float(_)
@@ -27622,7 +30970,14 @@ impl<'a> CoreLowerer<'a> {
         }
         let mut found = BTreeSet::new();
         let mut valid = true;
-        visit(expression, name, true, &mut found, &mut valid);
+        visit(
+            self.control_summaries,
+            expression,
+            name,
+            true,
+            &mut found,
+            &mut valid,
+        );
         (found, valid)
     }
 
@@ -27645,7 +31000,8 @@ impl<'a> CoreLowerer<'a> {
         for (index, expected) in loop_context.static_labels.iter().enumerate() {
             let actual = label_arguments[index]
                 .as_ref()
-                .map(|label| label.name.to_string());
+                .and_then(|label| self.active_labels.get(label.name.as_ref()))
+                .map(|destination| destination.label);
             if &actual != expected {
                 return Err(vec![unsupported(
                     arguments[index].span,
@@ -27669,10 +31025,21 @@ impl<'a> CoreLowerer<'a> {
         let mut args = Vec::with_capacity(loop_context.runtime_parameters.len());
         for (index, ty) in loop_context.runtime_parameters {
             let argument = &arguments[index];
+            let directly_forwarded_name = match &argument.kind {
+                ExprKind::Variable(path) if path.len() == 1 => Some(path[0].as_ref()),
+                _ => None,
+            };
+            let used_by_later_argument = directly_forwarded_name.is_some_and(|name| {
+                arguments
+                    .iter()
+                    .skip(index + 1)
+                    .any(|later| expression_mentions_name(later, name))
+            });
             let transfer_reference = matches!(
                 self.resolved_type(ty),
                 ResolvedType::Shared(_) | ResolvedType::Unique(_)
-            ) && matches!(&argument.kind, ExprKind::Variable(path) if path.len() == 1);
+            ) && directly_forwarded_name.is_some()
+                && !used_by_later_argument;
             if transfer_reference {
                 // A continue is terminal for the current iteration. Relocate a
                 // directly forwarded reference handle into the loop header
@@ -27697,8 +31064,212 @@ impl<'a> CoreLowerer<'a> {
         ))
     }
 
+    /// Infer the result of a nested generic source call while lowering a
+    /// control-inlined body. Such calls have no destination-frame call-site
+    /// key, but their source signature and the concrete types of their
+    /// arguments still provide complete structural evidence.
+    fn inferred_late_generic_expression_type(
+        &mut self,
+        expression: &Expr,
+        depth: usize,
+    ) -> Option<TypeId> {
+        if let Some(ty) = self
+            .static_local_expression_type(expression)
+            .or_else(|| self.planned_direct_call_result(expression))
+        {
+            return Some(ty);
+        }
+        if depth >= 32 {
+            return None;
+        }
+        let ExprKind::Call(callee, arguments) = &expression.kind else {
+            return None;
+        };
+        let ExprKind::Variable(path) = &callee.kind else {
+            return None;
+        };
+        let [name] = path.as_ref() else {
+            return None;
+        };
+        let function = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == name.as_ref() && function.generics.is_some())?
+            .clone();
+        if function.params.len() != arguments.len() {
+            return None;
+        }
+        let generic_binders = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter(|parameter| parameter.kind == GenericParamKind::Type)
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
+        let mut substitutions = BTreeMap::new();
+        for (parameter, argument) in function.params.iter().zip(arguments.iter()) {
+            let (formal, actual_expression) = match (&parameter.ty.kind, &argument.kind) {
+                (
+                    TypeSyntaxKind::SharedReference { referent, .. }
+                    | TypeSyntaxKind::UniqueReference { referent, .. },
+                    ExprKind::Unary {
+                        op: UnaryOp::BorrowShared | UnaryOp::BorrowUnique,
+                        operand,
+                    },
+                ) => (referent.as_ref(), operand.as_ref()),
+                _ => (&parameter.ty, argument),
+            };
+            let Some(actual) =
+                self.inferred_late_generic_expression_type(actual_expression, depth + 1)
+            else {
+                // Static callable and label arguments deliberately have no
+                // standalone runtime TypeId. Other arguments and the
+                // callable's associated Output can still fully determine the
+                // result, so unavailable evidence is not failure.
+                continue;
+            };
+            if !self.infer_late_substitutions(formal, actual, &generic_binders, &mut substitutions)
+            {
+                return None;
+            }
+        }
+        fn tail_expression(expression: &Expr) -> &Expr {
+            match &expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    match statements.last() {
+                        Some(Stmt::Expr(tail)) => tail_expression(tail),
+                        _ => expression,
+                    }
+                }
+                _ => expression,
+            }
+        }
+        for (parameter, argument) in function.params.iter().zip(arguments.iter()) {
+            let Some(callable) = parameter.ty.simple_name() else {
+                continue;
+            };
+            let Some(output) = function
+                .where_clause
+                .iter()
+                .flat_map(|clause| &clause.goals)
+                .find(|goal| {
+                    goal.subject.simple_name() == Some(callable)
+                        && goal.relation.path.len() == 1
+                        && goal.relation.path[0].name == "Fn"
+                })
+                .and_then(|goal| {
+                    goal.relation
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.name == "Output")
+                })
+                .and_then(|binding| binding.value.as_type())
+            else {
+                continue;
+            };
+            let forwarded_result = self
+                .static_closure_argument(argument)
+                .and_then(|closure| closure.result);
+            let body = match &argument.kind {
+                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                    body.as_ref()
+                }
+                ExprKind::Block(_) | ExprKind::ContextBlock(_) => argument,
+                _ => {
+                    let Some(actual) = forwarded_result else {
+                        continue;
+                    };
+                    if !self.infer_late_substitutions(
+                        output,
+                        actual,
+                        &generic_binders,
+                        &mut substitutions,
+                    ) {
+                        return None;
+                    }
+                    continue;
+                }
+            };
+            let tail = tail_expression(body);
+            let Some(actual) = forwarded_result
+                .or_else(|| self.static_local_expression_type(tail))
+                .or_else(|| self.provisional_handler_result(body.span))
+                .or_else(|| self.provisional_handler_result(tail.span))
+            else {
+                continue;
+            };
+            if !self.infer_late_substitutions(output, actual, &generic_binders, &mut substitutions)
+            {
+                return None;
+            }
+        }
+        let result = function.return_type.as_ref()?;
+        self.substituted_source_type(result, &substitutions)
+    }
+
+    fn planned_late_generic_type_substitutions(
+        &mut self,
+        expression: &Expr,
+        function: &Function,
+    ) -> BTreeMap<String, TypeId> {
+        let Some(body) = self.body_instance.clone() else {
+            return BTreeMap::new();
+        };
+        let Some(expression_ordinal) = self.expression_ordinal(expression) else {
+            return BTreeMap::new();
+        };
+        let Some(key) = self
+            .specialization_graph
+            .direct_calls
+            .get(&specialization::CallSiteKey {
+                body,
+                expression_ordinal,
+            })
+            .cloned()
+        else {
+            return BTreeMap::new();
+        };
+        if !matches!(&key.template,
+            typeck::DeclarationKey::Function(name) if name == &function.name)
+        {
+            return BTreeMap::new();
+        }
+        let Some(template) = self.specialization_graph.templates.get(&key.template) else {
+            return BTreeMap::new();
+        };
+        let planned = specialization::substitutions_for_key(template, &key);
+        let source_parameters = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .collect::<Vec<_>>();
+        let provisional = template
+            .generic_params
+            .iter()
+            .filter_map(|binder| {
+                // Specialization omits lifetime parameters but preserves each
+                // declaration parameter's original ordinal. A positional zip
+                // therefore shifts every binder after a lifetime (`Slice<'a,
+                // T>` used to infer T from the following accumulator A).
+                let parameter = source_parameters.get(binder.ordinal as usize)?;
+                if parameter.kind != GenericParamKind::Type {
+                    return None;
+                }
+                let specialization::SpecializationArgument::Type(ty) = planned.get(binder)? else {
+                    return None;
+                };
+                Some((parameter.name.clone(), ty.clone()))
+            })
+            .collect::<Vec<_>>();
+        provisional
+            .into_iter()
+            .filter_map(|(name, ty)| self.late_closure_type_id(&ty).map(|ty| (name, ty)))
+            .collect()
+    }
+
     fn inline_late_generic_call(
         &mut self,
+        call_site: &Expr,
         name: &str,
         arguments: &[Expr],
         span: Span,
@@ -27726,6 +31297,12 @@ impl<'a> CoreLowerer<'a> {
                 ),
             )]);
         }
+        // Root emission and type checking operate on this same structural
+        // view. A wrapper that mentions its implicit function label must keep
+        // that generative destination when its body is cloned into a caller;
+        // inlining the raw body would strand `@function` as an impossible
+        // runtime label value.
+        let function_body = function.semantic_body();
         let generic_binders = function
             .generics
             .iter()
@@ -27733,7 +31310,11 @@ impl<'a> CoreLowerer<'a> {
             .filter(|parameter| parameter.kind == GenericParamKind::Type)
             .map(|parameter| parameter.name.clone())
             .collect::<BTreeSet<_>>();
-        let mut substitutions = BTreeMap::new();
+        // Discovery knows generic arguments that may be absent from runtime
+        // operands, notably the error and divergent branch types of the
+        // source-defined lazy control functions. Preserve that proof when a
+        // label-carrying call is elaborated directly into its destination.
+        let mut substitutions = self.planned_late_generic_type_substitutions(call_site, &function);
         if let (Some(result), Some(expected)) = (&function.return_type, expected)
             && !self.infer_late_substitutions(
                 result,
@@ -27765,8 +31346,7 @@ impl<'a> CoreLowerer<'a> {
                         operand,
                     },
                 ) => self
-                    .static_local_expression_type(operand)
-                    .or_else(|| self.planned_direct_call_result(operand))
+                    .inferred_late_generic_expression_type(operand, 0)
                     .map(|actual| (referent.as_ref(), actual)),
                 _ => None,
             };
@@ -27786,12 +31366,10 @@ impl<'a> CoreLowerer<'a> {
                 }
                 continue;
             }
-            let Some(actual) = self
-                .static_local_expression_type(argument)
-                .or_else(|| self.planned_direct_call_result(argument))
-            else {
+            let Some(actual) = self.inferred_late_generic_expression_type(argument, 0) else {
                 continue;
             };
+            let before = substitutions.clone();
             if !self.infer_late_substitutions(
                 &parameter.ty,
                 actual,
@@ -27801,7 +31379,48 @@ impl<'a> CoreLowerer<'a> {
                 return Err(vec![type_error(
                     argument.span,
                     format!(
-                        "type mismatch: generic callable `{name}` has contradictory argument-type evidence"
+                        "type mismatch: generic callable `{name}` has contradictory argument-type evidence for `{}` ({:?} against type {actual}; substitutions {before:?} -> {substitutions:?})",
+                        parameter.name, parameter.ty
+                    ),
+                )]);
+            }
+        }
+        for (parameter, argument) in function.params.iter().zip(arguments) {
+            let Some(label_binder) = parameter.ty.simple_name() else {
+                continue;
+            };
+            let Some(payload) = function
+                .where_clause
+                .iter()
+                .flat_map(|clause| &clause.goals)
+                .find(|goal| {
+                    goal.subject.simple_name() == Some(label_binder)
+                        && goal.relation.path.len() == 1
+                        && goal.relation.path[0].name == "Label"
+                })
+                .and_then(|goal| match goal.relation.arguments.as_slice() {
+                    [GoalArgument::Type(payload)] => Some(payload),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            let Some(label) = self.static_label_argument(argument) else {
+                continue;
+            };
+            let Some(actual) = self
+                .active_labels
+                .get(label.name.as_ref())
+                .map(|destination| destination.result)
+            else {
+                continue;
+            };
+            if !self.infer_late_substitutions(payload, actual, &generic_binders, &mut substitutions)
+            {
+                return Err(vec![type_error(
+                    argument.span,
+                    format!(
+                        "type mismatch: generic callable `{name}` has contradictory label-payload evidence"
                     ),
                 )]);
             }
@@ -27839,6 +31458,9 @@ impl<'a> CoreLowerer<'a> {
                 });
             let planned_result =
                 planned_result.and_then(|result| self.late_closure_type_id(&result));
+            let forwarded_result = self
+                .static_closure_argument(argument)
+                .and_then(|closure| closure.result);
             fn tail_expression(expression: &Expr) -> &Expr {
                 match &expression.kind {
                     ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
@@ -27865,7 +31487,7 @@ impl<'a> CoreLowerer<'a> {
                 }
                 _ => None,
             };
-            let Some(actual) = planned_result.or(provisional_result) else {
+            let Some(actual) = planned_result.or(forwarded_result).or(provisional_result) else {
                 continue;
             };
             if !self.infer_late_substitutions(&output, actual, &generic_binders, &mut substitutions)
@@ -27931,7 +31553,7 @@ impl<'a> CoreLowerer<'a> {
             })
             .collect::<Vec<_>>();
         let (recursive_call_sites, tail_recursive) =
-            Self::late_control_recursion_shape(&function.body, name);
+            self.late_control_recursion_shape(&function_body, name);
         if self.active_late_control_loops.contains_key(name)
             && recursive_call_sites.contains(&(span.start, span.end))
         {
@@ -27943,6 +31565,46 @@ impl<'a> CoreLowerer<'a> {
                 span,
             );
         }
+        let pending_control_plan = self.control_summaries.get(name).and_then(|summary| {
+            (!summary.static_label_parameters.is_empty()
+                || !summary.static_callback_parameters.is_empty()
+                || !summary.tail_recursive_edges.is_empty())
+            .then(|| core::ControlPlan {
+                helper: name.to_owned(),
+                call_span: span,
+                static_labels: label_arguments
+                    .iter()
+                    .flatten()
+                    .map(|label| format!("@{}", label.name))
+                    .collect(),
+                static_callbacks: closure_arguments
+                    .iter()
+                    .flatten()
+                    .map(|closure| {
+                        format!(
+                            "closure@{}..{}",
+                            closure.source.span.start, closure.source.span.end
+                        )
+                    })
+                    .collect(),
+                forwarded_effects: summary
+                    .callback_effect_rows
+                    .iter()
+                    .map(|(index, row)| format!("#{index}={row:?}"))
+                    .collect(),
+                callback_quantities: summary
+                    .callback_call_quantities
+                    .iter()
+                    .map(|(index, quantity)| (*index, quantity.lower, quantity.upper))
+                    .collect(),
+                direct_exit_sites: summary.direct_exits.values().map(BTreeSet::len).sum(),
+                tail_recursive_cycle: !summary.tail_recursive_edges.is_empty(),
+                formed_control_loop: None,
+                residual_callable_allocation: false,
+                residual_effect_handler: false,
+                failure_reason: None,
+            })
+        });
         // Re-entering the same generic control helper at a different source
         // call site is ordinary higher-order nesting, not source recursion.
         // Keying only by the declaration name falsely rejected expressions
@@ -27953,7 +31615,12 @@ impl<'a> CoreLowerer<'a> {
             span: (span.start, span.end),
             static_labels: label_arguments
                 .iter()
-                .map(|label| label.as_ref().map(|label| label.name.to_string()))
+                .map(|label| {
+                    label
+                        .as_ref()
+                        .and_then(|label| self.active_labels.get(label.name.as_ref()))
+                        .map(|destination| destination.label)
+                })
                 .collect(),
             static_closures: closure_arguments
                 .iter()
@@ -28006,9 +31673,15 @@ impl<'a> CoreLowerer<'a> {
                     .simple_name()
                     .filter(|binder| generic_binders.contains(*binder))
                 {
-                    Some(LateInlineLetExpectation::Binder(format!(
-                        "{name}::{binder}"
-                    )))
+                    substitutions
+                        .get(binder)
+                        .copied()
+                        .map(LateInlineLetExpectation::Fixed)
+                        .or_else(|| {
+                            Some(LateInlineLetExpectation::Binder(format!(
+                                "{name}::{binder}"
+                            )))
+                        })
                 } else {
                     self.substituted_source_type(&parameter.ty, &substitutions)
                         .map(LateInlineLetExpectation::Fixed)
@@ -28033,11 +31706,21 @@ impl<'a> CoreLowerer<'a> {
                 _ => None,
             })
             .collect::<Option<Vec<_>>>();
+        let structural_control = self.control_summaries.get(name);
+        let state_parameters_ready = structural_control.is_some_and(|summary| {
+            runtime_parameters.as_ref().is_some_and(|runtime| {
+                summary
+                    .state_parameters
+                    .iter()
+                    .all(|index| runtime.iter().any(|(candidate, _)| candidate == index))
+            })
+        });
         let mut continuation_locals = self
             .late_inline_continuation_locals
             .last()
             .cloned()
             .unwrap_or_default();
+        continuation_locals.extend(self.locals.values().map(|binding| binding.local));
         continuation_locals.extend(
             self.current_live_after
                 .iter()
@@ -28056,20 +31739,35 @@ impl<'a> CoreLowerer<'a> {
             .values()
             .map(|binding| binding.local)
             .collect::<BTreeSet<_>>();
-        let control_context = (recursive_occurrences != 0
+        let mut control_continuation_locals = continuation_locals.clone();
+        control_continuation_locals.extend(
+            self.active_late_control_loops
+                .values()
+                .flat_map(|context| context.outer_locals.iter())
+                .map(|(local, _, _)| *local),
+        );
+        let control_context = (structural_control
+            .is_some_and(|summary| summary.can_form_control_loop)
+            && state_parameters_ready
+            && recursive_occurrences != 0
             && tail_recursive
-            && can_bind_directly
             && runtime_parameters.is_some())
         .then(|| {
             let control = core::ControlLoopId(self.next_control_loop);
             self.next_control_loop += 1;
+            let runtime_parameters = runtime_parameters.expect("checked above");
             ActiveLateControlLoop {
                 control,
                 inline_depth: self.late_inline_stack.len(),
-                runtime_parameters: runtime_parameters.expect("checked above"),
+                runtime_parameters,
                 static_labels: label_arguments
                     .iter()
-                    .map(|label| label.as_ref().map(|label| label.name.to_string()))
+                    .map(|label| {
+                        label
+                            .as_ref()
+                            .and_then(|label| self.active_labels.get(label.name.as_ref()))
+                            .map(|destination| destination.label)
+                    })
                     .collect(),
                 static_closures: closure_arguments
                     .iter()
@@ -28086,15 +31784,17 @@ impl<'a> CoreLowerer<'a> {
                         (
                             binding.local,
                             self.actual_uses.get(&binding.local).copied().unwrap_or(0),
-                            matches!(
-                                self.references.resolved(binding.ty),
-                                ResolvedType::Shared(_) | ResolvedType::Unique(_)
-                            ) || self.loans.contains_key(&binding.local)
+                            self.is_copy(binding.ty)
+                                || matches!(
+                                    self.references.resolved(binding.ty),
+                                    ResolvedType::Shared(_) | ResolvedType::Unique(_)
+                                )
+                                || self.loans.contains_key(&binding.local)
                                 || self.suspended.contains(&binding.local),
                         )
                     })
                     .chain(
-                        continuation_locals
+                        control_continuation_locals
                             .iter()
                             .filter(|local| !visible_locals.contains(local))
                             .filter_map(|local| {
@@ -28102,10 +31802,12 @@ impl<'a> CoreLowerer<'a> {
                                 Some((
                                     *local,
                                     self.actual_uses.get(local).copied().unwrap_or(0),
-                                    matches!(
-                                        self.references.resolved(ty),
-                                        ResolvedType::Shared(_) | ResolvedType::Unique(_)
-                                    ) || self.loans.contains_key(local)
+                                    self.is_copy(ty)
+                                        || matches!(
+                                            self.references.resolved(ty),
+                                            ResolvedType::Shared(_) | ResolvedType::Unique(_)
+                                        )
+                                        || self.loans.contains_key(local)
                                         || self.suspended.contains(local),
                                 ))
                             }),
@@ -28113,7 +31815,7 @@ impl<'a> CoreLowerer<'a> {
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect(),
-                continuation_locals: continuation_locals.clone(),
+                continuation_locals: control_continuation_locals.clone(),
             }
         });
         let mut statements = Vec::with_capacity(arguments.len() * 2 + 1);
@@ -28128,7 +31830,8 @@ impl<'a> CoreLowerer<'a> {
                 }
                 statements.push(Stmt::Let {
                     name: param.name.clone(),
-                    value: argument.clone(),
+                    value: self
+                        .late_inline_argument(argument, parameter_expectations[index].as_ref()),
                     span: param.span,
                 });
             }
@@ -28142,7 +31845,8 @@ impl<'a> CoreLowerer<'a> {
                 }
                 statements.push(Stmt::Let {
                     name: format!("$late_arg_{index}"),
-                    value: argument.clone(),
+                    value: self
+                        .late_inline_argument(argument, parameter_expectations[index].as_ref()),
                     span: argument.span,
                 });
             }
@@ -28165,9 +31869,9 @@ impl<'a> CoreLowerer<'a> {
                 });
             }
         }
-        match &function.body.kind {
+        match &function_body.kind {
             ExprKind::Block(body) => statements.extend(body.iter().cloned()),
-            _ => statements.push(Stmt::Expr(function.body.clone())),
+            _ => statements.push(Stmt::Expr(function_body)),
         }
         let mut previous_labels = Vec::new();
         for (param, label) in function
@@ -28218,12 +31922,31 @@ impl<'a> CoreLowerer<'a> {
         } else {
             self.active_late_control_loops.remove(name)
         };
+        self.late_inline_functions.push(name.to_owned());
         self.late_inline_continuation_locals
             .push(continuation_locals);
-        let result = self.block(&statements, span, expected);
+        let result = if can_bind_directly {
+            self.block(&statements, span, expected)
+        } else {
+            self.transparent_final_use_limits
+                .push(TransparentFinalUseLimit {
+                    outer_names: self.locals.keys().cloned().collect(),
+                    allowed: BTreeSet::new(),
+                });
+            let result = self.block(&statements, span, expected);
+            self.transparent_final_use_limits
+                .pop()
+                .expect("late-inline argument staging barrier must remain balanced");
+            result
+        };
         self.late_inline_continuation_locals
             .pop()
             .expect("late-inline continuation stack must remain balanced");
+        let popped_function = self
+            .late_inline_functions
+            .pop()
+            .expect("late-inline function stack must remain balanced");
+        debug_assert_eq!(popped_function, name);
         if let Some(previous) = previous_control_context {
             self.active_late_control_loops
                 .insert(name.to_owned(), previous);
@@ -28261,6 +31984,7 @@ impl<'a> CoreLowerer<'a> {
         self.late_inline_stack.remove(&inline_key);
         let result = result?;
         let Some(control_context) = control_context else {
+            self.finish_control_plan(pending_control_plan, &result, None);
             return Ok(result);
         };
         let core::Expr {
@@ -28283,6 +32007,35 @@ impl<'a> CoreLowerer<'a> {
         };
         let mut initial_args = Vec::with_capacity(control_context.runtime_parameters.len());
         let mut params = Vec::with_capacity(control_context.runtime_parameters.len());
+        let mut temporary_parameter_locals = BTreeMap::new();
+        if !can_bind_directly {
+            for (source_index, expected_ty) in &control_context.runtime_parameters {
+                let Some(core::Stmt::Let {
+                    local,
+                    name,
+                    ty,
+                    value,
+                    span: parameter_span,
+                }) = statements.first().cloned()
+                else {
+                    return Err(vec![unsupported(
+                        span,
+                        "tail-recursive late generic control lowering",
+                        "overlapping runtime arguments were not represented by canonical temporary bindings",
+                    )]);
+                };
+                if name != format!("$late_arg_{source_index}") || ty != *expected_ty {
+                    return Err(vec![unsupported(
+                        parameter_span,
+                        "tail-recursive late generic control lowering",
+                        "runtime argument temporary did not retain its inferred ground type and source position",
+                    )]);
+                }
+                statements.remove(0);
+                initial_args.push(value);
+                temporary_parameter_locals.insert(*source_index, local);
+            }
+        }
         for (source_index, expected_ty) in &control_context.runtime_parameters {
             let Some(core::Stmt::Let {
                 local,
@@ -28306,8 +32059,19 @@ impl<'a> CoreLowerer<'a> {
                     "runtime parameter binding did not retain its inferred ground type and source identity",
                 )]);
             }
+            if let Some(temporary) = temporary_parameter_locals.get(source_index)
+                && !matches!(value.kind, core::ExprKind::Move { local } if local == *temporary)
+            {
+                return Err(vec![unsupported(
+                    parameter_span,
+                    "tail-recursive late generic control lowering",
+                    "runtime parameter did not consume its canonical overlapping-argument temporary",
+                )]);
+            }
             statements.remove(0);
-            initial_args.push(value);
+            if can_bind_directly {
+                initial_args.push(value);
+            }
             params.push(core::ControlLoopParam {
                 local,
                 name: parameter_name,
@@ -28324,18 +32088,30 @@ impl<'a> CoreLowerer<'a> {
             .iter()
             .map(|parameter| parameter.local)
             .collect::<BTreeSet<_>>();
-        fn collect_initial_sources(expression: &core::Expr, sources: &mut BTreeSet<core::LocalId>) {
-            let collect = |expressions: &[core::Expr], sources: &mut BTreeSet<core::LocalId>| {
+        fn collect_initial_sources(
+            expression: &core::Expr,
+            sources: &mut BTreeSet<core::LocalId>,
+            borrow_roots: &mut BTreeSet<core::LocalId>,
+        ) {
+            let collect = |expressions: &[core::Expr],
+                           sources: &mut BTreeSet<core::LocalId>,
+                           borrow_roots: &mut BTreeSet<core::LocalId>| {
                 for expression in expressions {
-                    collect_initial_sources(expression, sources);
+                    collect_initial_sources(expression, sources, borrow_roots);
                 }
             };
             match &expression.kind {
-                core::ExprKind::Local { local, .. }
-                | core::ExprKind::Move { local }
-                | core::ExprKind::Borrow { source: local, .. }
-                | core::ExprKind::ProjectBorrow { source: local, .. }
-                | core::ExprKind::Reborrow { source: local, .. }
+                core::ExprKind::Local { local, copy } => {
+                    sources.insert(*local);
+                    if *copy {
+                        borrow_roots.insert(*local);
+                        for origin in expression.reference_fields.values() {
+                            sources.insert(origin.root);
+                            borrow_roots.insert(origin.root);
+                        }
+                    }
+                }
+                core::ExprKind::Move { local }
                 | core::ExprKind::DerefCopy { source: local }
                 | core::ExprKind::DerefMove { source: local }
                 | core::ExprKind::PatternTestBorrowed {
@@ -28343,6 +32119,12 @@ impl<'a> CoreLowerer<'a> {
                 }
                 | core::ExprKind::LocalReferenceView { local } => {
                     sources.insert(*local);
+                }
+                core::ExprKind::Borrow { source, .. }
+                | core::ExprKind::ProjectBorrow { source, .. }
+                | core::ExprKind::Reborrow { source, .. } => {
+                    sources.insert(*source);
+                    borrow_roots.insert(*source);
                 }
                 core::ExprKind::TemporaryProjectBorrow { source, .. }
                 | core::ExprKind::LabelDestination { body: source, .. }
@@ -28354,7 +32136,7 @@ impl<'a> CoreLowerer<'a> {
                     subject: source, ..
                 }
                 | core::ExprKind::Cancel { resumption: source } => {
-                    collect_initial_sources(source, sources);
+                    collect_initial_sources(source, sources, borrow_roots);
                 }
                 core::ExprKind::Call { args, .. }
                 | core::ExprKind::TailCall { args, .. }
@@ -28364,22 +32146,24 @@ impl<'a> CoreLowerer<'a> {
                 | core::ExprKind::MakeCallable { captures: args, .. }
                 | core::ExprKind::Primitive { args, .. }
                 | core::ExprKind::HostCall { args, .. }
-                | core::ExprKind::Perform { payloads: args, .. } => collect(args, sources),
+                | core::ExprKind::Perform { payloads: args, .. } => {
+                    collect(args, sources, borrow_roots)
+                }
                 core::ExprKind::CallKnownReceiver { receiver, args, .. }
                 | core::ExprKind::TailCallKnownReceiver { receiver, args, .. } => {
-                    collect_initial_sources(receiver, sources);
-                    collect(args, sources);
+                    collect_initial_sources(receiver, sources, borrow_roots);
+                    collect(args, sources, borrow_roots);
                 }
                 core::ExprKind::ControlLoop {
                     initial_args, body, ..
                 } => {
-                    collect(initial_args, sources);
-                    collect_initial_sources(body, sources);
+                    collect(initial_args, sources, borrow_roots);
+                    collect_initial_sources(body, sources, borrow_roots);
                 }
                 core::ExprKind::CallIndirect { callable, args, .. }
                 | core::ExprKind::TailCallIndirect { callable, args, .. } => {
-                    collect_initial_sources(callable, sources);
-                    collect(args, sources);
+                    collect_initial_sources(callable, sources, borrow_roots);
+                    collect(args, sources, borrow_roots);
                 }
                 core::ExprKind::RefinementBranch {
                     subject,
@@ -28387,21 +32171,21 @@ impl<'a> CoreLowerer<'a> {
                     negative,
                     ..
                 } => {
-                    collect_initial_sources(subject, sources);
-                    collect_initial_sources(positive, sources);
-                    collect_initial_sources(negative, sources);
+                    collect_initial_sources(subject, sources, borrow_roots);
+                    collect_initial_sources(positive, sources, borrow_roots);
+                    collect_initial_sources(negative, sources, borrow_roots);
                 }
                 core::ExprKind::Construct { fields, .. } => {
                     for field in fields {
-                        collect_initial_sources(&field.value, sources);
+                        collect_initial_sources(&field.value, sources, borrow_roots);
                     }
                 }
                 core::ExprKind::Resume {
                     resumption, value, ..
                 }
                 | core::ExprKind::TailResume { resumption, value } => {
-                    collect_initial_sources(resumption, sources);
-                    collect_initial_sources(value, sources);
+                    collect_initial_sources(resumption, sources, borrow_roots);
+                    collect_initial_sources(value, sources, borrow_roots);
                 }
                 core::ExprKind::Handle {
                     clauses,
@@ -28410,10 +32194,10 @@ impl<'a> CoreLowerer<'a> {
                     ..
                 } => {
                     for (_, _, captures) in clauses {
-                        collect(captures, sources);
+                        collect(captures, sources, borrow_roots);
                     }
-                    collect(shared_clause_captures, sources);
-                    collect(body_captures, sources);
+                    collect(shared_clause_captures, sources, borrow_roots);
+                    collect(body_captures, sources, borrow_roots);
                 }
                 core::ExprKind::Block { statements, tail } => {
                     for statement in statements {
@@ -28421,7 +32205,7 @@ impl<'a> CoreLowerer<'a> {
                             core::Stmt::Let { value, .. }
                             | core::Stmt::Assign { value, .. }
                             | core::Stmt::Expr(value) => {
-                                collect_initial_sources(value, sources);
+                                collect_initial_sources(value, sources, borrow_roots);
                             }
                             core::Stmt::Deconstruct { source, .. }
                             | core::Stmt::EndBorrow { local: source, .. } => {
@@ -28429,7 +32213,7 @@ impl<'a> CoreLowerer<'a> {
                             }
                         }
                     }
-                    collect_initial_sources(tail, sources);
+                    collect_initial_sources(tail, sources, borrow_roots);
                 }
                 core::ExprKind::Unit
                 | core::ExprKind::Constant(_)
@@ -28439,24 +32223,46 @@ impl<'a> CoreLowerer<'a> {
             }
         }
         let mut initial_source_locals = BTreeSet::new();
+        let mut initial_borrow_roots = BTreeSet::new();
         for argument in &initial_args {
-            collect_initial_sources(argument, &mut initial_source_locals);
+            collect_initial_sources(
+                argument,
+                &mut initial_source_locals,
+                &mut initial_borrow_roots,
+            );
         }
+        // Overlapping late-inline arguments use a temporary followed by the
+        // helper's parameter local. Both are consumed staging sources for the
+        // eventual loop parameter and neither may be recaptured as an outer
+        // loop local merely because its type is Copy.
+        initial_source_locals.extend(temporary_parameter_locals.values().copied());
+        let mut body_source_locals = BTreeSet::new();
+        let mut body_borrow_roots = BTreeSet::new();
+        collect_initial_sources(&body, &mut body_source_locals, &mut body_borrow_roots);
         let outer_locals = control_context
             .outer_locals
             .iter()
             .filter_map(|(local, uses_before, always_preserve)| {
+                let reusable_body_source = body_source_locals.contains(local)
+                    && self
+                        .owner_types
+                        .get(local)
+                        .is_some_and(|ty| self.is_copy(*ty));
                 (!parameter_locals.contains(local)
                     && (!initial_source_locals.contains(local)
+                        || initial_borrow_roots.contains(local)
                         || control_context.continuation_locals.contains(local)
-                        || *always_preserve)
+                        || reusable_body_source)
                     && (control_context.continuation_locals.contains(local)
+                        || initial_borrow_roots.contains(local)
                         || *always_preserve
+                        || body_source_locals.contains(local)
                         || self.actual_uses.get(local).copied().unwrap_or(0) > *uses_before))
                     .then_some(*local)
             })
-            .collect();
-        Ok(core::Expr {
+            .collect::<Vec<_>>();
+        let formed_control = control_context.control.0;
+        let result = core::Expr {
             ty,
             span: body_span,
             reference,
@@ -28468,7 +32274,158 @@ impl<'a> CoreLowerer<'a> {
                 outer_locals,
                 body: Box::new(body),
             },
-        })
+        };
+        self.finish_control_plan(pending_control_plan, &result, Some(formed_control));
+        Ok(result)
+    }
+
+    fn finish_control_plan(
+        &mut self,
+        plan: Option<core::ControlPlan>,
+        result: &core::Expr,
+        formed_control_loop: Option<u32>,
+    ) {
+        let Some(mut plan) = plan else {
+            return;
+        };
+        #[derive(Default)]
+        struct Residuals {
+            callable: bool,
+            handler: bool,
+        }
+        fn visit(expression: &core::Expr, residuals: &mut Residuals) {
+            let visit_all = |values: &[core::Expr], residuals: &mut Residuals| {
+                for value in values {
+                    visit(value, residuals);
+                }
+            };
+            match &expression.kind {
+                core::ExprKind::MakeCallable { captures, .. } => {
+                    residuals.callable = true;
+                    visit_all(captures, residuals);
+                }
+                core::ExprKind::CallIndirect { callable, args, .. }
+                | core::ExprKind::TailCallIndirect { callable, args, .. } => {
+                    residuals.callable = true;
+                    visit(callable, residuals);
+                    visit_all(args, residuals);
+                }
+                core::ExprKind::Handle {
+                    clauses,
+                    shared_clause_captures,
+                    body_captures,
+                    ..
+                } => {
+                    residuals.handler = true;
+                    for (_, _, captures) in clauses {
+                        visit_all(captures, residuals);
+                    }
+                    visit_all(shared_clause_captures, residuals);
+                    visit_all(body_captures, residuals);
+                }
+                core::ExprKind::TemporaryProjectBorrow { source, .. }
+                | core::ExprKind::LabelDestination { body: source, .. }
+                | core::ExprKind::Leave { value: source, .. }
+                | core::ExprKind::PatternTest {
+                    subject: source, ..
+                }
+                | core::ExprKind::Project {
+                    subject: source, ..
+                }
+                | core::ExprKind::Cancel { resumption: source } => visit(source, residuals),
+                core::ExprKind::Call { args, .. }
+                | core::ExprKind::TailCall { args, .. }
+                | core::ExprKind::CallSelf { args }
+                | core::ExprKind::TailCallSelf { args }
+                | core::ExprKind::ControlContinue { args, .. }
+                | core::ExprKind::Primitive { args, .. }
+                | core::ExprKind::HostCall { args, .. }
+                | core::ExprKind::Perform { payloads: args, .. } => visit_all(args, residuals),
+                core::ExprKind::CallKnownReceiver { receiver, args, .. }
+                | core::ExprKind::TailCallKnownReceiver { receiver, args, .. } => {
+                    visit(receiver, residuals);
+                    visit_all(args, residuals);
+                }
+                core::ExprKind::ControlLoop {
+                    initial_args, body, ..
+                } => {
+                    visit_all(initial_args, residuals);
+                    visit(body, residuals);
+                }
+                core::ExprKind::RefinementBranch {
+                    subject,
+                    positive,
+                    negative,
+                    ..
+                } => {
+                    visit(subject, residuals);
+                    visit(positive, residuals);
+                    visit(negative, residuals);
+                }
+                core::ExprKind::Construct { fields, .. } => {
+                    for field in fields {
+                        visit(&field.value, residuals);
+                    }
+                }
+                core::ExprKind::Resume {
+                    resumption, value, ..
+                }
+                | core::ExprKind::TailResume { resumption, value } => {
+                    visit(resumption, residuals);
+                    visit(value, residuals);
+                }
+                core::ExprKind::Block { statements, tail } => {
+                    for statement in statements {
+                        match statement {
+                            core::Stmt::Let { value, .. } | core::Stmt::Expr(value) => {
+                                visit(value, residuals)
+                            }
+                            core::Stmt::Assign {
+                                value, destination, ..
+                            } => {
+                                visit(value, residuals);
+                                if let core::AssignmentRoot::Dereference { reference, .. } =
+                                    &destination.root
+                                {
+                                    visit(reference, residuals);
+                                }
+                            }
+                            core::Stmt::Deconstruct { .. } | core::Stmt::EndBorrow { .. } => {}
+                        }
+                    }
+                    visit(tail, residuals);
+                }
+                core::ExprKind::Unit
+                | core::ExprKind::Constant(_)
+                | core::ExprKind::Local { .. }
+                | core::ExprKind::Move { .. }
+                | core::ExprKind::Borrow { .. }
+                | core::ExprKind::ProjectBorrow { .. }
+                | core::ExprKind::Reborrow { .. }
+                | core::ExprKind::DerefCopy { .. }
+                | core::ExprKind::DerefMove { .. }
+                | core::ExprKind::Receiver
+                | core::ExprKind::PatternTestBorrowed { .. }
+                | core::ExprKind::LocalReferenceView { .. }
+                | core::ExprKind::HostLeafStub
+                | core::ExprKind::Abort { .. } => {}
+            }
+        }
+        let mut residuals = Residuals::default();
+        visit(result, &mut residuals);
+        plan.formed_control_loop = formed_control_loop;
+        plan.residual_callable_allocation = residuals.callable;
+        plan.residual_effect_handler = residuals.handler;
+        plan.failure_reason = if plan.tail_recursive_cycle && formed_control_loop.is_none() {
+            Some("structural summary did not authorize control-loop formation".to_owned())
+        } else if plan.residual_callable_allocation {
+            Some("residual callable allocation remained after control inlining".to_owned())
+        } else if plan.residual_effect_handler {
+            Some("residual effect handler remained after control inlining".to_owned())
+        } else {
+            None
+        };
+        self.effects.control_plans.push(plan);
     }
 
     fn late_manifest_types(&mut self, name: &str) -> Option<(Vec<Option<TypeId>>, Option<TypeId>)> {
@@ -28503,57 +32460,46 @@ impl<'a> CoreLowerer<'a> {
             .clone();
         let generic_names = function
             .generics
-            .as_ref()
-            .map(|generics| {
-                generics
-                    .params
-                    .iter()
-                    .map(|parameter| parameter.name.clone())
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        let generic_name = |syntax: &TypeSyntax| match &syntax.kind {
-            TypeSyntaxKind::Path(path)
-                if path.len() == 1 && generic_names.contains(&path[0].name) =>
-            {
-                Some(path[0].name.clone())
-            }
-            _ => None,
-        };
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter(|parameter| parameter.kind == GenericParamKind::Type)
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
         let mut inferred = BTreeMap::<String, TypeId>::new();
-        if let (Some(result), Some(expected)) = (
-            function.return_type.as_ref().and_then(&generic_name),
-            expected,
-        ) {
-            inferred.insert(result, expected);
+        if let (Some(result), Some(expected)) = (&function.return_type, expected)
+            && !self.infer_late_substitutions(result, expected, &generic_names, &mut inferred)
+        {
+            return None;
         }
         for (parameter, argument) in function.params.iter().zip(arguments) {
-            let Some(generic) = generic_name(&parameter.ty) else {
+            let (formal, actual_expression) = match (&parameter.ty.kind, &argument.kind) {
+                (
+                    TypeSyntaxKind::SharedReference { referent, .. }
+                    | TypeSyntaxKind::UniqueReference { referent, .. },
+                    ExprKind::Unary {
+                        op: UnaryOp::BorrowShared | UnaryOp::BorrowUnique,
+                        operand,
+                    },
+                ) => (referent.as_ref(), operand.as_ref()),
+                _ => (&parameter.ty, argument),
+            };
+            let Some(actual) = self.inferred_late_generic_expression_type(actual_expression, 0)
+            else {
                 continue;
             };
-            let Some(ty) = self.static_local_expression_type(argument) else {
-                continue;
-            };
-            if inferred
-                .get(&generic)
-                .is_none_or(|inferred| *inferred == ty)
-            {
-                inferred.insert(generic, ty);
+            if !self.infer_late_substitutions(formal, actual, &generic_names, &mut inferred) {
+                return None;
             }
         }
-        let mut resolve = |syntax: &TypeSyntax| {
-            self.monomorphic_source_type(syntax)
-                .or_else(|| generic_name(syntax).and_then(|name| inferred.get(&name).copied()))
-        };
         let params = function
             .params
             .iter()
-            .map(|parameter| resolve(&parameter.ty))
-            .collect();
+            .map(|parameter| self.substituted_source_type(&parameter.ty, &inferred))
+            .collect::<Vec<_>>();
         let result = function
             .return_type
             .as_ref()
-            .and_then(&mut resolve)
+            .and_then(|result| self.substituted_source_type(result, &inferred))
             .or(Some(UNIT).filter(|_| function.return_type.is_none()));
         Some((params, result))
     }
@@ -28619,11 +32565,60 @@ impl<'a> CoreLowerer<'a> {
             self.runtime_bindings.array_name(),
         )
         .ok();
-        if let Some(id) = resolved
-            .as_ref()
-            .and_then(|resolved| self.existing_structural_type_id(resolved))
-        {
-            return Some(id);
+        if let Some(resolved) = resolved {
+            // Late generic substitution may be the first point at which a
+            // structural tuple/reference/array shape becomes concrete. The
+            // type allocator is canonical, so intern that exact shape here
+            // instead of requiring an unrelated earlier specialization to
+            // have created it as incidental evidence.
+            return Some(self.structural_type_id(&resolved));
+        }
+
+        // The ordinary resolver can fail when a structural shell contains a
+        // generic nominal instance created after specialization discovery.
+        // Resolve that shell recursively so `&Late<K>`, `(Late<K>, U)`, and
+        // `Array<Late<K>>` share the canonical late-nominal path used by a
+        // top-level `Late<K>`.
+        match &syntax.kind {
+            TypeSyntaxKind::SharedReference { referent, .. } => {
+                let referent = self.substituted_source_type(referent, substitutions)?;
+                return Some(self.structural_type_id(&ResolvedType::Shared(Box::new(
+                    ResolvedType::Concrete(referent),
+                ))));
+            }
+            TypeSyntaxKind::UniqueReference { referent, .. } => {
+                let referent = self.substituted_source_type(referent, substitutions)?;
+                return Some(self.structural_type_id(&ResolvedType::Unique(Box::new(
+                    ResolvedType::Concrete(referent),
+                ))));
+            }
+            TypeSyntaxKind::Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| {
+                        self.substituted_source_type(element, substitutions)
+                            .map(ResolvedType::Concrete)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                return Some(self.structural_type_id(&ResolvedType::Tuple(elements)));
+            }
+            TypeSyntaxKind::Application {
+                constructor,
+                arguments,
+                lifetime_arguments,
+            } if lifetime_arguments.is_empty()
+                && constructor.simple_name() == self.runtime_bindings.array_name()
+                && arguments.len() == 1 =>
+            {
+                let element = self.substituted_source_type(&arguments[0], substitutions)?;
+                return Some(self.structural_type_id(&ResolvedType::Array(Box::new(
+                    ResolvedType::Concrete(element),
+                ))));
+            }
+            TypeSyntaxKind::Path(_)
+            | TypeSyntaxKind::Application { .. }
+            | TypeSyntaxKind::Projection { .. }
+            | TypeSyntaxKind::Never => {}
         }
 
         // Static control inlining can discover a concrete generic result
@@ -28642,6 +32637,10 @@ impl<'a> CoreLowerer<'a> {
             return None;
         }
         let declaration_name = constructor.simple_name()?;
+        let declaration_leaf = declaration_name
+            .rsplit(':')
+            .next()
+            .unwrap_or(declaration_name);
         let argument_ids = arguments
             .iter()
             .map(|argument| self.substituted_source_type(argument, substitutions))
@@ -28651,13 +32650,57 @@ impl<'a> CoreLowerer<'a> {
         }) {
             return Some(id);
         }
-        let declaration = self
+        // A specialization may already have sealed this exact nominal under
+        // its canonical ground-identity spelling. Reuse that TypeId before
+        // allocating a late instance: bytecode type identity is nominal, so
+        // two descriptors for `Result<&T, Unit>` are not interchangeable even
+        // when their field layouts coincide.
+        let sealed_candidates = self
+            .nominals
+            .iter()
+            .map(|(name, info)| (name.clone(), info.id))
+            .collect::<Vec<_>>();
+        for (name, id) in sealed_candidates {
+            let Some(instance) = decode_nominal_instance(&name) else {
+                continue;
+            };
+            let leaf = instance
+                .declaration
+                .0
+                .rsplit(':')
+                .next()
+                .unwrap_or(&instance.declaration.0);
+            if leaf != declaration_leaf || instance.arguments.len() != argument_ids.len() {
+                continue;
+            }
+            let actuals = instance
+                .arguments
+                .iter()
+                .map(|argument| self.late_closure_type_id(argument))
+                .collect::<Option<Vec<_>>>();
+            if actuals.as_deref() == Some(argument_ids.as_slice()) {
+                return Some(id);
+            }
+        }
+        let mut declarations = self
             .enum_templates
             .iter()
-            .find(|declaration| {
-                declaration.name == declaration_name && declaration.generics.is_some()
-            })?
-            .clone();
+            .filter(|declaration| {
+                declaration.generics.is_some()
+                    && (declaration.name == declaration_name
+                        || declaration
+                            .name
+                            .rsplit(':')
+                            .next()
+                            .is_some_and(|leaf| leaf == declaration_leaf))
+            })
+            .cloned();
+        let declaration = declarations.next()?;
+        if declarations.next().is_some() {
+            // A short spelling is insufficient evidence when two modules
+            // expose generic enums with the same leaf name.
+            return None;
+        }
         let parameters = declaration
             .generics
             .as_ref()?
@@ -28744,6 +32787,61 @@ impl<'a> CoreLowerer<'a> {
             },
         );
         Some(ty)
+    }
+
+    /// Recover the declared result of the innermost source helper currently
+    /// being control-inlined into another destination frame. Expressions in
+    /// that helper deliberately retain the destination's `body_instance`, so
+    /// ordinary call-site construction plans cannot identify generic empty
+    /// variants such as `Result::Ok` or a work-queue empty slot. The active
+    /// helper and its structurally inferred type substitutions are the exact
+    /// equivalent evidence.
+    fn active_late_inline_result_type(&mut self) -> Option<TypeId> {
+        let name = self.late_inline_functions.last()?.clone();
+        let function = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == name)?
+            .clone();
+        let result = function.return_type.clone()?;
+        let mut substitutions = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter_map(|parameter| {
+                self.late_inline_type_substitutions
+                    .get(&format!("{name}::{}", parameter.name))
+                    .copied()
+                    .map(|ty| (parameter.name.clone(), ty))
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Call-site inference may be intentionally incomplete when a nested
+        // late helper receives an expression whose type is only materialized
+        // while staging its arguments. Once the helper body is active, its
+        // synthetic parameter locals are exact runtime evidence. Recover any
+        // missing binders from those locals before resolving an empty generic
+        // constructor in the helper body.
+        let generic_names = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter(|parameter| parameter.kind == GenericParamKind::Type)
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
+        for parameter in &function.params {
+            let Some(actual) = self.locals.get(&parameter.name).map(|local| local.ty) else {
+                continue;
+            };
+            if !self.infer_late_substitutions(
+                &parameter.ty,
+                actual,
+                &generic_names,
+                &mut substitutions,
+            ) {
+                return None;
+            }
+        }
+        self.substituted_source_type(&result, &substitutions)
     }
 
     fn monomorphic_source_type(&mut self, syntax: &TypeSyntax) -> Option<TypeId> {
@@ -29096,6 +33194,11 @@ impl<'a> CoreLowerer<'a> {
             body_instance: None,
             expression_ordinals: specialization::expression_ordinals(&runtime_body),
             recursive_receiver: None,
+            static_labels: BTreeMap::new(),
+            static_closures: BTreeMap::new(),
+            late_inline_type_substitutions: BTreeMap::new(),
+            late_inline_functions: Vec::new(),
+            handled_terminal_performs: BTreeSet::new(),
         });
         if let Some(plan) = runtime_reference_plan {
             self.effects
@@ -29135,7 +33238,41 @@ impl<'a> CoreLowerer<'a> {
             typeck::ProvisionalType::Predefined(name) => {
                 scalar_type(name).or_else(|| self.nominals.get(name).map(|nominal| nominal.id))
             }
-            typeck::ProvisionalType::Nominal(_) => {
+            typeck::ProvisionalType::Nominal(instance) => {
+                // Implicit generic function-label evidence retains a source
+                // binder such as `A` as a nominal-shaped placeholder. A
+                // control-inlined helper stack already carries its exact
+                // runtime substitution.
+                if instance.arguments.is_empty()
+                    && let Some(ty) = self.late_inline_named_type_id(&instance.declaration.0)
+                {
+                    return Some(ty);
+                }
+                if instance.arguments.is_empty()
+                    && let Some(ty) = self.specialized_named_type(&instance.declaration.0)
+                {
+                    return self.late_closure_type_id(&ty);
+                }
+                if instance.arguments.is_empty()
+                    && let Some(scalar) = scalar_type(&instance.declaration.0)
+                {
+                    return Some(scalar);
+                }
+                if instance.arguments.is_empty()
+                    && let Some(alias) = self.aliases.get(&instance.declaration.0).cloned()
+                {
+                    return self.existing_structural_type_id(&alias);
+                }
+                if instance.arguments.is_empty()
+                    && let Some(target) = self
+                        .program
+                        .type_aliases
+                        .iter()
+                        .find(|alias| alias.name == instance.declaration.0)
+                        .map(|alias| alias.target.clone())
+                {
+                    return self.substituted_source_type(&target, &BTreeMap::new());
+                }
                 let grounded = self.ground_late_closure_type(ty)?;
                 let typeck::ProvisionalType::Nominal(grounded) = grounded else {
                     unreachable!("grounding a nominal preserves its outer constructor")
@@ -29145,7 +33282,89 @@ impl<'a> CoreLowerer<'a> {
                 } else {
                     encode_nominal_instance(&grounded)
                 };
-                self.nominals.get(&name).map(|nominal| nominal.id)
+                if let Some(nominal) = self.nominals.get(&name) {
+                    return Some(nominal.id);
+                }
+                // Source label annotations retain the lexical spelling of a
+                // nominal constructor, while module resolution seals generic
+                // runtime instances under their fully-qualified declaration
+                // identity. Resolve that spelling structurally, exactly as
+                // ground alias applications do. Fail closed when two modules
+                // expose indistinguishable short heads; specialization must
+                // never silently choose a runtime identity.
+                let short = grounded.declaration.0.as_str();
+                let grounded_arguments = grounded
+                    .arguments
+                    .iter()
+                    .map(canonical_ground_type)
+                    .collect::<Vec<_>>();
+                fn same_lexical_type(
+                    left: &typeck::ProvisionalType,
+                    right: &typeck::ProvisionalType,
+                ) -> bool {
+                    match (left, right) {
+                        (
+                            typeck::ProvisionalType::Nominal(left),
+                            typeck::ProvisionalType::Nominal(right),
+                        ) => {
+                            let left_leaf = left
+                                .declaration
+                                .0
+                                .rsplit(':')
+                                .next()
+                                .unwrap_or(&left.declaration.0);
+                            let right_leaf = right
+                                .declaration
+                                .0
+                                .rsplit(':')
+                                .next()
+                                .unwrap_or(&right.declaration.0);
+                            (left.declaration == right.declaration || left_leaf == right_leaf)
+                                && left.arguments.len() == right.arguments.len()
+                                && left
+                                    .arguments
+                                    .iter()
+                                    .zip(&right.arguments)
+                                    .all(|(left, right)| same_lexical_type(left, right))
+                        }
+                        (
+                            typeck::ProvisionalType::Tuple(left),
+                            typeck::ProvisionalType::Tuple(right),
+                        ) => {
+                            left.len() == right.len()
+                                && left
+                                    .iter()
+                                    .zip(right)
+                                    .all(|(left, right)| same_lexical_type(left, right))
+                        }
+                        (
+                            typeck::ProvisionalType::Shared(left),
+                            typeck::ProvisionalType::Shared(right),
+                        )
+                        | (
+                            typeck::ProvisionalType::Unique(left),
+                            typeck::ProvisionalType::Unique(right),
+                        ) => same_lexical_type(left, right),
+                        _ => left == right,
+                    }
+                }
+                let mut candidates = self.nominals.iter().filter_map(|(encoded, nominal)| {
+                    let candidate = decode_nominal_instance(encoded)?;
+                    let same_head = candidate.declaration == grounded.declaration
+                        || candidate.declaration.0.ends_with(&format!(":{short}"));
+                    let same_arguments = candidate.arguments.len() == grounded_arguments.len()
+                        && candidate
+                            .arguments
+                            .iter()
+                            .map(canonical_ground_type)
+                            .zip(&grounded_arguments)
+                            .all(|(candidate, grounded)| same_lexical_type(&candidate, grounded));
+                    (same_head && same_arguments).then_some(nominal.id)
+                });
+                let found = candidates.next()?;
+                candidates
+                    .all(|candidate| candidate == found)
+                    .then_some(found)
             }
             typeck::ProvisionalType::Tuple(elements) => {
                 let elements = elements
@@ -29170,6 +33389,9 @@ impl<'a> CoreLowerer<'a> {
                 ))))
             }
             typeck::ProvisionalType::Param(param) => {
+                if let Some(ty) = self.late_inline_param_type_id(param) {
+                    return Some(ty);
+                }
                 let specialization::BodyInstanceKey::Specialization(key) =
                     self.body_instance.as_ref()?
                 else {
@@ -29206,6 +33428,21 @@ impl<'a> CoreLowerer<'a> {
                 ty.clone()
             }
             typeck::ProvisionalType::Nominal(instance) => {
+                if instance.arguments.is_empty()
+                    && let Some(ty) = scalar_type(&instance.declaration.0)
+                {
+                    return self.provisional_runtime_type_id(ty);
+                }
+                if instance.arguments.is_empty()
+                    && let Some(ty) = self.late_inline_named_type_id(&instance.declaration.0)
+                {
+                    return self.provisional_runtime_type_id(ty);
+                }
+                if instance.arguments.is_empty()
+                    && let Some(ty) = self.specialized_named_type(&instance.declaration.0)
+                {
+                    return self.ground_late_closure_type_inner(&ty, visiting);
+                }
                 typeck::ProvisionalType::Nominal(typeck::NominalInstanceKey {
                     declaration: instance.declaration.clone(),
                     arguments: instance
@@ -29228,6 +33465,9 @@ impl<'a> CoreLowerer<'a> {
                 self.ground_late_closure_type_inner(referent, visiting)?,
             )),
             typeck::ProvisionalType::Param(param) => {
+                if let Some(ty) = self.late_inline_param_type_id(param) {
+                    return self.provisional_runtime_type_id(ty);
+                }
                 if !visiting.insert(param.clone()) {
                     return None;
                 }
@@ -29248,6 +33488,121 @@ impl<'a> CoreLowerer<'a> {
             }
             typeck::ProvisionalType::Callable(_) => return None,
         })
+    }
+
+    fn late_inline_param_type_id(&self, param: &typeck::GenericParamKey) -> Option<TypeId> {
+        let typeck::DeclarationKey::Function(owner) = &param.owner else {
+            return None;
+        };
+        let binder = self
+            .function_templates
+            .iter()
+            .find(|function| &function.name == owner)?
+            .generics
+            .as_ref()?
+            .params
+            .get(param.ordinal as usize)?;
+        (binder.kind == GenericParamKind::Type)
+            .then(|| {
+                self.late_inline_type_substitutions
+                    .get(&format!("{}::{}", owner, binder.name))
+                    .copied()
+            })
+            .flatten()
+    }
+
+    fn late_inline_named_type_id(&self, binder: &str) -> Option<TypeId> {
+        self.late_inline_functions
+            .iter()
+            .rev()
+            .find_map(|function| {
+                self.late_inline_type_substitutions
+                    .get(&format!("{}::{}", function, binder))
+                    .copied()
+            })
+    }
+
+    fn specialized_named_type(&self, binder: &str) -> Option<typeck::ProvisionalType> {
+        let specialization::BodyInstanceKey::Specialization(key) = self.body_instance.as_ref()?
+        else {
+            return None;
+        };
+        let typeck::DeclarationKey::Function(owner) = &key.template else {
+            return None;
+        };
+        let function = self
+            .function_templates
+            .iter()
+            .find(|function| &function.name == owner)?;
+        let template = self.specialization_graph.templates.get(&key.template)?;
+        let generic = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .zip(&template.generic_params)
+            .find_map(|(parameter, key)| {
+                (parameter.kind == GenericParamKind::Type && parameter.name == binder)
+                    .then_some(key)
+            })?;
+        let substitutions = specialization::substitutions_for_key(template, key);
+        match substitutions.get(generic)? {
+            specialization::SpecializationArgument::Type(ty) => Some(ty.clone()),
+            specialization::SpecializationArgument::Closure(..)
+            | specialization::SpecializationArgument::EffectRow(_) => None,
+        }
+    }
+
+    fn provisional_runtime_type_id(&self, ty: TypeId) -> Option<typeck::ProvisionalType> {
+        fn resolved(
+            lowerer: &CoreLowerer<'_>,
+            ty: &ResolvedType,
+        ) -> Option<typeck::ProvisionalType> {
+            Some(match ty {
+                ResolvedType::Concrete(id) => {
+                    if let Some(info) = lowerer.effects.late_nominals.get(id) {
+                        typeck::ProvisionalType::Nominal(typeck::NominalInstanceKey {
+                            declaration: typeck::NominalKey(info.declaration.clone()),
+                            arguments: info
+                                .arguments
+                                .iter()
+                                .map(|argument| lowerer.provisional_runtime_type_id(*argument))
+                                .collect::<Option<Vec<_>>>()?,
+                        })
+                    } else if let Some((name, _)) =
+                        lowerer.nominals.iter().find(|(_, info)| info.id == *id)
+                    {
+                        typeck::ProvisionalType::Nominal(
+                            decode_nominal_instance(name).unwrap_or_else(|| {
+                                typeck::NominalInstanceKey::monomorphic(name.as_str())
+                            }),
+                        )
+                    } else {
+                        typeck::predefined_named(type_name(*id))
+                    }
+                }
+                ResolvedType::Tuple(elements) => typeck::ProvisionalType::Tuple(
+                    elements
+                        .iter()
+                        .map(|element| resolved(lowerer, element))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                ResolvedType::Array(element) => {
+                    typeck::ProvisionalType::Nominal(typeck::NominalInstanceKey {
+                        declaration: typeck::NominalKey(
+                            lowerer.runtime_bindings.array_name()?.to_owned(),
+                        ),
+                        arguments: vec![resolved(lowerer, element)?],
+                    })
+                }
+                ResolvedType::Shared(referent) => {
+                    typeck::ProvisionalType::shared(resolved(lowerer, referent)?)
+                }
+                ResolvedType::Unique(referent) => {
+                    typeck::ProvisionalType::unique(resolved(lowerer, referent)?)
+                }
+            })
+        }
+        resolved(self, &self.resolved_type(ty))
     }
 
     fn lower_late_closure(
@@ -29446,6 +33801,11 @@ impl<'a> CoreLowerer<'a> {
             body_instance: Some(specialization::BodyInstanceKey::Closure(request)),
             expression_ordinals: body_ordinals,
             recursive_receiver,
+            static_labels: BTreeMap::new(),
+            static_closures: BTreeMap::new(),
+            late_inline_type_substitutions: BTreeMap::new(),
+            late_inline_functions: Vec::new(),
+            handled_terminal_performs: BTreeSet::new(),
         });
         debug_assert_eq!(allocated, declaration);
         self.check(expression.span, expected, callable_type)?;
@@ -30309,6 +34669,11 @@ impl<'a> CoreLowerer<'a> {
         }
         let mut found = BTreeSet::new();
         visit(self, root, &mut found);
+        for (name, closure) in &self.static_closures {
+            if expression_mentions_name(root, name) {
+                closure.collect_runtime_capture_names(&mut found);
+            }
+        }
         found
     }
 
@@ -30375,7 +34740,7 @@ impl<'a> CoreLowerer<'a> {
             format!(
                 "expected {}, found {}",
                 diagnostic_type_name(expected, self.nominals),
-                diagnostic_type_name(actual, self.nominals)
+                diagnostic_type_name(actual, self.nominals),
             ),
         )
     }
@@ -31783,6 +36148,72 @@ impl<'a> CoreLowerer<'a> {
         self.end_region(origin.region);
     }
 
+    /// Retiring a unique reference at a branch join also retires every
+    /// descendant reborrow that exists only inside that predecessor.  Those
+    /// descendants may have narrowed the frontend loan from a whole-place
+    /// entry to projected entries, so releasing only the original exact path
+    /// would leave incomparable state at the join.
+    fn retire_unique_loan_tree_from_state(
+        origin: &core::ReferenceOrigin,
+        loans: &mut BTreeMap<core::LocalId, ActiveLoans>,
+        projected_loans: &mut BTreeMap<core::LocalId, BTreeMap<Vec<u32>, ActiveLoans>>,
+        suspended: &mut BTreeSet<core::LocalId>,
+        uniquely_suspended: &mut BTreeSet<core::LocalId>,
+    ) {
+        if !origin.unique {
+            return;
+        }
+        let mut roots = Vec::new();
+        if !origin.external {
+            roots.push(origin.root);
+        }
+        if let Some(parent) = origin.parent
+            && (origin.external || parent != origin.root)
+        {
+            roots.push(parent);
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        for root in roots {
+            if origin.path.is_empty()
+                && let Some(active) = loans.get_mut(&root)
+            {
+                active.unique = false;
+                if active.shared == 0 {
+                    loans.remove(&root);
+                }
+            }
+            if let Some(fields) = projected_loans.get_mut(&root) {
+                fields.retain(|path, active| {
+                    if path.starts_with(&origin.path) {
+                        active.unique = false;
+                    }
+                    active.unique || active.shared != 0
+                });
+                if fields.is_empty() {
+                    projected_loans.remove(&root);
+                }
+            }
+            let whole = loans.get(&root).copied().unwrap_or_default();
+            let projected = projected_loans.get(&root);
+            if whole.unique
+                || whole.shared != 0
+                || projected.is_some_and(|fields| !fields.is_empty())
+            {
+                suspended.insert(root);
+            } else {
+                suspended.remove(&root);
+            }
+            if whole.unique
+                || projected.is_some_and(|fields| fields.values().any(|loan| loan.unique))
+            {
+                uniquely_suspended.insert(root);
+            } else {
+                uniquely_suspended.remove(&root);
+            }
+        }
+    }
+
     /// A temporary parent reference consumed solely to create a projected
     /// child has no independently usable handle after this point. Narrow its
     /// whole-place frontend loan to the child's field loan while retaining its
@@ -31823,20 +36254,41 @@ impl<'a> CoreLowerer<'a> {
         origin: &core::ReferenceOrigin,
         result_unique: bool,
     ) {
-        if origin.external || origin.unique == result_unique {
+        if origin.unique == result_unique {
             return;
         }
         debug_assert!(origin.unique && !result_unique);
-        let loans = if !origin.path.is_empty() {
-            self.projected_loans
-                .get_mut(&origin.root)
-                .and_then(|fields| fields.get_mut(&origin.path))
-        } else {
-            self.loans.get_mut(&origin.root)
-        };
-        if let Some(loans) = loans {
-            loans.unique = false;
-            loans.shared = loans.shared.saturating_add(1);
+        // A transported reference is registered at every locally owned
+        // authority named by `register_loan`: its root when the referent is
+        // local, and its parent handle when a reference parameter or another
+        // external origin is reborrowed.  Downgrading a unique transport to a
+        // shared result must update the same frontier.  Updating only `root`
+        // silently missed external origins, leaving their local parent marked
+        // as uniquely suspended even though the surviving result was shared.
+        let mut roots = Vec::new();
+        if !origin.external {
+            roots.push(origin.root);
+        }
+        if let Some(parent) = origin.parent
+            && (origin.external || parent != origin.root)
+        {
+            roots.push(parent);
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        for root in roots {
+            let loans = if !origin.path.is_empty() {
+                self.projected_loans
+                    .get_mut(&root)
+                    .and_then(|fields| fields.get_mut(&origin.path))
+            } else {
+                self.loans.get_mut(&root)
+            };
+            if let Some(loans) = loans {
+                loans.unique = false;
+                loans.shared = loans.shared.saturating_add(1);
+            }
+            self.refresh_parent_suspension(root);
         }
     }
 
@@ -32170,6 +36622,100 @@ impl<'a> CoreLowerer<'a> {
                 expression.reference_fields = singleton_reference_fields(Some(origin));
                 return Ok(expression);
             }
+        }
+        if let ExprKind::Unary {
+            op: UnaryOp::Dereference,
+            operand: reference,
+        } = &operand.kind
+            && !matches!(&reference.kind, ExprKind::Variable(path) if path.len() == 1)
+        {
+            // A reference-valued aggregate field must be borrowed before its
+            // stored authority can itself be reborrowed. Evaluating the field
+            // as an ordinary expression would move that authority out of the
+            // owner (and is invalid for cleanup guards with custom Drop).
+            let stored_reference = matches!(reference.kind, ExprKind::Field(_, _));
+            let parent = if stored_reference {
+                self.borrow(reference, true, reference.span, None)?
+            } else {
+                self.expression(reference, None)?
+            };
+            let Some(parent_origin) = parent.reference.clone() else {
+                return Err(self.borrow_error(
+                    reference.span,
+                    "reborrowing a temporary reference requires tracked origin evidence",
+                ));
+            };
+            if unique && !parent_origin.unique {
+                return Err(self.borrow_error(
+                    reference.span,
+                    "a unique reborrow requires a unique parent reference",
+                ));
+            }
+            let referent = match self.resolved_type(parent.ty) {
+                ResolvedType::Shared(referent) | ResolvedType::Unique(referent) => {
+                    self.structural_id(&referent)
+                }
+                ResolvedType::Concrete(_) | ResolvedType::Tuple(_) | ResolvedType::Array(_) => {
+                    return Err(self.borrow_error(
+                        reference.span,
+                        "reborrowing a temporary requires a reference-valued expression",
+                    ));
+                }
+            };
+            self.mark_region_live(parent_origin.region);
+            let parent_region = (parent_origin.region != 0).then_some(parent_origin.region);
+            let region = self.allocate_region(parent_region);
+            let ty = if stored_reference {
+                match self.resolved_type(referent) {
+                    ResolvedType::Unique(inner) => {
+                        self.reference_id(self.structural_id(&inner), unique)
+                    }
+                    ResolvedType::Shared(inner) if !unique => {
+                        self.reference_id(self.structural_id(&inner), false)
+                    }
+                    ResolvedType::Shared(_) => {
+                        return Err(self.borrow_error(
+                            reference.span,
+                            "a shared stored reference cannot be uniquely reborrowed",
+                        ));
+                    }
+                    ResolvedType::Concrete(_) | ResolvedType::Tuple(_) | ResolvedType::Array(_) => {
+                        return Err(self.borrow_error(
+                            reference.span,
+                            "the dereferenced aggregate field is not a stored reference",
+                        ));
+                    }
+                }
+            } else {
+                self.reference_id(referent, unique)
+            };
+            self.check(span, expected, ty)?;
+            let mut projection_types = parent_origin.projection_types.clone();
+            if stored_reference && let Some(last) = projection_types.last_mut() {
+                *last = ty;
+            }
+            let origin = core::ReferenceOrigin {
+                region,
+                root: parent_origin.root,
+                path: parent_origin.path.clone(),
+                projection_types,
+                external: parent_origin.external,
+                unique,
+                parent: None,
+            };
+            self.transfer_temporary_parent_loan(&parent_origin);
+            let mut expression = self.typed(
+                span,
+                ty,
+                core::ExprKind::TemporaryProjectBorrow {
+                    source: Box::new(parent),
+                    path: Vec::new(),
+                    unique,
+                },
+            );
+            expression.reference = Some(origin.clone());
+            expression.reference_fields = singleton_reference_fields(Some(origin));
+            return Ok(expression);
         }
         let (source, referent, mut origin, reborrow, projected_steps) = match &operand.kind {
             ExprKind::Variable(path) if path.len() == 1 => {
@@ -32679,6 +37225,11 @@ impl<'a> CoreLowerer<'a> {
                     .signatures
                     .get(path[0].as_ref())
                     .map(|signature| signature.result)
+                    .or_else(|| {
+                        self.static_closures
+                            .get(path[0].as_ref())
+                            .and_then(|closure| closure.result)
+                    })
                     .or_else(|| match (path[0].as_ref(), arguments.as_slice()) {
                         ("and" | "or", [value, alternative]) => {
                             let value = self.static_local_expression_type(value)?;
@@ -32806,12 +37357,62 @@ impl<'a> CoreLowerer<'a> {
         self.expression(argument, Some(expected))
     }
 
+    fn late_inline_argument(
+        &self,
+        argument: &Expr,
+        expectation: Option<&LateInlineLetExpectation>,
+    ) -> Expr {
+        let Some(LateInlineLetExpectation::Fixed(expected)) = expectation else {
+            return argument.clone();
+        };
+        let ExprKind::Variable(path) = &argument.kind else {
+            return argument.clone();
+        };
+        if path.len() != 1 {
+            return argument.clone();
+        }
+        let Some(actual) = self.locals.get(path[0].as_ref()).map(|local| local.ty) else {
+            return argument.clone();
+        };
+        let expected_shape = self.resolved_type(*expected);
+        let actual_shape = self.resolved_type(actual);
+        let unique = matches!(expected_shape, ResolvedType::Unique(_));
+        let compatible = match (&expected_shape, &actual_shape) {
+            (ResolvedType::Unique(expected), ResolvedType::Unique(actual))
+            | (ResolvedType::Shared(expected), ResolvedType::Shared(actual))
+            | (ResolvedType::Shared(expected), ResolvedType::Unique(actual)) => {
+                self.structural_id(expected) == self.structural_id(actual)
+            }
+            _ => false,
+        };
+        if !compatible {
+            return argument.clone();
+        }
+        Expr {
+            kind: ExprKind::Unary {
+                op: if unique {
+                    UnaryOp::BorrowUnique
+                } else {
+                    UnaryOp::BorrowShared
+                },
+                operand: Rc::new(Expr {
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::Dereference,
+                        operand: Rc::new(argument.clone()),
+                    },
+                    span: argument.span,
+                }),
+            },
+            span: argument.span,
+        }
+    }
+
     /// Resolve a trait call retained under lexical generic evidence once the
     /// enclosing specialization has ground parameter types. Selection uses
     /// the exact first-parameter runtime type and a compiler-generated method
     /// namespace; absent or non-unique matches remain fail-closed.
     fn deferred_trait_target(
-        &self,
+        &mut self,
         deferred: &str,
         arguments: &[Expr],
         expected: Option<TypeId>,
@@ -32855,6 +37456,50 @@ impl<'a> CoreLowerer<'a> {
             })
             .map(|(name, _)| name.clone())
             .collect::<BTreeSet<_>>();
+        if matches.is_empty()
+            && let Some(receiver) = receiver
+        {
+            // A structural receiver can become concrete for the first time
+            // during late generic inlining (for example a tuple key flowing
+            // into `HashMap::remove`). Such a type has no pre-discovered
+            // monomorphic trait wrapper. Select the unique generic wrapper by
+            // substituting its receiver pattern and demanding exact TypeId
+            // equality; its body is then handled by the ordinary late-inline
+            // path, whose nested deferred calls prove every where-bound.
+            let templates = self
+                .function_templates
+                .iter()
+                .filter(|function| {
+                    function.name.starts_with(&prefix)
+                        && function.name.ends_with(&suffix)
+                        && function.generics.is_some()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for function in templates {
+                let Some(parameter) = function.params.first() else {
+                    continue;
+                };
+                let binders = function
+                    .generics
+                    .iter()
+                    .flat_map(|generics| &generics.params)
+                    .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<BTreeSet<_>>();
+                let mut substitutions = BTreeMap::new();
+                if self.infer_late_substitutions(
+                    &parameter.ty,
+                    receiver,
+                    &binders,
+                    &mut substitutions,
+                ) && self.substituted_source_type(&parameter.ty, &substitutions)
+                    == Some(receiver)
+                {
+                    matches.insert(function.name);
+                }
+            }
+        }
         if matches.len() != 1 {
             let selection = receiver.map_or_else(
                 || {
@@ -33686,27 +38331,30 @@ impl<'a> CoreLowerer<'a> {
         let span = expression.span;
         let enum_name = path[0].as_ref();
         let variant_name = path[1].as_ref();
+        let same_enum = |candidate: &str| {
+            candidate == enum_name || candidate.rsplit(':').next() == enum_name.rsplit(':').next()
+        };
         let planned = self.planned_construction(expression);
-        let ordinary = expected
+        let contextual = expected
+            .or(planned)
+            .or_else(|| self.active_late_inline_result_type());
+        let ordinary = contextual
             .and_then(|expected| {
                 self.nominals.iter().find_map(|(name, info)| {
                     (info.id == expected
-                        && (info.name == enum_name
+                        && (same_enum(&info.name)
                             || decode_nominal_instance(name)
-                                .is_some_and(|instance| instance.declaration.0 == enum_name)))
+                                .is_some_and(|instance| same_enum(&instance.declaration.0))))
                     .then_some(info)
                 })
             })
-            .or_else(|| {
-                planned.and_then(|planned| self.nominals.values().find(|info| info.id == planned))
-            })
             .or_else(|| self.nominals.get(enum_name))
             .cloned();
-        let late = expected.or(planned).and_then(|ty| {
+        let late = contextual.and_then(|ty| {
             self.effects
                 .late_nominals
                 .get(&ty)
-                .filter(|info| info.declaration == enum_name)
+                .filter(|info| same_enum(&info.declaration))
                 .and_then(|info| info.enum_variants().map(|variants| (ty, variants.to_vec())))
         });
         let (ty, variants) = if let Some(info) = ordinary {
@@ -34552,6 +39200,17 @@ impl<'a> CoreLowerer<'a> {
                         return Err(errors);
                     }
                     let mut substitutions = BTreeMap::<String, TypeId>::new();
+                    // A generic constructor cloned from an active source
+                    // helper retains the helper's binder spellings but has no
+                    // destination-frame specialization key of its own. Seed
+                    // those binders from the innermost active helper before
+                    // asking field expressions (notably `Array::empty`) to
+                    // infer their result types.
+                    for generic in &generic_names {
+                        if let Some(ty) = self.late_inline_named_type_id(generic) {
+                            substitutions.insert(generic.clone(), ty);
+                        }
+                    }
                     // A generic nominal constructed inside a statically
                     // inlined callback may have no specialization-graph entry
                     // of its own even though its enclosing expression already
@@ -34696,13 +39355,57 @@ impl<'a> CoreLowerer<'a> {
                         });
                     }
                     if substitutions.len() != generic_names.len() {
+                        let missing = generic_names
+                            .iter()
+                            .filter(|name| !substitutions.contains_key(*name))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         return Err(vec![unsupported(
                             span,
                             "late generic nominal construction",
-                            "every generic parameter must occur directly in a field while transporting a resumption",
+                            format!(
+                                "generic `{}` cannot infer [{}]; every generic parameter must occur directly in a field while transporting a resumption",
+                                declaration.name, missing
+                            ),
                         )]);
                     }
-                    if let Some(ty) = expected_sealed {
+                    // Field inference can fully identify an ordinary sealed
+                    // generic instance even when no expected type reached a
+                    // constructor nested in a statically inlined callback.
+                    // Reuse that canonical nominal ID; allocating an
+                    // equivalent late nominal would split one source type
+                    // into two runtime identities and, among other things,
+                    // break effect instances indexed by the state type.
+                    let sealed_candidates = self
+                        .nominals
+                        .iter()
+                        .filter_map(|(encoded, info)| {
+                            let instance = decode_nominal_instance(encoded)?;
+                            (instance.declaration.0 == declaration.name)
+                                .then_some((info.id, instance))
+                        })
+                        .collect::<Vec<_>>();
+                    let type_parameters = declaration
+                        .generics
+                        .iter()
+                        .flat_map(|generics| &generics.params)
+                        .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                        .map(|parameter| parameter.name.clone())
+                        .collect::<Vec<_>>();
+                    let inferred_sealed = sealed_candidates.into_iter().find_map(|(id, instance)| {
+                        if instance.arguments.len() != type_parameters.len() {
+                            return None;
+                        }
+                        let matches = type_parameters.iter().zip(&instance.arguments).all(
+                            |(parameter, argument)| {
+                                self.late_closure_type_id(argument)
+                                    == substitutions.get(parameter).copied()
+                            },
+                        );
+                        matches.then_some(id)
+                    });
+                    if let Some(ty) = expected_sealed.or(inferred_sealed) {
                         self.check(span, expected, ty)?;
                         let mut expression = self.typed(
                             span,
@@ -35935,6 +40638,27 @@ impl<'a> CoreLowerer<'a> {
                         references = merged;
                     }
                     destination.transferred_references = Some(references);
+                    let live_locals = self
+                        .locals
+                        .values()
+                        .map(|binding| binding.local)
+                        .collect::<BTreeSet<_>>();
+                    let live_outer = destination
+                        .outer_locals
+                        .iter()
+                        .copied()
+                        .filter(|local| {
+                            live_locals.contains(local) && !self.moved.contains(local)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    destination.live_outer_on_leaves = Some(
+                        destination
+                            .live_outer_on_leaves
+                            .take()
+                            .map_or(live_outer.clone(), |previous| {
+                                previous.intersection(&live_outer).copied().collect()
+                            }),
+                    );
                     self.active_labels
                         .insert(label.name.to_string(), destination.clone());
                     self.check(span, expected, NEVER)?;
@@ -35999,12 +40723,6 @@ impl<'a> CoreLowerer<'a> {
                         expected.or(closure_result),
                     );
                 }
-                if source_name == "try"
-                    && let [_, label_argument] = arguments.as_slice()
-                    && let Some(label) = self.static_label_argument(label_argument)
-                {
-                    return self.inline_standard_try(arguments, label, span, expected);
-                }
                 let structural_else_candidate = source_name == "else"
                     && matches!(
                         arguments.first().map(|argument| &argument.kind),
@@ -36018,6 +40736,7 @@ impl<'a> CoreLowerer<'a> {
                 let trusted_literal_control_wrapper = self
                     .trusted_literal_control_wrapper_call(source_name, arguments);
                 if !structural_else_candidate
+                    && self.runtime_bindings.leaf(source_name).is_none()
                     && self.function_templates.iter().any(|function| {
                     function.name == source_name
                         && function.generics.is_some()
@@ -36034,6 +40753,7 @@ impl<'a> CoreLowerer<'a> {
                         .or(expected)
                         .or_else(|| self.static_local_expression_type(expression));
                     return self.inline_late_generic_call(
+                        expression,
                         source_name,
                         arguments,
                         span,
@@ -36273,13 +40993,9 @@ impl<'a> CoreLowerer<'a> {
                                 }
                                 result
                             };
-                            let fields_irrefutable = fields.iter().all(|field| {
-                                matches!(
-                                    field.kind,
-                                    core::DecisionPatternKind::Binding { .. }
-                                        | core::DecisionPatternKind::Wildcard
-                                )
-                            });
+                            let fields_irrefutable = fields
+                                .iter()
+                                .all(Self::decision_pattern_is_irrefutable);
                             (
                                 impossible(&positive_possible),
                                 fields_irrefutable
@@ -36304,6 +41020,10 @@ impl<'a> CoreLowerer<'a> {
                     }
                     let branch_expected =
                         expected.or_else(|| self.provisional_handler_result(span));
+                    let positive_source_nonreturning =
+                        source_expression_is_directly_nonreturning(self.program, positive_source);
+                    let negative_source_nonreturning =
+                        source_expression_is_directly_nonreturning(self.program, negative_source);
                     let branch_binding_names = bindings
                         .iter()
                         .map(|binding| binding.name.clone())
@@ -36363,6 +41083,10 @@ impl<'a> CoreLowerer<'a> {
                     }
                     let mut negative_variant = None;
                     if let Some((local, excluded_variant)) = refined_variant
+                        && let core::DecisionPatternKind::Variant { fields, .. } = &decision.kind
+                        && fields
+                            .iter()
+                            .all(Self::decision_pattern_is_irrefutable)
                         && let Some((_, NominalKind::Enum(variants))) =
                             self.runtime_nominal_kind(decision_ty)
                         && variants.len() == 2
@@ -36388,7 +41112,10 @@ impl<'a> CoreLowerer<'a> {
                     // continuation. Compare and retain only reachable join
                     // states instead of requiring the dead edge to preserve
                     // owners it deliberately transported.
-                    match (positive.ty == NEVER, negative.ty == NEVER) {
+                    match (
+                        positive.ty == NEVER || positive_source_nonreturning,
+                        negative.ty == NEVER || negative_source_nonreturning,
+                    ) {
                         (true, false) => {
                             positive_moved = self.moved.clone();
                             positive_moved_paths = self.moved_paths.clone();
@@ -36615,8 +41342,43 @@ impl<'a> CoreLowerer<'a> {
                         self.moved_paths.insert(binding.local, joined);
                         conditional_at_join.push((binding.local, conditional));
                     }
-                    let positive_result_references = Self::expression_reference_fields(&positive);
-                    let negative_result_references = Self::expression_reference_fields(&negative);
+                    // A whole unique-reference handle retired by this join
+                    // can have been narrowed to field reborrows in only one
+                    // arm. Canonicalize those predecessor-local descendants
+                    // before comparing the outer frame's loan state.
+                    for binding in baseline_locals
+                        .values()
+                        .filter(|binding| retire_at_join.contains(&binding.local))
+                    {
+                        let mut origins = Vec::new();
+                        for origin in Self::local_reference_fields(binding).into_values() {
+                            if origin.unique && !origins.contains(&origin) {
+                                origins.push(origin);
+                            }
+                        }
+                        for origin in origins {
+                            Self::retire_unique_loan_tree_from_state(
+                                &origin,
+                                &mut positive_loans,
+                                &mut positive_projected_loans,
+                                &mut positive_suspended,
+                                &mut positive_uniquely_suspended,
+                            );
+                            Self::retire_unique_loan_tree_from_state(
+                                &origin,
+                                &mut self.loans,
+                                &mut self.projected_loans,
+                                &mut self.suspended,
+                                &mut self.uniquely_suspended,
+                            );
+                        }
+                    }
+                    let positive_result_references = (!positive_source_nonreturning)
+                        .then(|| Self::expression_reference_fields(&positive))
+                        .unwrap_or_default();
+                    let negative_result_references = (!negative_source_nonreturning)
+                        .then(|| Self::expression_reference_fields(&negative))
+                        .unwrap_or_default();
                     let mut joined_result_references = positive_result_references.clone();
                     let mut result_reference_conflict = false;
                     for (path, origin) in &negative_result_references {
@@ -36634,21 +41396,33 @@ impl<'a> CoreLowerer<'a> {
                             joined_result_references.insert(path.clone(), origin.clone());
                         }
                     }
-                    let result_parents = joined_result_references
+                    let result_loan_roots = joined_result_references
                         .values()
-                        .filter_map(|origin| origin.parent)
+                        .flat_map(|origin| {
+                            (!origin.external)
+                                .then_some(origin.root)
+                                .into_iter()
+                                .chain(origin.parent)
+                        })
                         .collect::<BTreeSet<_>>();
                     let suspended_shape_matches = positive_suspended
                         .symmetric_difference(&self.suspended)
-                        .all(|local| result_parents.contains(local));
-                    let unique_result_parents = joined_result_references
+                        .filter(|local| baseline_ids.contains(local))
+                        .all(|local| result_loan_roots.contains(local));
+                    let unique_result_loan_roots = joined_result_references
                         .values()
                         .filter(|origin| origin.unique)
-                        .filter_map(|origin| origin.parent)
+                        .flat_map(|origin| {
+                            (!origin.external)
+                                .then_some(origin.root)
+                                .into_iter()
+                                .chain(origin.parent)
+                        })
                         .collect::<BTreeSet<_>>();
                     let unique_suspended_shape_matches = positive_uniquely_suspended
                         .symmetric_difference(&self.uniquely_suspended)
-                        .all(|local| unique_result_parents.contains(local));
+                        .filter(|local| baseline_ids.contains(local))
+                        .all(|local| unique_result_loan_roots.contains(local));
                     let ownership_shape_matches = !result_reference_conflict
                         && suspended_shape_matches
                         && unique_suspended_shape_matches
@@ -36676,25 +41450,60 @@ impl<'a> CoreLowerer<'a> {
                         && self
                             .loans
                             .iter()
-                            .filter(|(local, _)| baseline_ids.contains(local))
+                            .filter(|(local, _)| {
+                                baseline_ids.contains(local)
+                                    && !result_loan_roots.contains(local)
+                            })
                             .eq(positive_loans
                                 .iter()
-                                .filter(|(local, _)| baseline_ids.contains(local)))
+                                .filter(|(local, _)| {
+                                    baseline_ids.contains(local)
+                                        && !result_loan_roots.contains(local)
+                                }))
                         && self
                             .projected_loans
                             .iter()
-                            .filter(|(local, _)| baseline_ids.contains(local))
+                            .filter(|(local, _)| {
+                                baseline_ids.contains(local)
+                                    && !result_loan_roots.contains(local)
+                            })
                             .eq(positive_projected_loans
                                 .iter()
-                                .filter(|(local, _)| baseline_ids.contains(local)));
+                                .filter(|(local, _)| {
+                                    baseline_ids.contains(local)
+                                        && !result_loan_roots.contains(local)
+                                }));
                     if !ownership_shape_matches {
-                        return Err(vec![type_error(
-                            span,
-                            "pattern-refined branches leave different ownership or borrow states",
-                        )
-                        .with_help(
-                            "consume, restore, and end borrows consistently on both branches",
-                        )]);
+                        if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
+                            eprintln!(
+                                "refinement join mismatch at {}..{}:\n  baseline={baseline_ids:?}\n  positive moved={positive_moved:?} paths={positive_moved_paths:?} loans={positive_loans:?} projected={positive_projected_loans:?} suspended={positive_suspended:?} unique_suspended={positive_uniquely_suspended:?}\n  negative moved={:?} paths={:?} loans={:?} projected={:?} suspended={:?} unique_suspended={:?}\n  result refs={joined_result_references:?} conflict={result_reference_conflict}",
+                                span.start,
+                                span.end,
+                                self.moved,
+                                self.moved_paths,
+                                self.loans,
+                                self.projected_loans,
+                                self.suspended,
+                                self.uniquely_suspended,
+                            );
+                        }
+                        return Err(vec![if result_reference_conflict {
+                            type_error(
+                                span,
+                                "a compatible reference origin must be uniquely selected across all reachable branches",
+                            )
+                            .with_help(
+                                "return the same parameter or capture route on every reachable branch",
+                            )
+                        } else {
+                            type_error(
+                                span,
+                                "pattern-refined branches leave different ownership or borrow states",
+                            )
+                            .with_help(
+                                "consume, restore, and end borrows consistently on both branches",
+                            )
+                        }]);
                     }
                     for local in &retire_at_join {
                         let Some((_, binding)) = baseline_locals
@@ -37227,7 +42036,16 @@ impl<'a> CoreLowerer<'a> {
                     Self::set_expression_reference_fields(&mut expression, result_references);
                     return Ok(expression);
                 }
-                if let Some(template) = self.planned_late_generic_call(expression) {
+                // A manifest-bound generic leaf has a deliberately inert
+                // source body: its trusted declaration identity, not that
+                // body, selects the frozen primitive.  Late control inlining
+                // can clone the call site into a caller whose specialization
+                // plan otherwise classifies it as another late generic call.
+                // Let the ordinary planned-call/manifest paths below retain
+                // the primitive instead of beta-reducing the stub to `()`.
+                if self.runtime_bindings.leaf(name).is_none()
+                    && let Some(template) = self.planned_late_generic_call(expression)
+                {
                     // The callable argument must be control-inlined because
                     // its late environment has no standalone artifact type,
                     // but specialization has already selected the call's
@@ -37241,6 +42059,7 @@ impl<'a> CoreLowerer<'a> {
                         self.check(span, expected, planned_result)?;
                     }
                     return self.inline_late_generic_call(
+                        expression,
                         &template,
                         arguments,
                         span,
@@ -37486,7 +42305,13 @@ impl<'a> CoreLowerer<'a> {
                     })
                     .map(|function| function.name.clone());
                 if let Some(template) = runtime_callable_wrapper {
-                    return self.inline_late_generic_call(&template, arguments, span, expected);
+                    return self.inline_late_generic_call(
+                        expression,
+                        &template,
+                        arguments,
+                        span,
+                        expected,
+                    );
                 }
                 if let Some(
                     primitive @ (Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique),
@@ -37654,7 +42479,13 @@ impl<'a> CoreLowerer<'a> {
                     // discovery has assigned call-site keys. Elaborate that
                     // source template at the late site instead of requiring an
                     // impossible pre-existing monomorphic signature.
-                    return self.inline_late_generic_call(name, arguments, span, expected);
+                    return self.inline_late_generic_call(
+                        expression,
+                        name,
+                        arguments,
+                        span,
+                        expected,
+                    );
                 }
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     return Err(vec![unsupported(
@@ -38194,6 +43025,17 @@ impl<'a> CoreLowerer<'a> {
                         format!("unknown effect operation `{effect}::{operation}`"),
                     )]);
                 };
+                if info.terminal
+                    && let Some(inlined) = self.inline_terminal_perform(
+                        info.protocol,
+                        info.operation,
+                        args,
+                        span,
+                        expected,
+                    )
+                {
+                    return inlined;
+                }
                 if !info.terminal && !self.empty_referents.is_empty() {
                     return Err(self.borrow_error(
                         span,
@@ -38388,14 +43230,30 @@ impl<'a> CoreLowerer<'a> {
                 let result = self.late_closure_type_id(provisional).ok_or_else(|| {
                     vec![type_error(
                         label.span,
-                        "typed label destination result is not a ground runtime type",
+                        format!(
+                            "typed label destination result `{provisional:?}` is not a ground runtime type"
+                        ),
                     )]
                 })?;
                 self.check(span, expected, result)?;
+                let core_label = self.next_source_label;
+                self.next_source_label = self
+                    .next_source_label
+                    .checked_add(1)
+                    .expect("source label identity space exhausted");
+                let mut outer_locals = self
+                    .locals
+                    .values()
+                    .map(|local| local.local)
+                    .collect::<BTreeSet<_>>();
+                if let Some(caller_locals) = self.late_inline_continuation_locals.last() {
+                    outer_locals.extend(caller_locals.iter().copied());
+                }
                 let destination = ActiveCoreLabel {
-                    label: evidence.brand.ordinal,
+                    label: core_label,
                     result,
-                    outer_locals: self.locals.values().map(|local| local.local).collect(),
+                    outer_locals,
+                    live_outer_on_leaves: None,
                     transferred_references: None,
                 };
                 let current_declaration =
@@ -38442,6 +43300,13 @@ impl<'a> CoreLowerer<'a> {
                     self.active_labels.insert(label.name.to_string(), previous);
                 }
                 let body = lowered_body?;
+                // Offer every outer local to the MIR destination. MIR lowers
+                // each edge with concrete SSA ownership state and intersects
+                // unavailable values there. Source-name liveness is not exact
+                // through static inlining, refinement arms, and generative
+                // labels; using it here can drop a caller-live owner before
+                // the destination frame has a chance to transport it.
+                let preserved_outer_locals = completed.outer_locals.iter().copied().collect();
                 let normal_references = (body.ty != NEVER)
                     .then(|| Self::expression_reference_fields(&body))
                     .filter(|fields| !fields.is_empty());
@@ -38467,6 +43332,7 @@ impl<'a> CoreLowerer<'a> {
                         label: completed.label,
                         has_leave: !evidence.leaves.is_empty() || has_inlined_leave,
                         function_boundary,
+                        preserved_locals: preserved_outer_locals,
                         body: Box::new(body),
                     },
                 );
@@ -38598,6 +43464,11 @@ impl<'a> CoreLowerer<'a> {
                         body_instance: None,
                         expression_ordinals: specialization::expression_ordinals(body),
                         recursive_receiver: None,
+                        static_labels: BTreeMap::new(),
+                        static_closures: BTreeMap::new(),
+                        late_inline_type_substitutions: BTreeMap::new(),
+                        late_inline_functions: Vec::new(),
+                        handled_terminal_performs: BTreeSet::new(),
                     });
                     let value = self.lifted_capture(
                         &capture_name,
@@ -38848,6 +43719,7 @@ impl<'a> CoreLowerer<'a> {
     /// speculative lowering or ownership-state mutation is required.
     fn handler_result_hint(&self, expression: &Expr) -> Option<TypeId> {
         match &expression.kind {
+            ExprKind::Unit => Some(UNIT),
             ExprKind::Variable(path) if path.len() == 1 => self
                 .globals
                 .get(path[0].as_ref())
@@ -38859,9 +43731,15 @@ impl<'a> CoreLowerer<'a> {
                 let ExprKind::Variable(path) = &callee.kind else {
                     return None;
                 };
-                (path.len() == 1)
-                    .then(|| self.signatures.get(path[0].as_ref()).map(|sig| sig.result))
-                    .flatten()
+                (path.len() == 1).then_some(())?;
+                self.signatures
+                    .get(path[0].as_ref())
+                    .map(|signature| signature.result)
+                    .or_else(|| {
+                        self.static_closures
+                            .get(path[0].as_ref())
+                            .and_then(|closure| closure.result)
+                    })
             }
             ExprKind::Block(statements) => {
                 statements.last().and_then(|statement| match statement {
@@ -38980,6 +43858,9 @@ impl<'a> CoreLowerer<'a> {
                 ),
             ]);
         };
+        if let Some(inlined) = self.inline_terminal_handler(computation, clauses, span, result) {
+            return inlined;
+        }
         let outer_names = self.locals.keys().cloned().collect::<BTreeSet<_>>();
         let capture_names = |expression: &Expr, bound: &BTreeSet<String>| {
             outer_names
@@ -39023,7 +43904,7 @@ impl<'a> CoreLowerer<'a> {
                     clause.span,
                     format!(
                         "unknown effect operation `{}::{}`",
-                        clause.effect, clause.operation
+                        clause.effect, clause.operation,
                     ),
                 )]);
             };
@@ -39094,6 +43975,17 @@ impl<'a> CoreLowerer<'a> {
             };
             let mut captures = capture_names(&clause.body, &binders);
             captures.extend(self.planned_capture_names_in(&clause.body));
+            // Static callbacks are beta-reduced only when the synthetic
+            // clause is lowered. The clause names the proof binding (for
+            // example `body()`), not the callback's runtime free variables,
+            // so ordinary lexical capture discovery cannot see those owners.
+            // Carry the transitive runtime set in the handler environment;
+            // callback identity itself remains proof-only metadata.
+            for (name, callback) in &self.static_closures {
+                if expression_mentions_name(&clause.body, name) {
+                    callback.collect_runtime_capture_names(&mut captures);
+                }
+            }
             captures.retain(|name| self.locals.contains_key(name));
             let key = (info.protocol, info.operation);
             let recurrent_outward_protocols =
@@ -39565,6 +44457,26 @@ impl<'a> CoreLowerer<'a> {
                 .params
                 .iter()
                 .any(|(name, _, _)| name == "$recursive$receiver");
+            let clause_static_labels = self
+                .static_labels
+                .iter()
+                .filter(|(name, _)| {
+                    clauses
+                        .iter()
+                        .any(|clause| expression_mentions_name(&clause.body, name))
+                })
+                .map(|(name, label)| (name.clone(), label.clone()))
+                .collect();
+            let clause_static_closures = self
+                .static_closures
+                .iter()
+                .filter(|(name, _)| {
+                    clauses
+                        .iter()
+                        .any(|clause| expression_mentions_name(&clause.body, name))
+                })
+                .map(|(name, closure)| (name.clone(), closure.clone()))
+                .collect();
             let function = self.effects.allocate_function(SyntheticFunction {
                 id: 0,
                 name: format!("$handler${site}$clause${group_index}"),
@@ -39605,6 +44517,11 @@ impl<'a> CoreLowerer<'a> {
                         context.capture_name = Some("$recursive$receiver".to_owned());
                         context
                     }),
+                static_labels: clause_static_labels,
+                static_closures: clause_static_closures,
+                late_inline_type_substitutions: self.late_inline_type_substitutions.clone(),
+                late_inline_functions: self.late_inline_functions.clone(),
+                handled_terminal_performs: BTreeSet::new(),
             });
             callable_types.push(callable_type);
             let individual_captures = if shared_clause_plan.is_none() {
@@ -39642,6 +44559,16 @@ impl<'a> CoreLowerer<'a> {
             .iter()
             .copied()
             .collect::<Vec<_>>();
+        outward_protocols.extend(seen.iter().map(|(protocol, _)| *protocol));
+        let static_computation_callbacks = self
+            .static_closures
+            .iter()
+            .filter(|(name, _)| expression_mentions_name(computation, name))
+            .map(|(name, closure)| (name.clone(), closure.clone()))
+            .collect::<Vec<_>>();
+        for (binding, callback) in &static_computation_callbacks {
+            outward_protocols.extend(self.static_closure_escaping_protocols(binding, callback));
+        }
         outward_protocols.sort_unstable();
         outward_protocols.dedup();
         let body_needs_recursive_receiver = self
@@ -39696,7 +44623,7 @@ impl<'a> CoreLowerer<'a> {
             outward_protocols,
             receiver_mode: 2,
             receiver_type: body_capture_plan.ty,
-            captures: body_capture_plan.params,
+            captures: body_capture_plan.params.clone(),
             capture_use_multiplier: 1,
             noncancelling_operations: noncancelling_operations.clone(),
             no_return: computation_scan.diverges,
@@ -39716,6 +44643,11 @@ impl<'a> CoreLowerer<'a> {
                     context.capture_name = Some("$recursive$receiver".to_owned());
                     context
                 }),
+            static_labels: self.static_labels.clone(),
+            static_closures: self.static_closures.clone(),
+            late_inline_type_substitutions: self.late_inline_type_substitutions.clone(),
+            late_inline_functions: self.late_inline_functions.clone(),
+            handled_terminal_performs: seen.clone(),
         });
         let mut expression = self.typed(
             span,
@@ -40131,13 +45063,14 @@ impl<'a> CoreLowerer<'a> {
                 span: field.span,
             });
         }
-        if !projections.is_empty() && self.custom_drop_types.contains(&base_ty) {
+        if !projections.is_empty() && self.custom_drop_types.contains(&base_ty) && !self.is_copy(ty)
+        {
             return Err(
                 vec![type_error(
                 destination.span,
                 "projected assignment cannot replace a field of an owner with a custom Drop hook",
             )
-            .with_help("replace the owner as a whole inside code that may invoke its Drop hook")],
+            .with_help("only copyable fields may be replaced in place; replace an ownership-bearing owner as a whole")],
             );
         }
         self.check(source_value.span, Some(ty), value.ty)?;
@@ -40349,29 +45282,6 @@ impl<'a> CoreLowerer<'a> {
         result
     }
 
-    fn transparent_block(
-        &mut self,
-        statements: &[Stmt],
-        span: Span,
-        expected: Option<TypeId>,
-    ) -> Result<core::Expr, Vec<Diagnostic>> {
-        let saved_final_uses = std::mem::take(&mut self.inferred_final_uses);
-        let saved_live_after = std::mem::take(&mut self.current_live_after);
-        self.transparent_final_use_limits
-            .push(TransparentFinalUseLimit {
-                outer_names: self.locals.keys().cloned().collect(),
-                allowed: saved_final_uses,
-            });
-        let result = self.block_inner(statements, None, span, expected);
-        self.inferred_final_uses = self
-            .transparent_final_use_limits
-            .pop()
-            .expect("transparent final-use limit stack must remain balanced")
-            .allowed;
-        self.current_live_after = saved_live_after;
-        result
-    }
-
     fn static_closure_block(
         &mut self,
         statements: &[Stmt],
@@ -40425,6 +45335,7 @@ impl<'a> CoreLowerer<'a> {
     ) -> Result<core::Expr, Vec<Diagnostic>> {
         let saved_body_instance = self.body_instance.clone();
         let saved_expression_span_ordinals = self.expression_span_ordinals.clone();
+        let saved_environment_capture_modes = self.environment_capture_modes.clone();
         let result = self.block_inner_with_planning_context(
             statements,
             static_capture_overlay,
@@ -40433,6 +45344,7 @@ impl<'a> CoreLowerer<'a> {
         );
         self.body_instance = saved_body_instance;
         self.expression_span_ordinals = saved_expression_span_ordinals;
+        self.environment_capture_modes = saved_environment_capture_modes;
         result
     }
 
@@ -40559,6 +45471,16 @@ impl<'a> CoreLowerer<'a> {
                 );
                 if let Some(body_instance) = body_instance {
                     self.body_instance = Some(body_instance.clone());
+                    self.environment_capture_modes = match body_instance {
+                        specialization::BodyInstanceKey::Closure(request) => request
+                            .captures
+                            .iter()
+                            .map(|capture| (capture.name.clone(), capture.mode))
+                            .collect(),
+                        specialization::BodyInstanceKey::Root(_)
+                        | specialization::BodyInstanceKey::Drop(_)
+                        | specialization::BodyInstanceKey::Specialization(_) => BTreeMap::new(),
+                    };
                 }
             }
             self.current_point = points[index];
@@ -40597,6 +45519,15 @@ impl<'a> CoreLowerer<'a> {
                             }
                         })
                         .or_else(|| self.handler_result_hint(value))
+                        .or_else(|| {
+                            if name.starts_with("$handle$result$")
+                                && let ExprKind::Handle { computation, .. } = &value.kind
+                            {
+                                self.handler_result_hint(computation)
+                            } else {
+                                None
+                            }
+                        })
                         .or_else(|| {
                             self.later_binding_expected_type(name, &statements[index + 1..])
                         });
@@ -40654,6 +45585,18 @@ impl<'a> CoreLowerer<'a> {
                         },
                     );
                     self.owner_types.insert(local, value.ty);
+                    if static_capture_overlay
+                        .is_some_and(|(overlay_at, _, _, _)| index < overlay_at)
+                        && liveness.live_out[&points[index]].contains(name)
+                        && let Some(continuation) = self.late_inline_continuation_locals.last_mut()
+                    {
+                        // Static beta reduction allocates callback parameter
+                        // locals only while lowering this block. Record their
+                        // exact identities once known: source-name liveness
+                        // cannot distinguish a callback parameter from a
+                        // nested helper parameter with the same spelling.
+                        continuation.insert(local);
+                    }
                     introduced.push(local);
                     lowered.push(core::Stmt::Let {
                         local,
@@ -41228,6 +46171,15 @@ struct MirLowerer {
     register_types: Vec<TypeId>,
     items: Vec<MirBuilderItem>,
     locals: BTreeMap<core::LocalId, u32>,
+    /// Every SSA register ever bound to a Core local. Lexical block exit can
+    /// remove the current name mapping before an enclosing synthetic label
+    /// performs cleanup; retained history lets that label preserve exactly
+    /// the still-owned versions proven live across it.
+    local_register_history: BTreeMap<core::LocalId, BTreeSet<u32>>,
+    /// Proof-only aliases introduced when a fused loop parameter replaces a
+    /// staging local or its provenance root. Aliases never create duplicate
+    /// SSA join operands.
+    local_aliases: BTreeMap<core::LocalId, core::LocalId>,
     shared_receiver_captures: BTreeMap<core::LocalId, (u32, TypeId)>,
     unique_receiver_captures: BTreeMap<core::LocalId, (u32, TypeId)>,
     shared_reference_types: BTreeMap<TypeId, TypeId>,
@@ -41236,9 +46188,24 @@ struct MirLowerer {
     owned: Vec<u32>,
     borrowed: BTreeSet<u32>,
     borrow_parents: BTreeMap<u32, u32>,
+    /// Current SSA identity for reference registers named by immutable loan
+    /// facts. Label destinations and control-loop headers transport live
+    /// references through block parameters, while PlaceFlow retains the
+    /// register which originally issued each loan.
+    borrow_register_renames: BTreeMap<u32, u32>,
+    /// Borrow ancestors which exist only to authorize a fused control loop's
+    /// carried reborrow. They have no caller-visible continuation binding and
+    /// are released when the last descendant loan ends, even if SSA joins
+    /// preserve that ancestry only in immutable loan facts.
+    auto_release_borrow_ancestors: BTreeSet<u32>,
     zero_use_types: BTreeSet<TypeId>,
     aggregate_field_types: BTreeMap<TypeId, Vec<TypeId>>,
     partial_aggregates: BTreeMap<u32, Vec<bool>>,
+    /// Aggregate SSA registers whose incoming control-flow edges disagree on
+    /// field initialization. Their residual shell may be empty at one source
+    /// site and populated at another, so every cleanup must use conditional
+    /// structural `Drop`, never the empty-shell-only `Deconstruct` opcode.
+    drop_only_aggregates: BTreeSet<u32>,
     /// Residual or newly restored subtrees that are temporarily detached from
     /// their source local.  A nested projected move leaves each opened parent
     /// here; assignments rebuild complete parents bottom-up and eventually
@@ -41260,6 +46227,12 @@ struct MirLowerer {
     /// Live loan identity per reference register, tracked at issue time so
     /// reborrows and chained projections record their parent loans.
     loan_of: BTreeMap<u32, mir::LoanId>,
+    /// Non-reference carriers whose fields contain live references, mapped to
+    /// the ultimate place owners protected by those references. Control-loop
+    /// formation uses this to close dominating roots transitively through
+    /// checkpoint/callback aggregates rather than moving a borrowed owner
+    /// through an ordinary phi.
+    carried_borrow_roots: BTreeMap<u32, BTreeSet<u32>>,
     current_block: u32,
     active_labels: BTreeMap<core::LabelId, ActiveMirLabel>,
     active_control_loops: BTreeMap<core::ControlLoopId, ActiveMirControlLoop>,
@@ -41273,6 +46246,22 @@ struct ActiveMirLabel {
     /// Owners already live outside this destination. A `leave` preserves
     /// these and explicitly cleans owners introduced by the label body.
     outer_owned: BTreeSet<u32>,
+    preserved_locals: BTreeSet<core::LocalId>,
+    /// Non-reference outer owners can be phi-renamed inside an inlined label
+    /// body. Thread them explicitly through the destination so normal and
+    /// LEAVE edges agree on the post-destination SSA identity.
+    preserved_owner_params: Vec<(core::LocalId, u32, TypeId)>,
+    /// Additional lexical locals which named the same source owner as one
+    /// preserved parameter at destination entry. They share that one edge
+    /// move and are rebound to its joined SSA register.
+    preserved_owner_aliases: Vec<(core::LocalId, core::LocalId)>,
+    hidden_borrow_ancestors: Vec<HiddenLabelBorrowAncestor>,
+    /// Raw owner identities which remain live after cleanup on every edge
+    /// emitted to this destination. This reconciles the sequential builder
+    /// state after an all-LEAVE body: the last syntactic branch is not an
+    /// authoritative description of what reaches the join.
+    live_owned_on_edges: Option<BTreeSet<u32>>,
+    retired_outer_locals: BTreeSet<core::LocalId>,
     /// The implicit destination surrounding a named function exits the whole
     /// activation, so its parameters must be cleaned on both normal and leave
     /// paths rather than preserved for code after the destination.
@@ -41280,10 +46269,46 @@ struct ActiveMirLabel {
 }
 
 #[derive(Clone)]
+struct HiddenLabelBorrowAncestor {
+    source_local: core::LocalId,
+    depth: usize,
+    register: u32,
+    ty: TypeId,
+}
+
+#[derive(Clone)]
 struct ActiveMirControlLoop {
     header: u32,
     parameter_types: Vec<TypeId>,
+    parameter_registers: Vec<u32>,
+    header_registers: Vec<u32>,
+    preheader_partial_aggregates: Vec<Option<Vec<bool>>>,
     outer_locals: Vec<(core::LocalId, TypeId)>,
+    hidden_borrow_ancestors: Vec<HiddenLoopBorrowAncestor>,
+    /// Shared-reference handles copied by the preheader so the enclosing
+    /// frame retains its authority while a distinct handle travels through
+    /// the loop. These dominate the loop, must survive every backedge, and
+    /// must be ended when the loop itself exits.
+    preheader_shared_sources: Vec<u32>,
+    /// Non-reference place owners reached by root loans carried through the
+    /// loop. They dominate the loop instead of becoming phi parameters, but
+    /// must remain live while any carried reference can use them.
+    borrow_root_owners: Vec<u32>,
+    /// Dominating owners required by lexically enclosing fused loops. They
+    /// have no local binding in this loop, so they are neither ordinary
+    /// parameters nor this loop's own preheader copies. Nested control must
+    /// retain them unchanged and return them to the enclosing continuation.
+    enclosing_control_owners: Vec<u32>,
+}
+
+#[derive(Clone)]
+struct HiddenLoopBorrowAncestor {
+    source_index: usize,
+    depth: usize,
+    ty: TypeId,
+    local: Option<core::LocalId>,
+    initial_source: u32,
+    header_source: u32,
 }
 
 enum MirBuilderItem {
@@ -41420,6 +46445,307 @@ impl MirFlow {
 }
 
 impl MirLowerer {
+    fn bind_local(&mut self, local: core::LocalId, register: u32) -> Option<u32> {
+        self.local_register_history
+            .entry(local)
+            .or_default()
+            .insert(register);
+        self.locals.insert(local, register)
+    }
+
+    fn canonical_local(&self, mut local: core::LocalId) -> core::LocalId {
+        let mut seen = BTreeSet::new();
+        while let Some(next) = self.local_aliases.get(&local).copied() {
+            if !seen.insert(local) {
+                break;
+            }
+            local = next;
+        }
+        local
+    }
+
+    fn local_register(&self, local: core::LocalId) -> Option<u32> {
+        self.locals.get(&self.canonical_local(local)).copied()
+    }
+
+    fn equivalent_locals(&self, local: core::LocalId) -> BTreeSet<core::LocalId> {
+        let mut equivalent = BTreeSet::new();
+        let mut pending = vec![local];
+        while let Some(candidate) = pending.pop() {
+            if !equivalent.insert(candidate) {
+                continue;
+            }
+            if let Some(next) = self.local_aliases.get(&candidate).copied() {
+                pending.push(next);
+            }
+            pending.extend(
+                self.local_aliases
+                    .iter()
+                    .filter_map(|(alias, representative)| {
+                        (*representative == candidate).then_some(*alias)
+                    }),
+            );
+        }
+        equivalent
+    }
+
+    /// Returns the one live SSA incarnation that currently represents a Core
+    /// local. Control fusion can retire the lexical mapping while a renamed
+    /// loop value remains owned, so fall back to the newest live history entry.
+    /// Preserving every historical entry is incorrect: old checkpoint and
+    /// loop-state incarnations are distinct owners which must still unwind.
+    fn current_owned_local_register(&self, local: core::LocalId) -> Option<u32> {
+        let equivalent_locals = self.equivalent_locals(local);
+        let requested_ty = self
+            .locals
+            .get(&local)
+            .copied()
+            .or_else(|| {
+                self.local_register_history
+                    .get(&local)
+                    .and_then(|history| history.iter().next().copied())
+            })
+            .map(|register| self.register_types[register as usize]);
+        let current =
+            |candidate_local| {
+                self.locals
+                    .get(&candidate_local)
+                    .copied()
+                    .filter(|register| {
+                        requested_ty.is_none_or(|ty| self.register_types[*register as usize] == ty)
+                    })
+                    .and_then(|register| {
+                        let canonical = self.current_borrow_register(register);
+                        self.owned
+                            .contains(&register)
+                            .then_some(register)
+                            .or_else(|| self.owned.contains(&canonical).then_some(canonical))
+                    })
+                    .or_else(|| {
+                        self.local_register_history
+                            .get(&candidate_local)
+                            .and_then(|history| {
+                                history.iter().rev().copied().find_map(|register| {
+                                    if requested_ty.is_some_and(|ty| {
+                                        self.register_types[register as usize] != ty
+                                    }) {
+                                        return None;
+                                    }
+                                    let canonical = self.current_borrow_register(register);
+                                    self.owned.contains(&register).then_some(register).or_else(
+                                        || self.owned.contains(&canonical).then_some(canonical),
+                                    )
+                                })
+                            })
+                    })
+            };
+        equivalent_locals
+            .iter()
+            .copied()
+            .find_map(current)
+            .or_else(|| {
+                let historical = equivalent_locals
+                    .iter()
+                    .copied()
+                    .flat_map(|candidate_local| {
+                        self.local_register_history
+                            .get(&candidate_local)
+                            .into_iter()
+                            .flat_map(|history| history.iter().copied())
+                    })
+                    .collect::<BTreeSet<_>>();
+                let expected_ty = requested_ty.or_else(|| {
+                    equivalent_locals
+                        .iter()
+                        .find_map(|candidate_local| self.locals.get(candidate_local))
+                        .or_else(|| historical.iter().next())
+                        .map(|register| self.register_types[*register as usize])
+                })?;
+                if !self.reference_types.contains(&expected_ty) {
+                    let loop_outer = self.active_control_loops.values().any(|context| {
+                        context
+                            .outer_locals
+                            .iter()
+                            .any(|(outer, _)| equivalent_locals.contains(outer))
+                    });
+                    if loop_outer {
+                        let candidates = self
+                            .owned
+                            .iter()
+                            .copied()
+                            .filter(|register| {
+                                self.register_types[*register as usize] == expected_ty
+                            })
+                            .collect::<Vec<_>>();
+                        if let [register] = candidates.as_slice() {
+                            return Some(*register);
+                        }
+                    }
+                    return None;
+                }
+                let historical_loans = historical
+                    .iter()
+                    .filter_map(|register| self.tracked_loan(*register))
+                    .collect::<BTreeSet<_>>();
+                let mut candidates = self
+                    .owned
+                    .iter()
+                    .copied()
+                    .filter(|register| self.register_types[*register as usize] == expected_ty)
+                    .map(|register| (register, self.tracked_loan(register)))
+                    .filter(|(register, loan)| {
+                        historical_loans.iter().any(|historical| {
+                            loan.is_some_and(|loan| {
+                                self.loans_are_ancestor_related(*historical, loan)
+                                    || self.loans_semantically_equivalent(*historical, loan)
+                            }) || self.flow.loans.get(historical.index()).is_some_and(|fact| {
+                                self.borrow_authorities_equivalent(*register, fact.borrowed.base)
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                // A borrowed-base authority is only a recovery fallback for
+                // reference identities whose transported SSA name no longer
+                // carries a loan record. If a live descendant loan exists,
+                // it is the reference value represented by the Core local;
+                // retaining the root beside it would make that identity
+                // spuriously ambiguous.
+                if candidates.iter().any(|(_, loan)| loan.is_some()) {
+                    candidates.retain(|(_, loan)| loan.is_some());
+                }
+                let all = candidates.clone();
+                candidates.retain(|(_, loan)| {
+                    !all.iter().any(|(_, other)| {
+                        loan.zip(*other).is_some_and(|(loan, other)| {
+                            loan != other && self.loan_is_ancestor(loan, other)
+                        })
+                    })
+                });
+                candidates.sort_unstable();
+                candidates.dedup_by_key(|(register, _)| *register);
+                if let [(register, _)] = candidates.as_slice() {
+                    Some(*register)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn refinement_local_sources(&self, locals: &[core::LocalId]) -> Vec<u32> {
+        let mut selected_restricted = BTreeSet::new();
+        locals
+            .iter()
+            .map(|local| {
+                let requested_local = *local;
+                let local = self.canonical_local(requested_local);
+                let mut candidates = Vec::new();
+                for candidate_local in [requested_local, local] {
+                    if let Some(register) = self.locals.get(&candidate_local).copied() {
+                        candidates.push(register);
+                        candidates.push(self.current_borrow_register(register));
+                    }
+                    if let Some(history) = self.local_register_history.get(&candidate_local) {
+                        for register in history.iter().rev().copied() {
+                            candidates.push(register);
+                            candidates.push(self.current_borrow_register(register));
+                        }
+                    }
+                }
+                let mut seen = BTreeSet::new();
+                candidates.retain(|register| seen.insert(*register));
+                let source = candidates
+                    .into_iter()
+                    .filter(|register| self.owned.contains(register))
+                    .find(|register| {
+                        let ty = self.register_types[*register as usize];
+                        let shared_reference = self.reference_types.contains(&ty)
+                            && !self
+                                .unique_reference_types
+                                .values()
+                                .any(|unique| *unique == ty);
+                        let restricted = self.join_operand(*register).mode == mir::UseMode::Move
+                            && !shared_reference;
+                        !restricted || !selected_restricted.contains(register)
+                    })
+                    .or_else(|| self.current_owned_local_register(requested_local))
+                    .or_else(|| {
+                        // Refinement edges transport each requested local once.
+                        // If nested control retired its lexical SSA name, the
+                        // sole remaining exact-type owner is an unambiguous
+                        // edge source. Keep this recovery local to join
+                        // formation; ordinary expression lookup must preserve
+                        // source identity.
+                        let expected_ty = self
+                            .locals
+                            .get(&requested_local)
+                            .or_else(|| self.locals.get(&local))
+                            .or_else(|| {
+                                self.local_register_history
+                                    .get(&requested_local)
+                                    .and_then(|history| history.iter().next_back())
+                            })
+                            .map(|register| self.register_types[*register as usize])?;
+                        let candidates = self
+                            .owned
+                            .iter()
+                            .copied()
+                            .filter(|register| {
+                                self.register_types[*register as usize] == expected_ty
+                                    && !selected_restricted.contains(register)
+                            })
+                            .collect::<Vec<_>>();
+                        let [register] = candidates.as_slice() else {
+                            return None;
+                        };
+                        Some(*register)
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "refinement local {local} has no distinct live source; requested={locals:?}, canonical={:?}, mapping={:?}, history={:?}, history-loans={:?}, aliases={:?}, locals={:?}, owned={:?}",
+                            locals.iter().map(|local| self.canonical_local(*local)).collect::<Vec<_>>(),
+                            self.locals.get(&local),
+                            self.local_register_history.get(&local),
+                            self.local_register_history.get(&local).into_iter().flat_map(|history| history.iter()).map(|register| (*register, self.tracked_loan(*register), self.tracked_loan(*register).map(|loan| &self.flow.loans[loan.index()]))).collect::<Vec<_>>(),
+                            self.local_aliases,
+                            self.locals.iter().map(|(local, register)| (*local, *register, self.register_types[*register as usize])).collect::<Vec<_>>(),
+                            self.owned.iter().map(|register| (*register, self.register_types[*register as usize], self.tracked_loan(*register), self.tracked_loan(*register).map(|loan| &self.flow.loans[loan.index()]))).collect::<Vec<_>>(),
+                        )
+                    });
+                let ty = self.register_types[source as usize];
+                let shared_reference = self.reference_types.contains(&ty)
+                    && !self
+                        .unique_reference_types
+                        .values()
+                        .any(|unique| *unique == ty);
+                if self.join_operand(source).mode == mir::UseMode::Move && !shared_reference {
+                    selected_restricted.insert(source);
+                }
+                source
+            })
+            .collect()
+    }
+
+    /// A consumed shared-reference argument can leave its lexical mapping in
+    /// place solely for the later idempotent EndBorrow statement. It has no
+    /// runtime value to transport through a refinement join. Non-reference
+    /// locals are deliberately excluded: losing one while Core still names it
+    /// is an ownership-lowering bug, not an NLL cleanup artifact.
+    fn stale_refinement_reference(&self, local: core::LocalId) -> bool {
+        let local = self.canonical_local(local);
+        self.current_owned_local_register(local).is_none()
+            && self.locals.get(&local).is_some_and(|register| {
+                self.reference_types
+                    .contains(&self.register_types[*register as usize])
+            })
+    }
+
+    fn preserved_owned_local_registers(&self, locals: &BTreeSet<core::LocalId>) -> BTreeSet<u32> {
+        locals
+            .iter()
+            .filter_map(|local| self.current_owned_local_register(*local))
+            .collect()
+    }
+
     fn begin(
         receiver_mode: Option<u32>,
         receiver_type: TypeId,
@@ -41428,6 +46754,36 @@ impl MirLowerer {
         types: &[Type],
         custom_drop_types: &BTreeSet<TypeId>,
     ) -> Self {
+        fn aggregate_projection_fields(types: &[Type], ty: TypeId) -> Option<Vec<TypeId>> {
+            let mut projected = ty;
+            for _ in 0..=types.len() {
+                projected = match types.get(projected as usize)?.representation() {
+                    Type::RefShared { referent } | Type::RefUnique { referent } => *referent,
+                    Type::Callable { capture_type, .. } | Type::Handler { capture_type, .. } => {
+                        *capture_type
+                    }
+                    Type::BindingPack { payload_type, .. } => *payload_type,
+                    _ => break,
+                };
+            }
+            let fields = match types.get(projected as usize)?.representation() {
+                Type::Tuple { fields, .. } => fields.clone(),
+                Type::Struct { fields, .. } => fields.iter().map(|field| field.ty).collect(),
+                _ => return None,
+            };
+            Some(
+                fields
+                    .into_iter()
+                    .filter(|field| {
+                        !matches!(
+                            types.get(*field as usize).map(Type::representation),
+                            Some(Type::Available { .. })
+                        )
+                    })
+                    .collect(),
+            )
+        }
+
         let mut register_types = vec![UNIT];
         register_types[0] = receiver_type;
         register_types.extend(params.iter().map(|param| param.ty));
@@ -41435,6 +46791,10 @@ impl MirLowerer {
             .iter()
             .enumerate()
             .map(|(index, param)| (param.local, index as u32 + 1))
+            .collect::<BTreeMap<_, _>>();
+        let local_register_history = locals
+            .iter()
+            .map(|(local, register)| (*local, BTreeSet::from([*register])))
             .collect();
         let mut lowerer = Self {
             register_types,
@@ -41443,6 +46803,8 @@ impl MirLowerer {
                 params: Vec::new(),
             }],
             locals,
+            local_register_history,
+            local_aliases: BTreeMap::new(),
             shared_receiver_captures: BTreeMap::new(),
             unique_receiver_captures: BTreeMap::new(),
             shared_reference_types: types
@@ -41482,6 +46844,8 @@ impl MirLowerer {
                 .map(|_| BTreeSet::from([0]))
                 .unwrap_or_default(),
             borrow_parents: BTreeMap::new(),
+            borrow_register_renames: BTreeMap::new(),
+            auto_release_borrow_ancestors: BTreeSet::new(),
             zero_use_types: types
                 .iter()
                 .enumerate()
@@ -41494,15 +46858,13 @@ impl MirLowerer {
             aggregate_field_types: types
                 .iter()
                 .enumerate()
-                .filter_map(|(ty, descriptor)| match descriptor.representation() {
-                    Type::Tuple { fields, .. } => Some((ty as TypeId, fields.clone())),
-                    Type::Struct { fields, .. } => {
-                        Some((ty as TypeId, fields.iter().map(|field| field.ty).collect()))
-                    }
-                    _ => None,
+                .filter_map(|(ty, _)| {
+                    aggregate_projection_fields(types, ty as TypeId)
+                        .map(|fields| (ty as TypeId, fields))
                 })
                 .collect(),
             partial_aggregates: BTreeMap::new(),
+            drop_only_aggregates: BTreeSet::new(),
             detached_subtrees: BTreeMap::new(),
             uninitialized_locals: BTreeSet::new(),
             next_label: 1,
@@ -41526,6 +46888,7 @@ impl MirLowerer {
                 })
                 .collect(),
             loan_of: BTreeMap::new(),
+            carried_borrow_roots: BTreeMap::new(),
             current_block: 0,
             active_labels: BTreeMap::new(),
             active_control_loops: BTreeMap::new(),
@@ -41573,7 +46936,7 @@ impl MirLowerer {
                                 field: field as u32,
                             },
                         );
-                        lowerer.locals.insert(capture.local, dst);
+                        lowerer.bind_local(capture.local, dst);
                         lowerer.owned.push(dst);
                     }
                     lowerer.push(
@@ -41621,16 +46984,28 @@ impl MirLowerer {
         let return_cleanup = if matches!(flow, MirFlow::Diverged) {
             Vec::new()
         } else {
-            lowerer.owned.iter().rev().copied().collect::<Vec<_>>()
+            lowerer.ordered_cleanup_registers(lowerer.owned.iter().rev().copied())
         };
         if let MirFlow::Value(value) = flow {
             let returning_reference = lowerer.reference_types.contains(&function.result);
+            let returning_borrow_authorities = lowerer.escaping_borrow_authorities(value);
+            let protected = return_cleanup.iter().copied().collect::<BTreeSet<_>>();
             for register in &return_cleanup {
-                if returning_reference && lowerer.borrowed.contains(register) {
+                if !lowerer.owned.contains(register) {
+                    continue;
+                }
+                if lowerer.borrowed.contains(register)
+                    && (returning_reference || returning_borrow_authorities.contains(register))
+                {
                     lowerer.retire_reference_handle(*register, function.body.span);
                 } else {
-                    lowerer.destroy(*register, function.body.span);
+                    lowerer.destroy_with_protected_parents(
+                        *register,
+                        function.body.span,
+                        &protected,
+                    );
                 }
+                lowerer.transfer_owner(*register);
             }
             if function.result == UNIT {
                 if let Some(register) = value {
@@ -41649,7 +47024,8 @@ impl MirLowerer {
         if !matches!(lowerer.items.last(), Some(MirBuilderItem::Terminator(_))) {
             lowerer.terminate(mir::Terminator::Unreachable);
         }
-        let blocks = Self::finish_blocks(std::mem::take(&mut lowerer.items));
+        let mut blocks = Self::finish_blocks(std::mem::take(&mut lowerer.items));
+        Self::prune_unused_explicit_edge_params(&mut blocks);
         let flow = lowerer.finish_flow(&blocks);
         mir::Function {
             phase: mir::MirPhase::Raw,
@@ -41691,15 +47067,23 @@ impl MirLowerer {
             &function.plan.arms,
             function.plan.fallback.as_ref(),
         );
-        let return_cleanup = lowerer.owned.iter().rev().copied().collect::<Vec<_>>();
+        let return_cleanup = lowerer.ordered_cleanup_registers(lowerer.owned.iter().rev().copied());
         if let MirFlow::Value(value) = flow {
             let returning_reference = lowerer.reference_types.contains(&function.result);
+            let returning_borrow_authorities = lowerer.escaping_borrow_authorities(value);
+            let protected = return_cleanup.iter().copied().collect::<BTreeSet<_>>();
             for register in &return_cleanup {
-                if returning_reference && lowerer.borrowed.contains(register) {
+                if !lowerer.owned.contains(register) {
+                    continue;
+                }
+                if lowerer.borrowed.contains(register)
+                    && (returning_reference || returning_borrow_authorities.contains(register))
+                {
                     lowerer.retire_reference_handle(*register, function.span);
                 } else {
-                    lowerer.destroy(*register, function.span);
+                    lowerer.destroy_with_protected_parents(*register, function.span, &protected);
                 }
+                lowerer.transfer_owner(*register);
             }
             if function.result == UNIT {
                 if let Some(register) = value {
@@ -41718,7 +47102,8 @@ impl MirLowerer {
         if !matches!(lowerer.items.last(), Some(MirBuilderItem::Terminator(_))) {
             lowerer.terminate(mir::Terminator::Unreachable);
         }
-        let blocks = Self::finish_blocks(std::mem::take(&mut lowerer.items));
+        let mut blocks = Self::finish_blocks(std::mem::take(&mut lowerer.items));
+        Self::prune_unused_explicit_edge_params(&mut blocks);
         let flow = lowerer.finish_flow(&blocks);
         mir::Function {
             phase: mir::MirPhase::Raw,
@@ -41796,6 +47181,23 @@ impl MirLowerer {
         register
     }
 
+    fn mark_drop_only_aggregate(&mut self, register: u32) {
+        self.drop_only_aggregates.insert(register);
+        for item in &mut self.items {
+            let MirBuilderItem::Statement(statement) = item else {
+                continue;
+            };
+            if matches!(
+                statement.kind,
+                mir::InstructionKind::Deconstruct { src } if src == register
+            ) {
+                statement.kind = mir::InstructionKind::Drop {
+                    owner: Self::operand(register, mir::UseMode::Move),
+                };
+            }
+        }
+    }
+
     fn record_loan(
         &mut self,
         span: Span,
@@ -41822,7 +47224,14 @@ impl MirLowerer {
         self.loan_of.insert(reference, id);
     }
 
-    fn push(&mut self, span: Span, kind: mir::InstructionKind) {
+    fn push(&mut self, span: Span, mut kind: mir::InstructionKind) {
+        if let mir::InstructionKind::Deconstruct { src } = &kind
+            && self.drop_only_aggregates.contains(src)
+        {
+            kind = mir::InstructionKind::Drop {
+                owner: Self::operand(*src, mir::UseMode::Move),
+            };
+        }
         match &kind {
             mir::InstructionKind::Borrow { dst, src, unique } => {
                 self.record_loan(span, *dst, mir::Place::local(*src), *unique, None);
@@ -41884,7 +47293,7 @@ impl MirLowerer {
             _ => {}
         }
         match &kind {
-            mir::InstructionKind::ProjectMove { src, field, .. } => {
+            mir::InstructionKind::ProjectMove { dst, src, field } => {
                 let ty = self.register_types[src.register as usize];
                 if let Some(field_types) = self.aggregate_field_types.get(&ty) {
                     let initialized = self
@@ -41895,6 +47304,17 @@ impl MirLowerer {
                         *initialized = false;
                     }
                 }
+                // Aggregate reference provenance is reconstructed exactly by
+                // PlaceFlow from the value stored by `Construct`. Keep the
+                // builder's lightweight ownership classification in step so
+                // a projected reference is included in continuation captures
+                // and remains classified after later SSA renaming.
+                if self
+                    .reference_types
+                    .contains(&self.register_types[*dst as usize])
+                {
+                    self.borrowed.insert(*dst);
+                }
             }
             mir::InstructionKind::Copy { dst, src } => {
                 if let Some(loan) = self.loan_of.get(&src.register).copied() {
@@ -41904,6 +47324,9 @@ impl MirLowerer {
             mir::InstructionKind::Move { dst, src } => {
                 if let Some(fields) = self.partial_aggregates.remove(&src.register) {
                     self.partial_aggregates.insert(*dst, fields);
+                }
+                if self.drop_only_aggregates.contains(&src.register) {
+                    self.drop_only_aggregates.insert(*dst);
                 }
                 if let Some(loan) = self.loan_of.remove(&src.register) {
                     self.loan_of.insert(*dst, loan);
@@ -41959,6 +47382,113 @@ impl MirLowerer {
         debug_assert!(current.is_none());
         blocks.sort_by_key(|block| block.id);
         blocks
+    }
+
+    /// Remove proof-only ordinary join parameters which have no MIR use.
+    /// This is intentionally limited to destinations reached exclusively by
+    /// explicit Goto/Leave edges, whose arguments align one-for-one with block
+    /// parameters. Call and resumption edges have implicit result parameters
+    /// and are left to the main optimizer.
+    fn prune_unused_explicit_edge_params(blocks: &mut [mir::BasicBlock]) {
+        let mut used = BTreeSet::new();
+        for block in blocks.iter() {
+            for statement in &block.statements {
+                statement.kind.for_each_register_use(|register, _| {
+                    used.insert(register);
+                });
+            }
+            block.terminator.for_each_register_use(|register, _| {
+                used.insert(register);
+            });
+        }
+
+        let mut explicit_targets = BTreeSet::new();
+        let mut implicit_or_switch_targets = BTreeSet::new();
+        for block in blocks.iter() {
+            match &block.terminator {
+                mir::Terminator::Goto(edge) | mir::Terminator::Leave { target: edge, .. } => {
+                    explicit_targets.insert(edge.target);
+                }
+                mir::Terminator::Switch {
+                    cases, otherwise, ..
+                } => {
+                    implicit_or_switch_targets.extend(cases.iter().map(|(_, edge)| edge.target));
+                    implicit_or_switch_targets.insert(otherwise.target);
+                }
+                mir::Terminator::Call { normal, .. }
+                | mir::Terminator::CallSelf { normal, .. }
+                | mir::Terminator::CallKnownReceiver { normal, .. }
+                | mir::Terminator::CallIndirect { normal, .. }
+                | mir::Terminator::HostCall { normal, .. }
+                | mir::Terminator::Handle { normal, .. }
+                | mir::Terminator::Cancel { normal, .. }
+                | mir::Terminator::Resume { normal, .. } => {
+                    implicit_or_switch_targets.insert(normal.target);
+                }
+                mir::Terminator::Perform { resume, .. } => {
+                    if let Some(resume) = resume {
+                        implicit_or_switch_targets.insert(resume.target);
+                    }
+                }
+                mir::Terminator::Return { .. }
+                | mir::Terminator::TailCall { .. }
+                | mir::Terminator::TailCallSelf { .. }
+                | mir::Terminator::TailCallKnownReceiver { .. }
+                | mir::Terminator::TailCallIndirect { .. }
+                | mir::Terminator::TailResume { .. }
+                | mir::Terminator::Abort { .. }
+                | mir::Terminator::Unreachable => {}
+            }
+        }
+
+        let mut removed = BTreeMap::<u32, BTreeSet<usize>>::new();
+        for block in blocks.iter_mut() {
+            if !explicit_targets.contains(&block.id)
+                || implicit_or_switch_targets.contains(&block.id)
+            {
+                continue;
+            }
+            let indexes = block
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(index, parameter)| {
+                    (parameter.role == mir::BlockParamRole::Ordinary
+                        && !used.contains(&parameter.register))
+                    .then_some(index)
+                })
+                .collect::<BTreeSet<_>>();
+            if indexes.is_empty() {
+                continue;
+            }
+            block.params = block
+                .params
+                .drain(..)
+                .enumerate()
+                .filter_map(|(index, parameter)| (!indexes.contains(&index)).then_some(parameter))
+                .collect();
+            removed.insert(block.id, indexes);
+        }
+
+        let prune = |edge: &mut mir::Edge, removed: &BTreeMap<u32, BTreeSet<usize>>| {
+            let Some(indexes) = removed.get(&edge.target) else {
+                return;
+            };
+            edge.args = edge
+                .args
+                .drain(..)
+                .enumerate()
+                .filter_map(|(index, argument)| (!indexes.contains(&index)).then_some(argument))
+                .collect();
+        };
+        for block in blocks.iter_mut() {
+            match &mut block.terminator {
+                mir::Terminator::Goto(edge) | mir::Terminator::Leave { target: edge, .. } => {
+                    prune(edge, &removed);
+                }
+                _ => {}
+            }
+        }
     }
 
     fn label(&mut self) -> u32 {
@@ -42071,9 +47601,123 @@ impl MirLowerer {
         }
     }
 
+    /// Select the transport mode for a value carried by a fused control loop.
+    /// Shared references must remain available to the enclosing frame while
+    /// the loop parameter receives its own logical reference value. Unique
+    /// references and other restricted values still transfer linearly.
+    fn control_loop_join_mode(&self, register: u32) -> mir::UseMode {
+        let ty = self.register_types[register as usize];
+        let shared_reference = self.reference_types.contains(&ty)
+            && !self
+                .unique_reference_types
+                .values()
+                .any(|unique| *unique == ty);
+        if shared_reference {
+            mir::UseMode::Copy
+        } else {
+            self.join_operand(register).mode
+        }
+    }
+
+    fn join_operands(&self, registers: &[u32]) -> Vec<mir::Operand> {
+        let mut remaining = BTreeMap::<u32, usize>::new();
+        for register in registers {
+            *remaining.entry(*register).or_default() += 1;
+        }
+        registers
+            .iter()
+            .map(|register| {
+                let occurrences = remaining
+                    .get_mut(register)
+                    .expect("every join source has a remaining occurrence");
+                *occurrences -= 1;
+                if *occurrences != 0 {
+                    let ty = self.register_types[*register as usize];
+                    let ordinary = self.join_operand(*register);
+                    let copyable_value = ordinary.mode == mir::UseMode::Copy;
+                    assert!(
+                        copyable_value
+                            || (self.reference_types.contains(&ty)
+                                && !self
+                                    .unique_reference_types
+                                    .values()
+                                    .any(|unique| *unique == ty)),
+                        "restricted r{register} of type {ty} feeds multiple join parameters in {registers:?}; duplicable={}, reference={}, unique={}",
+                        self.duplicable_types.contains(&ty),
+                        self.reference_types.contains(&ty),
+                        self.unique_reference_types.values().any(|unique| *unique == ty),
+                    );
+                    Self::operand(*register, mir::UseMode::Copy)
+                } else {
+                    self.join_operand(*register)
+                }
+            })
+            .collect()
+    }
+
+    fn normalize_duplicate_edge_modes(&self, registers: &[u32], modes: &mut [mir::UseMode]) {
+        debug_assert_eq!(registers.len(), modes.len());
+        let mut remaining_moves = BTreeMap::<u32, usize>::new();
+        for (register, mode) in registers.iter().zip(modes.iter()) {
+            if *mode == mir::UseMode::Move {
+                *remaining_moves.entry(*register).or_default() += 1;
+            }
+        }
+        for (register, mode) in registers.iter().zip(modes.iter_mut()) {
+            if *mode != mir::UseMode::Move {
+                continue;
+            }
+            let remaining = remaining_moves
+                .get_mut(register)
+                .expect("every moved edge source has a remaining count");
+            *remaining -= 1;
+            if *remaining == 0 {
+                continue;
+            }
+            let ty = self.register_types[*register as usize];
+            let shared_reference = self.reference_types.contains(&ty)
+                && !self
+                    .unique_reference_types
+                    .values()
+                    .any(|unique| *unique == ty);
+            assert!(
+                self.join_operand(*register).mode == mir::UseMode::Copy || shared_reference,
+                "restricted r{register} of type {ty} is moved more than once on one CFG edge"
+            );
+            *mode = mir::UseMode::Copy;
+        }
+    }
+
     fn transfer_owner(&mut self, source: u32) {
-        if let Some(index) = self.owned.iter().position(|register| *register == source) {
-            self.owned.remove(index);
+        self.owned.retain(|register| *register != source);
+        self.carried_borrow_roots.remove(&source);
+    }
+
+    /// A normal return from a unique-receiver recursive call has satisfied
+    /// the same capture-use obligations as this activation. Captures whose
+    /// types do not admit zero uses are therefore definitely moved out of the
+    /// shared environment by the child. Mirror that postcondition in the
+    /// caller's partial-owner state so a later CFG join does not incorrectly
+    /// treat the dominating receiver as intact on the recursive edge.
+    fn apply_unique_self_call_postcondition(&mut self) {
+        if self.unique_receiver_captures.is_empty() {
+            return;
+        }
+        let Some(field_types) = self
+            .aggregate_field_types
+            .get(&self.register_types[0])
+            .cloned()
+        else {
+            return;
+        };
+        let initialized = self
+            .partial_aggregates
+            .entry(0)
+            .or_insert_with(|| vec![true; field_types.len()]);
+        for (field, ty) in field_types.into_iter().enumerate() {
+            if !self.zero_use_types.contains(&ty) {
+                initialized[field] = false;
+            }
         }
     }
 
@@ -42092,6 +47736,73 @@ impl MirLowerer {
         if let Some(loan) = self.loan_of.remove(&source) {
             self.loan_of.insert(destination, loan);
         }
+        if let Some(roots) = self.carried_borrow_roots.remove(&source) {
+            self.carried_borrow_roots.insert(destination, roots);
+        }
+        self.record_borrow_register_rename(source, destination);
+    }
+
+    fn copy_borrow_tracking(&mut self, source: u32, destination: u32) {
+        if self.borrowed.contains(&source) {
+            self.borrowed.insert(destination);
+        }
+        if let Some(parent) = self.borrow_parents.get(&source).copied() {
+            self.borrow_parents.insert(destination, parent);
+        }
+        if let Some(loan) = self.loan_of.get(&source).copied() {
+            self.loan_of.insert(destination, loan);
+        }
+        if let Some(roots) = self.carried_borrow_roots.get(&source).cloned() {
+            self.carried_borrow_roots.insert(destination, roots);
+        }
+    }
+
+    /// Attach Typed Core's structural reference provenance to an aggregate
+    /// result. Calls can return structs/callables containing references even
+    /// though no local MIR `Construct` exposes their fields. Resolve a
+    /// top-level reference root through its active loan so the carrier records
+    /// the actual place owner that must dominate any fused loop.
+    fn record_expression_carried_borrow_roots(&mut self, expression: &core::Expr, register: u32) {
+        let mut roots = expression
+            .reference_fields
+            .values()
+            .flat_map(|origin| {
+                (!origin.external).then_some(origin.root).into_iter().chain(
+                    origin
+                        .parent
+                        .filter(|parent| origin.external || *parent != origin.root),
+                )
+            })
+            .filter_map(|local| {
+                self.current_owned_local_register(local)
+                    .or_else(|| self.local_register(local))
+                    .or_else(|| {
+                        self.local_register_history
+                            .get(&local)
+                            .and_then(|history| history.iter().next_back().copied())
+                    })
+            })
+            .filter_map(|root| {
+                self.live_borrow_authority_root(root)
+                    .or_else(|| self.owned.contains(&root).then_some(root))
+            })
+            .collect::<BTreeSet<_>>();
+        roots.retain(|root| self.owned.contains(root));
+        if !roots.is_empty() {
+            self.carried_borrow_roots
+                .entry(register)
+                .or_default()
+                .extend(roots);
+        }
+    }
+
+    fn record_borrow_register_rename(&mut self, source: u32, destination: u32) {
+        // Retain the chain rather than eagerly rewriting older values. Apart
+        // from preserving provenance across several SSA joins, this matters
+        // for path-sensitive lowering: recording `r23 -> r23` on a sibling
+        // path must make an earlier `r8 -> r23 -> r55` chain resolve to r23
+        // again instead of leaving the compressed r8 -> r55 mapping behind.
+        self.borrow_register_renames.insert(source, destination);
     }
 
     fn continuation_capture(&self) -> mir::ContinuationCapture {
@@ -42143,6 +47854,7 @@ impl MirLowerer {
         span: Span,
         protected: &BTreeSet<u32>,
     ) {
+        let tracked_parent = self.tracked_borrow_parent(register);
         if self.borrowed.remove(&register) {
             self.push(
                 span,
@@ -42150,9 +47862,13 @@ impl MirLowerer {
                     reference: register,
                 },
             );
-            if let Some(parent) = self.borrow_parents.remove(&register) {
+            let parent = self.borrow_parents.remove(&register).or_else(|| {
+                tracked_parent.filter(|parent| self.auto_release_borrow_ancestors.contains(parent))
+            });
+            if let Some(parent) = parent {
                 self.release_borrow_parent_with_protection(parent, span, protected);
             }
+            self.auto_release_borrow_ancestors.remove(&register);
         } else if self
             .duplicable_types
             .contains(&self.register_types[register as usize])
@@ -42195,9 +47911,10 @@ impl MirLowerer {
     /// projection carriers still collapse recursively, but a named reference
     /// which is also present in the cleanup frontier must not be ended by its
     /// child's cascade and then ended a second time by the frontier itself.
-    fn cleanup_registers(&mut self, registers: impl IntoIterator<Item = u32>, span: Span) {
+    fn ordered_cleanup_registers(&self, registers: impl IntoIterator<Item = u32>) -> Vec<u32> {
         let mut registers = registers.into_iter().collect::<Vec<_>>();
-        let protected = registers.iter().copied().collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        registers.retain(|register| seen.insert(*register));
         let depth = |reference| {
             let mut depth = 0usize;
             let mut register = reference;
@@ -42211,9 +47928,49 @@ impl MirLowerer {
             }
             depth
         };
-        registers.sort_by_key(|register| std::cmp::Reverse(depth(*register)));
+        registers.sort_by_key(|register| {
+            (
+                !self
+                    .reference_types
+                    .contains(&self.register_types[*register as usize]),
+                std::cmp::Reverse(depth(*register)),
+            )
+        });
+        registers
+    }
+
+    fn cleanup_registers(&mut self, registers: impl IntoIterator<Item = u32>, span: Span) {
+        let mut registers = self.ordered_cleanup_registers(registers);
+        self.normalize_transferred_owners();
+        registers.retain(|register| self.owned.contains(register));
+        let protected = registers.iter().copied().collect::<BTreeSet<_>>();
         for register in registers {
-            self.destroy_with_protected_parents(register, span, &protected);
+            if !self.owned.contains(&register) {
+                continue;
+            }
+            if self.borrowed.contains(&register)
+                && self.has_live_borrow_descendant_outside(register, &protected)
+            {
+                let ty = self.register_types[register as usize];
+                let unique = self
+                    .unique_reference_types
+                    .values()
+                    .any(|candidate| *candidate == ty);
+                if unique {
+                    // A unique reborrow suspends rather than replaces its
+                    // parent authority. The parent cannot be detached while
+                    // a child outside this cleanup frontier remains live.
+                    continue;
+                }
+                // This frontier retires the parent handle, but a reborrow
+                // continues through a result, label destination, or sibling
+                // control state outside the frontier. Ending the underlying
+                // loan here would invalidate that survivor; detach only the
+                // proof handle and let the child retain the external place.
+                self.retire_reference_handle(register, span);
+            } else {
+                self.destroy_with_protected_parents(register, span, &protected);
+            }
             self.transfer_owner(register);
         }
     }
@@ -42261,9 +48018,44 @@ impl MirLowerer {
     }
 
     fn retire_reference_handle(&mut self, register: u32, span: Span) {
+        let parent = self.tracked_borrow_parent(register);
+        let loan = self.tracked_loan(register);
+        let replacement_alias = loan.and_then(|loan| {
+            self.borrowed
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    *candidate != register
+                        && self.owned.contains(candidate)
+                        && self.register_types[*candidate as usize]
+                            == self.register_types[register as usize]
+                        && self.tracked_loan(*candidate) == Some(loan)
+                })
+                .min()
+        });
+        let replacement_parent = replacement_alias.or(parent);
+        let children = self
+            .borrowed
+            .iter()
+            .copied()
+            .filter(|child| {
+                *child != register && self.tracked_borrow_parent(*child) == Some(register)
+            })
+            .collect::<Vec<_>>();
         self.borrowed.remove(&register);
         self.borrow_parents.remove(&register);
         self.borrow_parents.retain(|_, parent| *parent != register);
+        for child in children {
+            if let Some(parent) = replacement_parent {
+                self.borrow_parents.insert(child, parent);
+            }
+        }
+        if let Some(alias) = replacement_alias {
+            // A copied reference handle and its surviving alias denote one
+            // loan authority. Preserve that identity for later flow-fact
+            // lookups after the retired SSA name disappears.
+            self.record_borrow_register_rename(register, alias);
+        }
         self.push(
             span,
             mir::InstructionKind::Drop {
@@ -42274,17 +48066,321 @@ impl MirLowerer {
 
     fn tracked_borrow_parent(&self, register: u32) -> Option<u32> {
         self.borrow_parents.get(&register).copied().or_else(|| {
-            let loan = self.loan_of.get(&register)?;
+            let loan = self.loan_of.get(&register).copied().or_else(|| {
+                self.flow
+                    .loans
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, fact)| {
+                        fact.reference == register
+                            || self.current_borrow_register(fact.reference) == register
+                            || self.borrow_registers_equivalent(fact.reference, register)
+                    })
+                    .map(|(index, _)| mir::LoanId(index as u32))
+            })?;
             let fact = self.flow.loans.get(loan.index())?;
             fact.parent
                 .and_then(|parent| self.flow.loans.get(parent.index()))
-                .map(|loan| loan.reference)
+                .map(|loan| self.current_borrow_register(loan.reference))
                 .or_else(|| {
                     self.reference_types
                         .contains(&self.register_types[fact.borrowed.base as usize])
-                        .then_some(fact.borrowed.base)
+                        .then(|| self.current_borrow_register(fact.borrowed.base))
                 })
         })
+    }
+
+    fn tracked_loan(&self, register: u32) -> Option<mir::LoanId> {
+        self.loan_of.get(&register).copied().or_else(|| {
+            self.flow
+                .loans
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, fact)| {
+                    fact.reference == register
+                        || self.current_borrow_register(fact.reference) == register
+                        || self.borrow_registers_equivalent(fact.reference, register)
+                })
+                .map(|(index, _)| mir::LoanId(index as u32))
+        })
+    }
+
+    fn loans_semantically_equivalent(&self, left: mir::LoanId, right: mir::LoanId) -> bool {
+        fn equivalent(
+            lowerer: &MirLowerer,
+            left: mir::LoanId,
+            right: mir::LoanId,
+            seen: &mut BTreeSet<(mir::LoanId, mir::LoanId)>,
+        ) -> bool {
+            if left == right || !seen.insert((left, right)) {
+                return true;
+            }
+            let Some(left_fact) = lowerer.flow.loans.get(left.index()) else {
+                return false;
+            };
+            let Some(right_fact) = lowerer.flow.loans.get(right.index()) else {
+                return false;
+            };
+            if left_fact.kind != right_fact.kind
+                || left_fact.borrowed.projection != right_fact.borrowed.projection
+                || !lowerer
+                    .borrow_registers_equivalent(left_fact.borrowed.base, right_fact.borrowed.base)
+            {
+                return false;
+            }
+            if left_fact.kind == mir::LoanKind::Shared {
+                return true;
+            }
+            match (left_fact.parent, right_fact.parent) {
+                (None, None) => true,
+                (Some(left), Some(right)) => equivalent(lowerer, left, right, seen),
+                _ => false,
+            }
+        }
+
+        equivalent(self, left, right, &mut BTreeSet::new())
+    }
+
+    fn merge_join_loans(&self, left: mir::LoanId, right: mir::LoanId) -> Option<mir::LoanId> {
+        let left_fact = self.flow.loans.get(left.index())?;
+        let right_fact = self.flow.loans.get(right.index())?;
+        let same_place = left_fact.kind == right_fact.kind
+            && left_fact.borrowed.projection == right_fact.borrowed.projection
+            && self.borrow_registers_equivalent(left_fact.borrowed.base, right_fact.borrowed.base);
+        if same_place && self.loan_is_ancestor(left, right) {
+            return Some(left);
+        }
+        if same_place && self.loan_is_ancestor(right, left) {
+            return Some(right);
+        }
+        if !self.loans_semantically_equivalent(left, right) {
+            return None;
+        }
+        let depth = |mut loan: mir::LoanId| {
+            let mut depth = 0usize;
+            let mut seen = BTreeSet::new();
+            while seen.insert(loan) {
+                let Some(parent) = self
+                    .flow
+                    .loans
+                    .get(loan.index())
+                    .and_then(|fact| fact.parent)
+                else {
+                    break;
+                };
+                depth += 1;
+                loan = parent;
+            }
+            depth
+        };
+        Some(if depth(right) < depth(left) {
+            right
+        } else {
+            left
+        })
+    }
+
+    fn loan_is_ancestor(&self, ancestor: mir::LoanId, mut descendant: mir::LoanId) -> bool {
+        let mut seen = BTreeSet::new();
+        while seen.insert(descendant) {
+            if ancestor == descendant {
+                return true;
+            }
+            let Some(parent) = self
+                .flow
+                .loans
+                .get(descendant.index())
+                .and_then(|fact| fact.parent)
+            else {
+                break;
+            };
+            descendant = parent;
+        }
+        false
+    }
+
+    fn loans_are_ancestor_related(&self, left: mir::LoanId, right: mir::LoanId) -> bool {
+        self.loan_is_ancestor(left, right) || self.loan_is_ancestor(right, left)
+    }
+
+    fn current_borrow_register(&self, mut register: u32) -> u32 {
+        let mut seen = BTreeSet::new();
+        while seen.insert(register) {
+            let Some(renamed) = self.borrow_register_renames.get(&register).copied() else {
+                break;
+            };
+            register = renamed;
+        }
+        register
+    }
+
+    /// Return whether two SSA registers are historical names for the same
+    /// borrow authority. Path-sensitive lowering can deliberately record a
+    /// rename back to an earlier dominating name while lowering a sibling
+    /// branch. That makes the functional rename map cyclic: following each
+    /// name to a terminal register alone then leaves the two starts distinct,
+    /// even though the cycle itself proves their identity.
+    fn borrow_registers_equivalent(&self, left: u32, right: u32) -> bool {
+        if left == right
+            || self.current_borrow_register(left) == self.current_borrow_register(right)
+        {
+            return true;
+        }
+        let reaches = |mut register, target| {
+            let mut seen = BTreeSet::new();
+            while seen.insert(register) {
+                let Some(next) = self.borrow_register_renames.get(&register).copied() else {
+                    return false;
+                };
+                if next == target {
+                    return true;
+                }
+                register = next;
+            }
+            false
+        };
+        reaches(left, right) || reaches(right, left)
+    }
+
+    /// Identify a register by the hidden loop-ancestor slot which transports
+    /// its borrow authority. The preheader source and header block parameter
+    /// are intentionally distinct SSA values, but represent the same proof
+    /// capability on opposite sides of the loop edge.
+    fn control_hidden_authority(
+        &self,
+        register: u32,
+    ) -> Option<(core::ControlLoopId, usize, usize)> {
+        self.active_control_loops
+            .iter()
+            .find_map(|(control, context)| {
+                context
+                    .hidden_borrow_ancestors
+                    .iter()
+                    .find(|hidden| {
+                        [hidden.initial_source, hidden.header_source]
+                            .into_iter()
+                            .any(|candidate| {
+                                register == candidate
+                                    || self.borrow_registers_equivalent(register, candidate)
+                            })
+                    })
+                    .map(|hidden| (*control, hidden.source_index, hidden.depth))
+            })
+    }
+
+    fn borrow_authorities_equivalent(&self, left: u32, right: u32) -> bool {
+        self.borrow_registers_equivalent(left, right)
+            || self
+                .control_hidden_authority(left)
+                .zip(self.control_hidden_authority(right))
+                .is_some_and(|(left, right)| left == right)
+    }
+
+    fn hidden_label_ancestor_source(&self, hidden: &HiddenLabelBorrowAncestor) -> Option<u32> {
+        let mut register = self.current_owned_local_register(hidden.source_local)?;
+        for _ in 0..hidden.depth {
+            register = self.tracked_borrow_parent(register)?;
+        }
+        self.owned.contains(&register).then_some(register)
+    }
+
+    /// Intersect a label's provisional transport list with the owners live on
+    /// the current edge. Earlier LEAVE arguments are rewritten in lockstep so
+    /// the eventual destination parameters describe exactly the values which
+    /// reach every edge, including normal completion.
+    fn intersect_live_label_owners(&mut self, label: core::LabelId) -> ActiveMirLabel {
+        let destination = self
+            .active_labels
+            .get(&label)
+            .cloned()
+            .expect("the label destination remains active");
+        let unavailable = destination
+            .preserved_owner_params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (local, _, _))| {
+                self.current_owned_local_register(*local)
+                    .is_none()
+                    .then_some((index, *local))
+            })
+            .collect::<Vec<_>>();
+        if unavailable.is_empty() {
+            return destination;
+        }
+        let unavailable_locals = unavailable
+            .iter()
+            .map(|(_, local)| *local)
+            .collect::<BTreeSet<_>>();
+        let removed_hidden = destination
+            .hidden_borrow_ancestors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, hidden)| {
+                unavailable_locals
+                    .contains(&hidden.source_local)
+                    .then_some(index)
+            })
+            .collect::<BTreeSet<_>>();
+        let original_preserved_len = destination.preserved_owner_params.len();
+        let mut removed_arguments = unavailable
+            .iter()
+            .map(|(index, _)| index + 1)
+            .collect::<BTreeSet<_>>();
+        removed_arguments.extend(
+            removed_hidden
+                .iter()
+                .map(|index| 1 + original_preserved_len + index),
+        );
+        for item in &mut self.items {
+            let MirBuilderItem::Terminator(mir::Terminator::Leave { target, .. }) = item else {
+                continue;
+            };
+            if target.target == destination.destination {
+                target.args = target
+                    .args
+                    .drain(..)
+                    .enumerate()
+                    .filter_map(|(index, argument)| {
+                        (!removed_arguments.contains(&index)).then_some(argument)
+                    })
+                    .collect();
+            }
+        }
+        let active = self
+            .active_labels
+            .get_mut(&label)
+            .expect("the label destination remains active");
+        let unavailable_representatives = unavailable
+            .iter()
+            .map(|(_, local)| *local)
+            .collect::<BTreeSet<_>>();
+        let retired_aliases = active
+            .preserved_owner_aliases
+            .iter()
+            .filter_map(|(alias, representative)| {
+                unavailable_representatives
+                    .contains(representative)
+                    .then_some(*alias)
+            })
+            .collect::<BTreeSet<_>>();
+        active
+            .preserved_owner_aliases
+            .retain(|(alias, _)| !retired_aliases.contains(alias));
+        for alias in retired_aliases {
+            active.preserved_locals.remove(&alias);
+            active.retired_outer_locals.insert(alias);
+        }
+        for (index, local) in unavailable.into_iter().rev() {
+            active.preserved_owner_params.remove(index);
+            active.preserved_locals.remove(&local);
+            active.retired_outer_locals.insert(local);
+        }
+        for index in removed_hidden.into_iter().rev() {
+            active.hidden_borrow_ancestors.remove(index);
+        }
+        active.clone()
     }
 
     fn borrow_ancestor_position(&self, mut register: u32, sources: &[u32]) -> Option<usize> {
@@ -42314,6 +48410,7 @@ impl MirLowerer {
             }
             if self.borrowed.contains(&parent) {
                 self.retire_reference_handle(parent, span);
+                self.transfer_owner(parent);
             }
             register = parent;
         }
@@ -42366,6 +48463,257 @@ impl MirLowerer {
         }
     }
 
+    fn borrow_survivor_closure(&self, survivors: &BTreeSet<u32>) -> BTreeSet<u32> {
+        let mut protected = survivors.clone();
+        for mut register in survivors.iter().copied() {
+            let mut seen = BTreeSet::new();
+            loop {
+                if let Some(loan) = self.tracked_loan(register)
+                    && let Some(fact) = self.flow.loans.get(loan.index())
+                {
+                    let root = self.current_borrow_register(fact.borrowed.base);
+                    if self.owned.contains(&root) {
+                        protected.insert(root);
+                    }
+                }
+                let Some(parent) = self.tracked_borrow_parent(register) else {
+                    break;
+                };
+                if !seen.insert(parent) {
+                    break;
+                }
+                protected.insert(parent);
+                register = parent;
+            }
+        }
+        protected
+    }
+
+    /// A scope result can carry references below an aggregate shell. Recover
+    /// every locally owned authority whose loan therefore escapes the scope,
+    /// so cleanup detaches proof handles without ending the referent before
+    /// the escaping child reference.
+    fn escaping_borrow_authorities(&self, value: Option<u32>) -> BTreeSet<u32> {
+        let Some(value) = value else {
+            return BTreeSet::new();
+        };
+        let mut survivors = self
+            .carried_borrow_roots
+            .get(&value)
+            .cloned()
+            .unwrap_or_default();
+        if self.borrowed.contains(&value) {
+            survivors.insert(value);
+        }
+        self.borrow_survivor_closure(&survivors)
+    }
+
+    /// Reference handles carried only to authorize a fused control loop are
+    /// not necessarily named by the loop body's Core locals. Branch and
+    /// refinement joins must nevertheless retain them on every reaching path
+    /// so the next backedge can pass the corresponding hidden block argument.
+    fn active_control_hidden_owners(&self) -> BTreeSet<u32> {
+        let mut protected = BTreeSet::new();
+        for context in self.active_control_loops.values() {
+            protected.extend(
+                context
+                    .enclosing_control_owners
+                    .iter()
+                    .copied()
+                    .filter(|owner| self.owned.contains(owner)),
+            );
+            protected.extend(
+                context
+                    .preheader_shared_sources
+                    .iter()
+                    .copied()
+                    .filter(|source| self.owned.contains(source)),
+            );
+            // A non-reference owner beneath a loop-carried loan deliberately
+            // stays in its preheader register. Phi-moving that root while a
+            // child reference crosses the same edge would split one authority
+            // into unrelated SSA identities, so refinements must retain it as
+            // an invariant hidden owner too.
+            protected.extend(context.borrow_root_owners.iter().filter_map(|owner| {
+                let current = self.current_borrow_register(*owner);
+                self.owned
+                    .contains(&current)
+                    .then_some(current)
+                    .or_else(|| self.owned.contains(owner).then_some(*owner))
+            }));
+            protected.extend(context.hidden_borrow_ancestors.iter().filter_map(|hidden| {
+                let current_header = self.current_borrow_register(hidden.header_source);
+                self.owned
+                    .contains(&current_header)
+                    .then_some(current_header)
+                    .or_else(|| {
+                        self.owned
+                            .contains(&hidden.header_source)
+                            .then_some(hidden.header_source)
+                    })
+                    .or_else(|| {
+                        hidden
+                            .local
+                            .and_then(|local| self.current_owned_local_register(local))
+                    })
+                    .or_else(|| {
+                        let current = self.current_borrow_register(hidden.initial_source);
+                        self.owned.contains(&current).then_some(current)
+                    })
+                    .or_else(|| {
+                        self.owned
+                            .contains(&hidden.initial_source)
+                            .then_some(hidden.initial_source)
+                    })
+            }));
+        }
+        protected
+    }
+
+    /// Visible loop parameters are ordinary state operands, but nested
+    /// control-inlined helpers can temporarily remove their Core-local
+    /// bindings. Preserve the current header/phi identity independently of
+    /// that lexical map so an inner refinement cannot clean a value required
+    /// by the next backedge.
+    fn active_control_visible_owners(&self) -> BTreeSet<u32> {
+        let mut owners = self
+            .active_control_loops
+            .values()
+            .flat_map(|context| context.parameter_registers.iter().copied())
+            .filter_map(|register| {
+                let current = self.current_borrow_register(register);
+                self.owned
+                    .contains(&current)
+                    .then_some(current)
+                    .or_else(|| self.owned.contains(&register).then_some(register))
+            })
+            .collect::<BTreeSet<_>>();
+        owners.extend(
+            self.active_control_loops
+                .values()
+                .flat_map(|context| context.outer_locals.iter().map(|(local, _)| *local))
+                .filter_map(|local| self.current_owned_local_register(local)),
+        );
+        owners.extend(
+            self.active_control_loops
+                .values()
+                .flat_map(|context| context.borrow_root_owners.iter().copied())
+                .filter_map(|owner| {
+                    self.owned.contains(&owner).then_some(owner).or_else(|| {
+                        let current = self.current_borrow_register(owner);
+                        self.owned.contains(&current).then_some(current)
+                    })
+                }),
+        );
+        owners
+    }
+
+    /// Resolve a borrow parent to an authority that is live at the current
+    /// builder point. Refinement block parameters are occasionally retired
+    /// after their logical authority has already been transported through a
+    /// fused loop's hidden slot. Such a stale SSA handle carries neither an
+    /// owner nor a loan and must not survive into the next join.
+    fn current_live_borrow_authority(&self, register: u32) -> u32 {
+        let current = self.current_borrow_register(register);
+        if self.owned.contains(&current) {
+            return current;
+        }
+        if self.owned.contains(&register) {
+            return register;
+        }
+        let ty = self.register_types[register as usize];
+        let candidates = self
+            .active_control_hidden_owners()
+            .into_iter()
+            .filter(|candidate| self.register_types[*candidate as usize] == ty)
+            .collect::<Vec<_>>();
+        if let [candidate] = candidates.as_slice() {
+            *candidate
+        } else {
+            register
+        }
+    }
+
+    /// Follow a reference or reborrow chain to the deepest still-owned local
+    /// authority. Aggregate provenance must name this survivor rather than a
+    /// temporary call argument which is consumed immediately after issuing
+    /// the returned loan.
+    fn live_borrow_authority_root(&self, register: u32) -> Option<u32> {
+        let mut current = self.current_borrow_register(register);
+        let mut live = self.owned.contains(&current).then_some(current);
+        let mut seen = BTreeSet::new();
+        while seen.insert(current) {
+            let Some(parent) = self.tracked_borrow_parent(current) else {
+                break;
+            };
+            current = self.current_borrow_register(parent);
+            if self.owned.contains(&current) {
+                live = Some(current);
+            }
+        }
+        live
+    }
+
+    /// Translate a predecessor borrow authority through an SSA join.  Loan
+    /// provenance can name an older equivalent register rather than the exact
+    /// edge operand, so direct map lookup alone is insufficient after nested
+    /// refinement joins.
+    fn remap_join_borrow_authority(
+        &self,
+        register: u32,
+        source_to_join: &BTreeMap<u32, u32>,
+    ) -> u32 {
+        if let Some(joined) = source_to_join.get(&register).copied() {
+            return joined;
+        }
+        let candidates = source_to_join
+            .iter()
+            .filter_map(|(source, joined)| {
+                (self.owned.contains(joined)
+                    && (self.borrow_authorities_equivalent(register, *source)
+                        || self.borrow_authorities_equivalent(register, *joined)))
+                .then_some(*joined)
+            })
+            .collect::<BTreeSet<_>>();
+        if let [joined] = candidates.iter().copied().collect::<Vec<_>>().as_slice() {
+            return *joined;
+        }
+        self.current_live_borrow_authority(register)
+    }
+
+    /// Remove historical SSA names whose linear value has already arrived in
+    /// a joined register. Copyable values may legitimately retain both names;
+    /// restricted values and reference handles may not be cleaned through the
+    /// predecessor name after the edge move.
+    fn normalize_transferred_owners(&mut self) {
+        let owned = self.owned.iter().copied().collect::<BTreeSet<_>>();
+        let stale = self
+            .owned
+            .iter()
+            .copied()
+            .filter(|register| {
+                let current = self.current_borrow_register(*register);
+                current != *register
+                    && owned.contains(&current)
+                    && self.join_operand(*register).mode == mir::UseMode::Move
+            })
+            .collect::<BTreeSet<_>>();
+        self.owned.retain(|register| !stale.contains(register));
+    }
+
+    fn active_label_outer_owners(&self) -> BTreeSet<u32> {
+        self.active_labels
+            .values()
+            .flat_map(|label| label.outer_owned.iter().copied())
+            .filter_map(|owner| {
+                self.owned.contains(&owner).then_some(owner).or_else(|| {
+                    let current = self.current_borrow_register(owner);
+                    self.owned.contains(&current).then_some(current)
+                })
+            })
+            .collect()
+    }
+
     /// Release a generated projection carrier once its last derived loan has
     /// ended. Multiple disjoint leaves may share one unique carrier, which is
     /// the atomic split-borrow representation used by the existing one-field
@@ -42374,19 +48722,52 @@ impl MirLowerer {
         self.release_borrow_parent_with_protection(parent, span, &BTreeSet::new());
     }
 
+    fn has_live_borrow_descendant(&self, parent: u32) -> bool {
+        self.has_live_borrow_descendant_outside(parent, &BTreeSet::new())
+    }
+
+    fn has_live_borrow_descendant_outside(&self, parent: u32, excluded: &BTreeSet<u32>) -> bool {
+        self.borrowed
+            .iter()
+            .copied()
+            .filter(|reference| !excluded.contains(reference))
+            .any(|mut reference| {
+                let mut seen = BTreeSet::new();
+                while let Some(candidate) = self.tracked_borrow_parent(reference) {
+                    if !seen.insert(candidate) {
+                        break;
+                    }
+                    if candidate == parent {
+                        return true;
+                    }
+                    reference = candidate;
+                }
+                false
+            })
+    }
+
     fn release_borrow_parent_with_protection(
         &mut self,
         parent: u32,
         span: Span,
         protected: &BTreeSet<u32>,
     ) {
+        let named_parent = self.locals.values().copied().any(|register| {
+            register == parent || self.borrow_registers_equivalent(register, parent)
+        });
+        let invariant_parent = named_parent
+            || protected.contains(&parent)
+            || self.active_control_visible_owners().contains(&parent)
+            || self.active_label_outer_owners().contains(&parent);
         if !self
             .borrow_parents
             .values()
             .any(|candidate| *candidate == parent)
-            && !protected.contains(&parent)
+            && !self.has_live_borrow_descendant(parent)
+            && !invariant_parent
         {
             self.destroy_with_protected_parents(parent, span, protected);
+            self.transfer_owner(parent);
         }
     }
 
@@ -42532,7 +48913,7 @@ impl MirLowerer {
             }
             self.owned.push(rebuilt);
             if parent_path.is_empty() {
-                self.locals.insert(local, rebuilt);
+                self.bind_local(local, rebuilt);
                 self.uninitialized_locals.remove(&local);
             } else {
                 self.detached_subtrees
@@ -43111,7 +49492,7 @@ impl MirLowerer {
                 source = dst;
             }
             debug_assert_eq!(self.register_types[source as usize], binding.ty);
-            self.locals.insert(binding.local, source);
+            self.bind_local(binding.local, source);
             self.owned.push(source);
         }
     }
@@ -43132,7 +49513,7 @@ impl MirLowerer {
                     .iter()
                     .find(|binding| binding.name == *name)
                     .expect("every refinement binder has a decision binding");
-                self.locals.insert(binding.local, register);
+                self.bind_local(binding.local, register);
             }
             core::DecisionPatternKind::Wildcard
             | core::DecisionPatternKind::Unit
@@ -43222,7 +49603,7 @@ impl MirLowerer {
     fn consume_pattern(&mut self, register: u32, pattern: &TypedPattern) {
         match &pattern.kind {
             TypedPatternKind::Binding { local, .. } => {
-                self.locals.insert(*local, register);
+                self.bind_local(*local, register);
             }
             TypedPatternKind::Wildcard
             | TypedPatternKind::Unit
@@ -43430,8 +49811,10 @@ impl MirLowerer {
                         }],
                     );
                     for owner in self.owned.clone().into_iter().rev() {
-                        self.destroy(owner, span);
-                        self.transfer_owner(owner);
+                        if self.owned.contains(&owner) {
+                            self.destroy(owner, span);
+                            self.transfer_owner(owner);
+                        }
                     }
                     self.terminate(mir::Terminator::Goto(mir::Edge {
                         target: join,
@@ -43469,8 +49852,10 @@ impl MirLowerer {
         if let MirFlow::Value(value) = flow {
             let value = self.materialize(value, arm.body.span);
             for owner in self.owned.clone().into_iter().rev() {
-                self.destroy(owner, arm.span);
-                self.transfer_owner(owner);
+                if self.owned.contains(&owner) {
+                    self.destroy(owner, arm.span);
+                    self.transfer_owner(owner);
+                }
             }
             self.terminate(mir::Terminator::Goto(mir::Edge {
                 target: join,
@@ -43520,6 +49905,12 @@ impl MirLowerer {
     }
 
     fn expression(&mut self, expression: &core::Expr) -> MirFlow {
+        stacker::maybe_grow(768 * 1024, 16 * 1024 * 1024, || {
+            self.expression_inner(expression)
+        })
+    }
+
+    fn expression_inner(&mut self, expression: &core::Expr) -> MirFlow {
         match &expression.kind {
             core::ExprKind::Unit => MirFlow::Value(None),
             core::ExprKind::Constant(value) => {
@@ -43550,82 +49941,343 @@ impl MirLowerer {
                     incoming.push(self.materialize(value, argument.span));
                 }
                 let incoming_set = incoming.iter().copied().collect::<BTreeSet<_>>();
-                let preserved_outer_locals = preserved_outer_locals
+                let enclosing_control_owners = self
+                    .borrow_survivor_closure(&self.active_control_hidden_owners())
+                    .into_iter()
+                    .filter(|owner| self.owned.contains(owner))
+                    .collect::<BTreeSet<_>>();
+                let mut preserved_outer_locals = preserved_outer_locals
                     .iter()
                     .copied()
                     .collect::<BTreeSet<_>>();
-                let initial_aliases = initial_args
+                for mut register in incoming.iter().copied() {
+                    let mut seen = BTreeSet::new();
+                    while let Some(parent) = self.tracked_borrow_parent(register) {
+                        if !seen.insert(parent) {
+                            break;
+                        }
+                        let already_named = preserved_outer_locals.iter().any(|local| {
+                            self.locals
+                                .get(local)
+                                .is_some_and(|current| *current == parent)
+                        });
+                        if !already_named
+                            && let Some(local) = self
+                                .locals
+                                .iter()
+                                .find_map(|(local, current)| (*current == parent).then_some(*local))
+                        {
+                            preserved_outer_locals.insert(local);
+                        }
+                        register = parent;
+                    }
+                }
+                let initial_source_aliases = initial_args
                     .iter()
                     .zip(params)
                     .filter_map(|(argument, parameter)| {
-                        let core::ExprKind::Local { local, .. } = &argument.kind else {
-                            return None;
+                        let local = match &argument.kind {
+                            core::ExprKind::Local { local, .. }
+                            | core::ExprKind::LocalReferenceView { local } => *local,
+                            core::ExprKind::Reborrow { .. } => return None,
+                            _ => return None,
                         };
-                        (*local != parameter.local && preserved_outer_locals.contains(local))
-                            .then_some((*local, parameter.local))
+                        (local != parameter.local).then_some((local, parameter.local))
                     })
                     .collect::<Vec<_>>();
-                let aliased_outer_locals = initial_aliases
+                let initial_outer_aliases = initial_args
+                    .iter()
+                    .zip(params)
+                    .filter_map(|(argument, parameter)| {
+                        let direct = match &argument.kind {
+                            core::ExprKind::Local { local, .. }
+                            | core::ExprKind::LocalReferenceView { local } => *local,
+                            core::ExprKind::Reborrow { .. } => return None,
+                            _ => return None,
+                        };
+                        let local = argument
+                            .reference
+                            .as_ref()
+                            .map(|origin| origin.root)
+                            .filter(|root| {
+                                preserved_outer_locals.contains(root)
+                                    && self.locals.get(root).is_some_and(|register| {
+                                        self.register_types[*register as usize] == parameter.ty
+                                    })
+                            })
+                            .unwrap_or(direct);
+                        (local != parameter.local && preserved_outer_locals.contains(&local))
+                            .then_some((local, parameter.local))
+                    })
+                    .collect::<Vec<_>>();
+                let aliased_outer_locals = initial_outer_aliases
                     .iter()
                     .map(|(outer, _)| *outer)
                     .collect::<BTreeSet<_>>();
-                let outer_locals = self
+                let parameter_locals = params
+                    .iter()
+                    .map(|parameter| parameter.local)
+                    .collect::<BTreeSet<_>>();
+                let mut outer_representatives = BTreeMap::new();
+                let mut coalesced_outer_aliases = Vec::new();
+                let mut outer_locals = self
                     .locals
                     .iter()
                     .filter_map(|(local, register)| {
-                        (preserved_outer_locals.contains(local)
+                        if !(preserved_outer_locals.contains(local)
+                            && !parameter_locals.contains(local)
                             && !aliased_outer_locals.contains(local)
                             && self.owned.contains(register)
                             && !incoming_set.contains(register))
-                        .then_some((*local, self.register_types[*register as usize]))
+                        {
+                            return None;
+                        }
+                        if let Some(representative) = outer_representatives.get(register).copied() {
+                            coalesced_outer_aliases.push((*local, representative));
+                            None
+                        } else {
+                            outer_representatives.insert(*register, *local);
+                            Some((*local, self.register_types[*register as usize]))
+                        }
                     })
                     .collect::<Vec<_>>();
+                // A non-reference owner reached by a loop-carried loan must
+                // dominate the loop. Transporting that owner through a phi
+                // while any copied reference to it remains live is not a
+                // value move; it is merely an SSA spelling change, which the
+                // bytecode verifier cannot soundly infer from an ordinary
+                // MOVE. Keep the root in its preheader register instead.
+                let mut borrow_root_owners = incoming
+                    .iter()
+                    .copied()
+                    .chain(
+                        outer_locals
+                            .iter()
+                            .filter_map(|(local, _)| self.locals.get(local).copied()),
+                    )
+                    .filter_map(|register| self.tracked_loan(register))
+                    .filter_map(|loan| self.flow.loans.get(loan.index()))
+                    .map(|fact| self.current_borrow_register(fact.borrowed.base))
+                    .filter(|root| self.owned.contains(root))
+                    .collect::<BTreeSet<_>>();
+                // Stored references inside aggregate loop state do not have a
+                // top-level `loan_of` entry on the carrier register. Typed
+                // Core nevertheless records their exact lexical roots. Fold
+                // those roots into the same dominating-owner set so moving a
+                // callable/environment carrier cannot make its referent look
+                // unborrowed merely because the reference is nested.
+                borrow_root_owners.extend(
+                    initial_args
+                        .iter()
+                        .flat_map(|argument| {
+                            argument
+                                .reference
+                                .iter()
+                                .map(|origin| origin.root)
+                                .chain(argument.reference_fields.values().map(|origin| origin.root))
+                        })
+                        .filter_map(|local| self.current_owned_local_register(local))
+                        .filter(|root| self.owned.contains(root)),
+                );
+                // A reference may dominate the loop without appearing in a
+                // visible loop argument—for example a planned-call result
+                // retained by a static callback environment. Its local
+                // referent still cannot become an ordinary phi owner while
+                // that live loan crosses the loop boundary.
+                borrow_root_owners.extend(
+                    self.loan_of
+                        .iter()
+                        .filter(|(reference, _)| self.owned.contains(reference))
+                        .filter_map(|(_, loan)| self.flow.loans.get(loan.index()))
+                        .map(|fact| self.current_borrow_register(fact.borrowed.base))
+                        .filter(|root| self.owned.contains(root)),
+                );
+                // Aggregate carriers can themselves contain references to
+                // further owners (for example a rollback checkpoint holding
+                // `&mut ByteBuf`). Close the root set transitively so neither
+                // the carrier nor its ultimate referent is phi-moved while
+                // that nested loan remains live.
+                let mut pending_carriers = incoming
+                    .iter()
+                    .copied()
+                    .chain(
+                        outer_locals
+                            .iter()
+                            .filter_map(|(local, _)| self.locals.get(local).copied()),
+                    )
+                    .chain(borrow_root_owners.iter().copied())
+                    .collect::<Vec<_>>();
+                let mut inspected_carriers = BTreeSet::new();
+                while let Some(carrier) = pending_carriers.pop() {
+                    let carrier = self.current_borrow_register(carrier);
+                    if !inspected_carriers.insert(carrier) {
+                        continue;
+                    }
+                    let Some(roots) = self.carried_borrow_roots.get(&carrier) else {
+                        continue;
+                    };
+                    for root in roots {
+                        let root = self.current_borrow_register(*root);
+                        if self.owned.contains(&root) && borrow_root_owners.insert(root) {
+                            pending_carriers.push(root);
+                        }
+                    }
+                }
+                borrow_root_owners.retain(|root| {
+                    !self
+                        .reference_types
+                        .contains(&self.register_types[*root as usize])
+                });
+                outer_locals.retain(|(local, _)| {
+                    self.locals
+                        .get(local)
+                        .is_none_or(|register| !borrow_root_owners.contains(register))
+                });
                 for (local, _) in &outer_locals {
                     incoming.push(self.locals[local]);
                 }
-                let carried = incoming.iter().copied().collect::<BTreeSet<_>>();
+                let visible_incoming_len = incoming.len();
+                let mut carried = incoming.iter().copied().collect::<BTreeSet<_>>();
+                let borrow_root_locals = self
+                    .locals
+                    .iter()
+                    .filter_map(|(local, register)| {
+                        borrow_root_owners.contains(register).then_some(*local)
+                    })
+                    .collect::<BTreeSet<_>>();
+                carried.extend(borrow_root_owners.iter().copied());
+                let mut hidden_borrow_ancestors = Vec::new();
+                let visible_sources = incoming.clone();
+                for (source_index, mut register) in visible_sources.into_iter().enumerate() {
+                    let mut depth = 0usize;
+                    let mut path_seen = BTreeSet::new();
+                    while let Some(parent) = self.tracked_borrow_parent(register) {
+                        if !path_seen.insert(parent) {
+                            break;
+                        }
+                        depth += 1;
+                        let local = self.locals.iter().find_map(|(local, current)| {
+                            (*current == parent && preserved_outer_locals.contains(local))
+                                .then_some(*local)
+                        });
+                        if local.is_some() && carried.insert(parent) && self.owned.contains(&parent)
+                        {
+                            hidden_borrow_ancestors.push(HiddenLoopBorrowAncestor {
+                                source_index,
+                                depth,
+                                ty: self.register_types[parent as usize],
+                                local,
+                                initial_source: parent,
+                                header_source: parent,
+                            });
+                            incoming.push(parent);
+                        }
+                        register = parent;
+                    }
+                }
+                debug_assert_eq!(
+                    incoming.len(),
+                    visible_incoming_len + hidden_borrow_ancestors.len()
+                );
                 let protected_label_owners = self
                     .active_labels
                     .values()
                     .flat_map(|label| label.outer_owned.iter().copied())
                     .filter(|register| {
                         let ty = self.register_types[*register as usize];
-                        self.duplicable_types.contains(&ty)
+                        let ordinary_copy = self.duplicable_types.contains(&ty)
                             && !self.custom_drop_types.contains(&ty)
-                            && !self.reference_types.contains(&ty)
+                            && !self.reference_types.contains(&ty);
+                        let shared_reference = self.reference_types.contains(&ty)
+                            && !self
+                                .unique_reference_types
+                                .values()
+                                .any(|unique| *unique == ty);
+                        ordinary_copy || shared_reference
                     })
                     .collect::<BTreeSet<_>>();
-                for owner in self.owned.clone().into_iter().rev() {
-                    if !carried.contains(&owner) && !protected_label_owners.contains(&owner) {
-                        // A nested fused loop is not a boundary for an
-                        // enclosing label destination. Plain copyable owners
-                        // in that exact baseline remain available to sibling
-                        // Leave paths; remapping them to this loop's header
-                        // would be wrong because those paths need not be
-                        // dominated by the header.
-                        self.destroy(owner, expression.span);
-                        self.transfer_owner(owner);
-                        let retired = self
-                            .locals
-                            .iter()
-                            .filter_map(|(local, register)| (*register == owner).then_some(*local))
-                            .collect::<Vec<_>>();
-                        for local in retired {
-                            self.locals.remove(&local);
-                            self.uninitialized_locals.insert(local);
-                        }
-                    }
+                let retiring = self
+                    .owned
+                    .clone()
+                    .into_iter()
+                    .filter(|owner| {
+                        !carried.contains(owner)
+                            && !protected_label_owners.contains(owner)
+                            && !enclosing_control_owners.contains(owner)
+                    })
+                    .collect::<Vec<_>>();
+                let retired_locals = self
+                    .locals
+                    .iter()
+                    .filter_map(|(local, register)| retiring.contains(register).then_some(*local))
+                    .collect::<Vec<_>>();
+                self.cleanup_registers(retiring, expression.span);
+                for local in retired_locals {
+                    self.locals.remove(&local);
+                    self.uninitialized_locals.insert(local);
                 }
                 let header = self.label();
+                let mut initial_modes = (0..incoming.len())
+                    .map(|index| {
+                        if index < visible_incoming_len {
+                            let mode = self.control_loop_join_mode(incoming[index]);
+                            if mode == mir::UseMode::Copy {
+                                return mode;
+                            }
+                        }
+                        let Some(hidden) = index
+                            .checked_sub(visible_incoming_len)
+                            .and_then(|index| hidden_borrow_ancestors.get(index))
+                        else {
+                            return mir::UseMode::Move;
+                        };
+                        let shared_reference = self.reference_types.contains(&hidden.ty)
+                            && !self
+                                .unique_reference_types
+                                .values()
+                                .any(|ty| *ty == hidden.ty);
+                        if shared_reference {
+                            mir::UseMode::Copy
+                        } else {
+                            mir::UseMode::Move
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.normalize_duplicate_edge_modes(&incoming, &mut initial_modes);
+                let moved_preheader_sources = incoming
+                    .iter()
+                    .zip(&initial_modes)
+                    .filter_map(|(register, mode)| {
+                        (*mode == mir::UseMode::Move).then_some(*register)
+                    })
+                    .collect::<BTreeSet<_>>();
+                let preheader_shared_sources = incoming
+                    .iter()
+                    .zip(&initial_modes)
+                    .filter_map(|(register, mode)| {
+                        let ty = self.register_types[*register as usize];
+                        (*mode == mir::UseMode::Copy
+                            && !moved_preheader_sources.contains(register)
+                            && self.reference_types.contains(&ty)
+                            && !self
+                                .unique_reference_types
+                                .values()
+                                .any(|unique| *unique == ty))
+                        .then_some(*register)
+                    })
+                    .collect::<BTreeSet<_>>();
                 self.terminate(mir::Terminator::Goto(mir::Edge {
                     target: header,
                     args: incoming
                         .iter()
-                        .map(|register| Self::operand(*register, mir::UseMode::Move))
+                        .zip(&initial_modes)
+                        .map(|(register, mode)| Self::operand(*register, *mode))
                         .collect(),
                 }));
-                for register in &incoming {
-                    self.transfer_owner(*register);
+                for (register, mode) in incoming.iter().zip(&initial_modes) {
+                    if *mode == mir::UseMode::Move {
+                        self.transfer_owner(*register);
+                    }
                 }
                 let parameter_registers = params
                     .iter()
@@ -43635,13 +50287,69 @@ impl MirLowerer {
                     .iter()
                     .map(|(_, ty)| self.allocate(*ty))
                     .collect::<Vec<_>>();
+                let hidden_ancestor_registers = hidden_borrow_ancestors
+                    .iter()
+                    .map(|ancestor| self.allocate(ancestor.ty))
+                    .collect::<Vec<_>>();
+                for (ancestor, register) in hidden_borrow_ancestors
+                    .iter_mut()
+                    .zip(&hidden_ancestor_registers)
+                {
+                    ancestor.header_source = *register;
+                }
                 let header_registers = parameter_registers
                     .iter()
                     .chain(&outer_registers)
+                    .chain(&hidden_ancestor_registers)
                     .copied()
                     .collect::<Vec<_>>();
-                for (source, destination) in incoming.iter().zip(&header_registers) {
-                    self.rename_borrow_tracking(*source, *destination);
+                let preheader_partial_aggregates = incoming
+                    .iter()
+                    .map(|source| self.partial_aggregates.get(source).cloned())
+                    .collect::<Vec<_>>();
+                for ((source, destination), mode) in
+                    incoming.iter().zip(&header_registers).zip(&initial_modes)
+                {
+                    if *mode == mir::UseMode::Copy {
+                        self.copy_borrow_tracking(*source, *destination);
+                    } else {
+                        self.rename_borrow_tracking(*source, *destination);
+                        for active in self.active_labels.values_mut() {
+                            if active.outer_owned.remove(source) {
+                                active.outer_owned.insert(*destination);
+                            }
+                        }
+                    }
+                    if let Some(fields) = self.partial_aggregates.get(source).cloned() {
+                        self.partial_aggregates.insert(*destination, fields);
+                    }
+                }
+                for (index, ancestor) in hidden_borrow_ancestors.iter().enumerate() {
+                    let parent = hidden_ancestor_registers[index];
+                    let child = if ancestor.depth == 1 {
+                        header_registers[ancestor.source_index]
+                    } else {
+                        hidden_borrow_ancestors
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(candidate_index, candidate)| {
+                                (candidate.source_index == ancestor.source_index
+                                    && candidate.depth < ancestor.depth)
+                                    .then_some((candidate.depth, candidate_index))
+                            })
+                            .max_by_key(|(depth, _)| *depth)
+                            .map(|(_, previous)| hidden_ancestor_registers[previous])
+                            .or_else(|| {
+                                incoming
+                                    .iter()
+                                    .take(visible_incoming_len)
+                                    .position(|source| *source == ancestor.initial_source)
+                                    .map(|position| header_registers[position])
+                            })
+                            .unwrap_or(header_registers[ancestor.source_index])
+                    };
+                    self.borrow_parents.insert(child, parent);
+                    self.auto_release_borrow_ancestors.insert(parent);
                 }
                 self.mark_with_params(
                     header,
@@ -43660,58 +50368,214 @@ impl MirLowerer {
                                 role: mir::BlockParamRole::Ordinary,
                             },
                         ))
+                        .chain(
+                            hidden_borrow_ancestors
+                                .iter()
+                                .zip(&hidden_ancestor_registers)
+                                .map(|(ancestor, register)| mir::BlockParam {
+                                    register: *register,
+                                    ty: ancestor.ty,
+                                    role: mir::BlockParamRole::Ordinary,
+                                }),
+                        )
                         .collect(),
                 );
                 self.owned = parameter_registers
                     .iter()
                     .chain(&outer_registers)
+                    .chain(&hidden_ancestor_registers)
                     .copied()
                     .collect();
+                self.owned.extend(borrow_root_owners.iter().copied());
+                self.owned.extend(preheader_shared_sources.iter().copied());
+                self.owned.extend(enclosing_control_owners.iter().copied());
+                self.owned.sort_unstable();
+                self.owned.dedup();
                 for (parameter, register) in params.iter().zip(&parameter_registers) {
-                    self.locals.insert(parameter.local, *register);
+                    self.bind_local(parameter.local, *register);
                 }
                 for ((local, _), register) in outer_locals.iter().zip(&outer_registers) {
-                    self.locals.insert(*local, *register);
+                    self.bind_local(*local, *register);
+                }
+                for (ancestor, register) in hidden_borrow_ancestors
+                    .iter()
+                    .zip(&hidden_ancestor_registers)
+                {
+                    if let Some(local) = ancestor.local
+                        && !params.iter().any(|parameter| parameter.local == local)
+                    {
+                        // The visible parameter is the lexical child; its
+                        // proof-only parent travels in the hidden slot. Do
+                        // not overwrite the child's local when both were
+                        // named by the same preheader alias.
+                        self.bind_local(local, *register);
+                    }
+                }
+                let mut previous_aliases = Vec::new();
+                for (alias, parameter) in initial_source_aliases
+                    .iter()
+                    .chain(&initial_outer_aliases)
+                    .chain(&coalesced_outer_aliases)
+                {
+                    // A copyable initial argument may also remain as an
+                    // independently preserved outer value. Keep that local
+                    // bound to its dedicated outer header slot; aliasing it
+                    // to the mutable loop parameter loses the preserved
+                    // identity after the parameter is moved by the body.
+                    if outer_locals.iter().any(|(local, _)| local == alias) {
+                        continue;
+                    }
+                    if alias != parameter {
+                        previous_aliases
+                            .push((*alias, self.local_aliases.insert(*alias, *parameter)));
+                    }
                 }
                 self.active_control_loops.insert(
                     *control,
                     ActiveMirControlLoop {
                         header,
                         parameter_types: params.iter().map(|parameter| parameter.ty).collect(),
+                        parameter_registers: parameter_registers.clone(),
+                        header_registers,
+                        preheader_partial_aggregates,
                         outer_locals: outer_locals.clone(),
+                        hidden_borrow_ancestors,
+                        preheader_shared_sources: preheader_shared_sources
+                            .iter()
+                            .copied()
+                            .collect(),
+                        borrow_root_owners: borrow_root_owners.iter().copied().collect(),
+                        enclosing_control_owners: enclosing_control_owners
+                            .iter()
+                            .copied()
+                            .collect(),
                     },
                 );
                 let value = self.expression(body);
                 self.active_control_loops.remove(control);
+                for (alias, previous) in previous_aliases.into_iter().rev() {
+                    if let Some(previous) = previous {
+                        self.local_aliases.insert(alias, previous);
+                    } else {
+                        self.local_aliases.remove(&alias);
+                    }
+                }
                 if let MirFlow::Value(result) = value {
-                    for (outer, parameter) in &initial_aliases {
-                        if let Some(register) = self.locals.get(parameter).copied() {
-                            self.locals.insert(*outer, register);
+                    let resolved_outer_locals = outer_locals
+                        .iter()
+                        .map(|(local, ty)| {
+                            let register = self
+                                .current_owned_local_register(*local)
+                                .filter(|register| {
+                                    self.register_types[*register as usize] == *ty
+                                })
+                                .or_else(|| {
+                                    let candidates = self
+                                        .owned
+                                        .iter()
+                                        .copied()
+                                        .filter(|register| {
+                                            self.register_types[*register as usize] == *ty
+                                        })
+                                        .collect::<Vec<_>>();
+                                    (candidates.len() == 1).then(|| candidates[0])
+                                })
+                                .unwrap_or_else(|| {
+                                    let history = self.local_register_history.get(local);
+                                    let expected_ty = history.and_then(|history| {
+                                        history.iter().next_back().map(|register| {
+                                            self.register_types[*register as usize]
+                                        })
+                                    });
+                                    let candidates = self
+                                        .owned
+                                        .iter()
+                                        .copied()
+                                        .filter(|register| {
+                                            expected_ty.is_some_and(|ty| {
+                                                self.register_types[*register as usize] == ty
+                                            })
+                                        })
+                                        .map(|register| {
+                                            (
+                                                register,
+                                                self.tracked_loan(register),
+                                                self.current_borrow_register(register),
+                                                self.tracked_borrow_parent(register),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    panic!(
+                                        "control-loop outer local {local:?} was lost on normal exit {:?}; expected={outer_locals:?}, live={:?}, aliases={:?}, history={history:?}, owned={:?}, candidates={candidates:?}, loans={:?}, renames={:?}, parents={:?}",
+                                        body.span,
+                                        self.locals.keys().collect::<Vec<_>>(),
+                                        self.local_aliases,
+                                        self.owned,
+                                        self.flow.loans,
+                                        self.borrow_register_renames,
+                                        self.borrow_parents,
+                                    )
+                                });
+                            (*local, register)
+                        })
+                        .collect::<Vec<_>>();
+                    for (local, register) in &resolved_outer_locals {
+                        self.bind_local(*local, *register);
+                    }
+                    for (outer, parameter) in &initial_outer_aliases {
+                        if let Some(register) = self.current_owned_local_register(*parameter) {
+                            self.bind_local(*outer, register);
+                        }
+                    }
+                    for (alias, representative) in &coalesced_outer_aliases {
+                        if let Some(register) = self.current_owned_local_register(*representative) {
+                            self.bind_local(*alias, register);
                         }
                     }
                     let mut protected = result.into_iter().collect::<BTreeSet<_>>();
                     protected.extend(
-                        initial_aliases
+                        initial_outer_aliases
                             .iter()
                             .filter_map(|(outer, _)| self.locals.get(outer).copied()),
                     );
-                    protected.extend(outer_locals.iter().map(|(local, _)| {
-                        *self.locals.get(local).unwrap_or_else(|| {
-                            panic!(
-                                "control-loop outer local {local:?} was lost on normal exit {:?}; expected={outer_locals:?}, live={:?}",
-                                body.span,
-                                self.locals.keys().collect::<Vec<_>>(),
-                            )
-                        })
+                    protected.extend(resolved_outer_locals.iter().map(|(_, register)| *register));
+                    // A nested label destination can phi-rename a dominating
+                    // non-reference borrow root. Protect the current SSA
+                    // identity, not merely the preheader spelling retained by
+                    // the structural loop context.
+                    protected.extend(borrow_root_owners.iter().filter_map(|owner| {
+                        let current = self.current_borrow_register(*owner);
+                        self.owned
+                            .contains(&current)
+                            .then_some(current)
+                            .or_else(|| self.owned.contains(owner).then_some(*owner))
                     }));
-                    for owner in self.owned.clone().into_iter().rev() {
-                        if !protected.contains(&owner) {
-                            self.destroy(owner, body.span);
-                            self.transfer_owner(owner);
-                        }
-                    }
-                    self.locals.retain(|local, _| {
-                        saved_locals.contains_key(local) && preserved_outer_locals.contains(local)
+                    protected.extend(enclosing_control_owners.iter().copied());
+                    // Lexical aliases can still name a loop parameter after
+                    // the body has already consumed and retired its current
+                    // register. Such a stale name must not keep the
+                    // parameter's invariant borrow ancestors alive beyond
+                    // the loop.
+                    protected.retain(|register| self.owned.contains(register));
+                    // If a loop result or preserved outer binding is itself a
+                    // reborrow, its authority ancestors must survive until
+                    // the enclosing expression retires that child. Ending an
+                    // invariant parent at the loop boundary would invert the
+                    // required child-before-parent cleanup order.
+                    let protected = self.borrow_survivor_closure(&protected);
+                    self.cleanup_registers(
+                        self.owned
+                            .clone()
+                            .into_iter()
+                            .filter(|owner| !protected.contains(owner)),
+                        body.span,
+                    );
+                    let live_owned = self.owned.iter().copied().collect::<BTreeSet<_>>();
+                    self.locals.retain(|local, register| {
+                        saved_locals.contains_key(local)
+                            && (preserved_outer_locals.contains(local)
+                                || borrow_root_locals.contains(local))
+                            && live_owned.contains(register)
                     });
                     MirFlow::Value(result)
                 } else {
@@ -43721,13 +50585,21 @@ impl MirLowerer {
                     // SSA identities. Restoring the whole preheader map would
                     // resurrect loop parameters whose owners were transferred
                     // through the header and eventually retired.
-                    for (outer, parameter) in &initial_aliases {
-                        if let Some(register) = self.locals.get(parameter).copied() {
-                            self.locals.insert(*outer, register);
+                    for (outer, parameter) in &initial_outer_aliases {
+                        if let Some(register) = self.current_owned_local_register(*parameter) {
+                            self.bind_local(*outer, register);
                         }
                     }
-                    self.locals.retain(|local, _| {
-                        saved_locals.contains_key(local) && preserved_outer_locals.contains(local)
+                    for (alias, representative) in &coalesced_outer_aliases {
+                        if let Some(register) = self.current_owned_local_register(*representative) {
+                            self.bind_local(*alias, register);
+                        }
+                    }
+                    let live_owned = self.owned.iter().copied().collect::<BTreeSet<_>>();
+                    self.locals.retain(|local, register| {
+                        saved_locals.contains_key(local)
+                            && preserved_outer_locals.contains(local)
+                            && live_owned.contains(register)
                     });
                     MirFlow::Diverged
                 }
@@ -43747,18 +50619,246 @@ impl MirLowerer {
                     };
                     incoming.push(self.materialize(value, argument.span));
                 }
-                for (local, _) in &context.outer_locals {
-                    incoming.push(*self.locals.get(local).unwrap_or_else(|| {
+                for (local, ty) in &context.outer_locals {
+                    let register = self
+                        .current_owned_local_register(*local)
+                        .filter(|register| self.register_types[*register as usize] == *ty)
+                        .or_else(|| {
+                            let candidates = self
+                                .owned
+                                .iter()
+                                .copied()
+                                .filter(|register| self.register_types[*register as usize] == *ty)
+                                .collect::<Vec<_>>();
+                            (candidates.len() == 1).then(|| candidates[0])
+                        });
+                    incoming.push(register.unwrap_or_else(|| {
+                        let history = self.local_register_history.get(local);
+                        let candidates = self
+                            .owned
+                            .iter()
+                            .copied()
+                            .filter(|register| self.register_types[*register as usize] == *ty)
+                            .map(|register| {
+                                (
+                                    register,
+                                    self.tracked_loan(register),
+                                    self.current_borrow_register(register),
+                                    self.tracked_borrow_parent(register),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let local_bindings = self
+                            .locals
+                            .iter()
+                            .map(|(local, register)| {
+                                (*local, *register, self.register_types[*register as usize])
+                            })
+                            .collect::<Vec<_>>();
+                        let owned_types = self
+                            .owned
+                            .iter()
+                            .map(|register| (*register, self.register_types[*register as usize]))
+                            .collect::<Vec<_>>();
                         panic!(
-                            "control-loop outer local {local:?} was not live at its backedge {:?}; expected={:?}, live={:?}",
+                            "control-loop outer local {local:?} was not live at its backedge {:?}; expected={:?}, live={local_bindings:?}, aliases={:?}, history={history:?}, owned={owned_types:?}, candidates={candidates:?}, loans={:?}, renames={:?}, parents={:?}",
                             expression.span,
                             context.outer_locals,
-                            self.locals.keys().collect::<Vec<_>>(),
+                            self.local_aliases,
+                            self.flow.loans,
+                            self.borrow_register_renames,
+                            self.borrow_parents,
                         )
                     }));
                 }
+                let mut incoming_modes = incoming
+                    .iter()
+                    .map(|register| self.control_loop_join_mode(*register))
+                    .collect::<Vec<_>>();
+                for ancestor in &context.hidden_borrow_ancestors {
+                    let source = *incoming.get(ancestor.source_index).unwrap_or_else(|| {
+                        panic!(
+                            "control-loop hidden borrow source {} is outside {} visible backedge values",
+                            ancestor.source_index,
+                            incoming.len(),
+                        )
+                    });
+                    let shared_reference = self.reference_types.contains(&ancestor.ty)
+                        && !self
+                            .unique_reference_types
+                            .values()
+                            .any(|ty| *ty == ancestor.ty);
+                    let current_header = self.current_borrow_register(ancestor.header_source);
+                    let current_initial = self.current_borrow_register(ancestor.initial_source);
+                    let mut register = if self.owned.contains(&current_header)
+                        || incoming.contains(&current_header)
+                    {
+                        current_header
+                    } else if self.owned.contains(&ancestor.header_source) {
+                        ancestor.header_source
+                    } else if shared_reference
+                        && (self.owned.contains(&current_initial)
+                            || incoming.contains(&current_initial))
+                    {
+                        current_initial
+                    } else {
+                        ancestor
+                            .local
+                            .and_then(|local| self.current_owned_local_register(local))
+                            .unwrap_or_else(|| {
+                            let mut register = source;
+                            for _ in 0..ancestor.depth {
+                                register = self.tracked_borrow_parent(register).unwrap_or_else(|| {
+                                    panic!(
+                                        "control-loop backedge {:?} lost hidden borrow ancestor at depth {} from r{}; hidden=(initial=r{}, header=r{}, local={:?}, ty={}); source=(ty={}, loan={:?}, current=r{}); owned={:?}; parents={:?}, loans={:?}, renames={:?}",
+                                        expression.span,
+                                        ancestor.depth,
+                                        source,
+                                        ancestor.initial_source,
+                                        ancestor.header_source,
+                                        ancestor.local,
+                                        ancestor.ty,
+                                        self.register_types[source as usize],
+                                        self.tracked_loan(source),
+                                        self.current_borrow_register(source),
+                                        self.owned.iter().map(|register| (*register, self.register_types[*register as usize], self.tracked_loan(*register))).collect::<Vec<_>>(),
+                                        self.borrow_parents,
+                                        self.loan_of,
+                                        self.borrow_register_renames,
+                                    )
+                                });
+                            }
+                            register
+                        })
+                    };
+                    let canonical_register = self.current_borrow_register(register);
+                    if self.owned.contains(&canonical_register)
+                        || incoming.contains(&canonical_register)
+                    {
+                        register = canonical_register;
+                    }
+                    if !self.owned.contains(&register) && !incoming.contains(&register) {
+                        let candidates = self
+                            .borrowed
+                            .iter()
+                            .copied()
+                            .filter(|candidate| self.owned.contains(candidate))
+                            .filter(|candidate| {
+                                self.register_types[*candidate as usize] == ancestor.ty
+                            })
+                            .collect::<Vec<_>>();
+                        let candidates = if candidates.is_empty() {
+                            self.owned
+                                .iter()
+                                .copied()
+                                .filter(|candidate| {
+                                    self.register_types[*candidate as usize] == ancestor.ty
+                                        && !incoming.contains(candidate)
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            candidates
+                        };
+                        if let [candidate] = candidates.as_slice() {
+                            register = *candidate;
+                        } else {
+                            panic!(
+                                "control-loop backedge {:?} selected stale hidden borrow ancestor r{register} from r{source}; source-index={}, depth={}, type={}, local={:?}, initial=r{}, canonical-initial=r{}; live candidates={candidates:?}, owned={:?}, owned-types={:?}, borrowed={:?}, parents={:?}",
+                                expression.span,
+                                ancestor.source_index,
+                                ancestor.depth,
+                                ancestor.ty,
+                                ancestor.local,
+                                ancestor.initial_source,
+                                current_initial,
+                                self.owned,
+                                self.owned
+                                    .iter()
+                                    .map(|register| (
+                                        *register,
+                                        self.register_types[*register as usize]
+                                    ))
+                                    .collect::<Vec<_>>(),
+                                self.borrowed,
+                                self.borrow_parents,
+                            );
+                        }
+                    }
+                    debug_assert_eq!(self.register_types[register as usize], ancestor.ty);
+                    let duplicate = incoming.contains(&register);
+                    let duplicate_copy = self.join_operand(register).mode == mir::UseMode::Copy;
+                    assert!(
+                        !duplicate || shared_reference || duplicate_copy,
+                        "control-loop backedge aliases non-shared hidden ancestor r{register}"
+                    );
+                    incoming.push(register);
+                    incoming_modes.push(if shared_reference {
+                        mir::UseMode::Copy
+                    } else {
+                        mir::UseMode::Move
+                    });
+                }
+                self.normalize_duplicate_edge_modes(&incoming, &mut incoming_modes);
+                for ((source, header), preheader) in incoming
+                    .iter()
+                    .zip(&context.header_registers)
+                    .zip(&context.preheader_partial_aggregates)
+                {
+                    let backedge = self.partial_aggregates.get(source);
+                    let Some(field_count) = preheader
+                        .as_ref()
+                        .map(Vec::len)
+                        .or_else(|| backedge.map(Vec::len))
+                    else {
+                        continue;
+                    };
+                    let preheader = preheader.clone().unwrap_or_else(|| vec![true; field_count]);
+                    let backedge = backedge.cloned().unwrap_or_else(|| vec![true; field_count]);
+                    debug_assert_eq!(preheader.len(), field_count);
+                    debug_assert_eq!(backedge.len(), field_count);
+                    for (field, (before, after)) in preheader.iter().zip(&backedge).enumerate() {
+                        if before == after
+                            || self.flow.drop_flags.iter().any(|fact| {
+                                fact.owner == *header && fact.field == Some(field as u32)
+                            })
+                        {
+                            continue;
+                        }
+                        self.flow.drop_flags.push(mir::DropFlagFact {
+                            flag: *header,
+                            owner: *header,
+                            field: Some(field as u32),
+                        });
+                    }
+                    let joined = preheader
+                        .iter()
+                        .zip(&backedge)
+                        .map(|(before, after)| *before || *after)
+                        .collect::<Vec<_>>();
+                    let conditional = preheader
+                        .iter()
+                        .zip(&backedge)
+                        .any(|(before, after)| before != after);
+                    if conditional {
+                        self.mark_drop_only_aggregate(*header);
+                    }
+                    if joined.iter().all(|initialized| *initialized) {
+                        self.partial_aggregates.remove(header);
+                    } else {
+                        self.partial_aggregates.insert(*header, joined);
+                    }
+                }
                 let incoming_set = incoming.iter().copied().collect::<BTreeSet<_>>();
                 let mut carried = incoming_set.clone();
+                carried.extend(context.borrow_root_owners.iter().filter_map(|owner| {
+                    let current = self.current_borrow_register(*owner);
+                    self.owned
+                        .contains(&current)
+                        .then_some(current)
+                        .or_else(|| self.owned.contains(owner).then_some(*owner))
+                }));
+                carried.extend(context.preheader_shared_sources.iter().copied());
+                carried.extend(context.enclosing_control_owners.iter().copied());
                 for mut register in incoming.iter().copied() {
                     let mut seen = BTreeSet::new();
                     while let Some(parent) = self.tracked_borrow_parent(register) {
@@ -43769,21 +50869,25 @@ impl MirLowerer {
                         register = parent;
                     }
                 }
-                for owner in self.owned.clone().into_iter().rev() {
-                    if !carried.contains(&owner) {
-                        self.destroy(owner, expression.span);
-                        self.transfer_owner(owner);
-                    }
-                }
+                self.cleanup_registers(
+                    self.owned
+                        .clone()
+                        .into_iter()
+                        .filter(|owner| !carried.contains(owner)),
+                    expression.span,
+                );
                 self.terminate(mir::Terminator::Goto(mir::Edge {
                     target: context.header,
                     args: incoming
                         .iter()
-                        .map(|register| Self::operand(*register, mir::UseMode::Move))
+                        .zip(&incoming_modes)
+                        .map(|(register, mode)| Self::operand(*register, *mode))
                         .collect(),
                 }));
-                for register in incoming {
-                    self.transfer_owner(register);
+                for (register, mode) in incoming.into_iter().zip(incoming_modes) {
+                    if mode == mir::UseMode::Move {
+                        self.transfer_owner(register);
+                    }
                 }
                 MirFlow::Diverged
             }
@@ -43810,16 +50914,21 @@ impl MirLowerer {
                 MirFlow::Value(Some(test))
             }
             core::ExprKind::PatternTestBorrowed { reference, pattern } => {
-                let reference = self.locals[reference];
+                let reference = self
+                    .local_register(*reference)
+                    .or_else(|| self.current_owned_local_register(*reference))
+                    .expect("borrowed pattern subject has a live local owner");
                 MirFlow::Value(Some(self.lower_borrowed_pattern_test(
                     reference,
                     pattern,
                     expression.span,
                 )))
             }
-            core::ExprKind::LocalReferenceView { local } => {
-                MirFlow::Value(Some(self.locals[local]))
-            }
+            core::ExprKind::LocalReferenceView { local } => MirFlow::Value(Some(
+                self.local_register(*local)
+                    .or_else(|| self.current_owned_local_register(*local))
+                    .expect("local reference view has a live owner"),
+            )),
             core::ExprKind::RefinementBranch {
                 subject,
                 pattern,
@@ -43859,6 +50968,29 @@ impl MirLowerer {
                 let join = self.label();
                 let result = self.allocate(expression.ty);
                 let baseline_locals = self.locals.clone();
+                let mut representative_by_identity = BTreeMap::new();
+                let mut refinement_local_aliases = BTreeMap::new();
+                for (local, register) in &baseline_locals {
+                    // A moved staging/source local can retain an old register
+                    // spelling which canonicalizes to the live destination
+                    // local's current SSA identity. It is not a usable alias:
+                    // choosing it as the representative would make the join
+                    // discard the live destination when availability filters
+                    // the uninitialized source. Coalesce only names which are
+                    // actually available on the refinement entry edge.
+                    if self.uninitialized_locals.contains(local) {
+                        continue;
+                    }
+                    let identity = self
+                        .current_owned_local_register(*local)
+                        .unwrap_or_else(|| self.current_borrow_register(*register));
+                    if let Some(representative) = representative_by_identity.get(&identity).copied()
+                    {
+                        refinement_local_aliases.insert(*local, representative);
+                    } else {
+                        representative_by_identity.insert(identity, *local);
+                    }
+                }
                 let baseline_owned = self.owned.clone();
                 let baseline_borrowed = self.borrowed.clone();
                 let baseline_borrow_parents = self.borrow_parents.clone();
@@ -43866,6 +50998,34 @@ impl MirLowerer {
                 let baseline_detached_subtrees = self.detached_subtrees.clone();
                 let baseline_uninitialized_locals = self.uninitialized_locals.clone();
                 let baseline_loan_of = self.loan_of.clone();
+                let baseline_carried_borrow_roots = self.carried_borrow_roots.clone();
+                let control_hidden_owners = self.active_control_hidden_owners();
+                let control_hidden_locals = baseline_locals
+                    .iter()
+                    .filter_map(|(local, register)| {
+                        let current = self.current_borrow_register(*register);
+                        control_hidden_owners
+                            .contains(&current)
+                            .then_some((*local, current))
+                            .or_else(|| {
+                                control_hidden_owners
+                                    .contains(register)
+                                    .then_some((*local, *register))
+                            })
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let label_outer_owners = self.active_label_outer_owners();
+                let mut continuation_owners = control_hidden_owners.clone();
+                continuation_owners.extend(self.active_control_visible_owners());
+                continuation_owners.extend(label_outer_owners.iter().copied());
+                let live_references = self
+                    .borrowed
+                    .iter()
+                    .copied()
+                    .filter(|reference| self.owned.contains(reference))
+                    .collect::<BTreeSet<_>>();
+                continuation_owners.extend(self.borrow_survivor_closure(&live_references));
+                continuation_owners = self.borrow_survivor_closure(&continuation_owners);
                 self.terminate(mir::Terminator::Switch {
                     discr: Self::operand(matched, mir::UseMode::Copy),
                     cases: vec![(
@@ -43884,9 +51044,29 @@ impl MirLowerer {
                 self.mark(positive_block, positive.span);
                 self.destroy(matched, expression.span);
                 if borrowed_refinement {
+                    if let core::DecisionPatternKind::Variant { variant, .. } = &pattern.kind {
+                        // The Boolean pattern-test join intentionally carries
+                        // no enum state. Re-establish the successful tag on
+                        // the exact retained owner/reference used by the arm.
+                        self.prove_enum_variant(subject_register, *variant, expression.span);
+                    }
                     self.install_refinement_bindings(subject_register, bindings);
                 } else {
                     self.consume_refinement_pattern(subject_register, pattern, bindings);
+                }
+                if !borrowed_refinement
+                    && moved_subject_local.is_none()
+                    && let core::DecisionPatternKind::Variant { variant, .. } = &pattern.kind
+                    && let Some(local) = subject_local
+                    && let Some(retained_subject) = self.current_owned_local_register(local)
+                    && retained_subject != subject_register
+                {
+                    // Pattern testing a copy proves the retained source
+                    // local's variant as well as the temporary copy's. The
+                    // consuming pattern below deconstructs only the copy;
+                    // projections in the arm read the retained local and
+                    // therefore need their own dominating MIR tag proof.
+                    self.prove_enum_variant(retained_subject, *variant, expression.span);
                 }
                 let mut join_local_ids = Vec::new();
                 let mut join_detached_keys = Vec::new();
@@ -43895,12 +51075,23 @@ impl MirLowerer {
                 let mut join_borrowed = Vec::new();
                 let mut join_partial = Vec::new();
                 let mut join_result_parent = None;
+                let mut join_result_loan = None;
+                let mut joined_result_carried_borrow_roots = BTreeSet::new();
                 let mut joined_entry_borrowed = BTreeSet::new();
                 let mut joined_uninitialized = BTreeSet::new();
                 let mut positive_reaches_join = false;
                 let mut positive_edge_item = None;
+                let mut negative_edge_item = None;
                 let mut positive_sources = Vec::new();
                 let mut negative_sources = Vec::new();
+                let mut positive_borrow_parents = BTreeMap::new();
+                let mut negative_borrow_parents = BTreeMap::new();
+                let mut positive_carried_borrow_roots = BTreeMap::new();
+                let mut negative_carried_borrow_roots = BTreeMap::new();
+                let mut positive_continuation_registers = BTreeMap::new();
+                let mut negative_continuation_registers = BTreeMap::new();
+                let mut positive_retired_continuations = BTreeSet::new();
+                let mut negative_retired_continuations = BTreeSet::new();
                 let mut joined_borrow_parent_edges = Vec::new();
                 let mut joined_loan_edges = Vec::new();
                 if let MirFlow::Value(value) = self.expression(positive) {
@@ -43918,24 +51109,54 @@ impl MirLowerer {
                     join_local_ids = baseline_locals
                         .keys()
                         .filter(|local| {
-                            self.locals.contains_key(local)
+                            !refinement_local_aliases.contains_key(local)
+                                && !control_hidden_locals.contains_key(local)
+                                && self.locals.contains_key(local)
+                                && !self.stale_refinement_reference(**local)
                                 && !self.uninitialized_locals.contains(local)
                                 && !retire_at_join.contains(local)
                         })
                         .copied()
                         .collect();
                     join_detached_keys = self.detached_subtrees.keys().cloned().collect();
-                    let sources = join_local_ids
-                        .iter()
-                        .map(|local| self.locals[local])
+                    let mut sources = self
+                        .refinement_local_sources(&join_local_ids)
+                        .into_iter()
                         .chain(
                             join_detached_keys
                                 .iter()
                                 .map(|key| self.detached_subtrees[key]),
                         )
                         .collect::<Vec<_>>();
+                    let mut coalesced = Vec::new();
+                    for later in 0..join_local_ids.len() {
+                        for earlier in 0..later {
+                            if coalesced.contains(&earlier) || sources[earlier] != sources[later] {
+                                continue;
+                            }
+                            let ty = self.register_types[sources[later] as usize];
+                            let shared_reference = self.reference_types.contains(&ty)
+                                && !self
+                                    .unique_reference_types
+                                    .values()
+                                    .any(|unique| *unique == ty);
+                            if self.join_operand(sources[later]).mode == mir::UseMode::Move
+                                && !shared_reference
+                            {
+                                refinement_local_aliases
+                                    .insert(join_local_ids[earlier], join_local_ids[later]);
+                                coalesced.push(earlier);
+                                break;
+                            }
+                        }
+                    }
+                    for index in coalesced.into_iter().rev() {
+                        join_local_ids.remove(index);
+                        sources.remove(index);
+                    }
                     let survivors = sources.iter().copied().collect::<BTreeSet<_>>();
                     join_result_parent = self.borrow_ancestor_position(value, &sources);
+                    join_result_loan = self.loan_of.get(&value).copied();
                     self.retire_intermediate_borrow_parents(value, &survivors, positive.span);
                     for source in &sources {
                         join_registers.push(self.allocate(self.register_types[*source as usize]));
@@ -43948,6 +51169,7 @@ impl MirLowerer {
                         .filter(|local| {
                             self.uninitialized_locals.contains(local)
                                 || !self.locals.contains_key(local)
+                                || self.stale_refinement_reference(**local)
                         })
                         .copied()
                         .collect();
@@ -43958,15 +51180,35 @@ impl MirLowerer {
                         value,
                         positive.span,
                     );
+                    let mut result_survivors = survivors.clone();
+                    result_survivors.insert(value);
+                    result_survivors.extend(continuation_owners.iter().copied());
+                    let protected_survivors = self.borrow_survivor_closure(&result_survivors);
                     for owner in self.owned.clone().into_iter().rev() {
-                        if !survivors.contains(&owner) {
+                        if self.owned.contains(&owner) && !protected_survivors.contains(&owner) {
                             self.destroy(owner, positive.span);
                             self.transfer_owner(owner);
                         }
                     }
+                    for owner in &continuation_owners {
+                        let current = self.current_borrow_register(*owner);
+                        if self.owned.contains(&current) {
+                            positive_continuation_registers.insert(*owner, current);
+                        } else if self.owned.contains(owner) {
+                            positive_continuation_registers.insert(*owner, *owner);
+                        }
+                    }
                     joined_entry_borrowed = entry_borrowed
                         .intersection(&self.borrowed)
-                        .filter(|reference| !survivors.contains(reference))
+                        .filter(|reference| {
+                            let identity = self.current_borrow_register(**reference);
+                            !survivors
+                                .iter()
+                                .any(|survivor| self.current_borrow_register(*survivor) == identity)
+                                && !continuation_owners
+                                    .iter()
+                                    .any(|owner| self.current_borrow_register(*owner) == identity)
+                        })
                         .copied()
                         .collect();
                     joined_borrow_parent_edges.extend(sources.iter().filter_map(|source| {
@@ -43981,9 +51223,29 @@ impl MirLowerer {
                             .copied()
                             .map(|loan| (*source, loan))
                     }));
+                    if let Some(roots) = self.carried_borrow_roots.get(&value) {
+                        joined_result_carried_borrow_roots.extend(roots.iter().copied());
+                    }
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
                     positive_sources = sources.clone();
-                    args.extend(sources.into_iter().map(|source| self.join_operand(source)));
+                    positive_borrow_parents = self
+                        .borrowed
+                        .iter()
+                        .filter_map(|reference| {
+                            self.tracked_borrow_parent(*reference)
+                                .map(|parent| (*reference, parent))
+                        })
+                        .collect();
+                    positive_carried_borrow_roots = sources
+                        .iter()
+                        .filter_map(|source| {
+                            self.carried_borrow_roots
+                                .get(source)
+                                .cloned()
+                                .map(|roots| (*source, roots))
+                        })
+                        .collect();
+                    args.extend(self.join_operands(&sources));
                     self.terminate(mir::Terminator::Goto(mir::Edge { target: join, args }));
                     positive_edge_item = Some(self.items.len() - 1);
                 }
@@ -43996,6 +51258,15 @@ impl MirLowerer {
                 self.detached_subtrees = baseline_detached_subtrees.clone();
                 self.uninitialized_locals = baseline_uninitialized_locals.clone();
                 self.loan_of = baseline_loan_of.clone();
+                self.carried_borrow_roots = baseline_carried_borrow_roots.clone();
+                // Historical rename chains are shared while sibling paths are
+                // lowered. Re-anchor every restored entry owner to itself so
+                // a move performed only on the positive arm cannot make the
+                // negative arm silently treat its dominating SSA value as
+                // already transferred.
+                for register in &baseline_borrowed {
+                    self.record_borrow_register_rename(*register, *register);
+                }
                 self.mark(negative_block, negative.span);
                 self.destroy(matched, expression.span);
                 if borrowed_refinement {
@@ -44007,18 +51278,23 @@ impl MirLowerer {
                     // source owner for the else arm. A later refinement may
                     // test it again; the complete conditional still retires
                     // it at the eventual join when no arm consumes it.
-                    self.locals.insert(local, subject_register);
+                    self.bind_local(local, subject_register);
                     self.uninitialized_locals.remove(&local);
-                    if baseline_locals
-                        .get(&local)
-                        .is_some_and(|register| baseline_owned.contains(register))
-                        && !self.owned.contains(&subject_register)
-                    {
+                    if !self.owned.contains(&subject_register) {
                         self.owned.push(subject_register);
+                    }
+                    if let Some(variant) = negative_variant {
+                        self.prove_enum_variant(subject_register, *variant, expression.span);
                     }
                 } else {
                     self.destroy(subject_register, subject.span);
                     self.transfer_owner(subject_register);
+                    if let Some(variant) = negative_variant
+                        && let Some(local) = subject_local
+                        && let Some(retained_subject) = self.current_owned_local_register(local)
+                    {
+                        self.prove_enum_variant(retained_subject, *variant, expression.span);
+                    }
                 }
                 let mut negative_reaches_join = false;
                 if let MirFlow::Value(value) = self.expression(negative) {
@@ -44036,7 +51312,10 @@ impl MirLowerer {
                     let mut negative_local_ids = baseline_locals
                         .keys()
                         .filter(|local| {
-                            self.locals.contains_key(local)
+                            !refinement_local_aliases.contains_key(local)
+                                && !control_hidden_locals.contains_key(local)
+                                && self.locals.contains_key(local)
+                                && !self.stale_refinement_reference(**local)
                                 && !self.uninitialized_locals.contains(local)
                                 && !retire_at_join.contains(local)
                         })
@@ -44055,26 +51334,66 @@ impl MirLowerer {
                         if !removed_positive.is_empty() {
                             let edge_item = positive_edge_item
                                 .expect("a reaching positive refinement arm emitted one join edge");
+                            let removed_indices = removed_positive
+                                .iter()
+                                .map(|(index, _)| *index)
+                                .collect::<BTreeSet<_>>();
+                            let retained_positive_sources = positive_sources
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, source)| {
+                                    (!removed_indices.contains(&index)).then_some(*source)
+                                })
+                                .collect::<Vec<_>>();
                             let mut cleanup = Vec::with_capacity(removed_positive.len());
                             for (index, local) in removed_positive.iter().rev() {
                                 let source = positive_sources[*index];
                                 let ty = self.register_types[source as usize];
                                 assert!(
-                                    self.duplicable_types.contains(&ty)
-                                        && !self.custom_drop_types.contains(&ty)
-                                        && !self.reference_types.contains(&ty),
-                                    "restricted local {local:?} disappeared from only one refinement predecessor"
+                                    self.reference_types.contains(&ty)
+                                        || (self.duplicable_types.contains(&ty)
+                                            && !self.custom_drop_types.contains(&ty)),
+                                    "restricted local {local:?} of type {ty} disappeared from only one refinement predecessor at positive {:?}, negative {:?}; join locals={join_local_ids:?}, negative locals={negative_local_ids:?}",
+                                    positive.span,
+                                    negative.span,
                                 );
-                                let kind =
-                                    if self.partial_aggregates.get(&source).is_some_and(|fields| {
-                                        fields.iter().all(|initialized| !initialized)
-                                    }) {
-                                        mir::InstructionKind::Deconstruct { src: source }
-                                    } else {
-                                        mir::InstructionKind::Drop {
-                                            owner: Self::operand(source, mir::UseMode::Move),
+                                let has_surviving_child = self.reference_types.contains(&ty)
+                                    && retained_positive_sources.iter().any(|survivor| {
+                                        let mut current = *survivor;
+                                        let mut seen = BTreeSet::new();
+                                        while let Some(parent) =
+                                            positive_borrow_parents.get(&current).copied()
+                                        {
+                                            if !seen.insert(parent) {
+                                                break;
+                                            }
+                                            if parent == source {
+                                                return true;
+                                            }
+                                            current = parent;
                                         }
-                                    };
+                                        false
+                                    });
+                                let kind = if has_surviving_child {
+                                    // The sibling arm no longer names this
+                                    // parent handle, but a retained child still
+                                    // carries its authority through the join.
+                                    // Detach the obsolete handle; ending its
+                                    // loan would invalidate the child edge.
+                                    mir::InstructionKind::Drop {
+                                        owner: Self::operand(source, mir::UseMode::Move),
+                                    }
+                                } else if self.reference_types.contains(&ty) {
+                                    mir::InstructionKind::EndBorrow { reference: source }
+                                } else if self.partial_aggregates.get(&source).is_some_and(
+                                    |fields| fields.iter().all(|initialized| !initialized),
+                                ) {
+                                    mir::InstructionKind::Deconstruct { src: source }
+                                } else {
+                                    mir::InstructionKind::Drop {
+                                        owner: Self::operand(source, mir::UseMode::Move),
+                                    }
+                                };
                                 cleanup.push(MirBuilderItem::Statement(mir::Instruction {
                                     span: positive.span,
                                     kind,
@@ -44207,15 +51526,81 @@ impl MirLowerer {
                             }
                         }
                     }
-                    let sources = negative_local_ids
-                        .iter()
-                        .map(|local| self.locals[local])
+                    let mut sources = self
+                        .refinement_local_sources(&negative_local_ids)
+                        .into_iter()
                         .chain(
                             negative_detached_keys
                                 .iter()
                                 .map(|key| self.detached_subtrees[key]),
                         )
                         .collect::<Vec<_>>();
+                    if positive_reaches_join {
+                        let local_count = join_local_ids.len();
+                        let mut coalesced = Vec::new();
+                        for later in 0..local_count {
+                            for earlier in 0..later {
+                                if coalesced.contains(&earlier) {
+                                    continue;
+                                }
+                                let ty = self.register_types[sources[later] as usize];
+                                let shared_reference = self.reference_types.contains(&ty)
+                                    && !self
+                                        .unique_reference_types
+                                        .values()
+                                        .any(|unique| *unique == ty);
+                                let restricted = self.join_operand(sources[later]).mode
+                                    == mir::UseMode::Move
+                                    && !shared_reference;
+                                if restricted
+                                    && (sources[earlier] == sources[later]
+                                        || positive_sources[earlier] == positive_sources[later])
+                                {
+                                    assert_eq!(
+                                        self.register_types[sources[earlier] as usize], ty,
+                                        "coalesced refinement aliases have different types"
+                                    );
+                                    refinement_local_aliases
+                                        .insert(join_local_ids[earlier], join_local_ids[later]);
+                                    coalesced.push(earlier);
+                                    break;
+                                }
+                            }
+                        }
+                        coalesced.sort_unstable();
+                        coalesced.dedup();
+                        if !coalesced.is_empty() {
+                            let edge_item = positive_edge_item
+                                .expect("a reaching positive refinement arm emitted one join edge");
+                            let removed_args = coalesced
+                                .iter()
+                                .map(|index| index + 1)
+                                .collect::<BTreeSet<_>>();
+                            let MirBuilderItem::Terminator(mir::Terminator::Goto(edge)) =
+                                &mut self.items[edge_item]
+                            else {
+                                unreachable!("recorded positive refinement edge is a Goto")
+                            };
+                            edge.args = edge
+                                .args
+                                .drain(..)
+                                .enumerate()
+                                .filter_map(|(index, argument)| {
+                                    (!removed_args.contains(&index)).then_some(argument)
+                                })
+                                .collect();
+                            for index in coalesced.into_iter().rev() {
+                                join_local_ids.remove(index);
+                                negative_local_ids.remove(index);
+                                join_registers.remove(index);
+                                join_owned.remove(index);
+                                join_borrowed.remove(index);
+                                join_partial.remove(index);
+                                positive_sources.remove(index);
+                                sources.remove(index);
+                            }
+                        }
+                    }
                     if !positive_reaches_join {
                         join_local_ids = negative_local_ids;
                         join_detached_keys = negative_detached_keys;
@@ -44231,6 +51616,7 @@ impl MirLowerer {
                             .filter(|local| {
                                 self.uninitialized_locals.contains(local)
                                     || !self.locals.contains_key(local)
+                                    || self.stale_refinement_reference(**local)
                             })
                             .copied()
                             .collect();
@@ -44250,39 +51636,73 @@ impl MirLowerer {
                     } else if !positive_reaches_join {
                         join_result_parent = negative_result_parent;
                     }
+                    let negative_result_loan = self.loan_of.get(&value).copied();
+                    if positive_reaches_join && join_result_loan != negative_result_loan {
+                        join_result_loan = match (join_result_loan, negative_result_loan) {
+                            (Some(left), Some(right)) => self.merge_join_loans(left, right),
+                            _ => None,
+                        };
+                    } else if !positive_reaches_join {
+                        join_result_loan = negative_result_loan;
+                    }
                     self.retire_intermediate_borrow_parents(value, &survivors, negative.span);
                     debug_assert_eq!(join_registers.len(), sources.len());
+                    joined_uninitialized
+                        .retain(|local| !refinement_local_aliases.contains_key(local));
                     let expected_uninitialized = baseline_locals
                         .keys()
                         .filter(|local| {
-                            self.uninitialized_locals.contains(local)
-                                || !self.locals.contains_key(local)
+                            !refinement_local_aliases.contains_key(local)
+                                && (self.uninitialized_locals.contains(local)
+                                    || !self.locals.contains_key(local)
+                                    || self.stale_refinement_reference(**local))
                         })
                         .copied()
                         .chain(retire_at_join.iter().copied())
-                        .collect();
-                    debug_assert_eq!(
-                        joined_uninitialized, expected_uninitialized,
-                        "refinement unavailability mismatch at {:?}",
-                        expression.span,
-                    );
+                        .collect::<BTreeSet<_>>();
+                    // Availability joins by intersection: a local consumed
+                    // on either reaching predecessor is unavailable after
+                    // the join. Control-inlined helpers can remove a lexical
+                    // binding on both paths while only one path records the
+                    // explicit move, so requiring identical bookkeeping is
+                    // stronger than the ownership rule itself.
+                    joined_uninitialized.extend(expected_uninitialized);
                     if positive_reaches_join {
                         for (index, source) in sources.iter().enumerate() {
                             let incoming_partial = self.partial_aggregates.get(source).cloned();
-                            let conditional = join_local_ids.get(index).and_then(|local| {
+                            let conditional_hint = join_local_ids.get(index).and_then(|local| {
                                 conditional_at_join.iter().find_map(|(candidate, fields)| {
-                                    (candidate == local).then_some(fields)
+                                    (candidate == local).then_some(fields.as_slice())
                                 })
                             });
-                            if let Some(conditional) = conditional {
-                                let field_count = conditional.len();
+                            if join_partial[index] != incoming_partial
+                                || conditional_hint.is_some_and(|fields| {
+                                    fields.iter().any(|conditional| *conditional)
+                                })
+                            {
+                                let field_count = conditional_hint
+                                    .map(<[bool]>::len)
+                                    .or_else(|| join_partial[index].as_ref().map(Vec::len))
+                                    .or_else(|| incoming_partial.as_ref().map(Vec::len))
+                                    .expect("a differing partial aggregate join has fields");
                                 let left = join_partial[index]
                                     .clone()
                                     .unwrap_or_else(|| vec![true; field_count]);
                                 let right =
                                     incoming_partial.unwrap_or_else(|| vec![true; field_count]);
-                                debug_assert_eq!(left.len(), field_count);
-                                debug_assert_eq!(right.len(), field_count);
+                                assert_eq!(left.len(), field_count);
+                                assert_eq!(right.len(), field_count);
+                                let mut conditional = left
+                                    .iter()
+                                    .zip(&right)
+                                    .map(|(left, right)| left != right)
+                                    .collect::<Vec<_>>();
+                                if let Some(hint) = conditional_hint {
+                                    assert_eq!(hint.len(), field_count);
+                                    for (conditional, hinted) in conditional.iter_mut().zip(hint) {
+                                        *conditional |= *hinted;
+                                    }
+                                }
                                 join_partial[index] = Some(
                                     left.iter()
                                         .zip(&right)
@@ -44290,7 +51710,12 @@ impl MirLowerer {
                                         .collect(),
                                 );
                                 for (field, conditional) in conditional.iter().enumerate() {
-                                    if *conditional {
+                                    if *conditional
+                                        && !self.flow.drop_flags.iter().any(|fact| {
+                                            fact.owner == join_registers[index]
+                                                && fact.field == Some(field as u32)
+                                        })
+                                    {
                                         self.flow.drop_flags.push(mir::DropFlagFact {
                                             flag: join_registers[index],
                                             owner: join_registers[index],
@@ -44334,24 +51759,143 @@ impl MirLowerer {
                         value,
                         negative.span,
                     );
+                    let mut result_survivors = survivors.clone();
+                    result_survivors.insert(value);
+                    result_survivors.extend(continuation_owners.iter().copied());
+                    let protected_survivors = self.borrow_survivor_closure(&result_survivors);
                     for owner in self.owned.clone().into_iter().rev() {
-                        if !survivors.contains(&owner) {
+                        if self.owned.contains(&owner) && !protected_survivors.contains(&owner) {
                             self.destroy(owner, negative.span);
                             self.transfer_owner(owner);
                         }
                     }
-                    let negative_entry_borrowed = entry_borrowed
+                    for owner in &continuation_owners {
+                        let current = self.current_borrow_register(*owner);
+                        if self.owned.contains(&current) {
+                            negative_continuation_registers.insert(*owner, current);
+                        } else if self.owned.contains(owner) {
+                            negative_continuation_registers.insert(*owner, *owner);
+                        }
+                    }
+                    let mut negative_entry_borrowed = entry_borrowed
                         .intersection(&self.borrowed)
-                        .filter(|reference| !survivors.contains(reference))
+                        .filter(|reference| {
+                            let identity = self.current_borrow_register(**reference);
+                            !survivors
+                                .iter()
+                                .any(|survivor| self.current_borrow_register(*survivor) == identity)
+                                && !continuation_owners
+                                    .iter()
+                                    .any(|owner| self.current_borrow_register(*owner) == identity)
+                        })
                         .copied()
                         .collect::<BTreeSet<_>>();
                     if positive_reaches_join {
-                        debug_assert_eq!(joined_entry_borrowed, negative_entry_borrowed);
+                        // Both source vectors describe the same ordered join
+                        // locals. A borrow can retain its entry register on
+                        // one predecessor while the sibling already carries
+                        // its renamed local register; exclude it if either
+                        // predecessor transports that logical owner.
+                        let cross_path_survivors = positive_sources
+                            .iter()
+                            .chain(&sources)
+                            .copied()
+                            .collect::<BTreeSet<_>>();
+                        let is_not_transported = |reference: &u32| {
+                            let identity = self.current_borrow_register(*reference);
+                            !cross_path_survivors.contains(reference)
+                                && !cross_path_survivors.iter().any(|survivor| {
+                                    self.current_borrow_register(*survivor) == identity
+                                })
+                        };
+                        joined_entry_borrowed.retain(&is_not_transported);
+                        negative_entry_borrowed.retain(is_not_transported);
+                        let common_entry_borrows = joined_entry_borrowed
+                            .intersection(&negative_entry_borrowed)
+                            .copied()
+                            .collect::<BTreeSet<_>>();
+                        let positive_only = joined_entry_borrowed
+                            .difference(&common_entry_borrows)
+                            .copied()
+                            .collect::<Vec<_>>();
+                        if !positive_only.is_empty() {
+                            positive_retired_continuations.extend(positive_only.iter().copied());
+                            let edge_item = positive_edge_item
+                                .expect("a reaching positive refinement arm emitted one join edge");
+                            let cleanup = positive_only
+                                .iter()
+                                .rev()
+                                .map(|reference| {
+                                    let has_surviving_child =
+                                        positive_sources.iter().any(|source| {
+                                            let mut current = *source;
+                                            let mut seen = BTreeSet::new();
+                                            while let Some(parent) =
+                                                positive_borrow_parents.get(&current).copied()
+                                            {
+                                                if !seen.insert(parent) {
+                                                    break;
+                                                }
+                                                if parent == *reference {
+                                                    return true;
+                                                }
+                                                current = parent;
+                                            }
+                                            false
+                                        });
+                                    MirBuilderItem::Statement(mir::Instruction {
+                                        span: positive.span,
+                                        kind: if has_surviving_child {
+                                            mir::InstructionKind::Drop {
+                                                owner: Self::operand(
+                                                    *reference,
+                                                    mir::UseMode::Move,
+                                                ),
+                                            }
+                                        } else {
+                                            mir::InstructionKind::EndBorrow {
+                                                reference: *reference,
+                                            }
+                                        },
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            let cleanup_len = cleanup.len();
+                            self.items.splice(edge_item..edge_item, cleanup);
+                            positive_edge_item = Some(edge_item + cleanup_len);
+                        }
+                        let negative_only = negative_entry_borrowed
+                            .difference(&common_entry_borrows)
+                            .copied()
+                            .collect::<Vec<_>>();
+                        negative_retired_continuations.extend(negative_only.iter().copied());
+                        self.cleanup_registers(negative_only, negative.span);
+                        joined_entry_borrowed = common_entry_borrows;
                     } else {
                         joined_entry_borrowed = negative_entry_borrowed;
                     }
+                    if let Some(roots) = self.carried_borrow_roots.get(&value) {
+                        joined_result_carried_borrow_roots.extend(roots.iter().copied());
+                    }
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
                     negative_sources = sources.clone();
+                    negative_borrow_parents = self
+                        .borrowed
+                        .iter()
+                        .filter_map(|reference| {
+                            self.tracked_borrow_parent(*reference)
+                                .map(|parent| (*reference, parent))
+                        })
+                        .collect();
+                    negative_carried_borrow_roots = sources
+                        .iter()
+                        .filter_map(|source| {
+                            self.carried_borrow_roots
+                                .get(source)
+                                .cloned()
+                                .map(|roots| (*source, roots))
+                        })
+                        .collect();
                     joined_borrow_parent_edges.extend(sources.iter().filter_map(|source| {
                         self.borrow_parents
                             .get(source)
@@ -44364,23 +51908,58 @@ impl MirLowerer {
                             .copied()
                             .map(|loan| (*source, loan))
                     }));
-                    args.extend(sources.into_iter().map(|source| self.join_operand(source)));
+                    args.extend(self.join_operands(&sources));
                     self.terminate(mir::Terminator::Goto(mir::Edge { target: join, args }));
+                    negative_edge_item = Some(self.items.len() - 1);
                 }
 
                 if !positive_reaches_join && !negative_reaches_join {
                     return MirFlow::Diverged;
+                }
+                // A refinement with only one reaching predecessor needs no
+                // phi transport for the surrounding locals. Keeping their
+                // existing dominating SSA registers is especially important
+                // for an outer owner preserved across a labeled destination:
+                // moving it into a one-edge block parameter would make the
+                // destination see the original register as consumed on only
+                // the normal edge.
+                let single_predecessor_join = positive_reaches_join ^ negative_reaches_join;
+                if single_predecessor_join {
+                    let (edge_item, sources) = if positive_reaches_join {
+                        (
+                            positive_edge_item
+                                .expect("the sole positive predecessor emitted a join edge"),
+                            &positive_sources,
+                        )
+                    } else {
+                        (
+                            self.items
+                                .len()
+                                .checked_sub(1)
+                                .expect("the sole negative predecessor emitted a join edge"),
+                            &negative_sources,
+                        )
+                    };
+                    let MirBuilderItem::Terminator(mir::Terminator::Goto(edge)) =
+                        &mut self.items[edge_item]
+                    else {
+                        unreachable!("a reaching refinement predecessor ends in Goto")
+                    };
+                    edge.args.truncate(1);
+                    join_registers = sources.clone();
                 }
                 let mut params = vec![mir::BlockParam {
                     register: result,
                     ty: expression.ty,
                     role: mir::BlockParamRole::ProtectedExitValue,
                 }];
-                params.extend(join_registers.iter().map(|register| mir::BlockParam {
-                    register: *register,
-                    ty: self.register_types[*register as usize],
-                    role: mir::BlockParamRole::Ordinary,
-                }));
+                if !single_predecessor_join {
+                    params.extend(join_registers.iter().map(|register| mir::BlockParam {
+                        register: *register,
+                        ty: self.register_types[*register as usize],
+                        role: mir::BlockParamRole::Ordinary,
+                    }));
+                }
                 self.mark_with_params(join, params);
                 let joined_local_ids = join_local_ids.iter().copied().collect::<BTreeSet<_>>();
                 self.locals = baseline_locals
@@ -44388,7 +51967,15 @@ impl MirLowerer {
                     .filter(|(local, _)| joined_local_ids.contains(local))
                     .collect();
                 for (local, register) in join_local_ids.iter().zip(&join_registers) {
-                    self.locals.insert(*local, *register);
+                    self.bind_local(*local, *register);
+                }
+                for (alias, representative) in refinement_local_aliases {
+                    if joined_local_ids.contains(&representative) {
+                        let register = self.locals[&representative];
+                        self.bind_local(alias, register);
+                        self.local_aliases.insert(alias, representative);
+                        self.uninitialized_locals.remove(&alias);
+                    }
                 }
                 self.detached_subtrees = join_detached_keys
                     .iter()
@@ -44407,6 +51994,19 @@ impl MirLowerer {
                     .zip(join_owned)
                     .filter_map(|(register, owned)| owned.then_some(*register))
                     .collect();
+                // Entry borrows which remain live on every predecessor keep
+                // their original dominating SSA handles; they need no block
+                // parameter, but are still owners after the join. Omitting
+                // them here leaves `borrowed` containing a handle which later
+                // loop/label cleanup cannot transport or retire.
+                self.owned.extend(
+                    joined_entry_borrowed
+                        .iter()
+                        .copied()
+                        .filter(|register| baseline_owned.contains(register)),
+                );
+                self.owned.sort_unstable();
+                self.owned.dedup();
                 self.borrowed = joined_entry_borrowed;
                 self.borrowed.extend(
                     join_registers
@@ -44426,28 +52026,410 @@ impl MirLowerer {
                     );
                     for (source, joined) in sources.iter().zip(&join_registers) {
                         if let Some(previous) = source_to_join.insert(*source, *joined) {
-                            assert_eq!(
-                                previous, *joined,
-                                "one refinement source maps to two join registers"
+                            let ty = self.register_types[*source as usize];
+                            let copyable_value =
+                                self.join_operand(*source).mode == mir::UseMode::Copy;
+                            assert!(
+                                previous == *joined
+                                    || copyable_value
+                                    || (self.reference_types.contains(&ty)
+                                        && !self
+                                            .unique_reference_types
+                                            .values()
+                                            .any(|unique| *unique == ty)),
+                                "restricted refinement source r{source} maps to r{previous} and r{joined} at {:?}",
+                                expression.span
                             );
+                            source_to_join.insert(*source, previous);
                         }
                     }
                 }
+                for (source, joined) in source_to_join.clone() {
+                    // PlaceFlow loan facts retain the register which first
+                    // issued a loan. Preserve the corresponding current SSA
+                    // identity across refinement joins so later control-loop
+                    // and lexical cleanup can still recover full ancestry.
+                    self.record_borrow_register_rename(source, joined);
+                }
+                self.carried_borrow_roots
+                    .retain(|register, _| self.owned.contains(register));
+                let joined_result_carried_borrow_roots = joined_result_carried_borrow_roots
+                    .into_iter()
+                    .map(|root| self.remap_join_borrow_authority(root, &source_to_join))
+                    .filter(|root| self.owned.contains(root))
+                    .collect::<BTreeSet<_>>();
+                if !joined_result_carried_borrow_roots.is_empty() {
+                    self.carried_borrow_roots
+                        .insert(result, joined_result_carried_borrow_roots);
+                }
+                for (sources, carried) in [
+                    (&positive_sources, &positive_carried_borrow_roots),
+                    (&negative_sources, &negative_carried_borrow_roots),
+                ] {
+                    for (source, joined) in sources.iter().zip(&join_registers) {
+                        if let Some(roots) = carried.get(source) {
+                            let roots = roots
+                                .iter()
+                                .map(|root| {
+                                    self.remap_join_borrow_authority(*root, &source_to_join)
+                                })
+                                .filter(|root| self.owned.contains(root))
+                                .collect::<BTreeSet<_>>();
+                            self.carried_borrow_roots
+                                .entry(*joined)
+                                .or_default()
+                                .extend(roots);
+                        }
+                    }
+                }
+                for owner in &continuation_owners {
+                    let ty = self.register_types[*owner as usize];
+                    let shared_control_owner = control_hidden_owners.contains(owner)
+                        && self.reference_types.contains(&ty)
+                        && !self
+                            .unique_reference_types
+                            .values()
+                            .any(|unique| *unique == ty);
+                    if !single_predecessor_join {
+                        let positive = positive_continuation_registers.get(owner).copied();
+                        let negative = negative_continuation_registers.get(owner).copied();
+                        let path_local_reference = match (positive, negative) {
+                            (Some(reference), None)
+                                if self
+                                    .reference_types
+                                    .contains(&self.register_types[reference as usize]) =>
+                            {
+                                Some((true, reference))
+                            }
+                            (None, Some(reference))
+                                if self
+                                    .reference_types
+                                    .contains(&self.register_types[reference as usize]) =>
+                            {
+                                Some((false, reference))
+                            }
+                            _ => None,
+                        }
+                        .filter(|(on_positive, reference)| {
+                            // Inspect the predecessor where the dedicated
+                            // continuation entry is absent. That arm may
+                            // already transport the same shared authority as
+                            // an ordinary refinement local; inspecting the
+                            // arm which still has `reference` cannot detect
+                            // that case and schedules a destructive false
+                            // equalization.
+                            let sources = if *on_positive {
+                                &negative_sources
+                            } else {
+                                &positive_sources
+                            };
+                            // A continuation owner can disappear from one
+                            // arm's dedicated continuation map because that
+                            // arm already transports the same reference as an
+                            // ordinary refinement local. The edge transfer is
+                            // the surviving authority; ending that handle
+                            // immediately before the edge creates invalid MIR.
+                            !sources.iter().any(|source| {
+                                source == reference
+                                    || self.borrow_authorities_equivalent(*source, *reference)
+                            })
+                        });
+                        if let Some((on_positive, reference)) = path_local_reference {
+                            let sources = if on_positive {
+                                &positive_sources
+                            } else {
+                                &negative_sources
+                            };
+                            let path_borrow_parents = if on_positive {
+                                &positive_borrow_parents
+                            } else {
+                                &negative_borrow_parents
+                            };
+                            let has_surviving_child = sources.iter().any(|source| {
+                                let mut current = *source;
+                                let mut seen = BTreeSet::new();
+                                while let Some(parent) = path_borrow_parents.get(&current).copied()
+                                {
+                                    if !seen.insert(parent) {
+                                        break;
+                                    }
+                                    if parent == reference {
+                                        return true;
+                                    }
+                                    current = parent;
+                                }
+                                false
+                            });
+                            let edge_item = if on_positive {
+                                positive_edge_item.expect(
+                                    "a reaching positive refinement arm emitted one join edge",
+                                )
+                            } else {
+                                negative_edge_item.expect(
+                                    "a reaching negative refinement arm emitted one join edge",
+                                )
+                            };
+                            self.items.insert(
+                                edge_item,
+                                MirBuilderItem::Statement(mir::Instruction {
+                                    span: expression.span,
+                                    kind: if has_surviving_child {
+                                        mir::InstructionKind::Drop {
+                                            owner: Self::operand(reference, mir::UseMode::Move),
+                                        }
+                                    } else {
+                                        mir::InstructionKind::EndBorrow { reference }
+                                    },
+                                }),
+                            );
+                            if on_positive {
+                                positive_edge_item = Some(edge_item + 1);
+                                if let Some(negative) = &mut negative_edge_item
+                                    && *negative >= edge_item
+                                {
+                                    *negative += 1;
+                                }
+                                positive_retired_continuations.insert(reference);
+                            } else {
+                                negative_edge_item = Some(edge_item + 1);
+                                negative_retired_continuations.insert(reference);
+                            }
+                        }
+                    }
+                    let retired_matches = |register: u32, retired: u32| {
+                        if register == retired {
+                            return true;
+                        }
+                        let ty = self.register_types[register as usize];
+                        let shared_reference = self.reference_types.contains(&ty)
+                            && !self
+                                .unique_reference_types
+                                .values()
+                                .any(|unique| *unique == ty);
+                        let copyable = self.join_operand(register).mode == mir::UseMode::Copy;
+                        !shared_reference
+                            && !copyable
+                            && self.borrow_authorities_equivalent(register, retired)
+                    };
+                    let path_local = if single_predecessor_join {
+                        let (registers, retired) = if positive_reaches_join {
+                            (
+                                &positive_continuation_registers,
+                                &positive_retired_continuations,
+                            )
+                        } else {
+                            (
+                                &negative_continuation_registers,
+                                &negative_retired_continuations,
+                            )
+                        };
+                        registers.get(owner).copied().filter(|register| {
+                            !retired
+                                .iter()
+                                .any(|retired| retired_matches(*register, *retired))
+                        })
+                    } else {
+                        let positive = positive_continuation_registers.get(owner).copied().filter(
+                            |positive| {
+                                !positive_retired_continuations
+                                    .iter()
+                                    .any(|retired| retired_matches(*positive, *retired))
+                            },
+                        );
+                        let negative = negative_continuation_registers.get(owner).copied().filter(
+                            |negative| {
+                                !negative_retired_continuations
+                                    .iter()
+                                    .any(|retired| retired_matches(*negative, *retired))
+                            },
+                        );
+                        match (positive, negative) {
+                            (Some(positive), Some(negative)) => {
+                                if positive == negative {
+                                    Some(positive)
+                                } else if shared_control_owner {
+                                    // Shared hidden authority is copied rather
+                                    // than transferred through either arm, so
+                                    // either the dominating entry identity or
+                                    // an equivalent ordinary join source is
+                                    // the live post-join representative.
+                                    self.owned.contains(owner).then_some(*owner).or_else(|| {
+                                        source_to_join.iter().find_map(|(source, joined)| {
+                                            (self.owned.contains(joined)
+                                                && self
+                                                    .borrow_authorities_equivalent(*source, *owner))
+                                            .then_some(*joined)
+                                        })
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
+                            (Some(_), None) | (None, Some(_)) if shared_control_owner => {
+                                self.owned.contains(owner).then_some(*owner).or_else(|| {
+                                    source_to_join.iter().find_map(|(source, joined)| {
+                                        (self.owned.contains(joined)
+                                            && self.borrow_authorities_equivalent(*source, *owner))
+                                        .then_some(*joined)
+                                    })
+                                })
+                            }
+                            (Some(live), None) | (None, Some(live))
+                                if !self
+                                    .reference_types
+                                    .contains(&self.register_types[live as usize])
+                                    && self.join_operand(live).mode == mir::UseMode::Move
+                                    && (live == *owner
+                                        || self.borrow_authorities_equivalent(live, *owner)) =>
+                            {
+                                if !self
+                                    .flow
+                                    .drop_flags
+                                    .iter()
+                                    .any(|fact| fact.owner == live && fact.field.is_none())
+                                {
+                                    self.flow.drop_flags.push(mir::DropFlagFact {
+                                        flag: live,
+                                        owner: live,
+                                        field: None,
+                                    });
+                                }
+                                Some(live)
+                            }
+                            _ => None,
+                        }
+                    };
+                    let Some(joined) = source_to_join.get(owner).copied().or(path_local) else {
+                        // At least one reaching predecessor consumed this
+                        // protected continuation owner. A historical rename
+                        // from a sibling must not resurrect it at the join.
+                        continue;
+                    };
+                    self.owned.push(joined);
+                    if baseline_borrowed.contains(owner) {
+                        self.borrowed.insert(joined);
+                    }
+                }
+                self.owned.sort_unstable();
+                self.owned.dedup();
+                self.normalize_transferred_owners();
+                // Hidden control invariants deliberately bypass the join
+                // parameter list, but their Core names remain lexically live.
+                // Reinstall each name only when the same dominating owner is
+                // still present on every reaching path; this preserves source
+                // identity without inventing a phi or type-only fallback.
+                for (local, entry) in control_hidden_locals {
+                    let current = self.current_borrow_register(entry);
+                    let register = self
+                        .owned
+                        .contains(&current)
+                        .then_some(current)
+                        .or_else(|| self.owned.contains(&entry).then_some(entry));
+                    if let Some(register) = register {
+                        self.bind_local(local, register);
+                        self.uninitialized_locals.remove(&local);
+                    }
+                }
                 let mut joined_parents = BTreeMap::new();
+                let mut detached_join_parents = BTreeSet::new();
                 for (reference, parent) in entry_borrow_parents
                     .into_iter()
                     .chain(joined_borrow_parent_edges)
                 {
                     let reference = source_to_join.get(&reference).copied().unwrap_or(reference);
+                    let reference = self.current_borrow_register(reference);
                     if !self.borrowed.contains(&reference) {
                         continue;
                     }
+                    if detached_join_parents.contains(&reference) {
+                        continue;
+                    }
                     let parent = source_to_join.get(&parent).copied().unwrap_or(parent);
+                    let parent = self.current_live_borrow_authority(parent);
                     if let Some(previous) = joined_parents.insert(reference, parent) {
-                        assert_eq!(
-                            previous, parent,
-                            "refinement predecessors disagree on a joined reference parent"
-                        );
+                        if previous != parent {
+                            let shared_parent = |parent| {
+                                let ty = self.register_types[parent as usize];
+                                (self.reference_types.contains(&ty)
+                                    && !self
+                                        .unique_reference_types
+                                        .values()
+                                        .any(|unique| *unique == ty))
+                                    || self.tracked_loan(parent).is_some_and(|loan| {
+                                        self.flow.loans[loan.index()].kind == mir::LoanKind::Shared
+                                    })
+                            };
+                            let same_shared_type = self.register_types[previous as usize]
+                                == self.register_types[parent as usize]
+                                && (shared_parent(previous) || shared_parent(parent));
+                            let shared_parents = shared_parent(previous) && shared_parent(parent)
+                                || same_shared_type;
+                            let unavailable_shared_parent =
+                                |register| !self.owned.contains(&register);
+                            if shared_parents
+                                && ((self.tracked_loan(previous).is_none()
+                                    && self.tracked_loan(parent).is_none())
+                                    || unavailable_shared_parent(previous)
+                                    || unavailable_shared_parent(parent))
+                            {
+                                // Shared authority survives through its
+                                // borrowed place. If either predecessor only
+                                // retains a stale proof handle, the joined
+                                // reference must not keep that unstable SSA
+                                // parent edge.
+                                joined_parents.remove(&reference);
+                                detached_join_parents.insert(reference);
+                                continue;
+                            }
+                            let equivalent = self.borrow_authorities_equivalent(previous, parent)
+                                || self
+                                    .tracked_loan(previous)
+                                    .zip(self.tracked_loan(parent))
+                                    .and_then(|(left, right)| self.merge_join_loans(left, right))
+                                    .is_some();
+                            assert!(
+                                equivalent,
+                                "refinement predecessors disagree on joined parents r{previous} and r{parent} at {:?}; types=({}, {}), loans=({:?}, {:?}), facts=({:?}, {:?}), owned={:?}, control-hidden={:?}, authorities=({:?}, {:?}), loops={:?}, renames={:?}",
+                                expression.span,
+                                self.register_types[previous as usize],
+                                self.register_types[parent as usize],
+                                self.tracked_loan(previous),
+                                self.tracked_loan(parent),
+                                self.tracked_loan(previous)
+                                    .map(|loan| &self.flow.loans[loan.index()]),
+                                self.tracked_loan(parent)
+                                    .map(|loan| &self.flow.loans[loan.index()]),
+                                self.owned,
+                                self.active_control_hidden_owners(),
+                                self.control_hidden_authority(previous),
+                                self.control_hidden_authority(parent),
+                                self.active_control_loops
+                                    .iter()
+                                    .flat_map(|(control, context)| context
+                                        .hidden_borrow_ancestors
+                                        .iter()
+                                        .map(move |hidden| (
+                                            *control,
+                                            hidden.source_index,
+                                            hidden.depth,
+                                            hidden.initial_source,
+                                            hidden.header_source
+                                        )))
+                                    .collect::<Vec<_>>(),
+                                self.borrow_register_renames
+                                    .iter()
+                                    .filter(|(source, destination)| **source == previous
+                                        || **source == parent
+                                        || **destination == previous
+                                        || **destination == parent)
+                                    .collect::<Vec<_>>(),
+                            );
+                            let selected = [previous, parent]
+                                .into_iter()
+                                .find(|candidate| self.owned.contains(candidate))
+                                .unwrap_or(previous);
+                            joined_parents.insert(reference, selected);
+                        }
                     }
                 }
                 self.borrow_parents = joined_parents;
@@ -44457,11 +52439,22 @@ impl MirLowerer {
                     if !self.borrowed.contains(&reference) {
                         continue;
                     }
-                    if let Some(previous) = joined_loans.insert(reference, loan) {
-                        assert_eq!(
-                            previous, loan,
-                            "refinement predecessors disagree on a joined loan identity"
-                        );
+                    if let Some(previous) = joined_loans.get(&reference).copied() {
+                        let merged = self.merge_join_loans(previous, loan).unwrap_or_else(|| panic!(
+                            "refinement predecessors disagree on a joined loan at {:?} for r{reference}: previous={:?}, previous-parent={:?}, incoming={:?}, incoming-parent={:?}",
+                            expression.span,
+                            self.flow.loans[previous.index()],
+                            self.flow.loans[previous.index()]
+                                .parent
+                                .map(|parent| &self.flow.loans[parent.index()]),
+                            self.flow.loans[loan.index()],
+                            self.flow.loans[loan.index()]
+                                .parent
+                                .map(|parent| &self.flow.loans[parent.index()]),
+                        ));
+                        joined_loans.insert(reference, merged);
+                    } else {
+                        joined_loans.insert(reference, loan);
                     }
                 }
                 self.loan_of = joined_loans;
@@ -44469,6 +52462,9 @@ impl MirLowerer {
                     join_result_parent.and_then(|position| join_registers.get(position).copied())
                 {
                     self.borrow_parents.insert(result, parent);
+                }
+                if let Some(loan) = join_result_loan {
+                    self.loan_of.insert(result, loan);
                 }
                 MirFlow::Value(Some(result))
             }
@@ -44506,11 +52502,27 @@ impl MirLowerer {
                     );
                     return MirFlow::Value(Some(dst));
                 }
-                let src = *self.locals.get(local).unwrap_or_else(|| {
+                let canonical = self.canonical_local(*local);
+                let src = self
+                    .local_register(*local)
+                    .or_else(|| {
+                        (!self.uninitialized_locals.contains(local)
+                            && !self.uninitialized_locals.contains(&canonical))
+                            .then(|| self.current_owned_local_register(*local))
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| {
                     panic!(
-                        "Core local {local:?} at {:?} was not installed in MIR; copy={copy}, live locals={:?}",
+                        "Core local {local:?} at {:?} was not installed in MIR; copy={copy}, canonical={:?}, live={:?}, aliases={:?}, history={:?}, uninitialized={:?}, owned={:?}, loops={:?}, labels={:?}",
                         expression.span,
-                        self.locals.keys().collect::<Vec<_>>(),
+                        canonical,
+                        self.locals.iter().map(|(local, register)| (*local, *register, self.register_types[*register as usize])).collect::<Vec<_>>(),
+                        self.local_aliases,
+                        self.local_register_history.get(local),
+                        self.uninitialized_locals,
+                        self.owned.iter().map(|register| (*register, self.register_types[*register as usize])).collect::<Vec<_>>(),
+                        self.active_control_loops.keys().collect::<Vec<_>>(),
+                        self.active_labels.keys().collect::<Vec<_>>(),
                     )
                 });
                 let dst = self.allocate(expression.ty);
@@ -44522,9 +52534,7 @@ impl MirLowerer {
                             src: Self::operand(src, mir::UseMode::Copy),
                         },
                     );
-                    if self.borrowed.contains(&src) {
-                        self.borrowed.insert(dst);
-                    }
+                    self.copy_borrow_tracking(src, dst);
                 } else {
                     self.push(
                         expression.span,
@@ -44533,12 +52543,7 @@ impl MirLowerer {
                             src: Self::operand(src, mir::UseMode::Move),
                         },
                     );
-                    if self.borrowed.remove(&src) {
-                        self.borrowed.insert(dst);
-                    }
-                    if let Some(parent) = self.borrow_parents.remove(&src) {
-                        self.borrow_parents.insert(dst, parent);
-                    }
+                    self.rename_borrow_tracking(src, dst);
                     self.transfer_owner(src);
                     self.uninitialized_locals.insert(*local);
                 }
@@ -44557,8 +52562,46 @@ impl MirLowerer {
                     );
                     return MirFlow::Value(Some(dst));
                 }
-                let src = self.locals[local];
+                let canonical = self.canonical_local(*local);
+                let src = self.current_owned_local_register(*local).unwrap_or_else(|| {
+                    let equivalent = self.equivalent_locals(*local);
+                    panic!(
+                        "Core move source {local:?} (canonical {canonical:?}) at {:?} is not live; live={:?}, aliases={:?}, equivalent={equivalent:?}, locals={:?}, history={:?}, owned={:?}, loans={:?}, renames={:?}",
+                        expression.span,
+                        self.locals.keys().collect::<Vec<_>>(),
+                        self.local_aliases,
+                        self.locals.iter().map(|(local, register)| (*local, *register, self.register_types[*register as usize])).collect::<Vec<_>>(),
+                        equivalent.iter().map(|local| (*local, self.local_register_history.get(local))).collect::<Vec<_>>(),
+                        self.owned.iter().map(|register| (*register, self.register_types[*register as usize], self.tracked_loan(*register))).collect::<Vec<_>>(),
+                        self.flow.loans,
+                        self.borrow_register_renames,
+                    )
+                });
                 let dst = self.allocate(expression.ty);
+                let aliases_invariant_outer = *local != canonical
+                    && self.active_control_loops.values().any(|context| {
+                        context
+                            .outer_locals
+                            .iter()
+                            .any(|(outer, _)| *outer == canonical)
+                    });
+                let unique_reference = self
+                    .unique_reference_types
+                    .values()
+                    .any(|ty| *ty == expression.ty);
+                if aliases_invariant_outer && unique_reference {
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::Reborrow {
+                            dst,
+                            src,
+                            unique: true,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    self.borrow_parents.insert(dst, src);
+                    return MirFlow::Value(Some(dst));
+                }
                 self.push(
                     expression.span,
                     mir::InstructionKind::Move {
@@ -44566,14 +52609,9 @@ impl MirLowerer {
                         src: Self::operand(src, mir::UseMode::Move),
                     },
                 );
-                if self.borrowed.remove(&src) {
-                    self.borrowed.insert(dst);
-                }
-                if let Some(parent) = self.borrow_parents.remove(&src) {
-                    self.borrow_parents.insert(dst, parent);
-                }
+                self.rename_borrow_tracking(src, dst);
                 self.transfer_owner(src);
-                self.uninitialized_locals.insert(*local);
+                self.uninitialized_locals.insert(canonical);
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::Borrow { source, unique } => {
@@ -44612,7 +52650,23 @@ impl MirLowerer {
                     self.borrowed.insert(dst);
                     return MirFlow::Value(Some(dst));
                 }
-                let src = self.locals[source];
+                let src = self
+                    .current_owned_local_register(*source)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "borrow source {source:?} at {:?} is not live; canonical={:?}, binding={:?}, history={:?}, uninitialized={:?}, owned={:?}, aliases={:?}, renames={:?}, loans={:?}, parents={:?}",
+                            expression.span,
+                            self.canonical_local(*source),
+                            self.local_register(*source),
+                            self.local_register_history.get(source),
+                            self.uninitialized_locals,
+                            self.owned.iter().map(|register| (*register, self.register_types[*register as usize])).collect::<Vec<_>>(),
+                            self.local_aliases,
+                            self.borrow_register_renames,
+                            self.flow.loans,
+                            self.borrow_parents,
+                        )
+                    });
                 let dst = self.allocate(expression.ty);
                 self.push(
                     expression.span,
@@ -44674,7 +52728,15 @@ impl MirLowerer {
                     }
                     return MirFlow::Value(Some(src));
                 }
-                let root = self.locals[source];
+                let root = self
+                    .current_owned_local_register(*source)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "project-borrow source {source:?} at {:?} is not live; live={:?}",
+                            expression.span,
+                            self.locals.keys().collect::<Vec<_>>(),
+                        )
+                    });
                 let mut src = root;
                 let mut parent = None;
                 let mut prefix = Vec::with_capacity(path.len());
@@ -44745,6 +52807,22 @@ impl MirLowerer {
                     self.borrowed.contains(&parent_reference),
                     "a temporary projected-reborrow parent must be a live reference"
                 );
+                if path.is_empty()
+                    && self.register_types[parent_reference as usize] != expression.ty
+                {
+                    let dst = self.allocate(expression.ty);
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::DerefReborrow {
+                            dst,
+                            src: parent_reference,
+                            unique: *unique,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    self.borrow_parents.insert(dst, parent_reference);
+                    return MirFlow::Value(Some(dst));
+                }
                 let mut src = parent_reference;
                 let mut parent = parent_reference;
                 for step in path {
@@ -44766,7 +52844,51 @@ impl MirLowerer {
                 MirFlow::Value(Some(src))
             }
             core::ExprKind::Reborrow { source, unique } => {
-                let src = self.locals[source];
+                if let Some(&(field, _)) = self.shared_receiver_captures.get(source) {
+                    debug_assert!(
+                        !*unique,
+                        "a shared handler environment cannot issue a unique reborrow"
+                    );
+                    let dst = self.allocate(expression.ty);
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::ProjectBorrow {
+                            dst,
+                            src: 0,
+                            field,
+                            unique: false,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    return MirFlow::Value(Some(dst));
+                }
+                if let Some(&(field, _)) = self.unique_receiver_captures.get(source) {
+                    let dst = self.allocate(expression.ty);
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::ProjectBorrow {
+                            dst,
+                            src: 0,
+                            field,
+                            unique: *unique,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    return MirFlow::Value(Some(dst));
+                }
+                let src = self.current_owned_local_register(*source).unwrap_or_else(|| {
+                    panic!(
+                        "reborrow source {source} is not live at {:?}; locals={:?}, aliases={:?}, owned={:?}, history={:?}, uninitialized={:?}, expected-type={:?}, candidates={:?}",
+                        expression.span,
+                        self.locals,
+                        self.local_aliases,
+                        self.owned,
+                        self.local_register_history.get(source),
+                        self.uninitialized_locals,
+                        self.local_register_history.get(source).and_then(|history| history.iter().next_back()).map(|register| self.register_types[*register as usize]),
+                        self.owned.iter().map(|register| (*register, self.register_types[*register as usize], self.tracked_loan(*register))).collect::<Vec<_>>(),
+                    )
+                });
                 let dst = self.allocate(expression.ty);
                 self.push(
                     expression.span,
@@ -44777,6 +52899,7 @@ impl MirLowerer {
                     },
                 );
                 self.borrowed.insert(dst);
+                self.borrow_parents.insert(dst, src);
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::DerefCopy { source } => {
@@ -44850,7 +52973,9 @@ impl MirLowerer {
                     self.push(expression.span, cleanup);
                     return MirFlow::Value(Some(dst));
                 }
-                let src = self.locals[source];
+                let src = self
+                    .current_owned_local_register(*source)
+                    .expect("dereference source is live");
                 let dst = self.allocate(expression.ty);
                 self.push(
                     expression.span,
@@ -44859,7 +52984,9 @@ impl MirLowerer {
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::DerefMove { source } => {
-                let src = self.locals[source];
+                let src = self
+                    .current_owned_local_register(*source)
+                    .expect("dereference source is live");
                 let dst = self.allocate(expression.ty);
                 self.push(
                     expression.span,
@@ -44957,6 +53084,9 @@ impl MirLowerer {
                         self.borrow_parents.insert(dst, *parent);
                     }
                 }
+                if let Some(dst) = dst {
+                    self.record_expression_carried_borrow_roots(expression, dst);
+                }
                 for (index, parent) in parents {
                     if Some(index) != returned_argument {
                         self.release_borrow_parent(parent, expression.span);
@@ -44971,7 +53101,12 @@ impl MirLowerer {
             } => {
                 let receiver_span = receiver.span;
                 let (receiver, cleanup_receiver) = match &receiver.kind {
-                    core::ExprKind::Local { local, copy: true } => (self.locals[local], false),
+                    core::ExprKind::Local { local, copy: true } => (
+                        self.local_register(*local)
+                            .or_else(|| self.current_owned_local_register(*local))
+                            .expect("known receiver local has a live owner"),
+                        false,
+                    ),
                     _ => {
                         let value = self.expression(receiver).value();
                         (self.materialize(value, receiver_span), true)
@@ -45009,6 +53144,9 @@ impl MirLowerer {
                     .into_iter()
                     .collect(),
                 );
+                if let Some(dst) = dst {
+                    self.record_expression_carried_borrow_roots(expression, dst);
+                }
                 if cleanup_receiver {
                     self.destroy(receiver.register, receiver_span);
                 }
@@ -45073,6 +53211,7 @@ impl MirLowerer {
                     .into_iter()
                     .collect(),
                 );
+                self.apply_unique_self_call_postcondition();
                 if expression.ty == NEVER {
                     self.terminate(mir::Terminator::Unreachable);
                     return MirFlow::Diverged;
@@ -45088,6 +53227,9 @@ impl MirLowerer {
                     {
                         self.borrow_parents.insert(dst, *parent);
                     }
+                }
+                if let Some(dst) = dst {
+                    self.record_expression_carried_borrow_roots(expression, dst);
                 }
                 for (index, parent) in parents {
                     if Some(index) != returned_argument {
@@ -45127,9 +53269,12 @@ impl MirLowerer {
             } => {
                 let callable_span = callable.span;
                 let (callable, cleanup_callable) = match &callable.kind {
-                    core::ExprKind::Local { local, copy: true } if *receiver_mode != 2 => {
-                        (self.locals[local], false)
-                    }
+                    core::ExprKind::Local { local, copy: true } if *receiver_mode != 2 => (
+                        self.local_register(*local)
+                            .or_else(|| self.current_owned_local_register(*local))
+                            .expect("indirect callable local has a live owner"),
+                        false,
+                    ),
                     _ => {
                         let callable = self.expression(callable).value();
                         (
@@ -45204,6 +53349,9 @@ impl MirLowerer {
                     .into_iter()
                     .collect(),
                 );
+                if let Some(dst) = dst {
+                    self.record_expression_carried_borrow_roots(expression, dst);
+                }
                 if expression.ty == NEVER {
                     self.terminate(mir::Terminator::Unreachable);
                     MirFlow::Diverged
@@ -45324,6 +53472,7 @@ impl MirLowerer {
                 label,
                 has_leave,
                 function_boundary,
+                preserved_locals: core_preserved_locals,
                 body,
             } => {
                 if !has_leave {
@@ -45345,25 +53494,162 @@ impl MirLowerer {
                         target: destination,
                     },
                 );
+                let mut preserved_locals = core_preserved_locals
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                if !function_boundary {
+                    // A nested nonlocal destination is part of the current
+                    // fused loop body. Its exits must retain the loop's
+                    // invariant outer bindings even when late inlining made
+                    // Core's source-name move bookkeeping conservative.
+                    // Otherwise the sequential MIR builder can retire an
+                    // invariant before a later ControlContinue backedge.
+                    preserved_locals.extend(
+                        self.active_control_loops.values().flat_map(|control| {
+                            control.outer_locals.iter().map(|(local, _)| *local)
+                        }),
+                    );
+                }
+                let mut preserved_owner_params = Vec::new();
+                let mut preserved_owner_aliases = Vec::new();
+                if !function_boundary {
+                    let mut representative_by_source = BTreeMap::new();
+                    for local in &preserved_locals {
+                        let Some(source) = self.current_owned_local_register(*local) else {
+                            continue;
+                        };
+                        let ty = self.register_types[source as usize];
+                        if self.owned.contains(&source) {
+                            if let Some(representative) =
+                                representative_by_source.get(&source).copied()
+                            {
+                                preserved_owner_aliases.push((*local, representative));
+                            } else {
+                                representative_by_source.insert(source, *local);
+                                preserved_owner_params.push((*local, self.allocate(ty), ty));
+                            }
+                        }
+                    }
+                }
+                let outer_owned = self.owned.iter().copied().collect::<BTreeSet<_>>();
+                let preserved_sources = preserved_owner_params
+                    .iter()
+                    .filter_map(|(local, _, _)| self.current_owned_local_register(*local))
+                    .collect::<BTreeSet<_>>();
+                let mut hidden_specs = Vec::new();
+                let mut hidden_sources = BTreeSet::new();
+                for (local, _, _) in &preserved_owner_params {
+                    let Some(mut register) = self.current_owned_local_register(*local) else {
+                        continue;
+                    };
+                    let mut depth = 0usize;
+                    let mut path_seen = BTreeSet::new();
+                    while let Some(parent) = self.tracked_borrow_parent(register) {
+                        if !path_seen.insert(parent) {
+                            break;
+                        }
+                        depth += 1;
+                        if outer_owned.contains(&parent)
+                            && !preserved_sources.contains(&parent)
+                            && hidden_sources.insert(parent)
+                        {
+                            hidden_specs.push((
+                                *local,
+                                depth,
+                                self.register_types[parent as usize],
+                            ));
+                        }
+                        register = parent;
+                    }
+                }
+                let hidden_borrow_ancestors = hidden_specs
+                    .into_iter()
+                    .map(|(source_local, depth, ty)| HiddenLabelBorrowAncestor {
+                        source_local,
+                        depth,
+                        register: self.allocate(ty),
+                        ty,
+                    })
+                    .collect();
                 let previous = self.active_labels.insert(
                     *label,
                     ActiveMirLabel {
                         label: runtime_label,
                         result,
                         destination,
-                        outer_owned: self.owned.iter().copied().collect(),
+                        outer_owned,
+                        preserved_locals,
+                        preserved_owner_params,
+                        preserved_owner_aliases,
+                        hidden_borrow_ancestors,
+                        live_owned_on_edges: None,
+                        retired_outer_locals: BTreeSet::new(),
                         function_boundary: *function_boundary,
                     },
                 );
+                let mut normal_preserved_sources = Vec::new();
+                let mut normal_hidden_sources = Vec::new();
                 if let MirFlow::Value(value) = self.expression(body) {
                     let value = self.materialize(value, body.span);
                     self.transfer_owner(value);
-                    let outer_owned = self.active_labels[label].outer_owned.clone();
+                    let active = self.intersect_live_label_owners(*label);
+                    normal_preserved_sources = active
+                        .preserved_owner_params
+                        .iter()
+                        .map(|(local, _, _)| {
+                            self.current_owned_local_register(*local).unwrap_or_else(|| {
+                                panic!(
+                                    "preserved label owner {local:?} is unavailable on the normal edge"
+                                )
+                            })
+                        })
+                        .collect();
+                    normal_hidden_sources = active
+                        .hidden_borrow_ancestors
+                        .iter()
+                        .map(|hidden| {
+                            self.hidden_label_ancestor_source(hidden).unwrap_or_else(|| {
+                                panic!(
+                                    "hidden label ancestor from {:?} at depth {} is unavailable on the normal edge",
+                                    hidden.source_local, hidden.depth,
+                                )
+                            })
+                        })
+                        .collect();
+                    let mut preserved_across_destination =
+                        self.preserved_owned_local_registers(&active.preserved_locals);
+                    preserved_across_destination.extend(normal_hidden_sources.iter().copied());
+                    if !function_boundary {
+                        preserved_across_destination.extend(active.outer_owned.iter().filter_map(
+                            |owner| {
+                                self.owned.contains(owner).then_some(*owner).or_else(|| {
+                                    let current = self.current_borrow_register(*owner);
+                                    self.owned.contains(&current).then_some(current)
+                                })
+                            },
+                        ));
+                    }
+                    let preserved_across_destination =
+                        self.borrow_survivor_closure(&preserved_across_destination);
                     self.cleanup_registers(
                         self.owned.clone().into_iter().rev().filter(|register| {
-                            *function_boundary || !outer_owned.contains(register)
+                            *function_boundary || !preserved_across_destination.contains(register)
                         }),
                         expression.span,
+                    );
+                    let live_owned = self.owned.iter().copied().collect::<BTreeSet<_>>();
+                    let active = self
+                        .active_labels
+                        .get_mut(label)
+                        .expect("the normal label edge has an active destination");
+                    active.live_owned_on_edges = Some(
+                        active
+                            .live_owned_on_edges
+                            .take()
+                            .map_or(live_owned.clone(), |previous| {
+                                previous.intersection(&live_owned).copied().collect()
+                            }),
                     );
                     self.push(
                         expression.span,
@@ -45373,21 +53659,201 @@ impl MirLowerer {
                     );
                     self.terminate(mir::Terminator::Goto(mir::Edge {
                         target: destination,
-                        args: vec![Self::operand(value, mir::UseMode::Move)],
+                        args: std::iter::once(Self::operand(value, mir::UseMode::Move))
+                            .chain(
+                                normal_preserved_sources
+                                    .iter()
+                                    .map(|source| self.join_operand(*source)),
+                            )
+                            .chain(
+                                normal_hidden_sources
+                                    .iter()
+                                    .map(|source| Self::operand(*source, mir::UseMode::Move)),
+                            )
+                            .collect(),
                     }));
                 }
-                self.active_labels.remove(label);
+                let completed = self
+                    .active_labels
+                    .remove(label)
+                    .expect("label destination remains active until its join is emitted");
                 if let Some(previous) = previous {
                     self.active_labels.insert(*label, previous);
                 }
-                self.mark_with_params(
-                    destination,
-                    vec![mir::BlockParam {
-                        register: result,
-                        ty: expression.ty,
-                        role: mir::BlockParamRole::ProtectedExitValue,
-                    }],
+                let incoming_destination_arguments = self
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        MirBuilderItem::Terminator(mir::Terminator::Goto(edge))
+                        | MirBuilderItem::Terminator(mir::Terminator::Leave {
+                            target: edge, ..
+                        }) if edge.target == destination => Some(
+                            edge.args
+                                .iter()
+                                .map(|argument| argument.register)
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let mut params = vec![mir::BlockParam {
+                    register: result,
+                    ty: expression.ty,
+                    role: mir::BlockParamRole::ProtectedExitValue,
+                }];
+                params.extend(
+                    completed
+                        .preserved_owner_params
+                        .iter()
+                        .map(|(_, register, ty)| mir::BlockParam {
+                            register: *register,
+                            ty: *ty,
+                            role: mir::BlockParamRole::Ordinary,
+                        }),
                 );
+                params.extend(completed.hidden_borrow_ancestors.iter().map(|hidden| {
+                    mir::BlockParam {
+                        register: hidden.register,
+                        ty: hidden.ty,
+                        role: mir::BlockParamRole::Ordinary,
+                    }
+                }));
+                self.mark_with_params(destination, params);
+                let transported_destinations = completed
+                    .preserved_owner_params
+                    .iter()
+                    .map(|(_, register, _)| *register)
+                    .chain(
+                        completed
+                            .hidden_borrow_ancestors
+                            .iter()
+                            .map(|hidden| hidden.register),
+                    )
+                    .collect::<Vec<_>>();
+                for arguments in &incoming_destination_arguments {
+                    for (source, destination) in
+                        arguments.iter().skip(1).zip(&transported_destinations)
+                    {
+                        // Every incoming edge transports the same logical
+                        // owner into this block parameter. Record all source
+                        // SSA identities, not only the source which happened
+                        // to remain in the builder's current lexical map.
+                        self.record_borrow_register_rename(*source, *destination);
+                    }
+                }
+                for local in &completed.retired_outer_locals {
+                    if let Some(source) = self.locals.remove(local) {
+                        self.transfer_owner(source);
+                    }
+                    self.uninitialized_locals.insert(*local);
+                }
+                for (index, (local, register, _)) in
+                    completed.preserved_owner_params.iter().enumerate()
+                {
+                    let argument_index = 1 + index;
+                    let source = normal_preserved_sources
+                        .get(index)
+                        .copied()
+                        .or_else(|| self.current_owned_local_register(*local))
+                        .or_else(|| {
+                            incoming_destination_arguments
+                                .iter()
+                                .filter_map(|arguments| arguments.get(argument_index).copied())
+                                .find(|source| self.owned.contains(source))
+                        })
+                        .or_else(|| {
+                            incoming_destination_arguments
+                                .first()
+                                .and_then(|arguments| arguments.get(argument_index).copied())
+                        })
+                        .expect("a preserved label owner reaches the destination");
+                    self.rename_borrow_tracking(source, *register);
+                    self.transfer_owner(source);
+                    if let Some(partial) = self.partial_aggregates.remove(&source) {
+                        self.partial_aggregates.insert(*register, partial);
+                    }
+                    self.bind_local(*local, *register);
+                    if !self.owned.contains(register) {
+                        self.owned.push(*register);
+                    }
+                }
+                for (alias, representative) in &completed.preserved_owner_aliases {
+                    let register = self
+                        .local_register(*representative)
+                        .expect("a preserved label alias has a joined representative");
+                    self.bind_local(*alias, register);
+                }
+                for (index, hidden) in completed.hidden_borrow_ancestors.iter().enumerate() {
+                    let argument_index = 1 + completed.preserved_owner_params.len() + index;
+                    let source = normal_hidden_sources
+                        .get(index)
+                        .copied()
+                        .or_else(|| self.hidden_label_ancestor_source(hidden))
+                        .or_else(|| {
+                            incoming_destination_arguments
+                                .iter()
+                                .filter_map(|arguments| arguments.get(argument_index).copied())
+                                .find(|source| self.owned.contains(source))
+                        })
+                        .or_else(|| {
+                            incoming_destination_arguments
+                                .first()
+                                .and_then(|arguments| arguments.get(argument_index).copied())
+                        })
+                        .expect("a hidden label borrow ancestor reaches the destination");
+                    self.rename_borrow_tracking(source, hidden.register);
+                    self.transfer_owner(source);
+                    if !self.owned.contains(&hidden.register) {
+                        self.owned.push(hidden.register);
+                    }
+                }
+                let destination_owners = completed
+                    .preserved_owner_params
+                    .iter()
+                    .map(|(_, register, _)| *register)
+                    .chain(
+                        completed
+                            .hidden_borrow_ancestors
+                            .iter()
+                            .map(|hidden| hidden.register),
+                    )
+                    .collect::<BTreeSet<_>>();
+                let direct_survivors = completed
+                    .live_owned_on_edges
+                    .unwrap_or_default()
+                    .intersection(&completed.outer_owned)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let stale = self
+                    .owned
+                    .iter()
+                    .copied()
+                    .filter(|register| {
+                        !destination_owners.contains(register)
+                            && !direct_survivors.contains(register)
+                    })
+                    .collect::<BTreeSet<_>>();
+                self.owned.retain(|register| !stale.contains(register));
+                let replacement_parents = stale
+                    .iter()
+                    .filter_map(|register| {
+                        let replacement = self.current_live_borrow_authority(*register);
+                        (*register != replacement && self.owned.contains(&replacement))
+                            .then_some((*register, replacement))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                self.locals.retain(|_, register| !stale.contains(register));
+                self.borrowed.retain(|register| !stale.contains(register));
+                self.loan_of.retain(|register, _| !stale.contains(register));
+                self.auto_release_borrow_ancestors
+                    .retain(|register| !stale.contains(register));
+                self.borrow_parents
+                    .retain(|reference, _| !stale.contains(reference));
+                for parent in self.borrow_parents.values_mut() {
+                    if let Some(replacement) = replacement_parents.get(parent) {
+                        *parent = *replacement;
+                    }
+                }
                 if expression.reference.is_some() && self.reference_types.contains(&expression.ty) {
                     self.borrowed.insert(result);
                 }
@@ -45398,27 +53864,104 @@ impl MirLowerer {
                     .active_labels
                     .get(label)
                     .cloned()
-                    .expect("Core leave refers to an active generative destination");
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Core leave {} at {}..{} does not refer to an active generative destination; active={:?}",
+                            label,
+                            expression.span.start,
+                            expression.span.end,
+                            self.active_labels.keys().collect::<Vec<_>>()
+                        )
+                    });
                 let MirFlow::Value(value_register) = self.expression(value) else {
                     return MirFlow::Diverged;
                 };
                 let value_register = self.materialize(value_register, value.span);
                 debug_assert_eq!(
                     self.register_types[destination.result as usize],
-                    self.register_types[value_register as usize]
+                    self.register_types[value_register as usize],
+                    "Core leave {label} at {:?} lowered a payload with the wrong type: destination register {} has type {:?}, value register {} has type {:?}",
+                    expression.span,
+                    destination.result,
+                    self.register_types[destination.result as usize],
+                    value_register,
+                    self.register_types[value_register as usize],
                 );
                 self.transfer_owner(value_register);
+                let destination = self.intersect_live_label_owners(*label);
+                let preserved_sources = destination
+                    .preserved_owner_params
+                    .iter()
+                    .map(|(local, _, _)| {
+                        self.current_owned_local_register(*local)
+                            .expect("intersected label owners are live on this LEAVE edge")
+                    })
+                    .collect::<Vec<_>>();
+                let hidden_sources = destination
+                    .hidden_borrow_ancestors
+                    .iter()
+                    .map(|hidden| {
+                        self.hidden_label_ancestor_source(hidden).unwrap_or_else(|| {
+                            panic!(
+                                "hidden label ancestor from {:?} at depth {} is unavailable on a LEAVE edge",
+                                hidden.source_local, hidden.depth,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let mut preserved_across_destination = preserved_sources
+                    .iter()
+                    .chain(&hidden_sources)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                if !destination.function_boundary {
+                    preserved_across_destination.extend(destination.outer_owned.iter().filter_map(
+                        |owner| {
+                            self.owned.contains(owner).then_some(*owner).or_else(|| {
+                                let current = self.current_borrow_register(*owner);
+                                self.owned.contains(&current).then_some(current)
+                            })
+                        },
+                    ));
+                }
+                preserved_across_destination =
+                    self.borrow_survivor_closure(&preserved_across_destination);
                 self.cleanup_registers(
                     self.owned.clone().into_iter().rev().filter(|register| {
-                        destination.function_boundary || !destination.outer_owned.contains(register)
+                        destination.function_boundary
+                            || !preserved_across_destination.contains(register)
                     }),
                     expression.span,
+                );
+                let live_owned = self.owned.iter().copied().collect::<BTreeSet<_>>();
+                let active = self
+                    .active_labels
+                    .get_mut(label)
+                    .expect("the LEAVE destination remains active");
+                active.live_owned_on_edges = Some(
+                    active
+                        .live_owned_on_edges
+                        .take()
+                        .map_or(live_owned.clone(), |previous| {
+                            previous.intersection(&live_owned).copied().collect()
+                        }),
                 );
                 self.terminate(mir::Terminator::Leave {
                     label: destination.label,
                     target: mir::Edge {
                         target: destination.destination,
-                        args: vec![Self::operand(value_register, mir::UseMode::Move)],
+                        args: std::iter::once(Self::operand(value_register, mir::UseMode::Move))
+                            .chain(
+                                preserved_sources
+                                    .into_iter()
+                                    .map(|source| self.join_operand(source)),
+                            )
+                            .chain(
+                                hidden_sources
+                                    .into_iter()
+                                    .map(|source| Self::operand(source, mir::UseMode::Move)),
+                            )
+                            .collect(),
                     },
                 });
                 MirFlow::Diverged
@@ -45440,6 +53983,20 @@ impl MirLowerer {
                     ));
                 }
                 let fields = lowered_fields;
+                let carried_borrow_roots = fields
+                    .iter()
+                    .flat_map(|field| {
+                        let mut roots = self
+                            .carried_borrow_roots
+                            .get(&field.register)
+                            .cloned()
+                            .unwrap_or_default();
+                        if let Some(root) = self.live_borrow_authority_root(field.register) {
+                            roots.insert(root);
+                        }
+                        roots
+                    })
+                    .collect::<BTreeSet<_>>();
                 let parents = fields
                     .iter()
                     .filter_map(|field| self.borrow_parents.remove(&field.register))
@@ -45457,6 +54014,9 @@ impl MirLowerer {
                         fields,
                     },
                 );
+                if !carried_borrow_roots.is_empty() {
+                    self.carried_borrow_roots.insert(dst, carried_borrow_roots);
+                }
                 // Moving a projected reference into an aggregate transfers
                 // the child loan to that aggregate. Its generated projection
                 // parent is no longer needed as a carrier: retiring it here
@@ -45562,7 +54122,10 @@ impl MirLowerer {
                         // The ordinary direct projection below handles a
                         // field that is still attached to its root.
                     } else {
-                        let mut source = self.locals[&local];
+                        let mut source = self
+                            .local_register(local)
+                            .or_else(|| self.current_owned_local_register(local))
+                            .expect("nested projected move has a live root owner");
                         let mut prefix = Vec::with_capacity(owned_path.len());
                         for (index, (field, ty)) in owned_path.iter().copied().enumerate() {
                             let dst = self.allocate(ty);
@@ -45588,7 +54151,10 @@ impl MirLowerer {
                     }
                 }
                 if let core::ExprKind::Local { local, .. } = subject.kind {
-                    let src = self.locals[&local];
+                    let src = self
+                        .local_register(local)
+                        .or_else(|| self.current_owned_local_register(local))
+                        .expect("projected local has a live root owner");
                     let dst = self.allocate(expression.ty);
                     self.push(
                         expression.span,
@@ -46029,7 +54595,8 @@ impl MirLowerer {
                             let span = value.span;
                             let emitted = self.expression(value).value();
                             let register = self.materialize(emitted, span);
-                            self.locals.insert(*local, register);
+                            self.record_expression_carried_borrow_roots(value, register);
+                            self.bind_local(*local, register);
                             self.owned.push(register);
                             block_owned.push(*local);
                         }
@@ -46039,7 +54606,10 @@ impl MirLowerer {
                             span,
                             ..
                         } => {
-                            let src = self.locals[source];
+                            let src = self
+                                .local_register(*source)
+                                .or_else(|| self.current_owned_local_register(*source))
+                                .expect("deconstruction source has a live owner");
                             let mut discarded = Vec::new();
                             for field in fields {
                                 if field.erased {
@@ -46055,7 +54625,7 @@ impl MirLowerer {
                                     },
                                 );
                                 if let Some(local) = field.local {
-                                    self.locals.insert(local, dst);
+                                    self.bind_local(local, dst);
                                     self.owned.push(dst);
                                     block_owned.push(local);
                                 } else {
@@ -46131,8 +54701,17 @@ impl MirLowerer {
                                     self.destroy(old, *span);
                                     self.transfer_owner(old);
                                 }
-                                if let Some(old) = self.locals.insert(*local, value_register) {
+                                if let Some(old) = self.bind_local(*local, value_register) {
                                     self.partial_aggregates.remove(&old);
+                                }
+                                // The RHS temporary becomes the local's new
+                                // lexical owner. Moving the previous value out
+                                // removed its register from `owned`; without
+                                // installing the replacement here, later uses
+                                // see only a stale local binding and block
+                                // cleanup also omits the new value.
+                                if !self.owned.contains(&value_register) {
+                                    self.owned.push(value_register);
                                 }
                                 self.uninitialized_locals.remove(local);
                                 self.detached_subtrees
@@ -46165,7 +54744,15 @@ impl MirLowerer {
 
                             let (mut reference, temporary_root) = match &destination.root {
                                 core::AssignmentRoot::Local { local, .. } => {
-                                    let owner = self.locals[local];
+                                    let owner = self
+                                        .local_register(*local)
+                                        .or_else(|| self.current_owned_local_register(*local))
+                                        .unwrap_or_else(|| {
+                                            panic!(
+                                                "projected assignment local {local:?} has no live canonical owner; aliases={:?}, locals={:?}",
+                                                self.local_aliases, self.locals
+                                            )
+                                        });
                                     let first = destination
                                         .projections
                                         .first()
@@ -46202,7 +54789,16 @@ impl MirLowerer {
                                         self.borrowed.insert(reference);
                                         (reference, true)
                                     } else {
-                                        (self.locals[local], false)
+                                        (
+                                            self.local_register(*local)
+                                                .or_else(|| {
+                                                    self.current_owned_local_register(*local)
+                                                })
+                                                .expect(
+                                                    "dereferenced assignment local has a live owner",
+                                                ),
+                                            false,
+                                        )
                                     }
                                 }
                                 core::AssignmentRoot::Dereference { reference, .. } => {
@@ -46280,8 +54876,11 @@ impl MirLowerer {
                                 self.destroy(reference, *span);
                                 self.transfer_owner(reference);
                                 if let core::AssignmentRoot::Local { local, .. } = &destination.root
+                                    && let Some(owner) = self
+                                        .local_register(*local)
+                                        .or_else(|| self.current_owned_local_register(*local))
                                     && let Some(initialized) =
-                                        self.partial_aggregates.get_mut(&self.locals[local])
+                                        self.partial_aggregates.get_mut(&owner)
                                     && let Some(first) = destination.projections.first()
                                     && let Some(field) = initialized.get_mut(first.field as usize)
                                 {
@@ -46293,10 +54892,17 @@ impl MirLowerer {
                             }
                         }
                         core::Stmt::EndBorrow { local, span, .. } => {
-                            let register = self.locals[local];
-                            self.destroy(register, *span);
-                            self.transfer_owner(register);
-                            self.locals.remove(local);
+                            // A labeled transfer performs destination cleanup
+                            // before LEAVE. When every reaching edge has
+                            // already retired this lexical reference, the NLL
+                            // cleanup emitted for the enclosing source block
+                            // is deliberately idempotent.
+                            if let Some(register) = self.locals.remove(local) {
+                                if !self.has_live_borrow_descendant(register) {
+                                    self.destroy(register, *span);
+                                    self.transfer_owner(register);
+                                }
+                            }
                         }
                         core::Stmt::Expr(value) => {
                             let flow = self.expression(value);
@@ -46317,6 +54923,8 @@ impl MirLowerer {
                 }
                 let mut escaping_borrow_parents = BTreeSet::new();
                 if let MirFlow::Value(Some(mut register)) = value {
+                    escaping_borrow_parents
+                        .extend(self.escaping_borrow_authorities(Some(register)));
                     loop {
                         let parent = self.borrow_parents.get(&register).copied().or_else(|| {
                             let loan = self.loan_of.get(&register)?;
@@ -46336,22 +54944,52 @@ impl MirLowerer {
                         register = parent;
                     }
                 }
+                // A refinement can coalesce an outer restricted local with a
+                // newer block-local reborrow and keep the newer authority as
+                // representative. Before the representative's lexical scope
+                // ends, promote its live SSA register back to the outer name;
+                // otherwise retaining only entry locals below would discard
+                // the authority and leave the outer alias mapped to a stale
+                // predecessor handle.
+                let promoted_aliases = self
+                    .local_aliases
+                    .iter()
+                    .filter_map(|(alias, representative)| {
+                        (saved.contains_key(alias) && !saved.contains_key(representative))
+                            .then_some((*alias, *representative))
+                    })
+                    .collect::<Vec<_>>();
+                for (alias, representative) in promoted_aliases {
+                    if let Some(register) = self.current_owned_local_register(representative) {
+                        self.bind_local(alias, register);
+                        block_owned.retain(|local| *local != representative);
+                        self.local_aliases.remove(&alias);
+                    }
+                }
                 let lexical_borrows = block_owned
                     .into_iter()
                     .filter_map(|local| self.locals.get(&local).copied())
                     .filter(|register| self.borrowed.contains(register))
                     .collect::<Vec<_>>();
-                for register in lexical_borrows.into_iter().rev() {
-                    if escaping_borrow_parents.contains(&register) {
-                        // The block result is a reborrow of this lexical
-                        // reference. Retire only the handle: EndBorrow would
-                        // end the underlying loan before its escaping child,
-                        // while Drop intentionally detaches the parent and
-                        // leaves that external-place loan alive in the child.
-                        self.retire_reference_handle(register, expression.span);
-                    } else {
-                        self.destroy(register, expression.span);
-                    }
+                let lexical_borrow_set = lexical_borrows.iter().copied().collect::<BTreeSet<_>>();
+                let (escaping, ending): (Vec<_>, Vec<_>) =
+                    lexical_borrows.into_iter().partition(|register| {
+                        escaping_borrow_parents.contains(register)
+                            || self
+                                .has_live_borrow_descendant_outside(*register, &lexical_borrow_set)
+                    });
+                // Lexical declaration order does not necessarily match loan
+                // ancestry after a label or loop transports both a reference
+                // and its reborrow through SSA parameters. End every
+                // non-escaping frontier deepest-loan-first.
+                self.cleanup_registers(ending, expression.span);
+                for register in escaping {
+                    // The block result is a reborrow of this lexical
+                    // reference. Retire only the handle: EndBorrow would end
+                    // the underlying loan before its escaping child, while
+                    // Drop intentionally detaches the parent and leaves that
+                    // external-place loan alive in the child.
+                    self.retire_reference_handle(register, expression.span);
                     self.transfer_owner(register);
                 }
                 // Lexical exit removes block-local identities, but outer
@@ -46362,6 +55000,110 @@ impl MirLowerer {
                 self.locals.retain(|local, _| saved.contains_key(local));
                 value
             }
+        }
+    }
+}
+
+/// Put the open-world protocol table in the verifier's canonical key order
+/// after late generic lowering has discovered every concrete instance.
+/// Protocol IDs occur throughout the artifact, so sorting only the table
+/// would silently retarget effects. Apply one bijection to every occurrence.
+fn canonicalize_protocols(artifact: &mut Artifact) {
+    let mut order = (0..artifact.protocols.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        let left = &artifact.protocols[*left];
+        let right = &artifact.protocols[*right];
+        (&left.display_name, &left.type_arguments)
+            .cmp(&(&right.display_name, &right.type_arguments))
+    });
+    if order.iter().enumerate().all(|(new, old)| new == *old) {
+        return;
+    }
+
+    let mut remap = vec![0_u32; order.len()];
+    for (new, old) in order.iter().copied().enumerate() {
+        remap[old] = new as u32;
+    }
+    let remap_row = |row: &mut Vec<u32>| {
+        for protocol in row.iter_mut() {
+            *protocol = remap[*protocol as usize];
+        }
+        row.sort_unstable();
+        row.dedup();
+    };
+    fn remap_signature(signature: &mut BytecodeSignature, remap: &[u32]) {
+        for protocol in &mut signature.outward_protocols {
+            *protocol = remap[*protocol as usize];
+        }
+        signature.outward_protocols.sort_unstable();
+        signature.outward_protocols.dedup();
+    }
+    fn remap_type(ty: &mut Type, remap: &[u32]) {
+        match ty {
+            Type::Restricted { base, .. } => remap_type(base, remap),
+            Type::Callable { signature, .. } => remap_signature(signature, remap),
+            Type::Resumption {
+                effect_signature, ..
+            } => remap_signature(effect_signature, remap),
+            Type::Unit
+            | Type::Never
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::U128
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::I128
+            | Type::Usize
+            | Type::Isize
+            | Type::F32
+            | Type::F64
+            | Type::Char
+            | Type::Text
+            | Type::Bytes
+            | Type::Array { .. }
+            | Type::RefShared { .. }
+            | Type::RefUnique { .. }
+            | Type::Handler { .. }
+            | Type::BindingPack { .. }
+            | Type::Available { .. }
+            | Type::Tuple { .. }
+            | Type::Struct { .. }
+            | Type::Enum { .. } => {}
+        }
+    }
+
+    let previous = std::mem::take(&mut artifact.protocols);
+    artifact.protocols = order.into_iter().map(|old| previous[old].clone()).collect();
+    for protocol in &mut artifact.protocols {
+        for operation in &mut protocol.operations {
+            remap_signature(&mut operation.payload_signature, &remap);
+        }
+    }
+    for import in &mut artifact.imports {
+        remap_signature(&mut import.signature, &remap);
+    }
+    for export in &mut artifact.exports {
+        remap_signature(&mut export.signature, &remap);
+    }
+    for ty in &mut artifact.types {
+        remap_type(ty, &remap);
+    }
+    for handler in &mut artifact.handler_defs {
+        for clause in &mut handler.clauses {
+            clause.protocol = remap[clause.protocol as usize];
+            remap_signature(&mut clause.callable_signature, &remap);
+        }
+    }
+    for function in &mut artifact.functions {
+        remap_row(&mut function.outward_protocols);
+    }
+    for instruction in &mut artifact.code {
+        if let Instruction::Perform { protocol, .. } = instruction {
+            *protocol = remap[*protocol as usize];
         }
     }
 }
@@ -46696,7 +55438,8 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
         // peephole below.
         let mut protected = vec![false; code.len()];
         for boundary in 0..code.len() {
-            if !matches!(code[boundary], Instruction::Jump { .. }) {
+            let is_leave = matches!(code[boundary], Instruction::Leave { .. });
+            if !is_leave && !matches!(code[boundary], Instruction::Jump { .. }) {
                 continue;
             }
             let mut first = boundary;
@@ -46741,11 +55484,12 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 && sources.is_disjoint(&scratches)
                 && destinations.is_disjoint(&scratches);
             if valid_bundle
-                && sources.iter().any(|source| {
-                    register_types
-                        .get(*source as usize)
-                        .is_none_or(|ty| type_contains_reference(types, *ty, &mut BTreeSet::new()))
-                })
+                && (is_leave
+                    || sources.iter().any(|source| {
+                        register_types.get(*source as usize).is_none_or(|ty| {
+                            type_contains_reference(types, *ty, &mut BTreeSet::new())
+                        })
+                    }))
             {
                 protected[first..boundary].fill(true);
             }
@@ -47043,6 +55787,8 @@ fn compact_artifact_registers_after_peephole(artifact: &mut Artifact) -> bool {
             | Instruction::ReborrowShared { dst, src }
             | Instruction::ReborrowUnique { dst, src }
             | Instruction::DerefCopy { dst, src }
+            | Instruction::DerefReborrowShared { dst, src }
+            | Instruction::DerefReborrowUnique { dst, src }
             | Instruction::DerefMove { dst, src }
             | Instruction::DerefStore { dst, src }
             | Instruction::ProjectMove { dst, src, .. }
@@ -47181,6 +55927,8 @@ fn compact_artifact_registers_after_peephole(artifact: &mut Artifact) -> bool {
             | Instruction::ReborrowShared { dst, src }
             | Instruction::ReborrowUnique { dst, src }
             | Instruction::DerefCopy { dst, src }
+            | Instruction::DerefReborrowShared { dst, src }
+            | Instruction::DerefReborrowUnique { dst, src }
             | Instruction::DerefMove { dst, src }
             | Instruction::DerefStore { dst, src }
             | Instruction::ProjectMove { dst, src, .. }
@@ -47309,13 +56057,11 @@ fn compact_artifact_registers_after_peephole(artifact: &mut Artifact) -> bool {
                 used.insert(register);
             });
         }
-        for cleanup in artifact
-            .cleanups
-            .iter()
-            .filter(|cleanup| cleanup.function == function_id as u32)
-        {
-            used.extend(cleanup.registers.iter().copied());
-        }
+        // Cleanup metadata cannot establish a register's wire type. A
+        // non-parameter register absent from executable code cannot contain a
+        // runtime value, so retaining it solely for an old cleanup seed would
+        // produce an artifact the decoder cannot type-infer. The cleanup
+        // oracle runs after this pass and reconstructs the final plans.
         let mut registers = vec![None; function.register_types.len()];
         let mut register_types = Vec::with_capacity(used.len());
         for old in used {
@@ -47333,9 +56079,12 @@ fn compact_artifact_registers_after_peephole(artifact: &mut Artifact) -> bool {
             .iter_mut()
             .filter(|cleanup| cleanup.function == function_id as u32)
         {
+            cleanup
+                .registers
+                .retain(|register| registers[*register as usize].is_some());
             cleanup.registers.iter_mut().for_each(|register| {
                 *register = registers[*register as usize]
-                    .expect("every serialized cleanup register is retained")
+                    .expect("every executable cleanup register is retained")
             });
         }
         function.register_types = register_types;
@@ -47383,7 +56132,12 @@ fn terminator_len(terminator: &mir::Terminator) -> u32 {
         | mir::Terminator::Return { .. }
         | mir::Terminator::Abort { .. }
         | mir::Terminator::Unreachable => 1,
-        mir::Terminator::Leave { .. } => 1,
+        mir::Terminator::Leave { target, .. } => {
+            // The protected exit value is transported atomically by LEAVE.
+            // Any additional ordinary block parameters are materialized with
+            // the same snapshot-then-assign sequence used by normal edges.
+            2 * target.args.len().saturating_sub(1) as u32 + 1
+        }
     }
 }
 
@@ -47525,12 +56279,43 @@ fn serialize_mir_cleanup_plans(
                             implicit: usize,
                             next_temporary: &mut u32|
          -> Result<(), String> {
-            let states = reverse_edge_cleanup_states(
+            let source_state = expected.get(pc as usize).cloned().flatten();
+            let mut states = reverse_edge_cleanup_states(
                 edge,
                 target_params(edge, implicit)?,
                 &destination(edge),
                 next_temporary,
             )?;
+            if let Some(source) = &source_state {
+                let moved = edge
+                    .args
+                    .iter()
+                    .filter(|argument| argument.mode == mir::UseMode::Move)
+                    .map(|argument| argument.register)
+                    .collect::<BTreeSet<_>>();
+                let stable = source
+                    .iter()
+                    .copied()
+                    .filter(|register| !moved.contains(register))
+                    .collect::<BTreeSet<_>>();
+                for state in &mut states {
+                    for (source_index, register) in source.iter().copied().enumerate() {
+                        if !stable.contains(&register) || state.contains(&register) {
+                            continue;
+                        }
+                        let before = source[..source_index].iter().rev().find_map(|candidate| {
+                            state.iter().position(|current| current == candidate)
+                        });
+                        let after = source[source_index + 1..].iter().find_map(|candidate| {
+                            state.iter().position(|current| current == candidate)
+                        });
+                        let position =
+                            before.map_or_else(|| after.unwrap_or(state.len()), |at| at + 1);
+                        state.insert(position, register);
+                    }
+                }
+                states[0] = source.clone();
+            }
             for (index, state) in states.into_iter().enumerate() {
                 expected[pc as usize + index] = Some(state);
             }
@@ -47596,8 +56381,36 @@ fn serialize_mir_cleanup_plans(
                         synthetic.push((otherwise, 0));
                     }
                 }
-                mir::Terminator::Leave { .. }
-                | mir::Terminator::Perform { resume: None, .. }
+                mir::Terminator::Leave { target, .. } => {
+                    let Some(anchor) = leave_anchors.get(&block.id) else {
+                        // Ownership analysis omits physically retained but
+                        // unreachable blocks. Their bytecode is never entered,
+                        // so no cleanup state is needed. Preserve the emitted
+                        // temporary-number allocation for later reachable
+                        // edges, however.
+                        next_temporary = next_temporary
+                            .checked_add(target.args.len().saturating_sub(1) as u32)
+                            .ok_or_else(|| {
+                                "edge-transfer temporary register space exhausted".to_string()
+                            })?;
+                        continue;
+                    };
+                    let params = target_params(target, 0)?;
+                    let ordinary = mir::Edge {
+                        target: target.target,
+                        args: target.args.iter().skip(1).cloned().collect(),
+                    };
+                    let states = reverse_edge_cleanup_states(
+                        &ordinary,
+                        &params[1..],
+                        &anchor.source,
+                        &mut next_temporary,
+                    )?;
+                    for (index, state) in states.into_iter().enumerate() {
+                        expected[edge_pc as usize + index] = Some(state);
+                    }
+                }
+                mir::Terminator::Perform { resume: None, .. }
                 | mir::Terminator::TailCall { .. }
                 | mir::Terminator::TailCallSelf { .. }
                 | mir::Terminator::TailCallKnownReceiver { .. }
@@ -47624,8 +56437,6 @@ fn serialize_mir_cleanup_plans(
                 .iter()
                 .find(|candidate| candidate.id == block)
                 .ok_or_else(|| format!("missing Leave source block {block}"))?;
-            expected[(offsets[&block] + source.statements.len() as u32) as usize] =
-                Some(anchor.source);
             let mir::Terminator::Leave { target, .. } = &source.terminator else {
                 return Err(format!(
                     "Leave boundary attached to non-Leave block {block}"
@@ -47636,8 +56447,8 @@ fn serialize_mir_cleanup_plans(
                 && existing != &anchor.target
             {
                 return Err(format!(
-                    "Leave edges targeting block {} require incompatible cleanup anchors: {existing:?} and {:?}",
-                    target.target, anchor.target
+                    "function `{}` Leave edges targeting block {} require incompatible cleanup anchors: {existing:?} and {:?}",
+                    function.name, target.target, anchor.target
                 ));
             }
             *destination = Some(anchor.target);
@@ -47717,12 +56528,16 @@ fn cross_validate_cleanup_maps(
             .map_err(|error| error.to_string())?;
         let mut label_anchor_registers = BTreeMap::<u32, Vec<u32>>::new();
         let mut leave_source_anchor_registers = BTreeMap::<u32, Vec<u32>>::new();
+        let mut leave_protected_sources = BTreeMap::<u32, u32>::new();
         for block in &function.blocks {
             let mir::Terminator::Leave { target, .. } = &block.terminator else {
                 continue;
             };
             if let Some(anchor) = leave_anchors.get(&block.id) {
                 leave_source_anchor_registers.insert(block.id, anchor.source.clone());
+                if let Some(protected) = target.args.first() {
+                    leave_protected_sources.insert(block.id, protected.register);
+                }
                 if let Some(existing) = label_anchor_registers.get(&target.target)
                     && existing != &anchor.target
                 {
@@ -47803,7 +56618,10 @@ fn cross_validate_cleanup_maps(
                         };
                     let matches = actual == expected.as_slice()
                         || (expected.iter().all(|register| {
-                            actual.contains(register) || folded_unrestricted(register)
+                            actual.contains(register)
+                                || folded_unrestricted(register)
+                                || (at_leave_source_anchor
+                                    && leave_protected_sources.get(&block.id) == Some(register))
                         }) && actual.iter().all(|register| {
                             expected.contains(register)
                                 || (at_label_destination_anchor
@@ -47817,8 +56635,10 @@ fn cross_validate_cleanup_maps(
                         }));
                     if !matches {
                         return Err(format!(
-                            "function `{}` block {} instruction {pc}: serialized cleanup list {actual:?} does not match the MIR-derived owner list {expected:?}",
-                            function.name, block.id
+                            "function `{}` block {} instruction {pc} (old {old_pc}, renames {:?}): serialized cleanup list {actual:?} does not match the MIR-derived owner list {expected:?}",
+                            function.name,
+                            block.id,
+                            map.map(|map| &map.state_renames[old_pc as usize])
                         ));
                     }
                 }
@@ -47895,6 +56715,42 @@ fn emit_mir_function(
             });
         }
         code.push(Instruction::Jump { target });
+    }
+
+    fn emit_edge_assignments(
+        args: &[mir::Operand],
+        params: &[mir::BlockParam],
+        register_types: &mut Vec<TypeId>,
+        code: &mut Vec<Instruction>,
+    ) {
+        debug_assert_eq!(params.len(), args.len());
+        let mut temporaries = vec![0; args.len()];
+        for mode in [mir::UseMode::Copy, mir::UseMode::Move] {
+            for (index, (param, argument)) in params.iter().zip(args).enumerate() {
+                if argument.mode != mode {
+                    continue;
+                }
+                let temporary = register_types.len() as u32;
+                register_types.push(param.ty);
+                temporaries[index] = temporary;
+                code.push(match mode {
+                    mir::UseMode::Copy => Instruction::Copy {
+                        dst: temporary,
+                        src: argument.register,
+                    },
+                    mir::UseMode::Move => Instruction::Move {
+                        dst: temporary,
+                        src: argument.register,
+                    },
+                });
+            }
+        }
+        for (param, temporary) in params.iter().zip(temporaries) {
+            code.push(Instruction::Move {
+                dst: param.register,
+                src: temporary,
+            });
+        }
     }
 
     let mut offsets = BTreeMap::new();
@@ -48187,7 +57043,9 @@ fn emit_mir_function(
                 src: value.as_ref().map(register),
             }),
             mir::Terminator::Leave { label, target } => {
-                debug_assert_eq!(target.args.len(), 1);
+                debug_assert!(!target.args.is_empty());
+                let params = target_params(mir_function, target, None);
+                emit_edge_assignments(&target.args[1..], &params[1..], &mut register_types, code);
                 code.push(Instruction::Leave {
                     slot: label.0,
                     value: target.args[0].register,
@@ -48215,7 +57073,7 @@ mod mir_edge_emission_tests {
     use grandiose_vm::{I64, Type, U32, UNIT, Value, Vm, verify};
 
     use super::{
-        Constant, Instruction, MirLowerer, Primitive, Span,
+        Constant, Instruction, MirBuilderItem, MirLowerer, Primitive, Span,
         compact_artifact_registers_after_peephole, constant_key, emit_mir_function,
         layout_and_peephole, layout_mir_blocks, mir, serialize_mir_cleanup_plans,
     };
@@ -48275,6 +57133,36 @@ mod mir_edge_emission_tests {
     }
 
     #[test]
+    fn post_peephole_compaction_removes_cleanup_only_temporaries() {
+        let mut artifact = Artifact::default();
+        artifact.code = vec![Instruction::Return { src: None }];
+        artifact.functions.push(BytecodeFunction {
+            name: "cleanup_only_gap".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: 1,
+            label_slot_count: 0,
+        });
+        artifact.cleanups.push(grandiose_vm::bytecode::CleanupPlan {
+            function: 0,
+            first_instruction: 0,
+            end_instruction: 1,
+            registers: vec![1],
+        });
+
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT]);
+        assert!(artifact.cleanups[0].registers.is_empty());
+        let decoded = Artifact::decode(&artifact.encode()).unwrap();
+        verify(decoded).unwrap();
+    }
+
+    #[test]
     fn mir_local_facts_distinguish_structural_child_drop_from_a_direct_custom_hook() {
         let mut types = Type::predefined();
         let child = types.len() as u32;
@@ -48304,6 +57192,46 @@ mod mir_edge_emission_tests {
                 .drop_glue,
             mir::DropGlueKind::Structural
         );
+    }
+
+    #[test]
+    fn conditional_loop_aggregate_promotes_existing_and_future_deconstructs_to_drop() {
+        let mut types = Type::predefined();
+        let pair = types.len() as u32;
+        types.push(Type::Tuple {
+            fields: vec![I64, U32],
+            copy: true,
+        });
+        let mut lowerer = MirLowerer::begin(None, UNIT, &[], &[], &types, &BTreeSet::new());
+        let owner = lowerer.allocate(pair);
+        lowerer.push(
+            Span::new(1, 2),
+            mir::InstructionKind::Deconstruct { src: owner },
+        );
+        lowerer.mark_drop_only_aggregate(owner);
+        lowerer.push(
+            Span::new(3, 4),
+            mir::InstructionKind::Deconstruct { src: owner },
+        );
+
+        let cleanups = lowerer
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MirBuilderItem::Statement(statement) => Some(&statement.kind),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cleanups.len(), 2);
+        assert!(cleanups.iter().all(|kind| matches!(
+            kind,
+            mir::InstructionKind::Drop {
+                owner: mir::Operand {
+                    register,
+                    mode: mir::UseMode::Move,
+                },
+            } if *register == owner
+        )));
     }
 
     #[test]
@@ -49666,6 +58594,19 @@ fn emit_mir_instruction(
             dst: *dst,
             src: *src,
         },
+        mir::InstructionKind::DerefReborrow { dst, src, unique } => {
+            if *unique {
+                Instruction::DerefReborrowUnique {
+                    dst: *dst,
+                    src: *src,
+                }
+            } else {
+                Instruction::DerefReborrowShared {
+                    dst: *dst,
+                    src: *src,
+                }
+            }
+        }
         mir::InstructionKind::DerefMove { dst, src } => Instruction::DerefMove {
             dst: *dst,
             src: *src,
@@ -49928,12 +58869,27 @@ fn expression_kind(expression: &ExprKind) -> &'static str {
     }
 }
 
-fn drop_body_reaches_unsafe_control(expression: &core::Expr, unsafe_calls: &BTreeSet<u32>) -> bool {
-    let any = |expressions: &[core::Expr]| {
-        expressions
-            .iter()
-            .any(|expression| drop_body_reaches_unsafe_control(expression, unsafe_calls))
+fn drop_body_reaches_unsafe_control(
+    expression: &core::Expr,
+    unsafe_calls: &BTreeSet<u32>,
+    core_functions: &BTreeMap<u32, &core::Function>,
+    pattern_functions: &BTreeMap<u32, &TypedPatternFunction>,
+    handler_defs: &[HandlerDef],
+    allowed_terminal_performs: &BTreeSet<(u32, u32)>,
+    known_variants: &BTreeMap<core::LocalId, u32>,
+) -> bool {
+    let unsafe_expression = |expression: &core::Expr| {
+        drop_body_reaches_unsafe_control(
+            expression,
+            unsafe_calls,
+            core_functions,
+            pattern_functions,
+            handler_defs,
+            allowed_terminal_performs,
+            known_variants,
+        )
     };
+    let any = |expressions: &[core::Expr]| expressions.iter().any(unsafe_expression);
     match &expression.kind {
         core::ExprKind::Call { declaration, args }
         | core::ExprKind::TailCall { declaration, args } => {
@@ -49948,59 +58904,194 @@ fn drop_body_reaches_unsafe_control(expression: &core::Expr, unsafe_calls: &BTre
             declaration,
             receiver,
             args,
-        } => {
-            unsafe_calls.contains(declaration)
-                || drop_body_reaches_unsafe_control(receiver, unsafe_calls)
-                || any(args)
-        }
+        } => unsafe_calls.contains(declaration) || unsafe_expression(receiver) || any(args),
         core::ExprKind::CallSelf { args } | core::ExprKind::TailCallSelf { args } => any(args),
         core::ExprKind::ControlLoop {
             initial_args, body, ..
-        } => any(initial_args) || drop_body_reaches_unsafe_control(body, unsafe_calls),
-        core::ExprKind::ControlContinue { .. } => true,
+        } => any(initial_args) || unsafe_expression(body),
+        // Fused control loops are local CFG, not resumptive control. Their
+        // backedge is safe in Drop whenever the transported values and loop
+        // body are themselves safe.
+        core::ExprKind::ControlContinue { args, .. } => any(args),
         core::ExprKind::MakeCallable { .. }
         | core::ExprKind::CallIndirect { .. }
         | core::ExprKind::TailCallIndirect { .. }
         | core::ExprKind::LabelDestination { .. }
         | core::ExprKind::Leave { .. }
         | core::ExprKind::HostCall { .. }
-        | core::ExprKind::Perform { .. }
         | core::ExprKind::Resume { .. }
         | core::ExprKind::TailResume { .. }
         | core::ExprKind::Cancel { .. }
-        | core::ExprKind::Handle { .. }
         | core::ExprKind::Abort { .. } => true,
+        core::ExprKind::Perform {
+            protocol,
+            operation,
+            payloads,
+        } => !allowed_terminal_performs.contains(&(*protocol, *operation)) || any(payloads),
+        core::ExprKind::Handle {
+            handler_def,
+            clauses,
+            shared_clause_captures,
+            body,
+            body_captures,
+            ..
+        } => {
+            // A total handler over terminal operations is an ordinary local
+            // decision: it cannot suspend, resume, or leak an effect beyond
+            // the expression. Validate the generated body and every pattern
+            // arm structurally instead of classifying all `Handle` nodes as
+            // effectful. Resumptive or partial handlers still fail closed.
+            let Some(definition) = handler_defs.get(*handler_def as usize) else {
+                return true;
+            };
+            if definition.partial
+                || definition
+                    .clauses
+                    .iter()
+                    .any(|clause| clause.resumption_type.is_some())
+                || any(shared_clause_captures)
+                || any(body_captures)
+            {
+                return true;
+            }
+            let handled = definition
+                .clauses
+                .iter()
+                .map(|clause| (clause.protocol, clause.operation))
+                .collect::<BTreeSet<_>>();
+            let body_unsafe = core_functions.get(body).is_none_or(|function| {
+                drop_body_reaches_unsafe_control(
+                    &function.body,
+                    unsafe_calls,
+                    core_functions,
+                    pattern_functions,
+                    handler_defs,
+                    &handled,
+                    &BTreeMap::new(),
+                )
+            });
+            body_unsafe
+                || clauses.iter().any(|(declaration, _, captures)| {
+                    any(captures)
+                        || pattern_functions.get(declaration).is_none_or(|function| {
+                            function.plan.fallback.is_some()
+                                || function.plan.arms.iter().any(|arm| {
+                                    drop_body_reaches_unsafe_control(
+                                        &arm.body,
+                                        unsafe_calls,
+                                        core_functions,
+                                        pattern_functions,
+                                        handler_defs,
+                                        &BTreeSet::new(),
+                                        &BTreeMap::new(),
+                                    )
+                                })
+                        })
+                })
+        }
         core::ExprKind::PatternTest { subject, .. } | core::ExprKind::Project { subject, .. } => {
-            drop_body_reaches_unsafe_control(subject, unsafe_calls)
+            unsafe_expression(subject)
         }
         core::ExprKind::PatternTestBorrowed { .. } | core::ExprKind::LocalReferenceView { .. } => {
             false
         }
-        core::ExprKind::TemporaryProjectBorrow { source, .. } => {
-            drop_body_reaches_unsafe_control(source, unsafe_calls)
-        }
+        core::ExprKind::TemporaryProjectBorrow { source, .. } => unsafe_expression(source),
         core::ExprKind::RefinementBranch {
             subject,
+            pattern,
             positive,
             negative,
+            negative_variant,
             ..
         } => {
-            drop_body_reaches_unsafe_control(subject, unsafe_calls)
-                || drop_body_reaches_unsafe_control(positive, unsafe_calls)
-                || drop_body_reaches_unsafe_control(negative, unsafe_calls)
+            if unsafe_expression(subject) {
+                return true;
+            }
+            let subject_local = match subject.kind {
+                core::ExprKind::Local { local, .. }
+                | core::ExprKind::Move { local }
+                | core::ExprKind::LocalReferenceView { local } => Some(local),
+                _ => None,
+            };
+            let positive_variant = match pattern.kind {
+                core::DecisionPatternKind::Variant { variant, .. } => Some(variant),
+                _ => None,
+            };
+            if let (Some(_), Some(variant), Some(known)) = (
+                subject_local,
+                positive_variant,
+                subject_local.and_then(|local| known_variants.get(&local).copied()),
+            ) {
+                return if known == variant {
+                    drop_body_reaches_unsafe_control(
+                        positive,
+                        unsafe_calls,
+                        core_functions,
+                        pattern_functions,
+                        handler_defs,
+                        allowed_terminal_performs,
+                        known_variants,
+                    )
+                } else {
+                    drop_body_reaches_unsafe_control(
+                        negative,
+                        unsafe_calls,
+                        core_functions,
+                        pattern_functions,
+                        handler_defs,
+                        allowed_terminal_performs,
+                        known_variants,
+                    )
+                };
+            }
+            let mut positive_facts = known_variants.clone();
+            if let (Some(local), Some(variant)) = (subject_local, positive_variant) {
+                positive_facts.insert(local, variant);
+            }
+            let mut negative_facts = known_variants.clone();
+            if let (Some(local), Some(variant)) = (subject_local, *negative_variant) {
+                negative_facts.insert(local, variant);
+            }
+            drop_body_reaches_unsafe_control(
+                positive,
+                unsafe_calls,
+                core_functions,
+                pattern_functions,
+                handler_defs,
+                allowed_terminal_performs,
+                &positive_facts,
+            ) || drop_body_reaches_unsafe_control(
+                negative,
+                unsafe_calls,
+                core_functions,
+                pattern_functions,
+                handler_defs,
+                allowed_terminal_performs,
+                &negative_facts,
+            )
         }
-        core::ExprKind::Construct { fields, .. } => fields
-            .iter()
-            .any(|field| drop_body_reaches_unsafe_control(&field.value, unsafe_calls)),
+        core::ExprKind::Construct { fields, .. } => {
+            fields.iter().any(|field| unsafe_expression(&field.value))
+        }
         core::ExprKind::Primitive { args, .. } => any(args),
         core::ExprKind::Block { statements, tail } => {
             statements.iter().any(|statement| match statement {
-                core::Stmt::Let { value, .. } | core::Stmt::Expr(value) => {
-                    drop_body_reaches_unsafe_control(value, unsafe_calls)
+                core::Stmt::Let { value, .. } | core::Stmt::Expr(value) => unsafe_expression(value),
+                core::Stmt::Deconstruct { .. } => false,
+                core::Stmt::Assign {
+                    value, destination, ..
+                } => {
+                    unsafe_expression(value)
+                        || match &destination.root {
+                            core::AssignmentRoot::Dereference { reference, .. } => {
+                                unsafe_expression(reference)
+                            }
+                            core::AssignmentRoot::Local { .. }
+                            | core::AssignmentRoot::DereferenceLocal { .. } => false,
+                        }
                 }
-                core::Stmt::Deconstruct { .. } | core::Stmt::Assign { .. } => true,
                 core::Stmt::EndBorrow { .. } => false,
-            }) || drop_body_reaches_unsafe_control(tail, unsafe_calls)
+            }) || unsafe_expression(tail)
         }
         core::ExprKind::Unit
         | core::ExprKind::Constant(_)
@@ -50059,12 +59150,19 @@ fn validate_drop_core(
                 "effect or nonlocal control in Drop::drop",
                 "Drop hooks must be pure, non-suspending, and locally returning",
             )]),
-            core::ExprKind::ControlLoop { .. } | core::ExprKind::ControlContinue { .. } => {
-                Err(vec![unsupported(
-                    expression.span,
-                    "compiler-owned looping control in Drop::drop",
-                    "Drop hooks cannot contain synthesized nonlocal control loops",
-                )])
+            core::ExprKind::ControlLoop {
+                initial_args, body, ..
+            } => {
+                for argument in initial_args {
+                    visit(argument, false, unsafe_calls)?;
+                }
+                visit(body, false, unsafe_calls)
+            }
+            core::ExprKind::ControlContinue { args, .. } => {
+                for argument in args {
+                    visit(argument, false, unsafe_calls)?;
+                }
+                Ok(())
             }
             core::ExprKind::Project { subject, copy, .. } => {
                 if !copy {

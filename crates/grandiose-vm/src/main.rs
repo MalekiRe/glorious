@@ -19,7 +19,7 @@ use supervisor::{
     MEMORY_REPORT_FD_ENV, SupervisorError, SupervisorLimits, WorkerTermination, run_worker,
 };
 
-const USAGE: &str = "usage:\n  grvm --capabilities\n  grvm verify FILE\n  grvm run [--seed-identity ID] [--time-limit 120s] [--memory-limit 4096MiB] [--allow CAPABILITY]... FILE [-- args...]";
+const USAGE: &str = "usage:\n  grvm --capabilities\n  grvm verify FILE\n  grvm functions FILE [PATTERN]\n  grvm inspect FILE FUNCTION PC [RADIUS]\n  grvm verify-seeded FILE\n  grvm complete-seeded FILE OUTPUT\n  grvm inspect-seeded FILE FUNCTION PC [RADIUS]\n  grvm run [--seed-identity ID] [--time-limit 120s] [--memory-limit 4096MiB] [--allow CAPABILITY]... FILE [-- args...]";
 const DEFAULT_WALL_TIME: Duration = Duration::from_secs(120);
 const DEFAULT_ADDRESS_SPACE_BYTES: u64 = 4096 * 1024 * 1024;
 
@@ -148,6 +148,27 @@ fn main() -> ExitCode {
 enum Cli {
     Capabilities,
     Verify(PathBuf),
+    Functions {
+        file: PathBuf,
+        pattern: Option<String>,
+    },
+    Inspect {
+        file: PathBuf,
+        function: u32,
+        pc: u32,
+        radius: u32,
+    },
+    VerifySeeded(PathBuf),
+    CompleteSeeded {
+        file: PathBuf,
+        output: PathBuf,
+    },
+    InspectSeeded {
+        file: PathBuf,
+        function: u32,
+        pc: u32,
+        radius: u32,
+    },
     Run {
         file: PathBuf,
         args: Vec<OsString>,
@@ -180,11 +201,91 @@ fn parse(mut args: Vec<OsString>) -> Result<Cli, String> {
             }
             Ok(Cli::Verify(PathBuf::from(args.remove(0))))
         }
+        Some("functions") => {
+            if !(1..=2).contains(&args.len()) {
+                return Err("functions expects FILE and an optional PATTERN".into());
+            }
+            let file = PathBuf::from(args.remove(0));
+            let pattern = args
+                .pop()
+                .map(|pattern| {
+                    pattern
+                        .into_string()
+                        .map_err(|_| "PATTERN must be valid UTF-8".to_string())
+                })
+                .transpose()?;
+            Ok(Cli::Functions { file, pattern })
+        }
+        Some("inspect") => {
+            if !(3..=4).contains(&args.len()) {
+                return Err(
+                    "inspect expects FILE, FUNCTION, PC, and an optional RADIUS".into(),
+                );
+            }
+            let file = PathBuf::from(args.remove(0));
+            let function = decimal_u32(args.remove(0), "FUNCTION")?;
+            let pc = decimal_u32(args.remove(0), "PC")?;
+            let radius = if args.is_empty() {
+                12
+            } else {
+                decimal_u32(args.remove(0), "RADIUS")?
+            };
+            Ok(Cli::Inspect {
+                file,
+                function,
+                pc,
+                radius,
+            })
+        }
+        Some("verify-seeded") => {
+            if args.len() != 1 {
+                return Err("verify-seeded expects exactly one pre-oracle bytecode file".into());
+            }
+            Ok(Cli::VerifySeeded(PathBuf::from(args.remove(0))))
+        }
+        Some("complete-seeded") => {
+            if args.len() != 2 {
+                return Err("complete-seeded expects an input and output file".into());
+            }
+            Ok(Cli::CompleteSeeded {
+                file: PathBuf::from(args.remove(0)),
+                output: PathBuf::from(args.remove(0)),
+            })
+        }
+        Some("inspect-seeded") => {
+            if !(3..=4).contains(&args.len()) {
+                return Err(
+                    "inspect-seeded expects FILE, FUNCTION, PC, and an optional RADIUS".into(),
+                );
+            }
+            let file = PathBuf::from(args.remove(0));
+            let function = decimal_u32(args.remove(0), "FUNCTION")?;
+            let pc = decimal_u32(args.remove(0), "PC")?;
+            let radius = if args.is_empty() {
+                12
+            } else {
+                decimal_u32(args.remove(0), "RADIUS")?
+            };
+            Ok(Cli::InspectSeeded {
+                file,
+                function,
+                pc,
+                radius,
+            })
+        }
         Some("run") => parse_run(args),
         Some("__worker") => parse_worker(args),
         Some(command) => Err(format!("unknown command `{command}`")),
         None => Err("command is not valid UTF-8".into()),
     }
+}
+
+fn decimal_u32(value: OsString, name: &str) -> Result<u32, String> {
+    let text = value
+        .to_str()
+        .ok_or_else(|| format!("{name} is not valid UTF-8"))?;
+    text.parse::<u32>()
+        .map_err(|_| format!("{name} must be an unsigned 32-bit decimal integer"))
 }
 
 fn parse_run(args: Vec<OsString>) -> Result<Cli, String> {
@@ -336,6 +437,21 @@ fn dispatch(command: Cli) -> u8 {
             0
         }
         Cli::Verify(file) => report(verify_file(&file)),
+        Cli::Functions { file, pattern } => report(list_functions(&file, pattern.as_deref())),
+        Cli::Inspect {
+            file,
+            function,
+            pc,
+            radius,
+        } => report(inspect_file(&file, function, pc, radius)),
+        Cli::VerifySeeded(file) => report(verify_seeded_file(&file)),
+        Cli::CompleteSeeded { file, output } => report(complete_seeded_file(&file, &output)),
+        Cli::InspectSeeded {
+            file,
+            function,
+            pc,
+            radius,
+        } => report(inspect_seeded_file(&file, function, pc, radius)),
         Cli::Worker { file, args, grants } => report(run_file(&file, args, grants)),
         Cli::Run {
             file,
@@ -400,6 +516,150 @@ fn verify_file(path: &Path) -> Result<u8, AppError> {
     Ok(0)
 }
 
+fn list_functions(path: &Path, pattern: Option<&str>) -> Result<u8, AppError> {
+    let artifact = load(path)?;
+    for (index, function) in artifact.artifact().functions.iter().enumerate() {
+        if pattern.is_none_or(|pattern| function.name.contains(pattern)) {
+            println!(
+                "{index}\t{}\tcode={}\tregisters={}",
+                function.name,
+                function.code_len,
+                function.register_types.len()
+            );
+        }
+    }
+    Ok(0)
+}
+
+fn verify_seeded_file(path: &Path) -> Result<u8, AppError> {
+    let artifact = decode_seeded_file(path)?;
+    grandiose_vm::verify::with_compiler_seeded_cleanup_plans_unverified(artifact)
+        .map_err(AppError::Verify)?;
+    Ok(0)
+}
+
+fn complete_seeded_file(path: &Path, output: &Path) -> Result<u8, AppError> {
+    let artifact = decode_seeded_file(path)?;
+    let artifact = grandiose_vm::verify::with_compiler_seeded_cleanup_plans(artifact)
+        .map_err(AppError::Verify)?;
+    fs::write(output, artifact.encode()).map_err(|source| AppError::Write {
+        path: output.to_owned(),
+        source,
+    })?;
+    Ok(0)
+}
+
+fn decode_seeded_file(path: &Path) -> Result<grandiose_vm::Artifact, AppError> {
+    let bytes = fs::read(path).map_err(|source| AppError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut register_type_path = path.as_os_str().to_owned();
+    register_type_path.push(".types");
+    let register_type_path = PathBuf::from(register_type_path);
+    let register_type_bytes = fs::read(&register_type_path).map_err(|source| AppError::Read {
+        path: register_type_path,
+        source,
+    })?;
+    let register_types = decode_register_type_hints(&register_type_bytes)?;
+    grandiose_vm::Artifact::decode_with_register_type_hints(&bytes, &register_types)
+        .map_err(AppError::Decode)
+}
+
+fn inspect_seeded_file(path: &Path, function: u32, pc: u32, radius: u32) -> Result<u8, AppError> {
+    let artifact = decode_seeded_file(path)?;
+    inspect_artifact(&artifact, function, pc, radius)
+}
+
+fn inspect_file(path: &Path, function: u32, pc: u32, radius: u32) -> Result<u8, AppError> {
+    let artifact = load(path)?;
+    inspect_artifact(artifact.artifact(), function, pc, radius)
+}
+
+fn inspect_artifact(
+    artifact: &grandiose_vm::Artifact,
+    function: u32,
+    pc: u32,
+    radius: u32,
+) -> Result<u8, AppError> {
+    let descriptor = artifact
+        .functions
+        .get(function as usize)
+        .ok_or(AppError::Inspect("function index is out of range"))?;
+    if pc >= descriptor.code_len {
+        return Err(AppError::Inspect("PC is outside the selected function"));
+    }
+    let first = pc.saturating_sub(radius);
+    let last = pc
+        .saturating_add(radius)
+        .saturating_add(1)
+        .min(descriptor.code_len);
+    println!(
+        "function {function} `{}` pc {pc}; code_len={} registers={}",
+        descriptor.name,
+        descriptor.code_len,
+        descriptor.register_types.len()
+    );
+    let reference_return_contract = artifact
+        .reference_return_contracts
+        .iter()
+        .find(|contract| contract.function == function);
+    println!(
+        "  receiver={:?} params={:?} result={} outward={:?}",
+        descriptor.receiver_mode,
+        descriptor.params,
+        descriptor.return_type,
+        descriptor.outward_protocols
+    );
+    println!("  reference_return_contract={reference_return_contract:?}");
+    let start = descriptor.code_start as usize;
+    for ordinal in first..last {
+        let marker = if ordinal == pc { '>' } else { ' ' };
+        println!(
+            "{marker} {ordinal}: {:?}",
+            artifact.code[start + ordinal as usize]
+        );
+    }
+    Ok(0)
+}
+
+fn decode_register_type_hints(bytes: &[u8]) -> Result<Vec<Vec<u32>>, AppError> {
+    if bytes.get(..8) != Some(b"G1RT1\0\0\0") {
+        return Err(AppError::Decode(DecodeError::InvalidTable(
+            "pre-oracle register types",
+        )));
+    }
+    let mut cursor = 8usize;
+    let read_u32 = |cursor: &mut usize| -> Option<u32> {
+        let end = cursor.checked_add(4)?;
+        let word = bytes.get(*cursor..end)?;
+        *cursor = end;
+        Some(u32::from_le_bytes(word.try_into().ok()?))
+    };
+    let function_count = read_u32(&mut cursor)
+        .ok_or_else(|| AppError::Decode(DecodeError::InvalidTable("pre-oracle register types")))?
+        as usize;
+    let mut functions = Vec::with_capacity(function_count);
+    for _ in 0..function_count {
+        let register_count = read_u32(&mut cursor).ok_or_else(|| {
+            AppError::Decode(DecodeError::InvalidTable("pre-oracle register types"))
+        })? as usize;
+        let mut registers = Vec::with_capacity(register_count);
+        for _ in 0..register_count {
+            registers.push(read_u32(&mut cursor).ok_or_else(|| {
+                AppError::Decode(DecodeError::InvalidTable("pre-oracle register types"))
+            })?);
+        }
+        functions.push(registers);
+    }
+    if cursor != bytes.len() {
+        return Err(AppError::Decode(DecodeError::InvalidTable(
+            "pre-oracle register types",
+        )));
+    }
+    Ok(functions)
+}
+
 fn run_file(path: &Path, args: Vec<OsString>, grants: Vec<String>) -> Result<u8, AppError> {
     let artifact = load(path)?;
     let entry = artifact.entry_function().ok_or(AppError::MissingEntry)?;
@@ -444,12 +704,17 @@ enum AppError {
         path: PathBuf,
         source: std::io::Error,
     },
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     Decode(DecodeError),
     Verify(VerifyError),
     Runtime(RuntimeError),
     HostLink(HostLinkError),
     MissingEntry,
     InvalidResult(Value),
+    Inspect(&'static str),
     SupervisorExecutable(std::io::Error),
     Supervisor(SupervisorError),
 }
@@ -458,6 +723,7 @@ impl AppError {
     fn kind(&self) -> &'static str {
         match self {
             Self::Read { .. } => "input",
+            Self::Write { .. } => "output",
             Self::Decode(
                 DecodeError::UnsupportedMajor(_)
                 | DecodeError::UnsupportedFeatures { .. }
@@ -484,6 +750,7 @@ impl AppError {
             Self::HostLink(_) => "host-link",
             Self::MissingEntry => "entry",
             Self::InvalidResult(_) => "result",
+            Self::Inspect(_) => "inspect",
             Self::SupervisorExecutable(_) | Self::Supervisor(_) => "supervisor",
         }
     }
@@ -502,6 +769,9 @@ impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Read { path, source } => write!(f, "could not read {}: {source}", path.display()),
+            Self::Write { path, source } => {
+                write!(f, "could not write {}: {source}", path.display())
+            }
             Self::Decode(error) => error.fmt(f),
             Self::Verify(error) => error.fmt(f),
             Self::Runtime(error) => error.fmt(f),
@@ -511,6 +781,7 @@ impl fmt::Display for AppError {
                 f,
                 "entry function returned {value:?}; generation-1 executable entries must return unit"
             ),
+            Self::Inspect(message) => f.write_str(message),
             Self::SupervisorExecutable(error) => {
                 write!(f, "could not locate the grvm executable: {error}")
             }
@@ -580,6 +851,76 @@ mod tests {
             parse(strings(&["verify", "program.grbc"])),
             Ok(Cli::Verify("program.grbc".into()))
         );
+    }
+
+    #[test]
+    fn parses_seeded_verifier_replay() {
+        assert_eq!(
+            parse(strings(&["verify-seeded", "pre-oracle.grbc"])),
+            Ok(Cli::VerifySeeded("pre-oracle.grbc".into()))
+        );
+    }
+
+    #[test]
+    fn parses_seeded_cleanup_completion() {
+        assert_eq!(
+            parse(strings(&[
+                "complete-seeded",
+                "pre-oracle.grbc",
+                "stage1.grbc",
+            ])),
+            Ok(Cli::CompleteSeeded {
+                file: "pre-oracle.grbc".into(),
+                output: "stage1.grbc".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_seeded_instruction_inspection() {
+        assert_eq!(
+            parse(strings(&[
+                "inspect-seeded",
+                "pre-oracle.grbc",
+                "1110",
+                "622",
+            ])),
+            Ok(Cli::InspectSeeded {
+                file: "pre-oracle.grbc".into(),
+                function: 1110,
+                pc: 622,
+                radius: 12,
+            })
+        );
+        assert_eq!(
+            parse(strings(&[
+                "inspect-seeded",
+                "pre-oracle.grbc",
+                "1110",
+                "622",
+                "4",
+            ])),
+            Ok(Cli::InspectSeeded {
+                file: "pre-oracle.grbc".into(),
+                function: 1110,
+                pc: 622,
+                radius: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_seeded_register_type_sidecar() {
+        let mut bytes = b"G1RT1\0\0\0".to_vec();
+        for word in [2_u32, 2, 0, 19, 1, 7] {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(
+            decode_register_type_hints(&bytes).unwrap(),
+            vec![vec![0, 19], vec![7]]
+        );
+        bytes.push(0);
+        assert!(decode_register_type_hints(&bytes).is_err());
     }
 
     #[test]

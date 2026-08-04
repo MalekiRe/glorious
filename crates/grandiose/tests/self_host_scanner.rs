@@ -252,7 +252,7 @@ fn scan_range(
                 let function_effect_set = kind == ShellKind::Function
                     && delimiter == 3
                     && index > marker
-                    && matches!(tokens[index - 1].kind, TokenKind::Slash);
+                    && matches!(tokens[index - 1].kind, TokenKind::Slash | TokenKind::Eq);
                 if delimiter == 3 && stack.is_empty() && !semicolon_style && !function_effect_set {
                     terminator = Some((index, true));
                     break;
@@ -464,6 +464,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "struct Pair<T> { left: T, right: T } enum Maybe<T> { None, Some(T) }",
         "trait Show<T> { show(T) String; } impl<T> Show<T> for T { show(x: T) { x } }",
         "pub apply<T>(value: T, f: (T) U) U where { U: Use } { f(value) }",
+        "apply<F, e: EffectRow>(f: F) -> () where F: Fn<(), Output=(), Effects={| e}> { f() }",
         "broken() { ([)] }",
         "mod unfinished { value() { () }",
         "let bad = \"unfinished",

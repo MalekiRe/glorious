@@ -227,6 +227,29 @@ fn moves_partial_moves_and_reinitialization_execute_identically_at_all_levels() 
 }
 
 #[test]
+fn refinement_join_drops_a_struct_that_is_full_on_one_edge_and_empty_on_another() {
+    let source = r#"
+        struct Probe { index: i64, found: Bool }
+        run() -> i64 {
+            let probe = Probe { index: 42, found: 1 == 1 };
+            handle move probe.found {
+                Result::Err(_) => 0,
+                Result::Ok(_) => {
+                    let index = move probe.index;
+                    handle index == 42 {
+                        Result::Ok(_) => move index,
+                        Result::Err(_) => 0
+                    }
+                }
+            }
+        }
+        main() -> { () }
+    "#;
+    let phases = phases_at(source, OptimizationLevel::O2);
+    assert_eq!(run_main(&phases), Value::I64(42));
+}
+
+#[test]
 fn borrows_and_loan_expiry_execute_identically_at_all_levels() {
     let source = r#"
         read(value: &i64) -> i64 { *value }

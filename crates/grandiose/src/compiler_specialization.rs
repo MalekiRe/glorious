@@ -15,6 +15,7 @@ use crate::ast::{
     GenericParamKind, GoalArgument, GoalPolarity, PatternKind, Program, Stmt, TypeSyntax,
     TypeSyntaxKind, UnaryOp, pattern_field_index, visit_expr_preorder, walk_expr,
 };
+use crate::compiler::decode_nominal_instance;
 use crate::compiler_traits::{
     AssociatedValue, ConstValue, GenericArg, GenericParameterKind, IntrinsicRole, LifetimeArg,
     ParamEnv, SolveResult, SolverBudget, TraitDb, TraitFact, TraitKey,
@@ -50,6 +51,7 @@ pub(crate) enum SpecializationArgument {
         Vec<ClosureCapture>,
         ParamEnv,
         BTreeMap<String, ProvisionalType>,
+        BTreeMap<String, Vec<ClosureRequest>>,
     ),
 }
 
@@ -62,6 +64,8 @@ pub(crate) fn contains_late_callable(ty: &ProvisionalType) -> bool {
 fn late_specialization(key: &SpecializationKey) -> bool {
     key.arguments.iter().any(|argument| {
         matches!(argument, SpecializationArgument::Type(ty) if contains_late_callable(ty))
+            || matches!(argument, SpecializationArgument::Closure(_, _, _, _, active_labels, _)
+                if !active_labels.is_empty())
     })
 }
 
@@ -103,6 +107,9 @@ pub(crate) struct ClosureRequest {
     pub(crate) captures: Vec<ClosureCapture>,
     pub(crate) param_env: ParamEnv,
     pub(crate) active_labels: BTreeMap<String, ProvisionalType>,
+    /// Exact callable identities captured only for static beta reduction.
+    /// These are proof values, not fields in the runtime closure environment.
+    pub(crate) static_captures: BTreeMap<String, Vec<ClosureRequest>>,
 }
 
 /// Stable source identity for a recursive closure binding. Recursive calls
@@ -159,6 +166,8 @@ fn contains_late_callable_captures(request: &ClosureRequest) -> bool {
         .captures
         .iter()
         .any(|capture| contains_late_callable(&capture.ty))
+        || request.shape.params.iter().any(contains_late_callable)
+        || contains_late_callable(&request.shape.result)
 }
 
 fn compatible_sealed_producer_contracts(
@@ -166,14 +175,17 @@ fn compatible_sealed_producer_contracts(
     left_captures: &[ClosureCapture],
     left_environment: &ParamEnv,
     left_labels: &BTreeMap<String, ProvisionalType>,
+    left_static: &BTreeMap<String, Vec<ClosureRequest>>,
     right_shape: &CallableShape,
     right_captures: &[ClosureCapture],
     right_environment: &ParamEnv,
     right_labels: &BTreeMap<String, ProvisionalType>,
+    right_static: &BTreeMap<String, Vec<ClosureRequest>>,
 ) -> bool {
     left_shape == right_shape
         && left_environment == right_environment
         && left_labels == right_labels
+        && left_static == right_static
         && left_captures.len() == right_captures.len()
         && left_captures
             .iter()
@@ -305,6 +317,10 @@ pub(crate) fn emission_plan(
         .graph
         .closure_bodies
         .keys()
+        // A closure that references a generative destination is proof-only
+        // control syntax. It must be beta-reduced into that destination's
+        // frame and therefore has no independently emittable runtime body.
+        .filter(|request| request.active_labels.is_empty() && request.static_captures.is_empty())
         .filter(|request| {
             retained_sources.is_none_or(|sources| sources.contains(&request.site.owner))
                 || matches!(
@@ -657,17 +673,26 @@ fn specialization_argument_embeds(
             specialization_type_embeds(left, right)
         }
         (
-            SpecializationArgument::Closure(_, left, left_captures, left_environment, left_labels),
+            SpecializationArgument::Closure(
+                _,
+                left,
+                left_captures,
+                left_environment,
+                left_labels,
+                left_static,
+            ),
             SpecializationArgument::Closure(
                 _,
                 right,
                 right_captures,
                 right_environment,
                 right_labels,
+                right_static,
             ),
         ) => {
             left_environment == right_environment
                 && left_labels == right_labels
+                && left_static == right_static
                 && left_captures.len() == right_captures.len()
                 && left_captures
                     .iter()
@@ -1787,6 +1812,8 @@ fn discover_templates(
         match &expression.kind {
             ExprKind::Call(callee, arguments) => {
                 let callee_name = variable_name(callee);
+                let callee_callable_positions =
+                    callee_name.and_then(|name| callable_positions.get(name));
                 let mut invoked = callee_name.is_some_and(|name| aliases.contains(name));
                 for (index, argument) in arguments.iter().enumerate() {
                     if let Some(alias) = variable_name(argument)
@@ -1804,6 +1831,23 @@ fn discover_templates(
                             None if !invoked => invoked = true,
                             None => {}
                         }
+                    } else if callee_callable_positions.and_then(|positions| positions.get(index))
+                        == Some(&true)
+                        && match &argument.kind {
+                            ExprKind::Closure { body, .. }
+                            | ExprKind::TypedClosure { body, .. } => {
+                                let mut nested_dependencies = BTreeSet::new();
+                                callable_use_summary(
+                                    body,
+                                    aliases,
+                                    callable_positions,
+                                    &mut nested_dependencies,
+                                )
+                            }
+                            _ => false,
+                        }
+                    {
+                        dependencies.insert((callee_name.unwrap().to_owned(), index));
                     } else {
                         invoked |= callable_use_summary(
                             argument,
@@ -2202,6 +2246,19 @@ fn substitute_preserving_missing(
     .ok()
 }
 
+fn collapse_type_substitution_chains(
+    substitutions: &mut BTreeMap<GenericParamKey, SpecializationArgument>,
+) {
+    let available = substitutions.clone();
+    for argument in substitutions.values_mut() {
+        if let SpecializationArgument::Type(ty) = argument
+            && let Some(resolved) = substitute_preserving_missing(ty, &available)
+        {
+            *ty = resolved;
+        }
+    }
+}
+
 /// Controls whether an incomplete contextual type preserves rigid parameters
 /// owned by its generic caller. Recursively resolving a substitution value
 /// always preserves such a rigid tail.
@@ -2241,7 +2298,7 @@ impl ProvisionalTypeFolder for SubstitutionFolder<'_> {
             self.missing = MissingParameter::Preserve;
             let resolved = match &argument {
                 SpecializationArgument::Type(value) => self.fold_type(value),
-                SpecializationArgument::Closure(_, shape, _, _, _) => {
+                SpecializationArgument::Closure(_, shape, _, _, _, _) => {
                     Ok(ProvisionalType::Callable(shape.clone()))
                 }
                 SpecializationArgument::EffectRow(_) => Err(()),
@@ -2381,7 +2438,7 @@ fn bind(
     match formal {
         ProvisionalType::Param(key) => match substitutions.get(key) {
             Some(SpecializationArgument::Type(existing)) => existing == actual,
-            Some(SpecializationArgument::Closure(_, shape, _, _, _)) => {
+            Some(SpecializationArgument::Closure(_, shape, _, _, _, _)) => {
                 actual == &ProvisionalType::Callable(shape.clone())
             }
             Some(SpecializationArgument::EffectRow(_)) => false,
@@ -2435,7 +2492,7 @@ fn inference_occurs(
                 SpecializationArgument::Type(ty) => {
                     inference_occurs(key, ty, substitutions, visiting)
                 }
-                SpecializationArgument::Closure(_, shape, _, _, _) => {
+                SpecializationArgument::Closure(_, shape, _, _, _, _) => {
                     shape
                         .params
                         .iter()
@@ -2447,6 +2504,67 @@ fn inference_occurs(
         visiting.remove(candidate);
         occurs
     })
+}
+
+/// Recover the structural identity hidden behind a post-instantiation ground
+/// nominal declaration. Specialization discovery normally reasons about
+/// generic source heads (`Vec<T>`, `Result<T, E>`), but a nested expression may
+/// already expose the generated monomorphic declaration name. Treating that
+/// name as an unrelated zero-argument nominal loses otherwise exact inference
+/// evidence at calls such as `Vec::truncate(&mut grounded_vec, length)`.
+fn expand_ground_nominals(ty: &ProvisionalType) -> ProvisionalType {
+    match ty {
+        ProvisionalType::Nominal(instance) if instance.arguments.is_empty() => {
+            decode_nominal_instance(&instance.declaration.0)
+                .map(|instance| expand_ground_nominals(&ProvisionalType::Nominal(instance)))
+                .unwrap_or_else(|| ty.clone())
+        }
+        ProvisionalType::Nominal(instance) => ProvisionalType::Nominal(NominalInstanceKey {
+            declaration: instance.declaration.clone(),
+            arguments: instance
+                .arguments
+                .iter()
+                .map(expand_ground_nominals)
+                .collect(),
+        }),
+        ProvisionalType::Shared(referent) => {
+            ProvisionalType::shared(expand_ground_nominals(referent))
+        }
+        ProvisionalType::Unique(referent) => {
+            ProvisionalType::unique(expand_ground_nominals(referent))
+        }
+        ProvisionalType::Tuple(elements) if elements.is_empty() => {
+            ProvisionalType::Predefined("Unit".into())
+        }
+        ProvisionalType::Tuple(elements) => {
+            ProvisionalType::Tuple(elements.iter().map(expand_ground_nominals).collect())
+        }
+        ProvisionalType::Callable(shape) => ProvisionalType::Callable(Box::new(CallableShape {
+            params: shape.params.iter().map(expand_ground_nominals).collect(),
+            result: expand_ground_nominals(&shape.result),
+            effects: shape
+                .effects
+                .iter()
+                .map(|effect| crate::compiler_typeck::CallableEffect {
+                    declaration: effect.declaration.clone(),
+                    arguments: effect
+                        .arguments
+                        .iter()
+                        .map(expand_ground_nominals)
+                        .collect(),
+                })
+                .collect(),
+            effect_tail: shape.effect_tail.clone(),
+            infer_effects: shape.infer_effects,
+        })),
+        ProvisionalType::Predefined(_) | ProvisionalType::Const(_) | ProvisionalType::Param(_) => {
+            ty.clone()
+        }
+    }
+}
+
+fn equivalent_specialization_type(left: &ProvisionalType, right: &ProvisionalType) -> bool {
+    left == right || expand_ground_nominals(left) == expand_ground_nominals(right)
 }
 
 fn unify_inference_with_rigid_mode(
@@ -2463,14 +2581,14 @@ fn unify_inference_with_rigid_mode(
         match ty {
             ProvisionalType::Param(key) => match substitutions.get(key) {
                 Some(SpecializationArgument::Type(value)) if value != ty => {
-                    resolve(value, substitutions)
+                    expand_ground_nominals(&resolve(value, substitutions))
                 }
-                Some(SpecializationArgument::Closure(_, shape, _, _, _)) => {
+                Some(SpecializationArgument::Closure(_, shape, _, _, _, _)) => {
                     ProvisionalType::Callable(shape.clone())
                 }
                 _ => ty.clone(),
             },
-            _ => ty.clone(),
+            _ => expand_ground_nominals(ty),
         }
     }
     fn bind_var(
@@ -5028,7 +5146,7 @@ impl<'a> Walker<'a> {
             return Some(false);
         };
         let principal = match exact_argument {
-            Some(SpecializationArgument::Closure(_, shape, captures, _, _))
+            Some(SpecializationArgument::Closure(_, shape, captures, _, _, _))
                 if subject == &ProvisionalType::Callable(shape.clone()) =>
             {
                 let mut environment_zero_use = true;
@@ -5412,6 +5530,7 @@ impl<'a> Walker<'a> {
             captures: Vec::new(),
             param_env: self.param_env.clone(),
             active_labels: item.active_labels,
+            static_captures: BTreeMap::new(),
         };
         self.discovery
             .graph
@@ -5506,6 +5625,7 @@ impl<'a> Walker<'a> {
         };
         let outer = self.bindings.clone();
         let mut captures = Vec::new();
+        let mut static_captures = BTreeMap::new();
         let mut late = false;
         for (name, mut mode) in captured_outer_uses(body, &outer, &params) {
             if let Some(LocalBinding::RecursiveSelf(recursive_self, _)) = self.locals.get(&name)
@@ -5515,13 +5635,35 @@ impl<'a> Walker<'a> {
                 // binding is planning evidence, never an environment field.
                 continue;
             }
-            let Some(LocalBinding::Type(ty)) = self.locals.get(&name) else {
-                self.error(format!(
-                    "captureful closure specialization: closure capture `{name}` is not an ordinary typed local"
-                ));
-                return None;
+            let ty = match self.locals.get(&name) {
+                Some(LocalBinding::Type(ty)) => ty.clone(),
+                Some(LocalBinding::Closure(request)) => {
+                    // A control wrapper commonly builds a short-lived closure
+                    // around one of its own Fn-bound parameters. The captured
+                    // callable identity is static during late control
+                    // inlining, but discovery still has to validate the
+                    // nested closure before Core beta-reduces it. Retain the
+                    // callable shape as late evidence instead of demanding an
+                    // ordinary runtime local.
+                    static_captures.insert(name, vec![request.clone()]);
+                    continue;
+                }
+                Some(LocalBinding::ClosureSet(requests))
+                    if requests.first().is_some_and(|first| {
+                        requests.iter().all(|request| request.shape == first.shape)
+                    }) =>
+                {
+                    static_captures.insert(name, requests.clone());
+                    continue;
+                }
+                _ => {
+                    self.error(format!(
+                        "captureful closure specialization: closure capture `{name}` is not an ordinary typed local or one statically known callable"
+                    ));
+                    return None;
+                }
             };
-            let ty = substitute(ty, substitutions).unwrap_or_else(|| ty.clone());
+            let ty = substitute(&ty, substitutions).unwrap_or(ty);
             if mode == CaptureMode::Observe
                 && matches!(ty, ProvisionalType::Unique(_))
                 && passed_as_unique_call_argument(body, &name, self.templates)
@@ -5634,12 +5776,31 @@ impl<'a> Walker<'a> {
                 .insert(capture.name.clone(), LocalBinding::Type(capture.ty.clone()));
             self.bindings.insert(capture.name.clone());
         }
+        for (name, requests) in &static_captures {
+            let binding = if requests.len() == 1 {
+                LocalBinding::Closure(requests[0].clone())
+            } else {
+                LocalBinding::ClosureSet(requests.clone())
+            };
+            self.locals.insert(name.clone(), binding);
+            self.bindings.insert(name.clone());
+        }
         for (name, ty) in params.iter().zip(&expected.params) {
             let ty = substitute(ty, substitutions).unwrap_or_else(|| ty.clone());
             self.locals.insert(name.clone(), LocalBinding::Type(ty));
             self.bindings.insert(name.clone());
         }
         let saved_recording = self.recording;
+        let saved_symbolic_validation = self.symbolic_validation;
+        // Static control callbacks may close over another exact callback.
+        // Their callable identity is intentionally unavailable as a runtime
+        // local because Core lowering beta-reduces both layers. Validate the
+        // nested body from its exact callable shape and defer identity checks
+        // to that control-inlining step.
+        self.symbolic_validation |= !static_captures.is_empty()
+            || captures
+                .iter()
+                .any(|capture| contains_late_callable(&capture.ty));
         self.recording = false;
         let expected_result =
             substitute(&expected.result, substitutions).unwrap_or_else(|| expected.result.clone());
@@ -5701,6 +5862,7 @@ impl<'a> Walker<'a> {
                 (result, effects)
             });
         self.recording = saved_recording;
+        self.symbolic_validation = saved_symbolic_validation;
         self.locals = saved;
         self.bindings = saved_bindings;
         let actual_result = actual_result?;
@@ -5820,7 +5982,9 @@ impl<'a> Walker<'a> {
             captures,
             param_env: self.param_env.clone(),
             active_labels: referenced_active_labels(body, &self.active_labels),
+            static_captures,
         };
+        let late = late || contains_late_callable_captures(&request);
         if let Some(recursive_self) = &self.active_recursive_self {
             let validation_body = self.body_instance.clone();
             let calls = self
@@ -6273,7 +6437,7 @@ impl<'a> Walker<'a> {
             .iter()
             .map(|param| match substitutions.get(param)? {
                 SpecializationArgument::Type(ty) => Some(ty.clone()),
-                SpecializationArgument::Closure(_, shape, _, _, _) => {
+                SpecializationArgument::Closure(_, shape, _, _, _, _) => {
                     Some(ProvisionalType::Callable(shape.clone()))
                 }
                 SpecializationArgument::EffectRow(_) => None,
@@ -6412,6 +6576,7 @@ impl<'a> Walker<'a> {
                         closure.captures.clone(),
                         closure.param_env.clone(),
                         closure.active_labels.clone(),
+                        closure.static_captures.clone(),
                     ),
                 );
                 if let Some(ClosureTupleField::ClosureSet(closures)) = &exact_callable {
@@ -6451,7 +6616,7 @@ impl<'a> Walker<'a> {
                 {
                     Some(ty.clone())
                 }
-                Some(SpecializationArgument::Closure(_, shape, _, _, _)) => {
+                Some(SpecializationArgument::Closure(_, shape, _, _, _, _)) => {
                     Some(ProvisionalType::Callable(shape.clone()))
                 }
                 _ => None,
@@ -6486,12 +6651,14 @@ impl<'a> Walker<'a> {
                             captures,
                             environment,
                             active_labels,
+                            static_captures,
                         ) => Some(ClosureTupleField::Closure(ClosureRequest {
                             site: site.clone(),
                             shape: shape.clone(),
                             captures: captures.clone(),
                             param_env: environment.clone(),
                             active_labels: active_labels.clone(),
+                            static_captures: static_captures.clone(),
                         })),
                         SpecializationArgument::EffectRow(_) => None,
                     }
@@ -6591,6 +6758,23 @@ impl<'a> Walker<'a> {
         expected: Option<&ProvisionalType>,
         requested_receiver_mode: Option<u32>,
     ) -> Option<ProvisionalType> {
+        // A call nested in a specialized generic body may receive contextual
+        // evidence that still uses the caller template's rigid binders. Those
+        // binders are mutable only for the caller, but they are already fixed
+        // by its specialization key. Ground that context before using it to
+        // infer the nested callee's result-only parameters (notably parser
+        // transaction helpers whose item type appears in `Fn::Output`).
+        let specialized_expected = match (&self.body_instance, expected) {
+            (BodyInstanceKey::Specialization(key), Some(expected)) => self
+                .templates
+                .get(match &key.template {
+                    DeclarationKey::Function(name) => name,
+                    DeclarationKey::Global(_) => return None,
+                })
+                .and_then(|template| substitute(expected, &substitutions_for_key(template, key))),
+            _ => None,
+        };
+        let expected = specialized_expected.as_ref().or(expected);
         // Resolution may revisit this syntax under a different contextual
         // callable shape. Clear the previous fact before recording the exact
         // target selected by this attempt.
@@ -6614,7 +6798,7 @@ impl<'a> Walker<'a> {
                 return None;
             }
             let actual = self.expression(&args[0], shape.params.first())?;
-            if actual != shape.params[0]
+            if !equivalent_specialization_type(&actual, &shape.params[0])
                 && (!self.symbolic_validation || ground(&actual) && ground(&shape.params[0]))
             {
                 self.error(format!("label parameter `{name}` has an ambiguous payload"));
@@ -6641,7 +6825,7 @@ impl<'a> Walker<'a> {
             }
             for (argument, formal) in args.iter().zip(&shape.params) {
                 let actual = self.expression(argument, Some(formal))?;
-                if actual != *formal
+                if !equivalent_specialization_type(&actual, formal)
                     && (!self.symbolic_validation || ground(&actual) && ground(formal))
                 {
                     self.error(format!(
@@ -6654,7 +6838,7 @@ impl<'a> Walker<'a> {
                 self.symbolically_known_type(expected)
                     && ground(expected)
                     && ground(&shape.result)
-                    && expected != &shape.result
+                    && !equivalent_specialization_type(expected, &shape.result)
             }) && !matches!(
                 shape.result,
                 ProvisionalType::Predefined(ref result) if result == "Never"
@@ -6680,14 +6864,15 @@ impl<'a> Walker<'a> {
             }
             for (argument, formal) in args.iter().zip(&shape.params) {
                 let actual = self.expression(argument, Some(formal))?;
-                if actual != *formal {
+                if !equivalent_specialization_type(&actual, formal) {
                     self.error(format!(
                         "recursive callable `{name}` has an ambiguous argument"
                     ));
                     return None;
                 }
             }
-            if expected.is_some_and(|expected| expected != &shape.result)
+            if expected
+                .is_some_and(|expected| !equivalent_specialization_type(expected, &shape.result))
                 && !matches!(shape.result, ProvisionalType::Predefined(ref name) if name == "Never")
             {
                 self.error(format!(
@@ -6722,13 +6907,16 @@ impl<'a> Walker<'a> {
             }
             for (argument, formal) in args.iter().zip(&shape.params) {
                 let actual = self.expression(argument, Some(formal))?;
-                if actual != *formal {
+                if !equivalent_specialization_type(&actual, formal) {
                     self.error(format!("callable local `{name}` has an ambiguous argument"));
                     return None;
                 }
             }
-            if expected.is_some_and(|expected| expected != &shape.result)
-                && !expected.is_some_and(contains_projection_placeholder)
+            if expected.is_some_and(|expected| {
+                ground(expected)
+                    && ground(&shape.result)
+                    && !equivalent_specialization_type(expected, &shape.result)
+            }) && !expected.is_some_and(contains_projection_placeholder)
                 && !matches!(shape.result, ProvisionalType::Predefined(ref name) if name == "Never")
             {
                 self.error(format!("callable local `{name}` has an ambiguous result"));
@@ -6762,13 +6950,16 @@ impl<'a> Walker<'a> {
             }
             for (argument, formal) in args.iter().zip(&shape.params) {
                 let actual = self.expression(argument, Some(formal))?;
-                if actual != *formal {
+                if !equivalent_specialization_type(&actual, formal) {
                     self.error(format!("callable local `{name}` has an ambiguous argument"));
                     return None;
                 }
             }
-            if expected.is_some_and(|expected| expected != &shape.result)
-                && !expected.is_some_and(contains_projection_placeholder)
+            if expected.is_some_and(|expected| {
+                ground(expected)
+                    && ground(&shape.result)
+                    && !equivalent_specialization_type(expected, &shape.result)
+            }) && !expected.is_some_and(contains_projection_placeholder)
                 && !matches!(
                     shape.result,
                     ProvisionalType::Predefined(ref name) if name == "Never"
@@ -6929,27 +7120,23 @@ impl<'a> Walker<'a> {
         // the empty constructor needs `T`, while the later literal fixes it.
         // The real expression walk below still performs all diagnostics and
         // records every discovery edge exactly once.
-        for defaulting in [false, true] {
-            for (argument, formal) in args.iter().zip(&template.params) {
-                if matches!(formal, ProvisionalType::Callable(_)) {
-                    if !defaulting && let Some(actual) = self.typed_closure_shape(argument) {
-                        let mut trial = substitutions.clone();
-                        if bind(formal, &ProvisionalType::Callable(actual), &mut trial) {
-                            substitutions = trial;
-                        }
-                    }
-                    continue;
-                }
-                if substitute(formal, &substitutions).is_some_and(|ty| ground(&ty)) {
-                    continue;
-                }
-                if let Some((actual, is_default)) = self.obvious_argument_type(argument)
-                    && is_default == defaulting
-                {
+        for (argument, formal) in args.iter().zip(&template.params) {
+            if matches!(formal, ProvisionalType::Callable(_)) {
+                if let Some(actual) = self.typed_closure_shape(argument) {
                     let mut trial = substitutions.clone();
-                    if unify_inference(formal, &actual, &mutable_inference, &mut trial) {
+                    if bind(formal, &ProvisionalType::Callable(actual), &mut trial) {
                         substitutions = trial;
                     }
+                }
+                continue;
+            }
+            if substitute(formal, &substitutions).is_some_and(|ty| ground(&ty)) {
+                continue;
+            }
+            if let Some((actual, false)) = self.obvious_argument_type(argument) {
+                let mut trial = substitutions.clone();
+                if unify_inference(formal, &actual, &mutable_inference, &mut trial) {
+                    substitutions = trial;
                 }
             }
         }
@@ -6976,20 +7163,56 @@ impl<'a> Walker<'a> {
             let Some(subject) = substitute(&constraint_subject, &substitutions) else {
                 continue;
             };
-            let Some(payload) = label_payload_type(&subject) else {
-                continue;
-            };
             let [GenericArg::Type(formal_payload)] = constraint.arguments.as_slice() else {
                 continue;
             };
-            let mut trial = substitutions.clone();
-            if constrain_contextual_inference(
-                formal_payload,
-                payload,
-                &mutable_inference,
-                &mut trial,
-            ) {
-                substitutions = trial;
+
+            let evidence_payloads = label_payload_type(&subject)
+                .cloned()
+                .into_iter()
+                .chain(
+                    self.param_env
+                        .matching_argument_lists(
+                            constraint.polarity,
+                            &constraint.trait_key,
+                            &subject,
+                        )
+                        .into_iter()
+                        .filter_map(|arguments| match arguments.as_slice() {
+                            [GenericArg::Type(payload)] => Some(payload.clone()),
+                            _ => None,
+                        }),
+                )
+                .collect::<Vec<_>>();
+            for payload in evidence_payloads {
+                let mut trial = substitutions.clone();
+                if constrain_contextual_inference(
+                    formal_payload,
+                    &payload,
+                    &mutable_inference,
+                    &mut trial,
+                ) {
+                    substitutions = trial;
+                    break;
+                }
+            }
+        }
+        // Numeric literals are the weakest available evidence. Apply their
+        // language defaults only after exact label payloads have constrained
+        // phantom result/error parameters; otherwise `ensure(false, 7,
+        // @exit)` would choose `i64` before learning the destination's exact
+        // `Result<T, E>` payload.
+        for (argument, formal) in args.iter().zip(&template.params) {
+            if matches!(formal, ProvisionalType::Callable(_))
+                || substitute(formal, &substitutions).is_some_and(|ty| ground(&ty))
+            {
+                continue;
+            }
+            if let Some((actual, true)) = self.obvious_argument_type(argument) {
+                let mut trial = substitutions.clone();
+                if unify_inference(formal, &actual, &mutable_inference, &mut trial) {
+                    substitutions = trial;
+                }
             }
         }
         for (index, (argument, formal)) in args.iter().zip(&template.params).enumerate() {
@@ -7120,15 +7343,18 @@ impl<'a> Walker<'a> {
                             existing_captures,
                             existing_environment,
                             existing_labels,
+                            existing_static,
                         )) if !compatible_sealed_producer_contracts(
                             existing_shape,
                             existing_captures,
                             existing_environment,
                             existing_labels,
+                            existing_static,
                             &closure.shape,
                             &closure.captures,
                             &closure.param_env,
                             &closure.active_labels,
+                            &closure.static_captures,
                         ) =>
                         {
                             let message = "VM-sealed generic callable transport has incompatible producer signature/effect, receiver mode, capture layout, or lifetime environment";
@@ -7161,6 +7387,7 @@ impl<'a> Walker<'a> {
                                     closure.captures.clone(),
                                     closure.param_env.clone(),
                                     closure.active_labels.clone(),
+                                    closure.static_captures.clone(),
                                 ),
                             );
                         }
@@ -7271,6 +7498,33 @@ impl<'a> Walker<'a> {
                 });
             }
         }
+        // Forwarded generic callbacks often expose the caller's item binder
+        // only through an associated `Fn::Output` equality. Rewalking an
+        // already-ground caller specialization can therefore infer a nested
+        // callee argument as that caller-owned rigid parameter. Resolve such
+        // transitive type arguments through the active specialization before
+        // constructing the nested request key.
+        // Contextual inference may first relate one of this callee's result
+        // variables to a temporary variable owned by an enclosing call. A
+        // later callback argument can then solve that enclosing variable to a
+        // concrete type. Collapse those call-local chains before constructing
+        // the key; otherwise an implementation detail such as `commit`'s `T`
+        // leaks into the specialization of its nested `attempt_item` call.
+        collapse_type_substitution_chains(&mut substitutions);
+        if let BodyInstanceKey::Specialization(current) = &self.body_instance
+            && let DeclarationKey::Function(current_name) = &current.template
+            && let Some(current_template) = self.templates.get(current_name)
+        {
+            let current_substitutions = substitutions_for_key(current_template, current);
+            for argument in substitutions.values_mut() {
+                if let SpecializationArgument::Type(ty) = argument
+                    && let Some(grounded) =
+                        substitute_preserving_missing(ty, &current_substitutions)
+                {
+                    *ty = grounded;
+                }
+            }
+        }
         let result = substitute(&template.result, &substitutions).and_then(|result| {
             normalize_projection_placeholders(&result, self.trait_db, self.solver_budget)
         });
@@ -7311,12 +7565,31 @@ impl<'a> Walker<'a> {
                 .trait_db
                 .intrinsic_key(IntrinsicRole::Label)
                 .is_some_and(|key| key == &constraint.trait_key)
-                && let Some(payload) = label_payload_type(&subject)
                 && let [GenericArg::Type(formal_payload)] = constraint.arguments.as_slice()
             {
-                let mut trial = substitutions.clone();
-                if unify_inference(formal_payload, payload, &mutable_inference, &mut trial) {
-                    substitutions = trial;
+                let evidence_payloads = label_payload_type(&subject)
+                    .cloned()
+                    .into_iter()
+                    .chain(
+                        self.param_env
+                            .matching_argument_lists(
+                                constraint.polarity,
+                                &constraint.trait_key,
+                                &subject,
+                            )
+                            .into_iter()
+                            .filter_map(|arguments| match arguments.as_slice() {
+                                [GenericArg::Type(payload)] => Some(payload.clone()),
+                                _ => None,
+                            }),
+                    )
+                    .collect::<Vec<_>>();
+                for payload in evidence_payloads {
+                    let mut trial = substitutions.clone();
+                    if unify_inference(formal_payload, &payload, &mutable_inference, &mut trial) {
+                        substitutions = trial;
+                        break;
+                    }
                 }
             }
             let exact_argument =
@@ -7445,7 +7718,7 @@ impl<'a> Walker<'a> {
         };
         if arguments.iter().any(|argument| match argument {
             SpecializationArgument::Type(ty) => !ground(ty),
-            SpecializationArgument::Closure(_, shape, captures, _, _) => {
+            SpecializationArgument::Closure(_, shape, captures, _, _, _) => {
                 !shape.params.iter().all(ground)
                     || !ground(&shape.result)
                     || captures.iter().any(|capture| !ground(&capture.ty))
@@ -7454,7 +7727,9 @@ impl<'a> Walker<'a> {
                 .iter()
                 .any(|effect| !effect.arguments.iter().all(ground)),
         }) {
-            self.error(format!("call to `{name}` is not fully ground"));
+            self.error(format!(
+                "call to `{name}` is not fully ground: {arguments:?}"
+            ));
             return None;
         }
         let key = SpecializationKey {
@@ -7500,10 +7775,12 @@ impl<'a> Walker<'a> {
                             &first.captures,
                             &first.param_env,
                             &first.active_labels,
+                            &first.static_captures,
                             &producer.shape,
                             &producer.captures,
                             &producer.param_env,
                             &producer.active_labels,
+                            &producer.static_captures,
                         )
                     })
                 });
@@ -7534,6 +7811,7 @@ impl<'a> Walker<'a> {
                     captures,
                     environment,
                     active_labels,
+                    static_captures,
                 )) = substitutions.get(binder)
             {
                 self.discovery.graph.returned_closures.insert(
@@ -7544,6 +7822,7 @@ impl<'a> Walker<'a> {
                         captures: captures.clone(),
                         param_env: environment.clone(),
                         active_labels: active_labels.clone(),
+                        static_captures: static_captures.clone(),
                     },
                 );
             }
@@ -7560,12 +7839,14 @@ impl<'a> Walker<'a> {
                             captures,
                             environment,
                             active_labels,
+                            static_captures,
                         ) => Some(ClosureTupleField::Closure(ClosureRequest {
                             site: site.clone(),
                             shape: shape.clone(),
                             captures: captures.clone(),
                             param_env: environment.clone(),
                             active_labels: active_labels.clone(),
+                            static_captures: static_captures.clone(),
                         })),
                         SpecializationArgument::EffectRow(_) => None,
                     })
@@ -7645,7 +7926,7 @@ impl<'a> Walker<'a> {
                     });
                 let ground_substitutions = substitutions.values().all(|argument| match argument {
                     SpecializationArgument::Type(ty) => ground(ty),
-                    SpecializationArgument::Closure(_, shape, captures, _, _) => {
+                    SpecializationArgument::Closure(_, shape, captures, _, _, _) => {
                         shape.params.iter().all(ground)
                             && ground(&shape.result)
                             && captures.iter().all(|capture| ground(&capture.ty))
@@ -7666,11 +7947,176 @@ impl<'a> Walker<'a> {
         (matches.len() == 1).then(|| matches.pop_first().unwrap())
     }
 
+    /// Type a long source-defined `handle`/pattern chain without consuming one
+    /// Rust stack frame per arm. The ordinary bidirectional path remains in
+    /// charge of short chains and unresolved/callable results, where sibling
+    /// inference and closure-set recording are material. Once the enclosing
+    /// result is ground, every arm has the same complete context and can be
+    /// checked independently while retaining its exact pattern refinement.
+    fn long_ground_refinement_chain(
+        &mut self,
+        source: &Expr,
+        expected: Option<&ProvisionalType>,
+    ) -> Option<Option<ProvisionalType>> {
+        let expected = expected.filter(|expected| {
+            ground(expected) && !matches!(expected, ProvisionalType::Callable(_))
+        })?;
+
+        fn transparent_expression(mut expression: &Expr) -> &Expr {
+            loop {
+                match &expression.kind {
+                    ExprKind::Block(statements) | ExprKind::ContextBlock(statements)
+                        if matches!(statements.as_slice(), [Stmt::Expr(_)]) =>
+                    {
+                        let [Stmt::Expr(value)] = statements.as_slice() else {
+                            unreachable!()
+                        };
+                        expression = value;
+                    }
+                    _ => return expression,
+                }
+            }
+        }
+
+        fn step(expression: &Expr) -> Option<(&Expr, &crate::ast::Pattern, &Expr, &Expr)> {
+            let expression = transparent_expression(expression);
+            let ExprKind::Call(callee, arguments) = &expression.kind else {
+                return None;
+            };
+            let ExprKind::Variable(else_path) = &callee.kind else {
+                return None;
+            };
+            if else_path.len() != 1 || else_path[0].as_ref() != "else" {
+                return None;
+            }
+            let [conditional, negative] = arguments.as_slice() else {
+                return None;
+            };
+            let ExprKind::Call(if_callee, if_arguments) = &conditional.kind else {
+                return None;
+            };
+            let ExprKind::Variable(if_path) = &if_callee.kind else {
+                return None;
+            };
+            if if_path.len() != 1 || if_path[0].as_ref() != "if" {
+                return None;
+            }
+            let [condition, positive] = if_arguments.as_slice() else {
+                return None;
+            };
+            let ExprKind::Is { subject, pattern } = &condition.kind else {
+                return None;
+            };
+            Some((subject, pattern, positive, negative))
+        }
+
+        let mut cursor = source;
+        let mut branches = Vec::new();
+        while let Some((subject, pattern, positive, negative)) = step(cursor) {
+            branches.push((subject, pattern, positive));
+            cursor = negative;
+        }
+        // Below this size the ordinary path is comfortably stack-safe and
+        // retaining one implementation avoids perturbing common programs.
+        if branches.len() < 32 {
+            return None;
+        }
+
+        let saved_locals = self.locals.clone();
+        let saved_bindings = self.bindings.clone();
+        let saved_active_variants = self.active_variants.clone();
+        let mut compatible = true;
+        let mut inferred = None;
+        for (subject, pattern, positive) in branches {
+            self.locals = saved_locals.clone();
+            self.bindings = saved_bindings.clone();
+            self.active_variants = saved_active_variants.clone();
+            let Some(subject_ty) = self.expression(subject, None) else {
+                compatible = false;
+                continue;
+            };
+            if let PatternKind::Variant { path, .. } = &pattern.kind
+                && path.len() == 2
+                && let ExprKind::Unary {
+                    op: UnaryOp::Dereference,
+                    operand,
+                } = &subject.kind
+                && let ExprKind::Variable(local) = &operand.kind
+                && local.len() == 1
+            {
+                self.active_variants
+                    .insert(local[0].to_string(), path[1].clone());
+            }
+            self.bind_handler_pattern(pattern, &subject_ty);
+            let mut branch = self.expression(positive, Some(expected));
+            if self.symbolic_validation || self.may_use_bidirectional_result_fallback(positive) {
+                branch = branch.or_else(|| Some(expected.clone()));
+            }
+            match (&inferred, branch) {
+                (None, Some(branch)) => inferred = Some(branch),
+                (Some(current), Some(branch))
+                    if equivalent_specialization_type(current, &branch) =>
+                {
+                    if !ground(current) {
+                        inferred = Some(branch);
+                    }
+                }
+                (Some(ProvisionalType::Predefined(name)), Some(branch)) if name == "Never" => {
+                    inferred = Some(branch);
+                }
+                (Some(_), Some(ProvisionalType::Predefined(name))) if name == "Never" => {}
+                _ => compatible = false,
+            }
+        }
+        self.locals = saved_locals.clone();
+        self.bindings = saved_bindings.clone();
+        self.active_variants = saved_active_variants.clone();
+        let mut final_branch = self.expression(cursor, Some(expected));
+        if self.symbolic_validation || self.may_use_bidirectional_result_fallback(cursor) {
+            final_branch = final_branch.or_else(|| Some(expected.clone()));
+        }
+        match (&inferred, final_branch) {
+            (None, Some(branch)) => inferred = Some(branch),
+            (Some(current), Some(branch)) if equivalent_specialization_type(current, &branch) => {
+                if !ground(current) {
+                    inferred = Some(branch);
+                }
+            }
+            (Some(ProvisionalType::Predefined(name)), Some(branch)) if name == "Never" => {
+                inferred = Some(branch);
+            }
+            (Some(_), Some(ProvisionalType::Predefined(name))) if name == "Never" => {}
+            _ => compatible = false,
+        }
+        self.locals = saved_locals;
+        self.bindings = saved_bindings;
+        self.active_variants = saved_active_variants;
+        if compatible {
+            Some(inferred)
+        } else {
+            self.error("pattern-refined if branches have incompatible result types");
+            Some(None)
+        }
+    }
+
     fn expression(
         &mut self,
         source: &Expr,
         expected: Option<&ProvisionalType>,
     ) -> Option<ProvisionalType> {
+        stacker::maybe_grow(768 * 1024, 16 * 1024 * 1024, || {
+            self.expression_inner(source, expected)
+        })
+    }
+
+    fn expression_inner(
+        &mut self,
+        source: &Expr,
+        expected: Option<&ProvisionalType>,
+    ) -> Option<ProvisionalType> {
+        if let Some(result) = self.long_ground_refinement_chain(source, expected) {
+            return result;
+        }
         match &source.kind {
             ExprKind::Unit => Some(ProvisionalType::Predefined("Unit".into())),
             ExprKind::Int(_) => Some(
@@ -7997,7 +8443,15 @@ impl<'a> Walker<'a> {
                         }
                     }
                     match (positive_ty, negative_ty) {
-                        (Some(positive), Some(negative)) if positive == negative => Some(positive),
+                        (Some(positive), Some(negative))
+                            if equivalent_specialization_type(&positive, &negative) =>
+                        {
+                            Some(if ground(&positive) {
+                                positive
+                            } else {
+                                negative
+                            })
+                        }
                         (Some(ProvisionalType::Predefined(name)), Some(negative))
                             if name == "Never" =>
                         {
@@ -9424,10 +9878,47 @@ where
                     .escapes
                 }),
             },
-            // Constructing a closure is pure. Its body belongs to a separate
-            // callable summary and must not be charged until that value is
-            // actually invoked.
-            ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => ValueFlow::default(),
+            // Constructing a closure is pure, but the value still transports
+            // any tracked callable captured by its body. Charge the effect
+            // only when a downstream callable summary invokes this closure.
+            ExprKind::Closure { params, body } => {
+                let mut closure_locals = locals.clone();
+                for parameter in params.iter() {
+                    closure_locals.insert(parameter.to_string(), false);
+                }
+                let body = visit(
+                    body,
+                    effect,
+                    handled,
+                    &mut closure_locals,
+                    functions,
+                    summaries,
+                    handler_closes,
+                );
+                ValueFlow {
+                    tracked: body.tracked || body.escapes,
+                    escapes: false,
+                }
+            }
+            ExprKind::TypedClosure { params, body, .. } => {
+                let mut closure_locals = locals.clone();
+                for parameter in params.iter() {
+                    closure_locals.insert(parameter.name.clone(), false);
+                }
+                let body = visit(
+                    body,
+                    effect,
+                    handled,
+                    &mut closure_locals,
+                    functions,
+                    summaries,
+                    handler_closes,
+                );
+                ValueFlow {
+                    tracked: body.tracked || body.escapes,
+                    escapes: false,
+                }
+            }
             ExprKind::Move(value)
             | ExprKind::Field(value, _)
             | ExprKind::Unary { operand: value, .. } => visit(
@@ -10230,6 +10721,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                             captures,
                             environment,
                             active_labels,
+                            static_captures,
                         )) = substitutions.get(binder)
                     {
                         return Some((
@@ -10240,6 +10732,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                                 captures: captures.clone(),
                                 param_env: environment.clone(),
                                 active_labels: active_labels.clone(),
+                                static_captures: static_captures.clone(),
                             }),
                         ));
                     }
@@ -10334,6 +10827,27 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 .get(&closure)
                 .cloned()
                 .or(planned_recursive_self);
+            // Static callbacks discovered while walking a specialization are
+            // part of that request's ancestry. Preserve the parent edge while
+            // rewalking the callback body so homeomorphic-growth detection
+            // also covers closure-environment expansion; otherwise a wrapper
+            // that captures and re-forwards another callback can manufacture
+            // an unbounded sequence of ever-deeper producer identities.
+            let parent = discovery
+                .graph
+                .static_closure_bodies
+                .iter()
+                .find_map(|(site, plan)| {
+                    if plan.request != closure {
+                        return None;
+                    }
+                    match &site.body {
+                        BodyInstanceKey::Specialization(parent) => Some(parent.clone()),
+                        BodyInstanceKey::Root(_)
+                        | BodyInstanceKey::Drop(_)
+                        | BodyInstanceKey::Closure(_) => None,
+                    }
+                });
             if let Some(recursive_self) = &recursive_self {
                 locals.insert(
                     recursive_self.binding.clone(),
@@ -10353,7 +10867,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 operations: &operation_templates,
                 discovery: &mut discovery,
                 owner: closure.site.owner.clone(),
-                parent: None,
+                parent,
                 locals,
                 bindings,
                 active_variants: BTreeMap::new(),
@@ -10364,7 +10878,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 trait_db,
                 solver_budget,
                 param_env,
-                symbolic_validation: false,
+                symbolic_validation: contains_late_callable_captures(&closure),
                 active_recursive_self: recursive_self,
                 contextual_validations: &mut contextual_validations,
                 resolved_call_effects: &mut resolved_call_effects,
@@ -10855,7 +11369,7 @@ mod tests {
         assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
         assert!(discovery.graph.requests.keys().any(|request| matches!(
             request.arguments.first(),
-            Some(SpecializationArgument::Closure(_, _, captures, _, _)) if captures.is_empty()
+            Some(SpecializationArgument::Closure(_, _, captures, _, _, _)) if captures.is_empty()
         )));
     }
 
@@ -10895,7 +11409,7 @@ mod tests {
             }) || request.arguments.iter().any(|argument| {
                 matches!(
                     argument,
-                    SpecializationArgument::Closure(_, shape, _, _, _)
+                    SpecializationArgument::Closure(_, shape, _, _, _, _)
                         if shape.effects.iter().any(|effect| !effect.arguments.is_empty())
                 )
             })
@@ -11078,7 +11592,7 @@ mod tests {
             .requests
             .keys()
             .filter_map(|key| match &key.arguments[0] {
-                SpecializationArgument::Closure(site, shape, captures, _environment, _) => {
+                SpecializationArgument::Closure(site, shape, captures, _environment, _, _) => {
                     assert!(shape.params.is_empty());
                     assert!(captures.is_empty());
                     assert_eq!(shape.result, ProvisionalType::Predefined("i64".into()));
@@ -11160,7 +11674,7 @@ mod tests {
             closure.active_labels.contains_key("outer") && closure.active_labels.len() == 1
         }));
 
-        let local = parse_discovery(&format!(
+        let local_source = format!(
             "{common}
              local()->Result<(),Failure>{{
                  @done: Result<(),Failure>{{
@@ -11174,10 +11688,21 @@ mod tests {
                      }}}})
                  }}
              }}"
-        ));
+        );
+        let local = parse_discovery(&local_source);
         assert!(local.errors.is_empty(), "{:#?}", local.errors);
         assert!(local.graph.closure_bodies.keys().any(|closure| {
             closure.active_labels.contains_key("done") && closure.active_labels.len() == 1
+        }));
+        let local_program =
+            crate::parser::parse(crate::lexer::lex(&local_source).unwrap()).unwrap();
+        let plan = emission_plan(&local_program, &local, None);
+        assert!(plan.ordered.iter().all(|entry| match entry {
+            EmissionKey::Closure(request) => {
+                request.active_labels.is_empty() && request.static_captures.is_empty()
+            }
+            EmissionKey::Specialization(key) => !late_specialization(key),
+            EmissionKey::Source { .. } => true,
         }));
     }
 
@@ -11379,6 +11904,59 @@ mod tests {
         assert_eq!(plan.request.captures[0].name, "k");
         assert!(contains_late_callable(&plan.request.captures[0].ty));
         assert_eq!(plan.request.receiver_mode(), 0);
+    }
+
+    #[test]
+    fn nested_generic_callback_capture_is_static_specialization_evidence() {
+        let source = "inner<G>(body: G) where G: Fn<(usize), Output=()> { body(0) }
+             outer<F>(body: F) where F: Fn<(usize), Output=()> {
+                 inner({ index => body(index) })
+             }
+             use() -> () { outer({ _ => () }) }";
+        let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+        let discovery = discover(&program);
+        assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
+        let nested = discovery
+            .graph
+            .closure_bodies
+            .keys()
+            .find(|request| request.static_captures.contains_key("body"))
+            .expect("nested wrapper closure retains the exact outer callback identity");
+        assert!(nested.captures.is_empty());
+        assert_eq!(nested.static_captures["body"].len(), 1);
+        let plan = emission_plan(&program, &discovery, None);
+        assert!(plan.ordered.iter().all(|emission| {
+            !matches!(emission, EmissionKey::Closure(request) if !request.static_captures.is_empty())
+        }));
+    }
+
+    #[test]
+    fn nested_transaction_call_collapses_temporary_contextual_binders() {
+        let attempt_item = GenericParamKey {
+            owner: DeclarationKey::Function("attempt_item".into()),
+            ordinal: 0,
+        };
+        let commit = GenericParamKey {
+            owner: DeclarationKey::Function("commit".into()),
+            ordinal: 0,
+        };
+        let mut substitutions = BTreeMap::from([
+            (
+                attempt_item.clone(),
+                SpecializationArgument::Type(ProvisionalType::Param(commit.clone())),
+            ),
+            (
+                commit,
+                SpecializationArgument::Type(ProvisionalType::Predefined("i64".into())),
+            ),
+        ]);
+
+        collapse_type_substitution_chains(&mut substitutions);
+
+        assert_eq!(
+            substitutions[&attempt_item],
+            SpecializationArgument::Type(ProvisionalType::Predefined("i64".into()))
+        );
     }
 
     #[test]
@@ -11688,6 +12266,12 @@ mod tests {
                 where F: Fn<(), Output=i64, Effects={Ask}> { body }
             returned_invoke<F>(body: F) -> i64
                 where F: Fn<(), Output=i64, Effects={Ask}> { identity(body)() }
+            invoke_wrapper<F>(wrapped: F) -> i64
+                where F: Fn<(), Output=i64, Effects={Ask}> { wrapped() }
+            captured_wrapper<F>(body: F) -> i64
+                where F: Fn<(), Output=i64, Effects={Ask}> {
+                invoke_wrapper({ => body() })
+            }
             closure_only<F>(body: F) -> i64
                 where F: Fn<(), Output=i64, Effects={Ask}> {
                 let delayed = { => body() };
@@ -11732,11 +12316,19 @@ mod tests {
         );
         assert!(escapes("live_cycle_a", "Ask") && escapes("live_cycle_b", "Ask"));
         assert!(escapes("returned_invoke", "Ask"));
+        assert!(escapes("captured_wrapper", "Ask"));
         assert!(!escapes("closure_only", "Ask"));
         assert!(
             escapes("partial_handler", "Partial"),
             "a handler that omits an operation must not close the protocol"
         );
+        let discovery = discover(&program);
+        let captured = discovery
+            .graph
+            .templates
+            .get(&DeclarationKey::Function("captured_wrapper".into()))
+            .unwrap();
+        assert_eq!(captured.effectful_callable_binders.len(), 1);
     }
 
     #[test]

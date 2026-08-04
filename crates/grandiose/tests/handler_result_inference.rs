@@ -165,6 +165,27 @@ fn planned_generic_control_shape_contextualizes_a_sibling_literal() {
 }
 
 #[test]
+fn typed_handler_sibling_contextualizes_an_earlier_literal_at_runtime() {
+    let source = r#"
+        usize_value(value: usize) -> usize { value }
+
+        selected() -> usize {
+            handle true {
+                Result::Err(_) => 0,
+                Result::Ok(_) => usize_value(2)
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    run_selected(
+        "handler-runtime-sibling-literal.glorious",
+        source,
+        Value::U64(2),
+    );
+}
+
+#[test]
 fn recursive_nondefault_handler_branch_contextualizes_outer_literal() {
     let source = r#"
         usize_value(value: usize) -> usize { value }

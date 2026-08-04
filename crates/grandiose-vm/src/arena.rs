@@ -193,6 +193,11 @@ impl<T> Arena<T> {
         self.len == 0
     }
 
+    /// Number of backing slots retained by the arena, including vacant slots.
+    pub(crate) fn storage_len(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Enumerate occupied handles in stable index order.
     pub fn handles(&self) -> impl Iterator<Item = Handle<T>> + '_ {
         self.entries

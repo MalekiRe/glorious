@@ -23,7 +23,7 @@ enum HeaderTypeKind {
     SharedReference(Option<NameUse>, TypeId),
     UniqueReference(Option<NameUse>, TypeId),
     Tuple(HeaderRange),
-    Application(TypeId, HeaderRange),
+    Application(TypeId, HeaderRange, HeaderRange),
     Never
 }
 
@@ -41,7 +41,7 @@ pub enum HeaderTypeView<'a> {
     SharedReference(usize, Option<usize>, TypeId),
     UniqueReference(usize, Option<usize>, TypeId),
     Tuple(usize, Slice<'a, TypeEdge>),
-    Application(usize, TypeId, Slice<'a, TypeEdge>),
+    Application(usize, TypeId, Slice<'a, NameUse>, Slice<'a, TypeEdge>),
     Never(usize)
 }
 
@@ -77,6 +77,10 @@ pub struct CallableHeader {
     parameters: HeaderRange,
     result: Option<TypeId>,
     effects: Option<EffectRow>,
+    // Retain the complete constraint syntax until generic interface
+    // elaboration resolves trait, quantity, lifetime, and associated-type
+    // arguments. The scanner has already bounded this range before the body.
+    where_tokens: HeaderTokenRange,
     tokens: HeaderTokenRange
 }
 
@@ -191,6 +195,7 @@ pub struct HeaderIndex {
     parameters: Vec<Parameter>,
     types: Arena<TypeTag, TypeNode>,
     names: Vec<NameUse>,
+    lifetime_arguments: Vec<NameUse>,
     type_edges: Vec<TypeEdge>
 }
 
@@ -490,12 +495,27 @@ pub callable_effects(value: &CallableHeader) -> &Option<EffectRow> {
     &value.effects
 }
 
+pub callable_where_tokens(value: &CallableHeader) -> &HeaderTokenRange {
+    &value.where_tokens
+}
+
+pub callable_has_where_clause(value: &CallableHeader) -> Bool {
+    not(super::syntax::token_is_empty(&value.where_tokens))
+}
+
 pub effect_row_effects(value: &EffectRow) -> &HeaderRange {
     &value.effects
 }
 
 pub effect_row_tail(value: &EffectRow) -> &Option<NameUse> {
     &value.row_tail
+}
+
+pub effect_row_types<'a>(
+    value: &'a HeaderIndex,
+    row: &EffectRow
+) -> Slice<'a, TypeEdge> {
+    type_edges(value, &row.effects)
 }
 
 header_slice<'a, T>(
@@ -517,6 +537,13 @@ type_edges<'a>(
     range: &HeaderRange
 ) -> Slice<'a, TypeEdge> {
     header_slice(&value.type_edges, range)
+}
+
+lifetime_arguments<'a>(
+    value: &'a HeaderIndex,
+    range: &HeaderRange
+) -> Slice<'a, NameUse> {
+    header_slice(&value.lifetime_arguments, range)
 }
 
 pub type_edge_range<'a>(
@@ -566,10 +593,11 @@ pub header_type_view<'a>(
             token,
             type_edges(value, &children)
         ),
-        HeaderTypeKind::Application(constructor, children) =>
+        HeaderTypeKind::Application(constructor, lifetimes, children) =>
             HeaderTypeView::Application(
             token,
             constructor,
+            lifetime_arguments(value, &lifetimes),
             type_edges(value, &children)
         ),
         HeaderTypeKind::Never => HeaderTypeView::Never(token)
@@ -993,6 +1021,36 @@ append_edges(
     }})
 }
 
+append_name_uses(
+    output: &mut Vec<NameUse>,
+    values: &Vec<NameUse>,
+    index: usize
+) {
+    for_range(Range::new(index, Vec::len(values)), { current => {
+        Vec::push(&mut *output, *Vec::index(values, current))
+    }})
+}
+
+parse_lifetime_arguments(
+    value: &mut Parser,
+    related: usize,
+    values: &mut Vec<NameUse>
+) -> Result<(), HeaderError> {
+    handle take_lifetime(value) {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(found) => {
+            Vec::push(&mut *values, found);
+            if(eat_token(value, TokenPattern::Comma)) {
+                if(at_token(&*value, TokenPattern::Gt)) {
+                    Result::Ok(())
+                } else {
+                    parse_lifetime_arguments(value, related, values)
+                }
+            } else { Result::Ok(()) }
+        }
+    }
+}
+
 parse_type_values(
     value: &mut Parser,
     closing: TokenPattern,
@@ -1056,6 +1114,15 @@ parse_application(
     if(eat_token(value, TokenPattern::Lt)) { if(at_token(&*value, TokenPattern::Gt)) { Result::Err(
                 HeaderError::EmptyTypeArguments(value.tokens.position, related)
             ) } else {
+        let lifetime_values = Vec::new();
+        try(
+            parse_lifetime_arguments(
+                value,
+                related,
+                &mut lifetime_values
+            ),
+            @parse_application
+        );
         let arguments = Vec::new();
         try(
             parse_type_values(
@@ -1067,6 +1134,16 @@ parse_application(
             @parse_application
         );
         try(expect_right_angle(value, related), @parse_application);
+        let lifetime_start = super::syntax::range_mark(
+            &value.output.lifetime_arguments
+        );
+        append_name_uses(
+            &mut value.output.lifetime_arguments,
+            &lifetime_values,
+            0
+        );
+        let lifetime_end = Vec::len(&value.output.lifetime_arguments);
+        let lifetimes = header_range(lifetime_start, lifetime_end);
         let edge_start = super::syntax::range_mark(&value.output.type_edges);
         append_edges(
             &mut value.output.type_edges,
@@ -1078,7 +1155,7 @@ parse_application(
         let arguments = header_range(edge_start, edge_end);
         push_type(
             value,
-            HeaderTypeKind::Application(constructor, arguments),
+            HeaderTypeKind::Application(constructor, lifetimes, arguments),
             start,
             related
         )
@@ -1526,6 +1603,22 @@ finish_callable(
     result: Option<TypeId>,
     effects: Option<EffectRow>
 ) -> Result<(), HeaderError> {
+    let where_start = value.tokens.position;
+    let where_tokens = if(where_start < value.tokens.limit) {
+        handle super::lexer::token_kind_at(&value.source, where_start) {
+            TokenKind::Keyword(super::lexer::Keyword::Where) => {
+                // Constraint grammar is intentionally retained as a bounded
+                // syntax range here. Generic interface elaboration owns its
+                // semantic parsing because relation arguments are not merely
+                // types (`Use<[0, *]>`, associated bindings, lifetimes).
+                if(where_start + 1 < value.tokens.limit) {
+                    value.tokens.position = value.tokens.limit;
+                    token_range(where_start, value.tokens.limit)
+                } else { token_range(where_start, where_start) }
+            },
+            _ => token_range(where_start, where_start)
+        }
+    } else { token_range(where_start, where_start) };
     if(value.tokens.position == value.tokens.limit) {
         let limit = value.tokens.limit;
         Vec::push(
@@ -1538,6 +1631,7 @@ finish_callable(
                 parameters: parameters,
                 result: result,
                 effects: effects,
+                where_tokens: where_tokens,
                 tokens: token_range(start, limit)
             }
         );
@@ -2199,6 +2293,7 @@ pub parse(
                 parameters: Vec::new(),
                 types: Arena::new(),
                 names: Vec::new(),
+                lifetime_arguments: Vec::new(),
                 type_edges: Vec::new()
             }
         },

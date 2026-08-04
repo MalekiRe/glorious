@@ -1,7 +1,34 @@
 # Grandiose Control Kernel and Compiler Toolkit
 
-Status: proposed design for shrinking the compiler through source-defined,
-label-aware control abstractions that fuse to direct control flow.
+Status: implemented. The source-defined kernel, compiler toolkit, structural
+control fusion, inspection output, and development lints described below are
+present in the distributed standard library and self-hosted compiler.
+
+The implementation is deliberately split along the layering proposed here:
+
+- `crates/grandiose/src/distributed_std.glorious` contains `fold_until`, the
+  branded `LoopControl`/`loop_state` family, search and range builders,
+  checkpoint-backed collection and byte writers, worklist/fixed-point runners,
+  propagation guards, and the recoverable `Report` effect.
+- `self-host/src/frontend/bodies/bodies.glorious` contains the syntax walkers,
+  cursor transaction, and bounded imperative parser toolkit.
+- `self-host/src/frontend/elaboration/elaboration.glorious` contains type and
+  Typed Core walkers; `self-host/src/backend/lowering/lowering.glorious`
+  contains MIR-place, MIR-operand, and CFG walkers.
+- `self-host/src/frontend/resolution/resolution.glorious` contains lexical
+  scope, binding, and temporary-map rollback frames.
+- `crates/grandiose/src/compiler.rs` derives name-independent
+  `ControlSummary` facts, forms direct Core control loops, reports unsuccessful
+  fusion, and implements the nine machine-applicable development lints.
+- `grc --emit control-plan` exposes the specialization result, including
+  static capabilities, exact effect/quantity facts, loop formation, residual
+  runtime machinery, and failure reasons.
+
+Executable coverage lives primarily in `range_helpers.rs`, `labels_leave.rs`,
+`control_kernel_lints.rs`, `grc_cli.rs`, and `self_host_bytecode.rs`. It checks
+O0--O3 behavior, cleanup rollback, nested branded control, effect forwarding,
+direct-loop fusion without residual callables/handlers, machine fixes,
+name-independent custom helpers, and the self-hosted compiler pipeline.
 
 This is probably the **most Grandiose-specific opportunity** for shrinking the
 compiler.

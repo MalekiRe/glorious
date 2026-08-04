@@ -15,12 +15,13 @@ use super::super::frontend::elaboration::CoreValueTag;
 use super::super::frontend::elaboration::ConstructionField;
 use super::super::frontend::elaboration::ConstructionFlavor;
 use super::super::frontend::elaboration::IntegerConstantId;
+use super::super::frontend::elaboration::CallableInstanceTag;
 use super::super::frontend::elaboration::InterfaceCallableId;
-use super::super::frontend::elaboration::InterfaceCallableTag;
 use super::super::frontend::elaboration::InterfaceNominalView;
 use super::super::frontend::elaboration::InterfaceTypeView;
 use super::super::frontend::elaboration::TypeId;
 use super::super::frontend::scanner::ShellId;
+use super::super::frontend::bodies::Visit;
 
 pub struct RegisterTag {}
 pub type RegisterId = Id<RegisterTag>;
@@ -28,11 +29,11 @@ pub type RegisterId = Id<RegisterTag>;
 pub struct RegisterPackTag {}
 pub type RegisterPackId = Id<RegisterPackTag>;
 
-// Every interface callable has exactly one MIR function. Sharing the tag
-// makes that identity structural: calls cannot accidentally index a separately
-// ordered function arena.
-pub type MirFunctionTag = InterfaceCallableTag;
-pub type MirFunctionId = InterfaceCallableId;
+// Demand-specialized callable instances and MIR functions share one identity.
+// The compiler allocates MIR functions in instance-discovery order, so a Core
+// call cannot accidentally index the declaration-scheme arena.
+pub type MirFunctionTag = CallableInstanceTag;
+pub type MirFunctionId = Id<MirFunctionTag>;
 
 pub struct MirTypeTag {}
 pub type MirTypeId = Id<MirTypeTag>;
@@ -59,11 +60,24 @@ pub enum MirInstruction {
     EnumTag(RegisterId, RegisterId),
     Drop(RegisterId),
     Deconstruct(RegisterId),
+    Primitive(RegisterId, u32, RegisterPackId),
+    HostCall(Option<RegisterId>, u32, RegisterPackId),
+    Abort,
+    Unreachable,
     Jump(MirBlockId),
     Switch(RegisterId, MirSwitchPackId, MirBlockId),
     Call(Option<RegisterId>, MirFunctionId, RegisterPackId),
     Return(Option<RegisterId>)
 }
+
+pub enum MirPlaceRole {
+    Definition,
+    Read,
+    Transfer,
+    Destroy
+}
+
+impl Use<[0, *]> for MirPlaceRole {}
 
 pub struct MirSwitchCase {
     key: Bytes,
@@ -79,7 +93,11 @@ pub struct MirVariant {
 }
 
 pub enum MirTypeKind {
+    Pending,
     Tuple,
+    Array,
+    SharedReference,
+    UniqueReference,
     Struct,
     Enum
 }
@@ -103,6 +121,106 @@ struct MirTypeFacts {
 impl Use<[0, *]> for MirTypeFacts {}
 
 pub type MirTypes = Arena<MirTypeTag, MirType>;
+
+pub struct ArtifactTypeMap {
+    entries: Vec<Option<ArtifactTypeId>>,
+    copyable: Vec<Bool>
+}
+
+push_predefined_type_mappings(
+    entries: &mut Vec<Option<ArtifactTypeId>>,
+    copyable: &mut Vec<Bool>,
+    raw: u32
+) {
+    if(raw < 19) {
+        Vec::push(&mut *entries, Option::Some(Id::from_u32(raw)));
+        Vec::push(&mut *copyable, raw != 1 and { raw < 17 });
+        push_predefined_type_mappings(entries, copyable, raw + 1)
+    } else { () }
+}
+
+pub artifact_type_map() -> ArtifactTypeMap {
+    let entries = Vec::new();
+    let copyable = Vec::new();
+    push_predefined_type_mappings(&mut entries, &mut copyable, 0);
+    ArtifactTypeMap { entries: entries, copyable: copyable }
+}
+
+extend_artifact_type_map(
+    value: &mut ArtifactTypeMap,
+    semantic_count: usize
+) {
+    if(Vec::len(&value.entries) < semantic_count) {
+        Vec::push(&mut value.entries, None);
+        Vec::push(&mut value.copyable, false);
+        extend_artifact_type_map(value, semantic_count)
+    } else { () }
+}
+
+pub mapped_artifact_type(
+    value: &ArtifactTypeMap,
+    semantic: TypeId
+) -> Option<ArtifactTypeId> {
+    let index = Id::to_usize(semantic);
+    if(index < Vec::len(&value.entries)) {
+        *Vec::index(&value.entries, index)
+    } else { None }
+}
+
+pub bind_artifact_type(
+    value: &mut ArtifactTypeMap,
+    semantic_count: usize,
+    semantic: TypeId,
+    artifact: ArtifactTypeId
+) {
+    extend_artifact_type_map(value, semantic_count);
+    *Vec::index_mut(
+        &mut value.entries,
+        Id::to_usize(semantic)
+    ) = Option::Some(artifact);
+    ()
+}
+
+pub set_mapped_type_copyable(
+    value: &mut ArtifactTypeMap,
+    semantic: TypeId,
+    copyable: Bool
+) {
+    *Vec::index_mut(
+        &mut value.copyable,
+        Id::to_usize(semantic)
+    ) = copyable;
+    ()
+}
+
+pub mapped_type_copyable(
+    value: &ArtifactTypeMap,
+    semantic: TypeId
+) -> Bool {
+    *Vec::index(&value.copyable, Id::to_usize(semantic))
+}
+
+copy_type_map_entries(
+    source: &ArtifactTypeMap,
+    entries: &mut Vec<Option<ArtifactTypeId>>,
+    copyable: &mut Vec<Bool>,
+    index: usize
+) {
+    if(index < Vec::len(&source.entries)) {
+        Vec::push(&mut *entries, *Vec::index(&source.entries, index));
+        Vec::push(&mut *copyable, *Vec::index(&source.copyable, index));
+        copy_type_map_entries(
+            source, entries, copyable, index + 1
+        )
+    } else { () }
+}
+
+copy_artifact_type_map(source: &ArtifactTypeMap) -> ArtifactTypeMap {
+    let entries = Vec::new();
+    let copyable = Vec::new();
+    copy_type_map_entries(source, &mut entries, &mut copyable, 0);
+    ArtifactTypeMap { entries: entries, copyable: copyable }
+}
 
 pub enum MirVariantView<'a> {
     Variant(
@@ -142,6 +260,336 @@ pub struct MirProgram {
     type_names: Vec<String>
 }
 
+__g1_walk_mir_register_pack<L, R, F, e: EffectRow>(
+    function: &MirFunction,
+    instruction: usize,
+    pack: RegisterPackId,
+    role: MirPlaceRole,
+    index: usize,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(usize, RegisterId, MirPlaceRole, L), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    let registers = mir_function_register_pack(function, pack);
+    if(index < usize_from_u32(register_pack_count(registers))) {
+        visitor(instruction, register_pack_at(registers, index), role, stop);
+        __g1_walk_mir_register_pack(
+            function, instruction, pack, role, index + 1, stop, visitor
+        )
+    } else { () }
+}
+
+__g1_walk_mir_instruction_places<L, R, F, e: EffectRow>(
+    function: &MirFunction,
+    instruction: usize,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(usize, RegisterId, MirPlaceRole, L), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    let value = mir_function_instruction_at(function, instruction);
+    handle *value {
+        MirInstruction::Const(target, _) =>
+            visitor(instruction, target, MirPlaceRole::Definition, stop),
+        MirInstruction::Move(target, source) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, source, MirPlaceRole::Transfer, stop)
+        },
+        MirInstruction::Copy(target, source) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, source, MirPlaceRole::Read, stop)
+        },
+        MirInstruction::Construct(target, _, _, pack) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            __g1_walk_mir_register_pack(
+                function,
+                instruction,
+                pack,
+                MirPlaceRole::Transfer,
+                0,
+                stop,
+                visitor
+            )
+        },
+        MirInstruction::ProjectMove(target, source, _) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, source, MirPlaceRole::Transfer, stop)
+        },
+        MirInstruction::ProjectCopy(target, source, _) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, source, MirPlaceRole::Read, stop)
+        },
+        MirInstruction::EnumTag(target, source) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, source, MirPlaceRole::Read, stop)
+        },
+        MirInstruction::Drop(register) =>
+            visitor(instruction, register, MirPlaceRole::Destroy, stop),
+        MirInstruction::Deconstruct(register) =>
+            visitor(instruction, register, MirPlaceRole::Destroy, stop),
+        MirInstruction::Primitive(target, _, pack) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            __g1_walk_mir_register_pack(
+                function,
+                instruction,
+                pack,
+                MirPlaceRole::Transfer,
+                0,
+                stop,
+                visitor
+            )
+        },
+        MirInstruction::HostCall(target, _, pack) => {
+            handle target {
+                None => (),
+                Option::Some(found) => visitor(
+                    instruction, found, MirPlaceRole::Definition, stop
+                )
+            };
+            __g1_walk_mir_register_pack(
+                function,
+                instruction,
+                pack,
+                MirPlaceRole::Transfer,
+                0,
+                stop,
+                visitor
+            )
+        },
+        MirInstruction::Abort => (),
+        MirInstruction::Unreachable => (),
+        MirInstruction::Switch(register, _, _) =>
+            visitor(instruction, register, MirPlaceRole::Read, stop),
+        MirInstruction::Call(target, _, pack) => {
+            handle target {
+                None => (),
+                Option::Some(found) => visitor(
+                    instruction, found, MirPlaceRole::Definition, stop
+                )
+            };
+            __g1_walk_mir_register_pack(
+                function,
+                instruction,
+                pack,
+                MirPlaceRole::Transfer,
+                0,
+                stop,
+                visitor
+            )
+        },
+        MirInstruction::Return(source) => handle source {
+            None => (),
+            Option::Some(found) => visitor(
+                instruction, found, MirPlaceRole::Transfer, stop
+            )
+        },
+        _ => ()
+    }
+}
+
+__g1_walk_mir_places<L, R, F, e: EffectRow>(
+    function: &MirFunction,
+    instruction: usize,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(usize, RegisterId, MirPlaceRole, L), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    if(instruction < mir_function_instruction_count(function)) {
+        __g1_walk_mir_instruction_places(function, instruction, stop, visitor);
+        __g1_walk_mir_places(function, instruction + 1, stop, visitor)
+    } else { () }
+}
+
+pub walk_mir_places<L, R, F, e: EffectRow>(
+    function: &MirFunction,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(usize, RegisterId, MirPlaceRole, L), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_walk_mir_places(function, 0, stop, visitor)
+}
+
+pub walk_mir_operands<L, R, F, e: EffectRow>(
+    function: &MirFunction,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(usize, RegisterId, L), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    walk_mir_places(function, stop, {
+        instruction, register, role, destination => handle role {
+            MirPlaceRole::Definition => (),
+            _ => visitor(instruction, register, destination)
+        }
+    })
+}
+
+__g1_mir_cfg_block_end(
+    function: &MirFunction,
+    start: usize,
+    index: usize,
+    end: usize
+) -> usize {
+    handle index < Arena::len(&function.blocks) {
+      Result::Ok(_) => {
+        let candidate = handle *Arena::index(
+            &function.blocks,
+            Id::from_u32(checked_u32(index))
+        ) {
+            None => end,
+            Option::Some(offset) => usize_from_u32(offset)
+        };
+        let next = handle start < candidate {
+            Result::Err(_) => end,
+            Result::Ok(_) => handle candidate < end {
+                Result::Ok(_) => candidate,
+                Result::Err(_) => end
+            }
+        };
+        __g1_mir_cfg_block_end(function, start, index + 1, next)
+      },
+      Result::Err(_) => end
+    }
+}
+
+__g1_push_cfg_switch(
+    pack: &MirSwitchPack,
+    index: usize,
+    pending: &mut Stack<MirBlockId>
+) {
+    handle index < mir_switch_pack_count(pack) {
+      Result::Ok(_) => {
+        Stack::push(
+            &mut *pending,
+            mir_switch_case_target(mir_switch_pack_at(pack, index)),
+        );
+        __g1_push_cfg_switch(pack, index + 1, pending)
+      },
+      Result::Err(_) => ()
+    }
+}
+
+__g1_push_cfg_successors(
+    function: &MirFunction,
+    block: MirBlockId,
+    pending: &mut Stack<MirBlockId>
+) {
+    let start = usize_from_u32(mir_function_block_offset(function, block));
+    let end = __g1_mir_cfg_block_end(
+        function,
+        start,
+        0,
+        mir_function_instruction_count(function)
+    );
+    handle start < end {
+      Result::Ok(_) => {
+        let terminator = mir_function_instruction_at(function, end - 1);
+        handle *terminator {
+          MirInstruction::Jump(target) =>
+              Stack::push(&mut *pending, target),
+          MirInstruction::Switch(_, pack, otherwise) => {
+              Stack::push(&mut *pending, otherwise);
+              __g1_push_cfg_switch(
+                mir_function_switch_pack(function, pack),
+                0,
+                pending
+              )
+          },
+          _ => ()
+        }
+      },
+      Result::Err(_) => ()
+    }
+}
+
+__g1_empty_cfg_visited() -> Vec<Bool> { Vec::new() }
+
+__g1_empty_cfg_pending() -> Stack<MirBlockId> { Stack::new() }
+
+struct __CfgWalkState {
+    pending: Stack<MirBlockId>,
+    visited: Vec<Bool>
+}
+
+__g1_walk_cfg_loop<L, R, F, e: EffectRow>(
+    function: &MirFunction,
+    state: __CfgWalkState,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(MirBlockId, u32, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    let __CfgWalkState { pending, visited } = move state;
+    handle Stack::pop(&mut pending) {
+        Result::Err(_) => { pending; visited; () },
+        Result::Ok(block) => {
+            let index = Id::to_usize(block);
+            handle *Vec::index(&visited, index) {
+                Result::Ok(_) => (),
+                Result::Err(_) => {
+                    *Vec::index_mut(&mut visited, index) = true;
+                    let offset = mir_function_block_offset(function, block);
+                    handle visitor(block, offset, stop) {
+                        Visit::Descend => __g1_push_cfg_successors(
+                            function, block, &mut pending
+                        ),
+                        Visit::SkipChildren => ()
+                    }
+                }
+            };
+            __g1_walk_cfg_loop(
+                function,
+                __CfgWalkState {
+                    pending: move pending,
+                    visited: move visited
+                },
+                stop,
+                visitor
+            )
+        }
+    }
+}
+
+__g1_push_cfg_visited(output: &mut Vec<Bool>, remaining: usize) {
+    handle remaining == 0 {
+        Result::Ok(_) => (),
+        Result::Err(_) => {
+            Vec::push(&mut *output, false);
+            __g1_push_cfg_visited(output, remaining - 1)
+        }
+    }
+}
+
+pub walk_cfg<L, R, F, e: EffectRow>(
+    function: &MirFunction,
+    entry: MirBlockId,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(MirBlockId, u32, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    let visited = __g1_empty_cfg_visited();
+    let pending = __g1_empty_cfg_pending();
+    __g1_push_cfg_visited(&mut visited, Arena::len(&function.blocks));
+    Stack::push(&mut pending, entry);
+    __g1_walk_cfg_loop(
+        function,
+        __CfgWalkState { pending: pending, visited: visited },
+        stop,
+        visitor
+    )
+}
+
 pub enum LoweringError {
     UnsupportedScalar(TypeId),
     MissingLocal(CoreLocalId),
@@ -170,6 +618,92 @@ pub enum LoweringError {
     InvalidMirFunction(MirFunctionId)
 }
 
+invalid_mir_register_result(
+    register: RegisterId
+) -> Result<(), LoweringError> {
+    Result::Err(LoweringError::InvalidMirRegister(register))
+}
+
+unbound_mir_block_result(
+    block: MirBlockId
+) -> Result<(), LoweringError> {
+    Result::Err(LoweringError::UnboundMirBlock(block))
+}
+
+validate_final_mir_definitions(
+    value: &MirFunction
+) -> Result<(), LoweringError> {
+    let register_count = mir_function_register_count(value);
+    walk_mir_places(value, @validate_final_mir_definitions, {
+        _, register, role, invalid => {
+            handle role {
+                MirPlaceRole::Definition => handle
+                    Id::to_u32(register) < register_count {
+                    Result::Ok(_) => (),
+                    Result::Err(_) =>
+                        invalid(invalid_mir_register_result(register))
+                },
+                _ => ()
+            }
+        }
+    });
+    Result::Ok(())
+}
+
+validate_final_mir_operands(
+    value: &MirFunction
+) -> Result<(), LoweringError> {
+    let register_count = mir_function_register_count(value);
+    walk_mir_operands(value, @validate_final_mir_operands, {
+        _, register, invalid => {
+            handle Id::to_u32(register) < register_count {
+                Result::Ok(_) => (),
+                Result::Err(_) =>
+                    invalid(invalid_mir_register_result(register))
+            }
+        }
+    });
+    Result::Ok(())
+}
+
+validate_final_mir_cfg(
+    value: &MirFunction
+) -> Result<(), LoweringError> {
+    handle Arena::len(&value.blocks) == 0 {
+        Result::Ok(_) => (),
+        Result::Err(_) => {
+            let instruction_count = checked_u32(
+                mir_function_instruction_count(value)
+            );
+            walk_cfg(
+                value,
+                Id::from_u32(0),
+                @validate_final_mir_cfg,
+                { block, offset, invalid => {
+                    handle offset <= instruction_count {
+                        Result::Ok(_) => Visit::Descend,
+                        Result::Err(_) =>
+                            invalid(unbound_mir_block_result(block))
+                    }
+                }}
+            )
+        }
+    };
+    Result::Ok(())
+}
+
+validate_final_mir_walkers(
+    value: &MirFunction
+) -> Result<(), LoweringError> {
+    try(validate_final_mir_definitions(
+        value
+    ), @validate_final_mir_walkers);
+    try(validate_final_mir_operands(
+        value
+    ), @validate_final_mir_walkers);
+    validate_final_mir_cfg(value)
+}
+
 struct MatchFlow {
     computation: CoreComputationId,
     live_out: Vec<Bool>
@@ -181,6 +715,7 @@ struct PlaceFlowFacts {
 }
 
 struct MirBuilder {
+    type_map: ArtifactTypeMap,
     locals: Vec<Option<RegisterId>>,
     place_flow: PlaceFlowFacts,
     live_order: Vec<RegisterId>,
@@ -245,19 +780,123 @@ alloc_mir_type(value: &mut MirTypes, mir_type: MirType) -> MirTypeId {
 
 absent_type_name_index() -> u32 { 4294967295 }
 
+pub reserve_mir_type(value: &mut MirTypes) -> MirTypeId {
+    alloc_mir_type(value, MirType {
+        kind: MirTypeKind::Pending,
+        name_index: absent_type_name_index(),
+        field_names: Vec::new(),
+        fields: Vec::new(),
+        variants: Vec::new(),
+        copy_flag: 0
+    })
+}
+
+set_mir_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    kind: MirTypeKind,
+    name_index: u32,
+    field_names: Vec<u32>,
+    fields: Vec<ArtifactTypeId>,
+    variants: Vec<MirVariant>,
+    copy_flag: u32
+) {
+    let slot = Arena::index_mut(&mut *value, id);
+    (*slot).kind = kind;
+    (*slot).name_index = name_index;
+    (*slot).field_names = field_names;
+    (*slot).fields = fields;
+    (*slot).variants = variants;
+    (*slot).copy_flag = copy_flag;
+    ()
+}
+
+pub set_tuple_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    fields: Vec<ArtifactTypeId>,
+    copy_flag: u32
+) {
+    set_mir_type(
+        value,
+        id,
+        MirTypeKind::Tuple,
+        absent_type_name_index(),
+        Vec::new(),
+        fields,
+        Vec::new(),
+        copy_flag
+    )
+}
+
+pub set_unary_structural_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    kind: MirTypeKind,
+    element: ArtifactTypeId,
+    copy_flag: u32
+) {
+    let fields = Vec::new();
+    Vec::push(&mut fields, element);
+    set_mir_type(
+        value,
+        id,
+        kind,
+        absent_type_name_index(),
+        Vec::new(),
+        fields,
+        Vec::new(),
+        copy_flag
+    )
+}
+
+pub set_struct_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    name_index: u32,
+    field_names: Vec<u32>,
+    fields: Vec<ArtifactTypeId>,
+    copy_flag: u32
+) {
+    set_mir_type(
+        value,
+        id,
+        MirTypeKind::Struct,
+        name_index,
+        field_names,
+        fields,
+        Vec::new(),
+        copy_flag
+    )
+}
+
+pub set_enum_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    name_index: u32,
+    variants: Vec<MirVariant>,
+    copy_flag: u32
+) {
+    set_mir_type(
+        value,
+        id,
+        MirTypeKind::Enum,
+        name_index,
+        Vec::new(),
+        Vec::new(),
+        variants,
+        copy_flag
+    )
+}
+
 pub push_tuple_type(
     value: &mut MirTypes,
     fields: Vec<ArtifactTypeId>,
     copy_flag: u32
 ) -> MirTypeId {
-    alloc_mir_type(value, MirType {
-        kind: MirTypeKind::Tuple,
-        name_index: absent_type_name_index(),
-        field_names: Vec::new(),
-        fields: fields,
-        variants: Vec::new(),
-        copy_flag: copy_flag
-    })
+    let id = reserve_mir_type(value);
+    set_tuple_type(value, id, fields, copy_flag);
+    id
 }
 
 pub push_struct_type(
@@ -267,14 +906,11 @@ pub push_struct_type(
     fields: Vec<ArtifactTypeId>,
     copy_flag: u32
 ) -> MirTypeId {
-    alloc_mir_type(value, MirType {
-        kind: MirTypeKind::Struct,
-        name_index: name_index,
-        field_names: field_names,
-        fields: fields,
-        variants: Vec::new(),
-        copy_flag: copy_flag
-    })
+    let id = reserve_mir_type(value);
+    set_struct_type(
+        value, id, name_index, field_names, fields, copy_flag
+    );
+    id
 }
 
 pub enum_variant(
@@ -295,14 +931,9 @@ pub push_enum_type(
     variants: Vec<MirVariant>,
     copy_flag: u32
 ) -> MirTypeId {
-    alloc_mir_type(value, MirType {
-        kind: MirTypeKind::Enum,
-        name_index: name_index,
-        field_names: Vec::new(),
-        fields: Vec::new(),
-        variants: variants,
-        copy_flag: copy_flag
-    })
+    let id = reserve_mir_type(value);
+    set_enum_type(value, id, name_index, variants, copy_flag);
+    id
 }
 
 pub mir_program_tuple_fields<'a>(
@@ -311,6 +942,14 @@ pub mir_program_tuple_fields<'a>(
 ) -> Slice<'a, ArtifactTypeId> {
     let found = Arena::index(&value.types, id);
     Vec::as_slice(&found.fields)
+}
+
+pub mir_program_unary_element(
+    value: &MirProgram,
+    id: MirTypeId
+) -> ArtifactTypeId {
+    let found = Arena::index(&value.types, id);
+    *Vec::index(&found.fields, 0)
 }
 
 pub mir_program_struct_name(value: &MirProgram, id: MirTypeId) -> u32 {
@@ -407,6 +1046,37 @@ pub mir_function_instruction_at<'a>(
     index: usize
 ) -> &'a MirInstruction {
     Vec::index(&value.instructions, index)
+}
+
+mir_function_host_role_at(
+    value: &MirFunction,
+    index: usize
+) -> Option<u32> {
+    if(index < Vec::len(&value.instructions)) {
+        handle Vec::index(&value.instructions, index) {
+            MirInstruction::HostCall(_, role, _) => Option::Some(role),
+            _ => mir_function_host_role_at(value, index + 1)
+        }
+    } else { None }
+}
+
+pub mir_program_host_function(
+    value: &MirProgram,
+    role: u32,
+    index: usize
+) -> Option<MirFunctionId> {
+    if(index < mir_program_function_count(value)) {
+        let id = mir_function_id_from_usize(index);
+        handle mir_function_host_role_at(
+            mir_program_function_at(value, id),
+            0
+        ) {
+            Option::Some(found) => if(found == role) {
+                Option::Some(id)
+            } else { mir_program_host_function(value, role, index + 1) },
+            None => mir_program_host_function(value, role, index + 1)
+        }
+    } else { None }
 }
 
 pub mir_function_cleanup_count(value: &MirFunction) -> usize {
@@ -510,6 +1180,10 @@ pub mir_function_id_from_usize(value: usize) -> MirFunctionId {
     }
 }
 
+mir_function_id_from_u32(value: u32) -> MirFunctionId {
+    Id::from_u32(value)
+}
+
 pub mir_type_id_from_usize(value: usize) -> MirTypeId {
     handle Id::from_usize(value) {
         Result::Err(_) => unreachable(),
@@ -537,11 +1211,10 @@ pub mir_constant_raw(value: MirConstantId) -> u32 {
 }
 
 pub artifact_type_id(value: u32) -> ArtifactTypeId {
-    Id::from_u32(if(value < 14) {
-        value
-    } else {
-        value + 5
-    })
+    // Typed interfaces and the VM artifact share the complete predefined
+    // scalar ordering (Unit through Bytes at IDs 0 through 18). Custom types
+    // therefore retain their semantic IDs as well.
+    Id::from_u32(value)
 }
 
 pub mir_type_artifact_id(value: MirTypeId) -> ArtifactTypeId {
@@ -711,12 +1384,18 @@ analyze_value(
     allow_transfer: Bool
 ) {
     handle super::super::frontend::elaboration::typed_body_value_at(body, id) {
-        CoreValueView::Local(_, local, _) => {
+        CoreValueView::Local(_, local, _, forced_transfer) => {
             let live = Vec::index_mut(
                 &mut output.live,
                 Id::to_usize(local)
             );
-            if(allow_transfer and {
+            if(forced_transfer) {
+                *IndexVec::index_mut(
+                    &mut output.facts.final_transfers,
+                    id
+                ) = true;
+                ()
+            } else if(allow_transfer and {
                 super::super::frontend::elaboration::
                     typed_body_transfer_candidate(body, id)
             }) {
@@ -868,7 +1547,15 @@ analyze_computation(
             *Vec::index_mut(&mut output.live, Id::to_usize(local)) = false;
             analyze_computation(body, initializer, output, allow_transfer)
         },
-        CoreComputationView::Call(_, _, operands) =>
+        CoreComputationView::Call(_, _, _, operands) =>
+            analyze_values_reverse(
+                body,
+                operands,
+                Slice::len(operands),
+                output,
+                allow_transfer
+            ),
+        CoreComputationView::Primitive(_, _, operands) =>
             analyze_values_reverse(
                 body,
                 operands,
@@ -1173,6 +1860,43 @@ emit_deconstruct(value: &mut MirBuilder, register: RegisterId) {
     consume_live(value, register)
 }
 
+emit_primitive(
+    value: &mut MirBuilder,
+    target: RegisterId,
+    primitive: u32,
+    arguments: Vec<RegisterId>
+) {
+    record_cleanup(value);
+    consume_arguments(value, &arguments, 0);
+    let pack = alloc_register_pack(value, arguments);
+    Vec::push(&mut value.instructions, MirInstruction::Primitive(
+        target,
+        primitive,
+        pack
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
+emit_host_call(
+    value: &mut MirBuilder,
+    target: Option<RegisterId>,
+    import: u32,
+    arguments: Vec<RegisterId>
+) {
+    record_cleanup(value);
+    consume_arguments(value, &arguments, 0);
+    let pack = alloc_register_pack(value, arguments);
+    Vec::push(&mut value.instructions, MirInstruction::HostCall(
+        target,
+        import,
+        pack
+    ));
+    handle target {
+        None => (),
+        Option::Some(found) => Vec::push(&mut value.live_order, found)
+    }
+}
+
 emit_jump(value: &mut MirBuilder, target: MirBlockId) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Jump(target))
@@ -1223,6 +1947,11 @@ emit_call(
     } else { () }
 }
 
+emit_unreachable(value: &mut MirBuilder) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, MirInstruction::Unreachable)
+}
+
 emit_return(value: &mut MirBuilder, source: Option<RegisterId>) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Return(source))
@@ -1271,7 +2000,7 @@ lower_value(
             emit_const(value, target, key);
             Result::Ok(Option::Some(target))
         },
-        CoreValueView::Local(type_id, local, _) => {
+        CoreValueView::Local(type_id, local, _, _) => {
             type_id;
             let transfer = *IndexVec::index(
                 &value.place_flow.final_transfers,
@@ -1537,6 +2266,102 @@ drop_match_locals_reverse<'a>(
     }
 }
 
+match_binding_at<'a>(
+    bindings: Slice<'a, CoreMatchBinding>,
+    index: usize
+) -> CoreMatchBinding {
+    *handle Slice::get(bindings, index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+match_bindings_refutable<'a>(
+    bindings: Slice<'a, CoreMatchBinding>,
+    index: usize
+) -> Bool {
+    if(index < Slice::len(bindings)) {
+        let binding = match_binding_at(bindings, index);
+        handle super::super::frontend::elaboration::
+            core_match_binding_integer_test(binding) {
+            None => match_bindings_refutable(bindings, index + 1),
+            Option::Some(_) => true
+        }
+    } else { false }
+}
+
+next_variant_block<'a>(
+    arms: Slice<'a, CoreMatchArm>,
+    blocks: &Vec<MirBlockId>,
+    variant: u32,
+    index: usize
+) -> Option<MirBlockId> {
+    if(index < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(super::super::frontend::elaboration::
+            core_match_arm_variant(arm) == variant) {
+            Option::Some(*Vec::index(blocks, index))
+        } else { next_variant_block(arms, blocks, variant, index + 1) }
+    } else { None }
+}
+
+lower_match_binding_tests<'a>(
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder,
+    subject: RegisterId,
+    bindings: Slice<'a, CoreMatchBinding>,
+    failure: MirBlockId,
+    index: usize
+) -> Result<(), LoweringError> {
+    if(index < Slice::len(bindings)) {
+        let binding = match_binding_at(bindings, index);
+        handle super::super::frontend::elaboration::
+            core_match_binding_integer_test(binding) {
+            None => lower_match_binding_tests(
+                body, value, subject, bindings, failure, index + 1
+            ),
+            Option::Some(test_parts) => {
+                let (field, ty, constant) = test_parts;
+                let test = alloc_register(value);
+                emit_project_copy(
+                    value,
+                    test,
+                    subject,
+                    field
+                );
+                let passed = alloc_block(value);
+                let failed = alloc_block(value);
+                let key = try(constant_key(
+                    body,
+                    ty,
+                    constant
+                ), @lower_match_binding_tests);
+                let cases = Vec::new();
+                Vec::push(&mut cases, MirSwitchCase {
+                    key: key,
+                    target: passed
+                });
+                emit_switch(value, test, cases, failed);
+                bind_block(value, failed);
+                emit_drop(value, test);
+                emit_jump(value, failure);
+                // The failed edge changes only the last-allocated test
+                // register. Restore the builder's linear state for the
+                // success edge without retaining borrowed state snapshots.
+                Vec::push(&mut value.live_order, test);
+                bind_block(value, passed);
+                emit_drop(value, test);
+                lower_match_binding_tests(
+                    body, value, subject, bindings, failure, index + 1
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
 match_flow_index(
     facts: &PlaceFlowFacts,
     computation: CoreComputationId,
@@ -1592,19 +2417,19 @@ lower_match_arms<'a>(
     blocks: &Vec<MirBlockId>,
     subject: RegisterId,
     tag: RegisterId,
-    result: RegisterId,
+    result: Option<RegisterId>,
     join: MirBlockId,
     baseline_locals: &Vec<Option<RegisterId>>,
     baseline_live: &Vec<RegisterId>,
     match_live_out: &Vec<Bool>,
     canonical_locals: &mut Vec<Option<RegisterId>>,
     canonical_live: &mut Vec<RegisterId>,
+    canonical_set: &mut Bool,
     index: usize
 ) -> Result<(), LoweringError> {
     if(index < Slice::len(arms)) {
         restore_match_state(value, baseline_locals, baseline_live);
         bind_block(value, *Vec::index(blocks, index));
-        emit_drop(value, tag);
         let arm = handle Slice::get(arms, index) {
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
@@ -1612,6 +2437,29 @@ lower_match_arms<'a>(
         let bindings =
             super::super::frontend::elaboration::
                 core_match_arm_bindings(body, arm);
+        if(match_bindings_refutable(bindings, 0)) {
+            let variant = super::super::frontend::elaboration::
+                core_match_arm_variant(arm);
+            handle next_variant_block(
+                arms,
+                blocks,
+                variant,
+                index + 1
+            ) {
+                None => @lower_match_arms(Result::Err(
+                    LoweringError::MatchStateMismatch
+                )),
+                Option::Some(failure) => try(lower_match_binding_tests(
+                    body,
+                    value,
+                    subject,
+                    bindings,
+                    failure,
+                    0
+                ), @lower_match_arms)
+            }
+        } else { () };
+        emit_drop(value, tag);
         let registers = Vec::new();
         try(project_match_fields(
             value,
@@ -1636,55 +2484,46 @@ lower_match_arms<'a>(
             value,
             arm_computation
         ), @lower_match_arms);
-        drop_match_locals_reverse(
-            value,
-            bindings,
-            Slice::len(bindings)
-        );
-        retire_dead_match_locals(
-            value,
-            baseline_locals,
-            match_live_out,
-            0
-        );
         handle lowered {
-            Result::Err(_) => Result::Err(
-                LoweringError::MissingMatchResult(arm_computation)
+            Result::Err(_) => lower_match_arms(
+                interfaces,
+                body,
+                value,
+                arms,
+                blocks,
+                subject,
+                tag,
+                result,
+                join,
+                baseline_locals,
+                baseline_live,
+                match_live_out,
+                canonical_locals,
+                canonical_live,
+                canonical_set,
+                index + 1
             ),
             Result::Ok(branch_result) => {
-                emit_move(value, result, branch_result);
+                let result_register = handle result {
+                    None => @lower_match_arms(Result::Err(
+                        LoweringError::MissingMatchResult(arm_computation)
+                    )),
+                    Option::Some(found) => found
+                };
+                drop_match_locals_reverse(
+                    value,
+                    bindings,
+                    Slice::len(bindings)
+                );
+                retire_dead_match_locals(
+                    value,
+                    baseline_locals,
+                    match_live_out,
+                    0
+                );
+                emit_move(value, result_register, branch_result);
                 emit_jump(value, join);
-                if(index == 0) {
-                    Vec::clear(canonical_locals);
-                    append_optional_registers(
-                        &value.locals,
-                        canonical_locals,
-                        0
-                    );
-                    Vec::clear(canonical_live);
-                    append_registers(
-                        &value.live_order,
-                        canonical_live,
-                        0
-                    );
-                    lower_match_arms(
-                        interfaces,
-                        body,
-                        value,
-                        arms,
-                        blocks,
-                        subject,
-                        tag,
-                        result,
-                        join,
-                        baseline_locals,
-                        baseline_live,
-                        match_live_out,
-                        canonical_locals,
-                        canonical_live,
-                        index + 1
-                    )
-                } else {
+                if(*canonical_set) {
                     let locals_match = optional_registers_equal(
                         &value.locals,
                         canonical_locals,
@@ -1713,15 +2552,71 @@ lower_match_arms<'a>(
                             match_live_out,
                             canonical_locals,
                             canonical_live,
+                            canonical_set,
                             index + 1
                         )
                     } else {
                         Result::Err(LoweringError::MatchStateMismatch)
                     }
+                } else {
+                    Vec::clear(canonical_locals);
+                    append_optional_registers(
+                        &value.locals,
+                        canonical_locals,
+                        0
+                    );
+                    Vec::clear(canonical_live);
+                    append_registers(
+                        &value.live_order,
+                        canonical_live,
+                        0
+                    );
+                    *canonical_set = true;
+                    lower_match_arms(
+                        interfaces,
+                        body,
+                        value,
+                        arms,
+                        blocks,
+                        subject,
+                        tag,
+                        result,
+                        join,
+                        baseline_locals,
+                        baseline_live,
+                        match_live_out,
+                        canonical_locals,
+                        canonical_live,
+                        canonical_set,
+                        index + 1
+                    )
                 }
             }
         }
     } else { Result::Ok(()) }
+}
+
+match_has_returning_arm<'a>(
+    body: &super::super::frontend::elaboration::TypedBody,
+    arms: Slice<'a, CoreMatchArm>,
+    index: usize
+) -> Bool {
+    if(index < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let computation = super::super::frontend::elaboration::
+            core_match_arm_body(arm);
+        if(Id::to_u32(
+            super::super::frontend::elaboration::
+                typed_body_computation_type(body, computation)
+        ) == 1) {
+            match_has_returning_arm(body, arms, index + 1)
+        } else {
+            true
+        }
+    } else { false }
 }
 
 lower_match<'a>(
@@ -1760,7 +2655,11 @@ lower_match<'a>(
             } else {
                 let tag = alloc_register(value);
                 emit_enum_tag(value, tag, subject_register);
-                let result = alloc_register(value);
+                let result = if(match_has_returning_arm(body, arms, 0)) {
+                    Option::Some(alloc_register(value))
+                } else {
+                    None
+                };
                 let blocks = Vec::new();
                 alloc_match_blocks(
                     value,
@@ -1788,6 +2687,7 @@ lower_match<'a>(
                 let baseline_live = snapshot_live(&*value);
                 let canonical_locals = Vec::new();
                 let canonical_live = Vec::new();
+                let canonical_set = false;
                 try(lower_match_arms(
                     interfaces,
                     body,
@@ -1803,16 +2703,84 @@ lower_match<'a>(
                     &match_live,
                     &mut canonical_locals,
                     &mut canonical_live,
+                    &mut canonical_set,
                     0
                 ), @lower_match);
-                restore_match_state(
-                    value,
-                    &canonical_locals,
-                    &canonical_live
-                );
+                if(canonical_set) {
+                    restore_match_state(
+                        value,
+                        &canonical_locals,
+                        &canonical_live
+                    )
+                } else {
+                    restore_match_state(
+                        value,
+                        &baseline_locals,
+                        &baseline_live
+                    )
+                };
                 bind_block(value, join);
-                Result::Ok(Option::Some(result))
+                if(canonical_set) {
+                    Result::Ok(result)
+                } else {
+                    Result::Ok(None)
+                }
             }
+        }
+    }
+}
+
+lower_nominal_construct<'a>(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder,
+    type_id: TypeId,
+    nominal: u32,
+    flavor: ConstructionFlavor,
+    fields: Slice<'a, ConstructionField>
+) -> Result<Option<RegisterId>, LoweringError> {
+    handle super::super::frontend::elaboration::interface_nominal_at_view(
+        interfaces,
+        usize_from_u32(nominal)
+    ) {
+        InterfaceNominalView::Struct(_, _, expected) => handle flavor {
+            ConstructionFlavor::Product => lower_aggregate(
+                interfaces,
+                body,
+                value,
+                type_id,
+                None,
+                fields,
+                expected
+            ),
+            ConstructionFlavor::Variant(ordinal) => Result::Err(
+                LoweringError::UnexpectedVariant(type_id, ordinal)
+            )
+        },
+        InterfaceNominalView::Enum(_, start, count) => handle flavor {
+            ConstructionFlavor::Product => Result::Err(
+                LoweringError::MissingVariant(type_id)
+            ),
+            ConstructionFlavor::Variant(ordinal) => if(ordinal < count) {
+                let payloads = super::super::frontend::elaboration::
+                    interface_variant_payloads_at(
+                        interfaces,
+                        usize_from_u32(start + ordinal)
+                    );
+                lower_aggregate(
+                    interfaces,
+                    body,
+                    value,
+                    type_id,
+                    Option::Some(ordinal),
+                    fields,
+                    checked_u32(Slice::len(payloads))
+                )
+            } else { Result::Err(LoweringError::VariantOutOfRange(
+                type_id,
+                ordinal
+            )) }
         }
     }
 }
@@ -1841,10 +2809,15 @@ lower_computation(
                 ),
                 @lower_computation
             );
-            set_local(value, local, initialized);
-            lower_computation(interfaces, body, value, remainder)
+            handle initialized {
+                None => Result::Ok(None),
+                Option::Some(register) => {
+                    set_local(value, local, Option::Some(register));
+                    lower_computation(interfaces, body, value, remainder)
+                }
+            }
         },
-        CoreComputationView::Call(type_id, shell, operands) => {
+        CoreComputationView::Call(type_id, shell, instance, operands) => {
             let arguments = Vec::new();
             try(lower_arguments(
                 interfaces,
@@ -1853,22 +2826,42 @@ lower_computation(
                 operands,
                 &mut arguments
             ), @lower_computation);
-            handle
+            let callable =
                 super::super::frontend::elaboration::
-                    interface_callable_for_shell(interfaces, shell) {
-                Result::Err(_) =>
-                    Result::Err(LoweringError::UnknownCallable(shell)),
-                Result::Ok(function) => {
-                    let target = Option::Some(alloc_register(value));
+                    callable_instance_callable(interfaces, instance);
+            if(
+                super::super::frontend::elaboration::
+                    interface_callable_shell(interfaces, callable) == shell
+            ) {
+                    let target = if(Id::to_u32(type_id) == 1) {
+                        None
+                    } else {
+                        Option::Some(alloc_register(value))
+                    };
                     emit_call(
                         value,
                         target,
-                        function,
+                        mir_function_id_from_u32(Id::to_u32(instance)),
                         arguments
                     );
+                    if(Id::to_u32(type_id) == 1) {
+                        emit_unreachable(value)
+                    } else { () };
                     Result::Ok(target)
-                }
-            }
+            } else { Result::Err(LoweringError::UnknownCallable(shell)) }
+        },
+        CoreComputationView::Primitive(_, primitive, operands) => {
+            let arguments = Vec::new();
+            try(lower_arguments(
+                interfaces,
+                body,
+                value,
+                operands,
+                &mut arguments
+            ), @lower_computation);
+            let target = alloc_register(value);
+            emit_primitive(value, target, primitive, arguments);
+            Result::Ok(Option::Some(target))
         },
         CoreComputationView::Construct(type_id, flavor, fields) => {
             handle super::super::frontend::elaboration::interface_type_at(
@@ -1893,66 +2886,34 @@ lower_computation(
                             )
                         )
                 },
-                InterfaceTypeView::Nominal(nominal) => handle
+                InterfaceTypeView::Nominal(nominal) =>
+                    lower_nominal_construct(
+                        interfaces,
+                        body,
+                        value,
+                        type_id,
+                        nominal,
+                        flavor,
+                        fields
+                    ),
+                InterfaceTypeView::Application(_, _) => handle
                     super::super::frontend::elaboration::
-                        interface_nominal_at_view(
+                        interface_application_nominal(
                             interfaces,
-                            usize_from_u32(nominal)
+                            type_id
                         ) {
-                    InterfaceNominalView::Struct(_, _, expected) =>
-                        handle flavor {
-                            ConstructionFlavor::Product =>
-                                lower_aggregate(
-                                    interfaces,
-                                    body,
-                                    value,
-                                    type_id,
-                                    None,
-                                    fields,
-                                    expected
-                                ),
-                            ConstructionFlavor::Variant(ordinal) =>
-                                Result::Err(
-                                    LoweringError::UnexpectedVariant(
-                                        type_id,
-                                        ordinal
-                                    )
-                                )
-                        },
-                    InterfaceNominalView::Enum(_, start, count) =>
-                        handle flavor {
-                            ConstructionFlavor::Product =>
-                                Result::Err(
-                                    LoweringError::MissingVariant(type_id)
-                                ),
-                            ConstructionFlavor::Variant(ordinal) =>
-                                if(ordinal < count) {
-                                    let payloads =
-                                        super::super::frontend::elaboration::
-                                            interface_variant_payloads_at(
-                                                interfaces,
-                                                usize_from_u32(
-                                                    start + ordinal
-                                                )
-                                            );
-                                    lower_aggregate(
-                                        interfaces,
-                                        body,
-                                        value,
-                                        type_id,
-                                        Option::Some(ordinal),
-                                        fields,
-                                        checked_u32(Slice::len(payloads))
-                                    )
-                                } else {
-                                    Result::Err(
-                                        LoweringError::VariantOutOfRange(
-                                            type_id,
-                                            ordinal
-                                        )
-                                    )
-                                }
-                },
+                    None => Result::Err(
+                        LoweringError::InvalidConstructionType(type_id)
+                    ),
+                    Option::Some(nominal) => lower_nominal_construct(
+                        interfaces,
+                        body,
+                        value,
+                        type_id,
+                        nominal,
+                        flavor,
+                        fields
+                    )
                 },
                 _ => Result::Err(
                     LoweringError::InvalidConstructionType(type_id)
@@ -1987,7 +2948,10 @@ lower_aggregate<'a>(
             emit_construct(
                 value,
                 target,
-                artifact_type_id(Id::to_u32(type_id)),
+                handle mapped_artifact_type(&value.type_map, type_id) {
+                    None => unreachable(),
+                    Option::Some(found) => found
+                },
                 variant,
                 registers
             );
@@ -2060,6 +3024,37 @@ parameter_types(
                         current
                     ))
             )
+        )
+    })
+}
+
+instance_parameter_types(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    instance: super::super::frontend::elaboration::CallableInstanceId,
+    type_map: &ArtifactTypeMap,
+    index: u32,
+    count: u32,
+    output: &mut Vec<ArtifactTypeId>
+) {
+    for_range(Range::new(
+        usize_from_u32(index),
+        usize_from_u32(count)
+    ), { current =>
+        Vec::push(
+            &mut *output,
+            handle mapped_artifact_type(
+                type_map,
+                super::super::frontend::elaboration::
+                    callable_instance_parameter_at(
+                        interfaces,
+                        instance,
+                        current
+                    )
+            ) {
+                None => unreachable(),
+                Option::Some(found) => found
+            }
         )
     })
 }
@@ -2189,6 +3184,25 @@ validate_mir_instruction(
         validate_mir_register(value, register)
     } else if(*instruction is MirInstruction::Deconstruct(register)) {
         validate_mir_register(value, register)
+    } else if(*instruction is MirInstruction::Primitive(target, _, pack)) {
+        try(validate_mir_register(
+            value,
+            target
+        ), @validate_mir_instruction);
+        validate_mir_register_pack(value, pack, 0)
+    } else if(*instruction is MirInstruction::HostCall(target, _, pack)) {
+        handle target {
+            None => (),
+            Option::Some(found) => try(validate_mir_register(
+                value,
+                found
+            ), @validate_mir_instruction)
+        };
+        validate_mir_register_pack(value, pack, 0)
+    } else if(*instruction is MirInstruction::Abort) {
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Unreachable) {
+        Result::Ok(())
     } else if(*instruction is MirInstruction::Jump(block)) {
         validate_mir_block(value, block)
     } else if(*instruction is MirInstruction::Switch(
@@ -2329,15 +3343,17 @@ pub lower_function(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
-    function: InterfaceCallableId
+    instance: super::super::frontend::elaboration::CallableInstanceId,
+    type_map: &ArtifactTypeMap
 ) -> Result<MirFunction, LoweringError> {
     let parameter_count =
         super::super::frontend::elaboration::
-            interface_callable_parameter_count(interfaces, function);
+            callable_instance_parameter_count(interfaces, instance);
     let parameters = Vec::new();
-    parameter_types(
+    instance_parameter_types(
         interfaces,
-        function,
+        instance,
+        type_map,
         0,
         parameter_count,
         &mut parameters
@@ -2346,6 +3362,7 @@ pub lower_function(
         super::super::frontend::elaboration::typed_body_local_count(body);
     let place_flow = analyze_place_flow(body);
     let builder = MirBuilder {
+        type_map: copy_artifact_type_map(type_map),
         locals: Vec::new(),
         place_flow: place_flow,
         live_order: Vec::new(),
@@ -2374,17 +3391,19 @@ pub lower_function(
     ), @lower_function);
     let core_result_type =
         super::super::frontend::elaboration::typed_body_result_type(body);
-    let result_type = artifact_type_id(Id::to_u32(core_result_type));
+    let result_type = handle mapped_artifact_type(
+        type_map, core_result_type
+    ) {
+        None => unreachable(),
+        Option::Some(found) => found
+    };
     handle result {
-        Result::Err(_) =>
-            Result::Err(LoweringError::MissingResult(core_result_type)),
-        Result::Ok(register) => {
-            emit_return(&mut builder, Option::Some(register));
+        Result::Err(_) => {
             try(validate_mir_builder(
                 &builder,
                 interfaces
             ), @lower_function);
-            Result::Ok(MirFunction {
+            let output = MirFunction {
                 name: name,
                 parameters: parameters,
                 result: result_type,
@@ -2394,9 +3413,241 @@ pub lower_function(
                 register_packs: builder.register_packs,
                 blocks: builder.blocks,
                 switch_packs: builder.switch_packs
-            })
+            };
+            try(validate_final_mir_walkers(
+                &output
+            ), @lower_function);
+            Result::Ok(output)
+        },
+        Result::Ok(register) => {
+            emit_return(&mut builder, Option::Some(register));
+            try(validate_mir_builder(
+                &builder,
+                interfaces
+            ), @lower_function);
+            let output = MirFunction {
+                name: name,
+                parameters: parameters,
+                result: result_type,
+                register_count: builder.register_count,
+                instructions: builder.instructions,
+                cleanups: builder.cleanups,
+                register_packs: builder.register_packs,
+                blocks: builder.blocks,
+                switch_packs: builder.switch_packs
+            };
+            try(validate_final_mir_walkers(
+                &output
+            ), @lower_function);
+            Result::Ok(output)
         }
     }
+}
+
+pub lower_primitive_function(
+    name: String,
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    instance: super::super::frontend::elaboration::CallableInstanceId,
+    primitive: u32,
+    type_map: &ArtifactTypeMap
+) -> Result<MirFunction, LoweringError> {
+    let parameter_count =
+        super::super::frontend::elaboration::
+            callable_instance_parameter_count(interfaces, instance);
+    let parameters = Vec::new();
+    instance_parameter_types(
+        interfaces,
+        instance,
+        type_map,
+        0,
+        parameter_count,
+        &mut parameters
+    );
+    let builder = MirBuilder {
+        type_map: copy_artifact_type_map(type_map),
+        locals: Vec::new(),
+        place_flow: PlaceFlowFacts {
+            final_transfers: IndexVec::new(),
+            matches: Vec::new()
+        },
+        live_order: Vec::new(),
+        instructions: Vec::new(),
+        cleanups: Vec::new(),
+        register_packs: Arena::new(),
+        blocks: Arena::new(),
+        switch_packs: Arena::new(),
+        register_count: parameter_count + 1
+    };
+    push_parameter_locals(
+        &mut builder.locals,
+        &mut builder.live_order,
+        0,
+        parameter_count
+    );
+    let arguments = Vec::new();
+    for_range(Range::new(0, usize_from_u32(parameter_count)), { index =>
+        Vec::push(&mut arguments, Id::from_u32(checked_u32(index) + 1))
+    });
+    let target = alloc_register(&mut builder);
+    emit_primitive(&mut builder, target, primitive, arguments);
+    emit_return(&mut builder, Option::Some(target));
+    try(validate_mir_builder(
+        &builder,
+        interfaces
+    ), @lower_primitive_function);
+    let output = MirFunction {
+        name: name,
+        parameters: parameters,
+        result: handle mapped_artifact_type(
+            type_map,
+            super::super::frontend::elaboration::callable_instance_result(
+                interfaces,
+                instance
+            )
+        ) {
+            None => unreachable(),
+            Option::Some(found) => found
+        },
+        register_count: builder.register_count,
+        instructions: builder.instructions,
+        cleanups: builder.cleanups,
+        register_packs: builder.register_packs,
+        blocks: builder.blocks,
+        switch_packs: builder.switch_packs
+    };
+    try(validate_final_mir_walkers(
+        &output
+    ), @lower_primitive_function);
+    Result::Ok(output)
+}
+
+pub lower_abort_function(
+    name: String,
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    instance: super::super::frontend::elaboration::CallableInstanceId,
+    type_map: &ArtifactTypeMap
+) -> Result<MirFunction, LoweringError> {
+    let parameter_count =
+        super::super::frontend::elaboration::
+            callable_instance_parameter_count(interfaces, instance);
+    let parameters = Vec::new();
+    instance_parameter_types(
+        interfaces,
+        instance,
+        type_map,
+        0,
+        parameter_count,
+        &mut parameters
+    );
+    let instructions = Vec::new();
+    Vec::push(&mut instructions, MirInstruction::Abort);
+    let output = MirFunction {
+        name: name,
+        parameters: parameters,
+        result: handle mapped_artifact_type(
+            type_map,
+            super::super::frontend::elaboration::callable_instance_result(
+                interfaces,
+                instance
+            )
+        ) {
+            None => unreachable(),
+            Option::Some(found) => found
+        },
+        register_count: parameter_count + 1,
+        instructions: instructions,
+        cleanups: Vec::new(),
+        register_packs: Arena::new(),
+        blocks: Arena::new(),
+        switch_packs: Arena::new()
+    };
+    try(validate_final_mir_walkers(
+        &output
+    ), @lower_abort_function);
+    Result::Ok(output)
+}
+
+pub lower_host_function(
+    name: String,
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    instance: super::super::frontend::elaboration::CallableInstanceId,
+    import: u32,
+    type_map: &ArtifactTypeMap
+) -> Result<MirFunction, LoweringError> {
+    let parameter_count =
+        super::super::frontend::elaboration::
+            callable_instance_parameter_count(interfaces, instance);
+    let parameters = Vec::new();
+    instance_parameter_types(
+        interfaces,
+        instance,
+        type_map,
+        0,
+        parameter_count,
+        &mut parameters
+    );
+    let result_semantic =
+        super::super::frontend::elaboration::callable_instance_result(
+            interfaces,
+            instance
+        );
+    let builder = MirBuilder {
+        type_map: copy_artifact_type_map(type_map),
+        locals: Vec::new(),
+        place_flow: PlaceFlowFacts {
+            final_transfers: IndexVec::new(),
+            matches: Vec::new()
+        },
+        live_order: Vec::new(),
+        instructions: Vec::new(),
+        cleanups: Vec::new(),
+        register_packs: Arena::new(),
+        blocks: Arena::new(),
+        switch_packs: Arena::new(),
+        register_count: parameter_count + 1
+    };
+    push_parameter_locals(
+        &mut builder.locals,
+        &mut builder.live_order,
+        0,
+        parameter_count
+    );
+    let arguments = Vec::new();
+    for_range(Range::new(0, usize_from_u32(parameter_count)), { index =>
+        Vec::push(&mut arguments, Id::from_u32(checked_u32(index) + 1))
+    });
+    let target = if(Id::to_u32(result_semantic) == 0) {
+        None
+    } else {
+        Option::Some(alloc_register(&mut builder))
+    };
+    emit_host_call(&mut builder, target, import, arguments);
+    emit_return(&mut builder, target);
+    try(validate_mir_builder(
+        &builder,
+        interfaces
+    ), @lower_host_function);
+    let output = MirFunction {
+        name: name,
+        parameters: parameters,
+        result: handle mapped_artifact_type(type_map, result_semantic) {
+            None => unreachable(),
+            Option::Some(found) => found
+        },
+        register_count: builder.register_count,
+        instructions: builder.instructions,
+        cleanups: builder.cleanups,
+        register_packs: builder.register_packs,
+        blocks: builder.blocks,
+        switch_packs: builder.switch_packs
+    };
+    try(validate_final_mir_walkers(
+        &output
+    ), @lower_host_function);
+    Result::Ok(output)
 }
 
 collect_instruction_constants(
@@ -2568,6 +3819,10 @@ derive_type_facts(
 ) -> MirTypeFacts {
     let mir_type = Arena::index(types, mir_type_id_from_usize(index));
     handle mir_type.kind {
+        MirTypeKind::Pending => MirTypeFacts {
+            zero_sized: false,
+            permits_zero_use: false
+        },
         MirTypeKind::Tuple => MirTypeFacts {
             zero_sized: fields_zero_sized(&mir_type.fields, facts, 0),
             permits_zero_use: fields_permit_zero_use(
@@ -2575,6 +3830,18 @@ derive_type_facts(
                 facts,
                 0
             )
+        },
+        MirTypeKind::Array => MirTypeFacts {
+            zero_sized: false,
+            permits_zero_use: false
+        },
+        MirTypeKind::SharedReference => MirTypeFacts {
+            zero_sized: false,
+            permits_zero_use: true
+        },
+        MirTypeKind::UniqueReference => MirTypeFacts {
+            zero_sized: false,
+            permits_zero_use: true
         },
         MirTypeKind::Struct => MirTypeFacts {
             zero_sized: fields_zero_sized(&mir_type.fields, facts, 0),

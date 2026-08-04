@@ -19,8 +19,37 @@ trait ReclaimNode {
     fn clear_edges(&self);
 }
 
+const MIN_RECLAMATION_COMPACTION_INTERVAL: usize = 65_536;
+
+struct ReclamationRegistry {
+    nodes: Vec<Weak<dyn ReclaimNode>>,
+    registrations_until_compaction: usize,
+}
+
+impl ReclamationRegistry {
+    fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            registrations_until_compaction: MIN_RECLAMATION_COMPACTION_INTERVAL,
+        }
+    }
+
+    fn register(&mut self, node: Weak<dyn ReclaimNode>) {
+        self.nodes.push(node);
+        self.registrations_until_compaction -= 1;
+        if self.registrations_until_compaction == 0 {
+            self.nodes.retain(|node| node.strong_count() != 0);
+            // When many objects are genuinely live, scan geometrically rather
+            // than once per fixed-size batch. Short-lived allocation churn is
+            // still pruned at a bounded interval.
+            self.registrations_until_compaction =
+                self.nodes.len().max(MIN_RECLAMATION_COMPACTION_INTERVAL);
+        }
+    }
+}
+
 thread_local! {
-    static RECLAMATION_SCOPES: RefCell<Vec<Vec<Weak<dyn ReclaimNode>>>> = const { RefCell::new(Vec::new()) };
+    static RECLAMATION_SCOPES: RefCell<Vec<ReclamationRegistry>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Execution-local registry used only to break unreachable `Rc` cycles at a
@@ -32,7 +61,7 @@ pub(crate) struct ReclamationScope {
 
 impl ReclamationScope {
     pub(crate) fn begin() -> Self {
-        RECLAMATION_SCOPES.with(|scopes| scopes.borrow_mut().push(Vec::new()));
+        RECLAMATION_SCOPES.with(|scopes| scopes.borrow_mut().push(ReclamationRegistry::new()));
         Self { active: true }
     }
 
@@ -52,7 +81,12 @@ impl ReclamationScope {
             return;
         }
         self.active = false;
-        let nodes = RECLAMATION_SCOPES.with(|scopes| scopes.borrow_mut().pop().unwrap_or_default());
+        let nodes = RECLAMATION_SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .pop()
+                .map_or_else(Vec::new, |registry| registry.nodes)
+        });
         reclaim_unreachable(nodes);
     }
 }
@@ -67,10 +101,22 @@ fn register_node<T: RuntimeEdges + 'static>(identity: &Rc<ObjectIdentity<T>>) {
     let erased: Rc<dyn ReclaimNode> = identity.clone();
     let weak = Rc::downgrade(&erased);
     RECLAMATION_SCOPES.with(|scopes| {
-        for scope in scopes.borrow_mut().iter_mut() {
-            scope.push(weak.clone());
+        for registry in scopes.borrow_mut().iter_mut() {
+            registry.register(weak.clone());
         }
     });
+}
+
+pub(crate) fn reclamation_diagnostic_counts() -> (usize, usize) {
+    RECLAMATION_SCOPES.with(|scopes| {
+        scopes
+            .borrow()
+            .iter()
+            .flat_map(|registry| &registry.nodes)
+            .fold((0, 0), |(tracked, live), node| {
+                (tracked + 1, live + usize::from(node.strong_count() != 0))
+            })
+    })
 }
 
 fn reclaim_unreachable(nodes: Vec<Weak<dyn ReclaimNode>>) {
@@ -235,6 +281,11 @@ impl Default for SlotStore {
 }
 
 impl SlotStore {
+    pub(crate) fn diagnostic_counts(&self) -> (usize, usize) {
+        let arena = self.arena.borrow();
+        (arena.len(), arena.storage_len())
+    }
+
     pub(crate) fn insert(&self, value: Option<Value>) -> Result<SlotHandle, ArenaError> {
         let owner = self.arena.borrow_mut().insert(PlaceSlots::new([value]))?;
         Ok(SlotHandle {
@@ -287,6 +338,20 @@ impl SlotHandle {
     pub(crate) fn take_and_reclaim(&self) -> Result<Value, ArenaError> {
         let mut arena = self.store.arena.borrow_mut();
         let value = arena.take_projection(PlaceHandle::new(self.owner, 0))?;
+        arena.remove(self.owner)?;
+        Ok(value)
+    }
+
+    /// Consume this place for a conditional drop. An uninitialized place is
+    /// the runtime representation of a disarmed drop flag and is reclaimed
+    /// without running destruction. All other arena failures remain errors.
+    pub(crate) fn take_and_reclaim_if_initialized(&self) -> Result<Option<Value>, ArenaError> {
+        let mut arena = self.store.arena.borrow_mut();
+        let value = match arena.take_projection(PlaceHandle::new(self.owner, 0)) {
+            Ok(value) => Some(value),
+            Err(ArenaError::UninitializedProjection { .. }) => None,
+            Err(error) => return Err(error),
+        };
         arena.remove(self.owner)?;
         Ok(value)
     }
@@ -956,6 +1021,17 @@ impl RuntimeEdges for ControlRecord {
 #[cfg(test)]
 mod slot_tests {
     use super::*;
+
+    #[test]
+    fn reclamation_registry_prunes_dead_allocation_churn_before_run_end() {
+        let scope = ReclamationScope::begin();
+        for _ in 0..MIN_RECLAMATION_COMPACTION_INTERVAL {
+            drop(Value::aggregate(0, std::iter::empty()));
+        }
+        assert_eq!(reclamation_diagnostic_counts(), (1, 0));
+        scope.finish();
+        assert_eq!(reclamation_diagnostic_counts(), (0, 0));
+    }
 
     #[test]
     fn boundary_reclamation_breaks_an_unreachable_callable_capture_cycle() {

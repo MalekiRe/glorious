@@ -110,7 +110,7 @@ fn external_quantity_arguments_are_structural_and_forward_through_param_envs() {
         impl Quota<[0,infinity]> for Infinite {}
         impl<T> Use<[0,1]> for Ticket<T> where T:Quota<[0,1]> {}
         impl<T> Drop for Bomb<T> where T:Quota<[0,1]> {
-            drop(&mut self)->{self.value;1/0;()}
+            drop(&mut self)->{self.value; 1 / 0; ()}
         }
         inner<T>(value:T)->T where T:Quota<[0,1]>{value}
         outer<T>(value:T)->T where T:Quota<[0,1]>{inner(value)}
@@ -196,7 +196,7 @@ fn external_quantity_arguments_are_structural_and_forward_through_param_envs() {
             "Infinite"
         };
         let source = format!(
-            "struct Token{{marker:i64}} struct Infinite{{marker:i64}} impl Quota<[0,1]> for Token{{}} impl Quota<[0,infinity]> for Infinite{{}} require<T>(v:T)->T where T:Quota<{bound}>{{v}} bad(v:{subject})->{subject}{{require(v)}} main()->{{()}}"
+            "struct Token{{marker:i64}} struct Infinite{{marker:i64}} impl Quota<[0,1]> for Token{{}} impl Quota<[0,infinity]> for Infinite{{}} require_quota<T>(v:T)->T where T:Quota<{bound}>{{v}} bad(v:{subject})->{subject}{{require_quota(v)}} main()->{{()}}"
         );
         let errors =
             compile_source_to_bytecode_with_manifest(name, &source, &structural_manifest())
@@ -254,7 +254,7 @@ fn source_const_binders_prove_ground_quantity_and_u32_goals() {
         impl<const N: u32> At<N> for Any {}
         quantity<T>(value:T)->i64 where T:Rel<[2,infinity]>{value;20}
         index<T>(value:T)->i64 where T:At<4294967295>{value;22}
-        answer()->i64{quantity(Any{marker:1})+index(Any{marker:2})}
+        answer()->i64{quantity(Any{marker:1}) + index(Any{marker:2})}
         main()->{()}
     "#;
     let artifact = grandiose::compile_source_to_bytecode("const-binders.glorious", source).unwrap();

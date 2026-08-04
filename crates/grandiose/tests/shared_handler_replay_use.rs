@@ -28,7 +28,7 @@ fn mixed_replay_source(use_interval: &str) -> String {
                     Duo::choose() with k => {{
                         let ignored = resume(k, 1);
                         resume(move k, 2)
-                    }}
+                    }},
                     Duo::stop() => consume(move ticket)
                 }}
             }}

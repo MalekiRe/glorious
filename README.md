@@ -371,6 +371,93 @@ The compiler and VM form the root Cargo workspace. The formatter, package tool,
 and language server are deliberately separate workspaces, so their commands use
 explicit manifests:
 
+When an investigation repeatedly requires an expensive full-pipeline build,
+prefer adding narrow, reusable diagnostic tooling over continuing with manual
+traces. Artifact snapshots and replay commands, phase/PC filters, state-delta
+views, and source-to-IR maps are appropriate development tools when they make a
+failure faster to reproduce and explain. Keep them opt-in, deterministic, and
+covered by focused tests so the next compiler bug benefits from the same
+visibility.
+
+Self-host diagnostics report token identities in the complete distributed
+source stream. Map one of those identities back to its owning file and local
+coordinates without rebuilding the compiler by passing the production inputs
+in bundle order:
+
+```sh
+grc --inspect-bundle-token path/to/main.glorious path/to/module.glorious -- 24956
+```
+
+The inspector prepends the embedded standard library exactly as an ordinary
+distributed compilation does. `--inspect-token` remains available for a single
+raw source stream.
+
+For cleanup-oracle failures, capture the compiler's exact verifier input once
+and replay it without recompiling the source bundle:
+
+```sh
+G1_PRE_ORACLE_ARTIFACT=target/pre-oracle.grbc grc -O2 src/main.glorious
+G1_VERIFY_TRACE=1 grvm verify-seeded target/pre-oracle.grbc
+grvm inspect-seeded target/pre-oracle.grbc FUNCTION PC
+```
+
+`verify-seeded` is a development command for artifacts whose compiler-provided
+`LEAVE` cleanup anchors have not yet been completed by the VM oracle; ordinary
+finished artifacts should continue to use `grvm verify`.
+`inspect-seeded` prints the selected function's signature, aggregate-reference
+return contract, and a bounded instruction window around the failing PC.
+
+For failures introduced while lowering optimized MIR into physical edge
+transfers, `G1_PRE_EDGE_MIR=target/pre-edge.mir` captures the canonical MIR
+immediately before emission-only edge canonicalization and writes the result
+afterward to `target/pre-edge.mir.post`. Set
+`G1_EDGE_COPY_TRACE=<function-name-fragment>` to report copy-to-move decisions
+for matching functions; `G1_EDGE_COPY_REGISTER=<logical-register>` narrows that
+trace to one register.
+
+Set `G1_RAW_MIR=target/raw.mir` to capture the canonical ownership-aware MIR
+immediately after Core lowering and before validation or optimization. Comparing
+this with `G1_PRE_EDGE_MIR` distinguishes frontend ownership-state mistakes from
+optimizer-introduced CFG or cleanup changes without rerunning a VM replay.
+
+To locate VM memory growth during a long compiler replay, enable the sparse
+instruction sampler with `G1_VM_MEMORY_PROFILE_MIB=<growth-per-report>`. It
+prints process RSS/virtual memory, the current function and PC, active and
+deferred frame counts, live register counts, place-arena occupancy, and tracked
+versus live cycle-reclamation nodes whenever RSS grows by that many MiB.
+`G1_VM_MEMORY_PROFILE_STEPS` controls the sampling interval and defaults to one
+million VM instructions.
+
+For long VM-hosted compiler runs whose memory use is stable, set
+`G1_VM_PROGRESS_STEPS=<instructions>` to print sparse execution progress. Each
+sample reports total interpreted instructions, elapsed time, instruction rate,
+current function and PC, and active call depth. This distinguishes a slow but
+advancing phase from a stalled loop and identifies the function to inspect
+without enabling the much larger per-instruction function trace.
+Set `G1_VM_FUNCTION_MAP=<path>` while compiling the artifact to write a compact
+TSV mapping from those runtime function IDs to MIR declaration IDs, semantic
+function names, and bytecode ranges. The map is diagnostic-only and does not
+change the encoded artifact.
+
+For repeated self-host boundary work, set
+`G1_SELF_HOST_REPLAY_DIR=target/self-host-replay` on the ignored fixed-point
+test. The test retains the verified Rust-bootstrap `stage1.grbc` and its exact
+canonical `input.glorious`, allowing the expensive bootstrap half to be reused:
+
+```sh
+grvm run --memory-limit 8192MiB \
+  --allow process.args --allow fs.read --allow fs.write --allow diagnostic \
+  target/self-host-replay/stage1.grbc -- \
+  target/self-host-replay/stage2.grbc target/self-host-replay/input.glorious
+```
+
+Set `G1_TAIL_CALL_TRACE=<function-name-fragment>` while compiling to report
+whether each direct-call candidate in matching MIR functions has an exact
+return continuation and consumes its complete caller frame.
+
+Set `G1_VM_ERROR_TRACE=1` while running bytecode to attach the executing
+function, program counter, and instruction to a returned VM runtime error.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

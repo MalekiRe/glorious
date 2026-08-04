@@ -20,7 +20,7 @@ use grandiose::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in one raw source stream\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
 
 const SESSION_PROTOCOL: u32 = 1;
 const SESSION_MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -105,6 +105,8 @@ enum EmitKind {
     Mir,
     Core,
     Provisional,
+    ControlPlan,
+    MonolithicSource,
     InterfacesJson,
     StandardInterfacesJson,
 }
@@ -119,10 +121,12 @@ impl EmitKind {
             "mir" => Ok(Self::Mir),
             "core" => Ok(Self::Core),
             "provisional" => Ok(Self::Provisional),
+            "control-plan" => Ok(Self::ControlPlan),
+            "monolithic-source" => Ok(Self::MonolithicSource),
             "interfaces-json" => Ok(Self::InterfacesJson),
             "std-interfaces-json" => Ok(Self::StandardInterfacesJson),
             _ => Err(format!(
-                "unsupported emission kind `{value}`; expected bytecode, grbc, llvm-ir, ll, llvm-object, obj, executable, exe, mir, core, provisional, interfaces-json, or std-interfaces-json"
+                "unsupported emission kind `{value}`; expected bytecode, grbc, llvm-ir, ll, llvm-object, obj, executable, exe, mir, core, provisional, control-plan, monolithic-source, interfaces-json, or std-interfaces-json"
             )),
         }
     }
@@ -136,6 +140,8 @@ impl EmitKind {
             Self::Mir => "mir",
             Self::Core => "core",
             Self::Provisional => "provisional",
+            Self::ControlPlan => "control-plan",
+            Self::MonolithicSource => "monolithic.glorious",
             Self::InterfacesJson | Self::StandardInterfacesJson => "json",
         }
     }
@@ -154,6 +160,14 @@ struct CompileCommand {
 
 enum Command {
     Compile(CompileCommand),
+    InspectTokens {
+        input: PathBuf,
+        indices: Vec<usize>,
+    },
+    InspectBundleTokens {
+        inputs: Vec<PathBuf>,
+        indices: Vec<usize>,
+    },
     Help,
     Version,
     Capabilities,
@@ -172,6 +186,36 @@ fn parse_optimization(argument: &str) -> Option<OptimizationLevel> {
 
 fn parse(args: Vec<OsString>) -> Result<Command, String> {
     let mut args = args.into_iter().peekable();
+    if args
+        .peek()
+        .is_some_and(|argument| argument == "--inspect-bundle-token")
+    {
+        args.next();
+        let mut inputs = Vec::new();
+        while args.peek().is_some_and(|argument| argument != "--") {
+            inputs.push(PathBuf::from(args.next().unwrap()));
+        }
+        if inputs.is_empty() {
+            return Err("`--inspect-bundle-token` requires at least a primary source path".into());
+        }
+        if args.next().is_none() {
+            return Err("`--inspect-bundle-token` requires `--` before token indices".into());
+        }
+        let indices = parse_token_indices(args, "--inspect-bundle-token")?;
+        return Ok(Command::InspectBundleTokens { inputs, indices });
+    }
+    if args
+        .peek()
+        .is_some_and(|argument| argument == "--inspect-token")
+    {
+        args.next();
+        let input = args
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| "`--inspect-token` requires a source path".to_string())?;
+        let indices = parse_token_indices(args, "--inspect-token")?;
+        return Ok(Command::InspectTokens { input, indices });
+    }
     if args.peek().is_some_and(|argument| argument == "--serve") {
         args.next();
         if args.next().is_some() {
@@ -341,6 +385,25 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         );
     }
     Ok(Command::Compile(command))
+}
+
+fn parse_token_indices(
+    args: impl Iterator<Item = OsString>,
+    option: &str,
+) -> Result<Vec<usize>, String> {
+    let indices = args
+        .map(|argument| {
+            argument
+                .to_str()
+                .ok_or_else(|| "token indices must be valid UTF-8".to_string())?
+                .parse::<usize>()
+                .map_err(|_| format!("invalid token index `{}`", argument.to_string_lossy()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if indices.is_empty() {
+        return Err(format!("`{option}` requires at least one token index"));
+    }
+    Ok(indices)
 }
 
 fn read_segment(path: &Path) -> Result<Segment, String> {
@@ -636,6 +699,44 @@ fn compile_loaded(
             }
         };
     }
+    if command.emit == Some(EmitKind::MonolithicSource) {
+        let program = match grandiose::modules::parse_bundle(&bundle) {
+            Ok(program) => program,
+            Err(diagnostics) => {
+                return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
+            }
+        };
+        let resolved = match grandiose::modules::resolve_program(&bundle, program) {
+            Ok(resolved) => resolved,
+            Err(diagnostics) => {
+                return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
+            }
+        };
+        let source = match grandiose::modules::monolithic_source(&bundle, &resolved.resolution) {
+            Ok(source) => source,
+            Err(error) => {
+                let _ = writeln!(
+                    stderr,
+                    "grc: error: could not render module bundle: {error}"
+                );
+                return 1;
+            }
+        };
+        let output = command
+            .output
+            .unwrap_or_else(|| default_output(&command.inputs[0], EmitKind::MonolithicSource));
+        return match std::fs::write(&output, source) {
+            Ok(()) => 0,
+            Err(error) => {
+                let _ = writeln!(
+                    stderr,
+                    "grc: error: could not write {}: {error}",
+                    output.display()
+                );
+                1
+            }
+        };
+    }
     let options = CompileOptions {
         optimization_level: command.optimization_level,
     };
@@ -752,6 +853,8 @@ fn compile_loaded(
         EmitKind::Mir => phases.mir.canonical_text().into_bytes(),
         EmitKind::Core => phases.core.canonical_text().into_bytes(),
         EmitKind::Provisional => phases.provisional_text().as_bytes().to_vec(),
+        EmitKind::ControlPlan => phases.core.control_plan_text().into_bytes(),
+        EmitKind::MonolithicSource => unreachable!(),
         EmitKind::InterfacesJson | EmitKind::StandardInterfacesJson => unreachable!(),
     };
     if let Err(error) = std::fs::write(&output, bytes) {
@@ -1245,6 +1348,14 @@ pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
             let mut stdout = io::stdout().lock();
             compile(command, &mut stdout, &mut stderr)
         }
+        Ok(Command::InspectTokens { input, indices }) => {
+            let mut stdout = io::stdout().lock();
+            inspect_tokens(&input, &indices, &mut stdout, &mut stderr)
+        }
+        Ok(Command::InspectBundleTokens { inputs, indices }) => {
+            let mut stdout = io::stdout().lock();
+            inspect_bundle_tokens(&inputs, &indices, &mut stdout, &mut stderr)
+        }
         Ok(Command::Help) => {
             print!("{USAGE}");
             0
@@ -1255,7 +1366,7 @@ pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
         }
         Ok(Command::Capabilities) => {
             println!(
-                "{{\"grc\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor\":0,\"seed-identity-version\":{},\"seed-identity\":\"{}\",\"multi-file\":true,\"modules\":true,\"phases\":[\"lex\",\"scan\",\"resolve\",\"check\"],\"emit\":[\"bytecode\",\"grbc\",\"llvm-ir\",\"ll\",\"llvm-object\",\"obj\",\"executable\",\"exe\",\"mir\",\"core\",\"provisional\",\"interfaces-json\",\"std-interfaces-json\"],\"diagnostics-json\":true,\"serve\":{{\"protocol\":{},\"transport\":\"json-lines\",\"max-request-bytes\":{},\"max-arguments\":{},\"max-inputs\":{},\"max-source-bytes\":{}}}}}",
+                "{{\"grc\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor\":0,\"seed-identity-version\":{},\"seed-identity\":\"{}\",\"multi-file\":true,\"modules\":true,\"phases\":[\"lex\",\"scan\",\"resolve\",\"check\"],\"emit\":[\"bytecode\",\"grbc\",\"llvm-ir\",\"ll\",\"llvm-object\",\"obj\",\"executable\",\"exe\",\"mir\",\"core\",\"provisional\",\"control-plan\",\"monolithic-source\",\"interfaces-json\",\"std-interfaces-json\"],\"diagnostics-json\":true,\"serve\":{{\"protocol\":{},\"transport\":\"json-lines\",\"max-request-bytes\":{},\"max-arguments\":{},\"max-inputs\":{},\"max-source-bytes\":{}}}}}",
                 env!("CARGO_PKG_VERSION"),
                 grandiose_vm::SEED_IDENTITY_VERSION,
                 grandiose_vm::RELEASED_SEED_IDENTITY,
@@ -1280,9 +1391,159 @@ pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
     }
 }
 
+fn inspect_tokens(
+    input: &Path,
+    indices: &[usize],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    let source = match std::fs::read_to_string(input) {
+        Ok(source) => source,
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "grc: error: could not read {}: {error}",
+                input.display()
+            );
+            return 1;
+        }
+    };
+    let tokens = match lexer::lex(&source) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            let _ = writeln!(stderr, "grc: error: source did not lex: {error:?}");
+            return 1;
+        }
+    };
+    for &index in indices {
+        let Some(token) = tokens.get(index) else {
+            let _ = writeln!(
+                stderr,
+                "grc: error: token index {index} is out of bounds for {} tokens",
+                tokens.len()
+            );
+            return 1;
+        };
+        let prefix = &source[..token.span.start];
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let line_start = prefix.rfind('\n').map_or(0, |offset| offset + 1);
+        let column = source[line_start..token.span.start].chars().count() + 1;
+        let spelling = &source[token.span.start..token.span.end];
+        let _ = writeln!(
+            stdout,
+            "token {index}: {:?} bytes {}..{} line {line} column {column} spelling={spelling:?}",
+            token.kind, token.span.start, token.span.end,
+        );
+    }
+    0
+}
+
+fn inspect_bundle_tokens(
+    inputs: &[PathBuf],
+    indices: &[usize],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    let mut segments = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let source = match std::fs::read_to_string(input) {
+            Ok(source) => source,
+            Err(error) => {
+                let _ = writeln!(
+                    stderr,
+                    "grc: error: could not read {}: {error}",
+                    input.display()
+                );
+                return 1;
+            }
+        };
+        segments.push(Segment::new(input.to_string_lossy(), source));
+    }
+    let primary = segments.remove(0);
+    let bundle = SourceBundle::distributed(primary, segments);
+    let tokens = match lexer::lex(bundle.source()) {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            let _ = writeln!(stderr, "grc: error: source bundle did not lex: {error:?}");
+            return 1;
+        }
+    };
+    for &index in indices {
+        let Some(token) = tokens.get(index) else {
+            let _ = writeln!(
+                stderr,
+                "grc: error: token index {index} is out of bounds for {} tokens",
+                tokens.len()
+            );
+            return 1;
+        };
+        let Some(mapped) = bundle.map_span(token.span) else {
+            let _ = writeln!(stderr, "grc: error: token {index} spans a bundle boundary");
+            return 1;
+        };
+        let prefix = &mapped.segment.source()[..mapped.span.start];
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let line_start = prefix.rfind('\n').map_or(0, |offset| offset + 1);
+        let column = mapped.segment.source()[line_start..mapped.span.start]
+            .chars()
+            .count()
+            + 1;
+        let spelling = &bundle.source()[token.span.start..token.span.end];
+        let _ = writeln!(
+            stdout,
+            "token {index}: {:?} {} bytes {}..{} line {line} column {column} spelling={spelling:?}",
+            token.kind,
+            mapped.segment.name(),
+            mapped.span.start,
+            mapped.span.end,
+        );
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_indexed_token_inspection() {
+        let command = parse(
+            ["--inspect-token", "bundle.glorious", "17", "42"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::InspectTokens { input, indices }
+                if input == PathBuf::from("bundle.glorious") && indices == [17, 42]
+        ));
+    }
+
+    #[test]
+    fn parses_bundle_token_inspection() {
+        let command = parse(
+            [
+                "--inspect-bundle-token",
+                "main.glorious",
+                "module.glorious",
+                "--",
+                "17",
+                "42",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::InspectBundleTokens { inputs, indices }
+                if inputs == [PathBuf::from("main.glorious"), PathBuf::from("module.glorious")]
+                    && indices == [17, 42]
+        ));
+    }
 
     #[test]
     fn json_diagnostics_preserve_spanless_messages() {
@@ -1418,6 +1679,7 @@ mod tests {
             ("mir", EmitKind::Mir),
             ("core", EmitKind::Core),
             ("provisional", EmitKind::Provisional),
+            ("control-plan", EmitKind::ControlPlan),
             ("interfaces-json", EmitKind::InterfacesJson),
         ] {
             let Command::Compile(command) = parse(

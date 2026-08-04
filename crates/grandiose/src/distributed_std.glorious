@@ -2394,42 +2394,179 @@ let Range::intersection = __g1_range_intersection;
 let Range::checked_offset = __g1_range_checked_offset;
 let Range::new = __g1_range_usize;
 
-// Effect-polymorphic traversal over half-open usize ranges. The open effect
-// row is inferred from the callback and forwarded unchanged by each
-// specialization. These helpers deliberately recurse over scalar cursors:
-// optimized compiler code can inline the callback and turn the tail step into
-// a direct loop without allocating an iterator or erasing its effects.
-__g1_for_range_step<F, e: EffectRow>(current: usize, end: usize, body: F)
-where F: Fn<(usize), Output=(), Effects={| e}>,
+// The range traversal kernel. `exit` is proof-only: a callback invocation of
+// it is control-inlined into the concrete destination and becomes cleanup plus
+// a direct LEAVE. The open callback effect row is forwarded exactly.
+__g1_fold_until_step<L, A, B, F, e: EffectRow>(
+    current: usize,
+    end: usize,
+    accumulator: A,
+    exit: L,
+    body: F
+) -> A
+where L: Label<B>,
+F: Fn<(A, usize, L), Output=A, Effects={| e}>,
 F: Use<[0, 0]> {
     if(current < end) {
-        body(current);
-        __g1_for_range_step(current + 1, end, body)
+        __g1_fold_until_step(
+            current + 1,
+            end,
+            body(accumulator, current, exit),
+            exit,
+            body
+        )
     } else {
-        ()
+        accumulator
     }
+}
+
+fold_until<L, A, B, F, e: EffectRow>(
+    range: Range<usize>,
+    seed: A,
+    exit: L,
+    body: F
+) -> A
+where L: Label<B>,
+F: Fn<(A, usize, L), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_fold_until_step(range.start, range.end, seed, exit, body)
+}
+
+scan_until<L, A, B, F, e: EffectRow>(
+    range: Range<usize>,
+    seed: A,
+    exit: L,
+    body: F
+) -> A
+where L: Label<B>,
+F: Fn<(A, usize, L), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    fold_until(range, seed, exit, body)
+}
+
+fold_control<L, A, B, F, e: EffectRow>(
+    range: Range<usize>,
+    seed: A,
+    exit: L,
+    body: F
+) -> A
+where L: Label<B>,
+F: Fn<(A, usize, L), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    fold_until(range, seed, exit, body)
+}
+
+for_range_control<L, B, F, e: EffectRow>(
+    range: Range<usize>,
+    exit: L,
+    body: F
+)
+where L: Label<B>,
+F: Fn<(usize, L), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    fold_until(range, (), exit, { accumulator, index, destination => {
+        body(index, destination);
+        accumulator
+    }})
+}
+
+// Stateful nonlocal loop control. The label parameter brands both operations,
+// so a nested loop's requests are a different protocol instance even when its
+// break value and state happen to have the same representation.
+effect LoopControl<L, B, S>
+where L: Label<B> {
+    break(value: B) -> !
+    continue(state: S) -> !
+}
+
+loop_break<L, B, S>(state: S, value: B, exit: L) -> ! / {LoopControl<L, B, S>}
+where L: Label<B>,
+S: Use<[0, 0]> {
+    state;
+    perform LoopControl<L, B, S>::break(value)
+}
+
+loop_continue<L, B, S>(state: S, exit: L) -> ! / {LoopControl<L, B, S>}
+where L: Label<B> {
+    perform LoopControl<L, B, S>::continue(state)
+}
+
+enum LoopStateStep<B, S> {
+    Break(B)
+    Continue(S)
+}
+
+__g1_loop_state_decide<L, B, S, F, e: EffectRow>(
+    state: S,
+    exit: L,
+    body: F
+) -> LoopStateStep<B, S>
+where L: Label<B>,
+F: Fn<(S, L), Output=B, Effects={LoopControl<L, B, S> | e}>,
+F: Use<[0, 0]> {
+    handle LoopStateStep::Break(body(state, exit)) {
+        LoopControl<L, B, S>::break(value) => LoopStateStep::Break(value),
+        LoopControl<L, B, S>::continue(next) => LoopStateStep::Continue(next)
+    }
+}
+
+__g1_loop_state_step<L, B, S, F, e: EffectRow>(
+    state: S,
+    exit: L,
+    body: F
+) -> B
+where L: Label<B>,
+F: Fn<(S, L), Output=B, Effects={LoopControl<L, B, S> | e}>,
+F: Use<[0, 0]> {
+    handle __g1_loop_state_decide(state, exit, body) {
+        LoopStateStep::Break(value) => value,
+        LoopStateStep::Continue(next) => __g1_loop_state_step(next, exit, body)
+    }
+}
+
+loop_state<L, B, S, F, e: EffectRow>(state: S, exit: L, body: F) -> B
+where L: Label<B>,
+F: Fn<(S, L), Output=B, Effects={LoopControl<L, B, S> | e}>,
+F: Use<[0, 0]> {
+    __g1_loop_state_step(state, exit, body)
+}
+
+repeat<L, B, S, F, e: EffectRow>(state: S, exit: L, body: F) -> B
+where L: Label<B>,
+F: Fn<(S, L), Output=B, Effects={LoopControl<L, B, S> | e}>,
+F: Use<[0, 0]> {
+    loop_state(state, exit, body)
+}
+
+__g1_while_state_step<S, P, F, e: EffectRow>(state: S, predicate: P, body: F) -> S
+where P: Fn<(&S,), Output=Bool, Effects={| e}>,
+P: Use<[0, 0]>,
+F: Fn<(S,), Output=S, Effects={| e}>,
+F: Use<[0, 0]> {
+    let keep_going = predicate(&state);
+    if(keep_going) {
+        __g1_while_state_step(body(state), predicate, body)
+    } else {
+        state
+    }
+}
+
+while_state<S, P, F, e: EffectRow>(state: S, predicate: P, body: F) -> S
+where P: Fn<(&S,), Output=Bool, Effects={| e}>,
+P: Use<[0, 0]>,
+F: Fn<(S,), Output=S, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_while_state_step(state, predicate, body)
 }
 
 for_range<F, e: EffectRow>(range: Range<usize>, body: F)
 where F: Fn<(usize), Output=(), Effects={| e}>,
 F: Use<[0, 0]> {
-    __g1_for_range_step(range.start, range.end, body)
-}
-
-__g1_try_for_range_step<E, F, e: EffectRow>(
-    current: usize,
-    end: usize,
-    body: F
-) -> Result<(), E>
-where F: Fn<(usize), Output=Result<(), E>, Effects={| e}>,
-F: Use<[0, 0]> {
-    if(current < end) {
-        handle body(current) {
-            Result::Err(error) => Result::Err(error),
-            Result::Ok(_) => __g1_try_for_range_step(current + 1, end, body)
-        }
-    } else {
-        Result::Ok(())
+    @done: () {
+        fold_until(range, (), @done, { accumulator, index, exit => {
+            body(index);
+            accumulator
+        }})
     }
 }
 
@@ -2439,21 +2576,14 @@ try_for_range<E, F, e: EffectRow>(
 ) -> Result<(), E>
 where F: Fn<(usize), Output=Result<(), E>, Effects={| e}>,
 F: Use<[0, 0]> {
-    __g1_try_for_range_step(range.start, range.end, body)
-}
-
-__g1_fold_range_step<A, F, e: EffectRow>(
-    current: usize,
-    end: usize,
-    accumulator: A,
-    body: F
-) -> A
-where F: Fn<(A, usize), Output=A, Effects={| e}>,
-F: Use<[0, 0]> {
-    if(current < end) {
-        __g1_fold_range_step(current + 1, end, body(accumulator, current), body)
-    } else {
-        accumulator
+    @done: Result<(), E> {
+        fold_until(range, (), @done, { accumulator, index, exit =>
+            handle body(index) {
+                Result::Err(error) => exit(Result::Err(error)),
+                Result::Ok(_) => accumulator
+            }
+        });
+        Result::Ok(())
     }
 }
 
@@ -2464,24 +2594,10 @@ fold_range<A, F, e: EffectRow>(
 ) -> A
 where F: Fn<(A, usize), Output=A, Effects={| e}>,
 F: Use<[0, 0]> {
-    __g1_fold_range_step(range.start, range.end, seed, body)
-}
-
-__g1_try_fold_range_step<A, E, F, e: EffectRow>(
-    current: usize,
-    end: usize,
-    accumulator: A,
-    body: F
-) -> Result<A, E>
-where F: Fn<(A, usize), Output=Result<A, E>, Effects={| e}>,
-F: Use<[0, 0]> {
-    if(current < end) {
-        handle body(accumulator, current) {
-            Result::Err(error) => Result::Err(error),
-            Result::Ok(next) => __g1_try_fold_range_step(current + 1, end, next, body)
-        }
-    } else {
-        Result::Ok(accumulator)
+    @done: A {
+        fold_until(range, seed, @done, { accumulator, index, exit =>
+            body(accumulator, index)
+        })
     }
 }
 
@@ -2492,24 +2608,14 @@ try_fold_range<A, E, F, e: EffectRow>(
 ) -> Result<A, E>
 where F: Fn<(A, usize), Output=Result<A, E>, Effects={| e}>,
 F: Use<[0, 0]> {
-    __g1_try_fold_range_step(range.start, range.end, seed, body)
-}
-
-__g1_find_range_step<F, e: EffectRow>(
-    current: usize,
-    end: usize,
-    predicate: F
-) -> Option<usize>
-where F: Fn<(usize), Output=Bool, Effects={| e}>,
-F: Use<[0, 0]> {
-    if(current < end) {
-        if(predicate(current)) {
-            Option::Some(current)
-        } else {
-            __g1_find_range_step(current + 1, end, predicate)
-        }
-    } else {
-        None
+    @done: Result<A, E> {
+        let accumulator = fold_until(range, seed, @done, {
+            accumulator, index, exit => handle body(accumulator, index) {
+                Result::Err(error) => exit(Result::Err(error)),
+                Result::Ok(next) => next
+            }
+        });
+        Result::Ok(accumulator)
     }
 }
 
@@ -2519,7 +2625,166 @@ find_range<F, e: EffectRow>(
 ) -> Option<usize>
 where F: Fn<(usize), Output=Bool, Effects={| e}>,
 F: Use<[0, 0]> {
-    __g1_find_range_step(range.start, range.end, predicate)
+    @found: Option<usize> {
+        fold_until(range, (), @found, { accumulator, index, exit =>
+            if(predicate(index)) {
+                exit(Option::Some(index))
+            } else {
+                accumulator
+            }
+        });
+        None
+    }
+}
+
+enum UniqueMatch<T> {
+    Missing
+    Unique(T)
+    Ambiguous(T, T)
+}
+
+__g1_unique_usize_none() -> Option<usize> { None }
+
+find_map_range<T, F, e: EffectRow>(
+    range: Range<usize>,
+    body: F
+) -> Option<T>
+where F: Fn<(usize), Output=Option<T>, Effects={| e}>,
+F: Use<[0, 0]> {
+    @found: Option<T> {
+        fold_until(range, (), @found, { accumulator, index, exit =>
+            handle body(index) {
+                Option::Some(value) => exit(Option::Some(value)),
+                None => accumulator
+            }
+        });
+        None
+    }
+}
+
+find_map<T, F, e: EffectRow>(range: Range<usize>, body: F) -> Option<T>
+where F: Fn<(usize), Output=Option<T>, Effects={| e}>,
+F: Use<[0, 0]> {
+    find_map_range(range, body)
+}
+
+position_range<F, e: EffectRow>(range: Range<usize>, predicate: F) -> Option<usize>
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    find_range(range, predicate)
+}
+
+position<F, e: EffectRow>(range: Range<usize>, predicate: F) -> Option<usize>
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    position_range(range, predicate)
+}
+
+any_range<F, e: EffectRow>(range: Range<usize>, predicate: F) -> Bool
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    Option::is_some(find_range(range, predicate))
+}
+
+any<F, e: EffectRow>(range: Range<usize>, predicate: F) -> Bool
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    any_range(range, predicate)
+}
+
+all_range<F, e: EffectRow>(range: Range<usize>, predicate: F) -> Bool
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    let failed = @failed: Option<usize> {
+        fold_until(range, (), @failed, { accumulator, index, exit =>
+            if(predicate(index)) { accumulator }
+            else { exit(Option::Some(index)) }
+        });
+        None
+    };
+    Option::is_none(move failed)
+}
+
+all<F, e: EffectRow>(range: Range<usize>, predicate: F) -> Bool
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    all_range(range, predicate)
+}
+
+first_error_range<E, F, e: EffectRow>(
+    range: Range<usize>,
+    body: F
+) -> Option<E>
+where F: Fn<(usize), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle try_for_range(range, body) {
+        Result::Err(error) => Option::Some(error),
+        Result::Ok(_) => None
+    }
+}
+
+first_error<E, F, e: EffectRow>(
+    range: Range<usize>,
+    body: F
+) -> Option<E>
+where F: Fn<(usize), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    first_error_range(range, body)
+}
+
+find_unique_by<F, e: EffectRow>(
+    range: Range<usize>,
+    predicate: F
+) -> UniqueMatch<usize>
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    @ambiguous: UniqueMatch<usize> {
+        let first = fold_until(range, __g1_unique_usize_none(), @ambiguous, {
+            found, index, exit => if(predicate(index)) {
+                handle move found {
+                    None => Option::Some(index),
+                    Option::Some(previous) =>
+                        exit(UniqueMatch::Ambiguous(move previous, index))
+                }
+            } else {
+                found
+            }
+        });
+        handle move first {
+            None => UniqueMatch::Missing,
+            Option::Some(value) => UniqueMatch::Unique(move value)
+        }
+    }
+}
+
+find_unique<F, e: EffectRow>(
+    range: Range<usize>,
+    predicate: F
+) -> UniqueMatch<usize>
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    find_unique_by(range, predicate)
+}
+
+__g1_collect_until_empty<T>() -> Vec<T> { Vec::new() }
+
+collect_until<L, T, B, F, e: EffectRow>(
+    range: Range<usize>,
+    exit: L,
+    body: F
+) -> Vec<T>
+where L: Label<B>,
+T: Use<[0, 0]>,
+F: Fn<(usize, L), Output=T, Effects={| e}>,
+F: Use<[0, 0]> {
+    fold_until(range, __g1_collect_until_empty(), exit, { output, index, destination => {
+        // Evaluate label-capable work before borrowing the accumulator. If the
+        // callback leaves, cleanup may then drop `output` without crossing a
+        // still-live unique reborrow.
+        let item = body(index, destination);
+        Vec::push(&mut output, move item);
+        move output
+    }})
 }
 
 __g1_utf8_valid() -> Result<(), Utf8Error> { Result::Ok(()) }
@@ -3706,6 +3971,186 @@ __g1_vec_truncate<T>(value: &mut Vec<T>, length: usize) where T: Use<[0, 0]> {
     }
 }
 
+// Transactional append guard. The stored unique reference is reborrowed for
+// the callback and for rollback; invoking any label out of the surrounding
+// scope runs Drop before the resulting LEAVE, restoring the original length.
+struct VecCheckpoint<'a, T> {
+    private value: &'a mut Vec<T>,
+    private length: usize,
+    private armed: Bool
+}
+
+impl<'a, T> Drop for VecCheckpoint<'a, T> where T: Use<[0, 0]> {
+    drop(&mut self) -> {
+        if(self.armed) {
+            __g1_vec_truncate(&mut *self.value, self.length)
+        } else {
+            ()
+        }
+    }
+}
+
+__g1_vec_checkpoint<'a, T>(value: &'a mut Vec<T>) -> VecCheckpoint<'a, T>
+where T: Use<[0, 0]> {
+    let length = __g1_vec_len(&*value);
+    VecCheckpoint { value: move value, length: move length, armed: true }
+}
+
+__g1_vec_checkpoint_commit<'a, T>(checkpoint: &mut VecCheckpoint<'a, T>) {
+    (*checkpoint).armed = false;
+    ()
+}
+
+// Execute a scoped mutation and always restore the original vector length.
+// The armed checkpoint is deliberately not committed: normal return and every
+// labeled transfer runs the same Drop cleanup before leaving.
+with_vec_rollback<'a, T, R, F>(value: &'a mut Vec<T>, body: F) -> R
+where T: Use<[0, 0]>,
+F: Fn<(&mut Vec<T>,), Output=R>,
+F: Use<[0, 0]> {
+    let checkpoint = __g1_vec_checkpoint(move value);
+    body(&mut *checkpoint.value)
+}
+
+// Compiler diagnostic-context stacks use the same length transaction as any
+// other append-only context. The semantic name keeps call sites explicit while
+// sharing the proven cleanup implementation.
+type DiagnosticContextFrame<'a, T> = VecCheckpoint<'a, T>;
+
+diagnostic_context_frame<'a, T>(
+    value: &'a mut Vec<T>
+) -> DiagnosticContextFrame<'a, T>
+where T: Use<[0, 0]> {
+    __g1_vec_checkpoint(move value)
+}
+
+diagnostic_context_frame_commit<'a, T>(
+    value: &mut DiagnosticContextFrame<'a, T>
+) {
+    __g1_vec_checkpoint_commit(move value)
+}
+
+with_diagnostic_context<'a, T, R, F>(value: &'a mut Vec<T>, body: F) -> R
+where T: Use<[0, 0]>,
+F: Fn<(&mut Vec<T>,), Output=R>,
+F: Use<[0, 0]> {
+    with_vec_rollback(move value, body)
+}
+
+with_range<T, F, e: EffectRow>(value: &mut Vec<T>, body: F) -> Range<usize>
+where T: Use<[0, 0]>,
+F: Fn<(&mut Vec<T>,), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    let checkpoint = __g1_vec_checkpoint(move value);
+    let start = checkpoint.length;
+    body(&mut *checkpoint.value);
+    let end = __g1_vec_len(&*checkpoint.value);
+    __g1_vec_checkpoint_commit(&mut checkpoint);
+    Range { start: move start, end: move end }
+}
+
+try_with_range<T, E, F, e: EffectRow>(
+    value: &mut Vec<T>,
+    body: F
+) -> Result<Range<usize>, E>
+where T: Use<[0, 0]>,
+F: Fn<(&mut Vec<T>,), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    @failed: Result<Range<usize>, E> {
+        let checkpoint = __g1_vec_checkpoint(move value);
+        let start = checkpoint.length;
+        try(body(&mut *checkpoint.value), @failed);
+        let end = __g1_vec_len(&*checkpoint.value);
+        __g1_vec_checkpoint_commit(&mut checkpoint);
+        Result::Ok(Range { start: move start, end: move end })
+    }
+}
+
+__g1_append_range_control<T, L, F, e: EffectRow>(
+    value: &mut Vec<T>,
+    range: Range<usize>,
+    exit: L,
+    body: F
+) -> usize
+where L: Label<usize>,
+F: Fn<(usize), Output=T, Effects={| e}>,
+F: Use<[0, 0]> {
+    fold_until(range, 0, exit, { count, index, done => {
+        Vec::push(&mut *value, body(index));
+        count + 1
+    }})
+}
+
+append_range<T, F, e: EffectRow>(
+    value: &mut Vec<T>,
+    range: Range<usize>,
+    body: F
+) -> Range<usize>
+where F: Fn<(usize), Output=T, Effects={| e}>,
+F: Use<[0, 0]> {
+    let start = Vec::len(&*value);
+    let count = @done: usize {
+        __g1_append_range_control(&mut *value, range, @done, body)
+    };
+    let end = start + count;
+    Range { start: move start, end: move end }
+}
+
+__g1_map_range_into<T, F, e: EffectRow>(
+    range: Range<usize>,
+    body: F,
+    output: Vec<T>
+) -> Vec<T>
+where F: Fn<(usize), Output=T, Effects={| e}>,
+F: Use<[0, 0]> {
+    append_range(&mut output, range, body);
+    move output
+}
+
+map_range<T, F, e: EffectRow>(range: Range<usize>, body: F) -> Vec<T>
+where F: Fn<(usize), Output=T, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_map_range_into(range, body, Vec::new())
+}
+
+collect_range<T, F, e: EffectRow>(range: Range<usize>, body: F) -> Vec<T>
+where F: Fn<(usize), Output=T, Effects={| e}>,
+F: Use<[0, 0]> {
+    map_range(range, body)
+}
+
+__g1_try_map_range_into<T, E, F, e: EffectRow>(
+    range: Range<usize>,
+    body: F,
+    output: Vec<T>
+) -> Result<Vec<T>, E>
+where T: Use<[0, 0]>,
+F: Fn<(usize), Output=Result<T, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    @failed: Result<Vec<T>, E> {
+        let output = fold_until(range, output, @failed, {
+            output, index, exit => handle body(index) {
+                Result::Err(error) => exit(Result::Err(error)),
+                Result::Ok(item) => {
+                    Vec::push(&mut output, move item);
+                    move output
+                }
+            }
+        });
+        Result::Ok(move output)
+    }
+}
+
+try_map_range<T, E, F, e: EffectRow>(
+    range: Range<usize>,
+    body: F
+) -> Result<Vec<T>, E>
+where T: Use<[0, 0]>,
+F: Fn<(usize), Output=Result<T, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_try_map_range_into(range, body, Vec::new())
+}
+
 __g1_vec_clear<T>(value: &mut Vec<T>) where T: Use<[0, 0]> {
     let current = __g1_array_len(&value.storage);
     handle 0 < current {
@@ -4280,6 +4725,10 @@ let Vec::push = __g1_vec_push;
 let Vec::is_empty = __g1_vec_is_empty;
 let Vec::pop = __g1_vec_pop;
 let Vec::truncate = __g1_vec_truncate;
+let Vec::checkpoint = __g1_vec_checkpoint;
+let VecCheckpoint::commit = __g1_vec_checkpoint_commit;
+let Vec::with_range = with_range;
+let Vec::try_with_range = try_with_range;
 let Vec::clear = __g1_vec_clear;
 let Vec::split_off = __g1_vec_split_off;
 let Vec::drain = __g1_vec_drain;
@@ -4294,6 +4743,7 @@ let Vec::swap = __g1_vec_swap;
 let Vec::reverse = __g1_vec_reverse;
 let Vec::into_iter = __g1_vec_into_iter;
 let Vec::remove = __g1_vec_remove;
+
 let Vec::swap_remove = __g1_vec_swap_remove;
 let Vec::insert = __g1_vec_insert;
 let Vec::append = __g1_vec_append;
@@ -4392,6 +4842,315 @@ let WorkList::reserve = __g1_vec_deque_reserve;
 let WorkList::push = __g1_vec_deque_push_back;
 let WorkList::pop = __g1_vec_deque_pop_front;
 let WorkList::clear = __g1_vec_deque_clear;
+
+struct __DrainStackState<T, A> { work: Stack<T>, accumulator: A }
+
+drain_stack<T, A, F, e: EffectRow>(work: Stack<T>, seed: A, body: F) -> A
+where T: Use<[0, 0]>,
+F: Fn<(A, T), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    loop_state(
+        __DrainStackState { work: move work, accumulator: move seed },
+        @drain_stack,
+        { state, destination => {
+            let __DrainStackState { work, accumulator } = move state;
+            handle Stack::pop(&mut work) {
+                Result::Err(_) => {
+                    work;
+                    move accumulator
+                },
+                Result::Ok(item) => loop_continue(
+                    __DrainStackState {
+                        work: move work,
+                        accumulator: body(move accumulator, move item)
+                    },
+                    destination
+                )
+            }
+        }}
+    )
+}
+
+struct __DrainQueueState<T, A> { work: WorkList<T>, accumulator: A }
+
+drain_queue<T, A, F, e: EffectRow>(work: WorkList<T>, seed: A, body: F) -> A
+where T: Use<[0, 0]>,
+F: Fn<(A, T), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    loop_state(
+        __DrainQueueState { work: move work, accumulator: move seed },
+        @drain_queue,
+        { state, destination => {
+            let __DrainQueueState { work, accumulator } = move state;
+            handle WorkList::pop(&mut work) {
+                Result::Err(_) => {
+                    work;
+                    move accumulator
+                },
+                Result::Ok(item) => loop_continue(
+                    __DrainQueueState {
+                        work: move work,
+                        accumulator: body(move accumulator, move item)
+                    },
+                    destination
+                )
+            }
+        }}
+    )
+}
+
+pub struct WorklistUpdate<T, A> { work: WorkList<T>, accumulator: A }
+
+pub worklist_update<T, A>(work: WorkList<T>, accumulator: A) -> WorklistUpdate<T, A> {
+    WorklistUpdate { work: move work, accumulator: move accumulator }
+}
+
+struct __DrainWorklistState<T, A> { work: WorkList<T>, accumulator: A }
+
+drain_worklist<T, A, F, e: EffectRow>(
+    work: WorkList<T>,
+    seed: A,
+    body: F
+) -> A
+where T: Use<[0, 0]>,
+F: Fn<(A, T, WorkList<T>), Output=WorklistUpdate<T, A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    loop_state(
+        __DrainWorklistState { work: move work, accumulator: move seed },
+        @drain_worklist,
+        { state, destination => {
+            let __DrainWorklistState { work, accumulator } = move state;
+            handle WorkList::pop(&mut work) {
+                Result::Err(_) => {
+                    work;
+                    move accumulator
+                },
+                Result::Ok(item) => {
+                    let WorklistUpdate { work: next_work, accumulator: next } =
+                        body(move accumulator, move item, move work);
+                    loop_continue(
+                        __DrainWorklistState {
+                            work: move next_work,
+                            accumulator: move next
+                        },
+                        destination
+                    )
+                }
+            }
+        }}
+    )
+}
+
+solve_worklist<T, A, F, e: EffectRow>(work: WorkList<T>, seed: A, body: F) -> A
+where T: Use<[0, 0]>,
+F: Fn<(A, T, WorkList<T>), Output=WorklistUpdate<T, A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    drain_worklist(work, seed, body)
+}
+
+propagate_graph<T, A, F, e: EffectRow>(work: WorkList<T>, seed: A, body: F) -> A
+where T: Use<[0, 0]>,
+F: Fn<(A, T, WorkList<T>), Output=WorklistUpdate<T, A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    drain_worklist(work, seed, body)
+}
+
+pub enum WorklistFailure { StepLimitExceeded }
+
+// Queue policy belongs to the engine, while the callback owns the analysis
+// domain and merge rule. The append-only queue prefix is the visited set and
+// its suffix is the enqueued set. Linear membership is deliberate here: it
+// keeps label-capable callbacks independent of HashMap's generic probe engine,
+// and compiler clients can choose compact integer work keys.
+pub struct WorklistSolver<T> {
+    private work: Vec<T>,
+    private pending: Vec<T>,
+    private pending_cursor: usize,
+    private scan_cursor: usize,
+    private cursor: usize,
+    private remaining: usize
+}
+
+pub struct WorklistStep<T, A> {
+    private dependents: Vec<T>,
+    private accumulator: A
+}
+
+worklist_step<T, A>(
+    dependents: Vec<T>,
+    accumulator: A
+) -> WorklistStep<T, A> {
+    WorklistStep {
+        dependents: move dependents,
+        accumulator: move accumulator
+    }
+}
+
+__g1_worklist_solver_new<T>(limit: usize) -> WorklistSolver<T> {
+    WorklistSolver {
+        work: Vec::new(),
+        pending: Vec::new(),
+        pending_cursor: 0,
+        scan_cursor: 0,
+        cursor: 0,
+        remaining: move limit
+    }
+}
+
+__g1_worklist_solver_contains<T>(
+    value: &WorklistSolver<T>,
+    item: &T,
+    index: usize,
+    end: usize
+) -> Bool
+where T: Eq {
+    if(index < end) {
+        if(*Vec::index(&value.work, index) == *item) {
+            true
+        } else {
+            __g1_worklist_solver_contains(move value, move item, index + 1, end)
+        }
+    } else { false }
+}
+
+__g1_worklist_solver_enqueue<T>(value: &mut WorklistSolver<T>, item: T) -> Bool
+where T: Eq,
+T: Use<[0, *]> {
+    let cursor = value.cursor;
+    let end = Vec::len(&value.work);
+    let duplicate = __g1_worklist_solver_contains(&*value, &item, cursor, end);
+    handle duplicate {
+        Result::Ok(_) => false,
+        Result::Err(_) => {
+            Vec::push(&mut value.work, item);
+            true
+        }
+    }
+}
+
+__g1_worklist_solver_visited<T>(value: &WorklistSolver<T>, item: &T) -> Bool
+where T: Eq,
+T: Use<[0, *]> {
+    __g1_worklist_solver_contains(value, item, 0, value.cursor)
+}
+
+__g1_worklist_solver_work_at<T>(value: &WorklistSolver<T>, index: usize) -> T
+where T: Use<[0, *]> {
+    *Vec::index(&value.work, index)
+}
+
+__g1_worklist_solver_pending_at<T>(value: &WorklistSolver<T>, index: usize) -> T
+where T: Use<[0, *]> {
+    *Vec::index(&value.pending, index)
+}
+
+__g1_solve_worklist_bounded_step<T, A, F, e: EffectRow>(
+    value: WorklistSolver<T>,
+    accumulator: A,
+    body: F
+) -> Result<A, WorklistFailure>
+where T: Eq,
+T: Use<[0, *]>,
+F: Fn<(A, T), Output=WorklistStep<T, A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(value.pending_cursor < Vec::len(&value.pending)) {
+        if(value.scan_cursor < Vec::len(&value.work)) {
+            let dependent = __g1_worklist_solver_pending_at(&value, value.pending_cursor);
+            let existing = __g1_worklist_solver_work_at(&value, value.scan_cursor);
+            if(existing == dependent) {
+                value.pending_cursor = value.pending_cursor + 1;
+                value.scan_cursor = value.cursor;
+                __g1_solve_worklist_bounded_step(move value, move accumulator, body)
+            } else {
+                value.scan_cursor = value.scan_cursor + 1;
+                __g1_solve_worklist_bounded_step(move value, move accumulator, body)
+            }
+        } else {
+            let dependent = __g1_worklist_solver_pending_at(&value, value.pending_cursor);
+            Vec::push(&mut value.work, move dependent);
+            value.pending_cursor = value.pending_cursor + 1;
+            value.scan_cursor = value.cursor;
+            __g1_solve_worklist_bounded_step(move value, move accumulator, body)
+        }
+    } else {
+        if(value.cursor < Vec::len(&value.work)) {
+            if(value.remaining == 0) {
+                value;
+                accumulator;
+                Result::Err(WorklistFailure::StepLimitExceeded)
+            } else {
+                let item = __g1_worklist_solver_work_at(&value, value.cursor);
+                value.cursor = value.cursor + 1;
+                value.remaining = value.remaining - 1;
+                let WorklistStep {
+                    dependents,
+                    accumulator: next
+                } = body(move accumulator, item);
+                value.pending = move dependents;
+                value.pending_cursor = 0;
+                value.scan_cursor = value.cursor;
+                __g1_solve_worklist_bounded_step(
+                    move value,
+                    move next,
+                    body
+                )
+            }
+        } else {
+            value;
+            Result::Ok(move accumulator)
+        }
+    }
+}
+
+solve_worklist_bounded<T, A, F, e: EffectRow>(
+    value: WorklistSolver<T>,
+    seed: A,
+    body: F
+) -> Result<A, WorklistFailure>
+where T: Eq,
+T: Use<[0, *]>,
+F: Fn<(A, T), Output=WorklistStep<T, A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_solve_worklist_bounded_step(move value, move seed, body)
+}
+
+let WorklistSolver::new = __g1_worklist_solver_new;
+let WorklistSolver::enqueue = __g1_worklist_solver_enqueue;
+let WorklistSolver::visited = __g1_worklist_solver_visited;
+
+pub enum Stability<S> {
+    Changed(S)
+    Stable(S)
+}
+
+pub changed<S>(value: S) -> Stability<S> {
+    Stability::Changed(move value)
+}
+
+pub stable<S>(value: S) -> Stability<S> {
+    Stability::Stable(move value)
+}
+
+__g1_repeat_until_stable_step<S, F, e: EffectRow>(state: S, body: F) -> S
+where F: Fn<(S), Output=Stability<S>, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle body(state) {
+        Stability::Changed(value) => __g1_repeat_until_stable_step(value, body),
+        Stability::Stable(value) => value
+    }
+}
+
+repeat_until_stable<S, F, e: EffectRow>(state: S, body: F) -> S
+where F: Fn<(S), Output=Stability<S>, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_repeat_until_stable_step(state, body)
+}
+
+fixed_point<S, F, e: EffectRow>(state: S, body: F) -> S
+where F: Fn<(S), Output=Stability<S>, Effects={| e}>,
+F: Use<[0, 0]> {
+    repeat_until_stable(state, body)
+}
 // Whole-shell byte conversion is the only public bridge to the internal
 // Array<u8> primitives. Vec's private-field authority is exercised here, and
 // the moved dense shell cannot be observed or reused by the caller.
@@ -4870,6 +5629,7 @@ let CharIndices::next_offset = __g1_char_indices_next_offset;
 struct StringBuilder { private bytes: Vec<u8> }
 
 struct ByteBuf { private bytes: Vec<u8> }
+type ByteWriter = ByteBuf;
 
 struct Formatter {
     private builder: StringBuilder,
@@ -5245,6 +6005,59 @@ __g1_byte_buf_resize_zeroed(value: &mut ByteBuf, length: usize) {
     }
 }
 
+struct ByteBufCheckpoint<'a> {
+    private value: &'a mut ByteBuf,
+    private length: usize,
+    private armed: Bool
+}
+
+impl<'a> Drop for ByteBufCheckpoint<'a> {
+    drop(&mut self) -> {
+        if(self.armed) {
+            __g1_byte_buf_resize_zeroed(&mut *self.value, self.length)
+        } else {
+            ()
+        }
+    }
+}
+
+__g1_byte_buf_checkpoint<'a>(value: &'a mut ByteBuf) -> ByteBufCheckpoint<'a> {
+    let length = __g1_byte_buf_len(&*value);
+    ByteBufCheckpoint { value: move value, length: move length, armed: true }
+}
+
+__g1_byte_buf_checkpoint_commit<'a>(checkpoint: &mut ByteBufCheckpoint<'a>) {
+    (*checkpoint).armed = false;
+    ()
+}
+
+__g1_byte_buf_with_record<F, e: EffectRow>(value: &mut ByteBuf, body: F) -> Range<usize>
+where F: Fn<(&mut ByteBuf,), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    let checkpoint = __g1_byte_buf_checkpoint(move value);
+    let start = checkpoint.length;
+    body(&mut *checkpoint.value);
+    let end = __g1_byte_buf_len(&*checkpoint.value);
+    __g1_byte_buf_checkpoint_commit(&mut checkpoint);
+    Range { start: move start, end: move end }
+}
+
+__g1_byte_buf_try_with_record<E, F, e: EffectRow>(
+    value: &mut ByteBuf,
+    body: F
+) -> Result<Range<usize>, E>
+where F: Fn<(&mut ByteBuf,), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    @failed: Result<Range<usize>, E> {
+        let checkpoint = __g1_byte_buf_checkpoint(move value);
+        let start = checkpoint.length;
+        try(body(&mut *checkpoint.value), @failed);
+        let end = __g1_byte_buf_len(&*checkpoint.value);
+        __g1_byte_buf_checkpoint_commit(&mut checkpoint);
+        Result::Ok(Range { start: move start, end: move end })
+    }
+}
+
 __g1_byte_buf_write_word_le(value: &mut ByteBuf, word: u128, remaining: usize) {
     handle remaining == 0 {
         Result::Ok(_) => (),
@@ -5394,6 +6207,111 @@ __g1_byte_buf_align_zeroed(value: &mut ByteBuf, alignment: usize) -> Bool {
     handle alignment == 0 {
         Result::Ok(_) => false,
         Result::Err(_) => __g1_byte_buf_align_nonzero(move value, move alignment)
+    }
+}
+
+__g1_byte_buf_with_alignment(value: &mut ByteBuf, alignment: usize) -> Option<Range<usize>> {
+    let start = __g1_byte_buf_len(&*value);
+    if(__g1_byte_buf_align_zeroed(&mut *value, move alignment)) {
+        Option::Some(Range { start: move start, end: __g1_byte_buf_len(&*value) })
+    } else {
+        None
+    }
+}
+
+__g1_byte_buf_with_length_prefix<F, e: EffectRow>(
+    value: &mut ByteBuf,
+    body: F
+) -> Result<Range<usize>, ToolkitCapacityError>
+where F: Fn<(&mut ByteBuf,), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    @failed: Result<Range<usize>, ToolkitCapacityError> {
+        let checkpoint = __g1_byte_buf_checkpoint(move value);
+        let prefix = checkpoint.length;
+        __g1_byte_buf_write_u32_le(&mut *checkpoint.value, 0);
+        let start = __g1_byte_buf_len(&*checkpoint.value);
+        body(&mut *checkpoint.value);
+        let end = __g1_byte_buf_len(&*checkpoint.value);
+        handle checked_usize_to_u32(end - start) {
+            Result::Ok(length) => {
+                __g1_byte_buf_patch_u32_le(&mut *checkpoint.value, move prefix, move length);
+                __g1_byte_buf_checkpoint_commit(&mut checkpoint);
+                Result::Ok(Range { start: move start, end: move end })
+            },
+            Result::Err(_) => @failed(Result::Err(ToolkitCapacityError::CounterOverflow))
+        }
+    }
+}
+
+__g1_byte_buf_offset_records<F, e: EffectRow>(
+    value: &mut ByteBuf,
+    table: usize,
+    payload: usize,
+    index: usize,
+    count: usize,
+    body: F
+) -> Result<(), ToolkitCapacityError>
+where F: Fn<(&mut ByteBuf, usize), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < count) {
+        handle checked_usize_to_u32(ByteBuf::len(&*value) - payload) {
+            Result::Err(_) => Result::Err(ToolkitCapacityError::CounterOverflow),
+            Result::Ok(offset) => {
+                ByteBuf::patch_u32_le(&mut *value, table + index * 4, offset);
+                body(&mut *value, index);
+                __g1_byte_buf_offset_records(
+                    move value,
+                    table,
+                    payload,
+                    index + 1,
+                    count,
+                    body
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+// Reserve a dense u32 offset table, then emit each record in order. Offsets are
+// relative to the returned payload range. The checkpoint makes both capacity
+// failure and any labeled callback exit transactional.
+__g1_byte_buf_with_offset_table<F, e: EffectRow>(
+    value: &mut ByteBuf,
+    count: usize,
+    body: F
+) -> Result<Range<usize>, ToolkitCapacityError>
+where F: Fn<(&mut ByteBuf, usize), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    @failed: Result<Range<usize>, ToolkitCapacityError> {
+        let checkpoint = __g1_byte_buf_checkpoint(move value);
+        let table = checkpoint.length;
+        let table_bytes = handle checked_usize_mul(count, 4) {
+            Result::Err(_) => @failed(Result::Err(
+                ToolkitCapacityError::CounterOverflow
+            )),
+            Result::Ok(found) => found
+        };
+        let payload = handle checked_usize_add(table, table_bytes) {
+            Result::Err(_) => @failed(Result::Err(
+                ToolkitCapacityError::CounterOverflow
+            )),
+            Result::Ok(found) => found
+        };
+        __g1_byte_buf_resize_zeroed(&mut *checkpoint.value, payload);
+        handle __g1_byte_buf_offset_records(
+            &mut *checkpoint.value,
+            table,
+            payload,
+            0,
+            count,
+            body
+        ) {
+            Result::Err(error) => @failed(Result::Err(error)),
+            Result::Ok(_) => ()
+        };
+        let end = __g1_byte_buf_len(&*checkpoint.value);
+        __g1_byte_buf_checkpoint_commit(&mut checkpoint);
+        Result::Ok(Range { start: move payload, end: move end })
     }
 }
 
@@ -6800,6 +7718,12 @@ let ByteBuf::is_empty = __g1_byte_buf_is_empty;
 let ByteBuf::reserve = __g1_byte_buf_reserve;
 let ByteBuf::push = __g1_byte_buf_push;
 let ByteBuf::resize_zeroed = __g1_byte_buf_resize_zeroed;
+let ByteBuf::checkpoint = __g1_byte_buf_checkpoint;
+let ByteBufCheckpoint::commit = __g1_byte_buf_checkpoint_commit;
+let ByteBuf::with_record = __g1_byte_buf_with_record;
+let ByteBuf::try_with_record = __g1_byte_buf_try_with_record;
+let ByteBuf::with_section = __g1_byte_buf_with_record;
+let ByteBuf::try_with_section = __g1_byte_buf_try_with_record;
 let ByteBuf::write_u16_le = __g1_byte_buf_write_u16_le;
 let ByteBuf::write_u32_le = __g1_byte_buf_write_u32_le;
 let ByteBuf::write_u64_le = __g1_byte_buf_write_u64_le;
@@ -6808,6 +7732,9 @@ let ByteBuf::patch_u16_le = __g1_byte_buf_patch_u16_le;
 let ByteBuf::patch_u32_le = __g1_byte_buf_patch_u32_le;
 let ByteBuf::patch_u64_le = __g1_byte_buf_patch_u64_le;
 let ByteBuf::align_zeroed = __g1_byte_buf_align_zeroed;
+let ByteBuf::with_alignment = __g1_byte_buf_with_alignment;
+let ByteBuf::with_length_prefix = __g1_byte_buf_with_length_prefix;
+let ByteBuf::with_offset_table = __g1_byte_buf_with_offset_table;
 let ByteBuf::append_bytes = __g1_byte_buf_append_bytes;
 let ByteBuf::append_view = __g1_byte_buf_append_view;
 let ByteBuf::finish = __g1_byte_buf_finish;
@@ -9641,6 +10568,82 @@ __g1_index_vec_pop<I, T>(value: &mut IndexVec<I, T>) -> Option<T> {
     }
 }
 
+__g1_index_vec_truncate<I, T>(value: &mut IndexVec<I, T>, length: usize)
+where T: Use<[0, 0]> {
+    let current = value.length;
+    if(length < current) {
+        let removed = __g1_array_pop_move(&mut value.values.storage);
+        (*value).length = current - 1;
+        removed;
+        __g1_index_vec_truncate(move value, length)
+    } else {
+        ()
+    }
+}
+
+struct IndexVecCheckpoint<'a, I, T> {
+    private value: &'a mut IndexVec<I, T>,
+    private length: usize,
+    private armed: Bool
+}
+
+impl<'a, I, T> Drop for IndexVecCheckpoint<'a, I, T> where T: Use<[0, 0]> {
+    drop(&mut self) -> {
+        if(self.armed) {
+            __g1_index_vec_truncate(&mut *self.value, self.length)
+        } else {
+            ()
+        }
+    }
+}
+
+__g1_index_vec_checkpoint<'a, I, T>(
+    value: &'a mut IndexVec<I, T>
+) -> IndexVecCheckpoint<'a, I, T>
+where T: Use<[0, 0]> {
+    let length = __g1_index_vec_len(&*value);
+    IndexVecCheckpoint { value: move value, length: move length, armed: true }
+}
+
+__g1_index_vec_checkpoint_commit<'a, I, T>(
+    checkpoint: &mut IndexVecCheckpoint<'a, I, T>
+) {
+    (*checkpoint).armed = false;
+    ()
+}
+
+__g1_index_vec_with_range<I, T, F, e: EffectRow>(
+    value: &mut IndexVec<I, T>,
+    body: F
+) -> Range<usize>
+where T: Use<[0, 0]>,
+F: Fn<(&mut IndexVec<I, T>,), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    let checkpoint = __g1_index_vec_checkpoint(move value);
+    let start = checkpoint.length;
+    body(&mut *checkpoint.value);
+    let end = __g1_index_vec_len(&*checkpoint.value);
+    __g1_index_vec_checkpoint_commit(&mut checkpoint);
+    Range { start: move start, end: move end }
+}
+
+__g1_index_vec_try_with_range<I, T, E, F, e: EffectRow>(
+    value: &mut IndexVec<I, T>,
+    body: F
+) -> Result<Range<usize>, E>
+where T: Use<[0, 0]>,
+F: Fn<(&mut IndexVec<I, T>,), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    @failed: Result<Range<usize>, E> {
+        let checkpoint = __g1_index_vec_checkpoint(move value);
+        let start = checkpoint.length;
+        try(body(&mut *checkpoint.value), @failed);
+        let end = __g1_index_vec_len(&*checkpoint.value);
+        __g1_index_vec_checkpoint_commit(&mut checkpoint);
+        Result::Ok(Range { start: move start, end: move end })
+    }
+}
+
 __g1_index_vec_get_copy<I, T>(value: &IndexVec<I, T>, id: Id<I>) -> Option<T> where T: Use<[0, *]> {
     let raw = wrapping_convert_to_usize(id.raw);
     handle raw < value.length {
@@ -9813,6 +10816,11 @@ let IndexVec::get_mut = __g1_index_vec_get_mut;
 let IndexVec::index = __g1_index_vec_index;
 let IndexVec::index_mut = __g1_index_vec_index_mut;
 let IndexVec::pop = __g1_index_vec_pop;
+let IndexVec::truncate = __g1_index_vec_truncate;
+let IndexVec::checkpoint = __g1_index_vec_checkpoint;
+let IndexVecCheckpoint::commit = __g1_index_vec_checkpoint_commit;
+let IndexVec::with_range = __g1_index_vec_with_range;
+let IndexVec::try_with_range = __g1_index_vec_try_with_range;
 let IndexVec::get_copy = __g1_index_vec_get_copy;
 let IndexVec::replace = __g1_index_vec_replace;
 let IndexVec::for_each = __g1_index_vec_for_each;
@@ -9875,6 +10883,65 @@ __g1_arena_truncate<I, T>(value: &mut Arena<I, T>, mark: usize) where T: Use<[0,
     }
 }
 
+struct ArenaCheckpoint<'a, I, T> {
+    private value: &'a mut Arena<I, T>,
+    private mark: usize,
+    private armed: Bool
+}
+
+impl<'a, I, T> Drop for ArenaCheckpoint<'a, I, T> where T: Use<[0, 0]> {
+    drop(&mut self) -> {
+        if(self.armed) {
+            __g1_arena_truncate(&mut *self.value, self.mark)
+        } else {
+            ()
+        }
+    }
+}
+
+__g1_arena_checkpoint<'a, I, T>(value: &'a mut Arena<I, T>) -> ArenaCheckpoint<'a, I, T>
+where T: Use<[0, 0]> {
+    let mark = __g1_arena_mark(&*value);
+    ArenaCheckpoint { value: move value, mark: move mark, armed: true }
+}
+
+__g1_arena_checkpoint_commit<'a, I, T>(checkpoint: &mut ArenaCheckpoint<'a, I, T>) {
+    (*checkpoint).armed = false;
+    ()
+}
+
+__g1_arena_with_range<I, T, F, e: EffectRow>(
+    value: &mut Arena<I, T>,
+    body: F
+) -> Range<usize>
+where T: Use<[0, 0]>,
+F: Fn<(&mut Arena<I, T>,), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    let checkpoint = __g1_arena_checkpoint(move value);
+    let start = checkpoint.mark;
+    body(&mut *checkpoint.value);
+    let end = __g1_arena_len(&*checkpoint.value);
+    __g1_arena_checkpoint_commit(&mut checkpoint);
+    Range { start: move start, end: move end }
+}
+
+__g1_arena_try_with_range<I, T, E, F, e: EffectRow>(
+    value: &mut Arena<I, T>,
+    body: F
+) -> Result<Range<usize>, E>
+where T: Use<[0, 0]>,
+F: Fn<(&mut Arena<I, T>,), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    @failed: Result<Range<usize>, E> {
+        let checkpoint = __g1_arena_checkpoint(move value);
+        let start = checkpoint.mark;
+        try(body(&mut *checkpoint.value), @failed);
+        let end = __g1_arena_len(&*checkpoint.value);
+        __g1_arena_checkpoint_commit(&mut checkpoint);
+        Result::Ok(Range { start: move start, end: move end })
+    }
+}
+
 __g1_arena_drain_rollback<I, T>(value: &mut Arena<I, T>, mark: usize) -> Vec<T> {
     let removed = __g1_arena_empty_rollback(&*value);
     __g1_arena_drain_rollback_step(move value, mark, move removed)
@@ -9915,6 +10982,10 @@ let Arena::index_mut = __g1_arena_index_mut;
 let Arena::get_copy = __g1_arena_get_copy;
 let Arena::truncate = __g1_arena_truncate;
 let Arena::drain_rollback = __g1_arena_drain_rollback;
+let Arena::checkpoint = __g1_arena_checkpoint;
+let ArenaCheckpoint::commit = __g1_arena_checkpoint_commit;
+let Arena::with_range = __g1_arena_with_range;
+let Arena::try_with_range = __g1_arena_try_with_range;
 struct BitSet<I> { private words: Vec<u64>, private length: usize }
 
 __g1_toolkit_u64_zero() -> u64 { 0 }
@@ -10228,6 +11299,7 @@ let WorkQueue::new = __g1_work_queue_new;
 let WorkQueue::len = __g1_work_queue_len;
 let WorkQueue::push = __g1_work_queue_push;
 let WorkQueue::pop = __g1_work_queue_pop;
+
 struct MultiMap<K, V> { private buckets: HashMap<K, Vec<V>> }
 
 __g1_multi_map_new<K, V>() -> MultiMap<K, V> { MultiMap { buckets: HashMap::new() } }
@@ -10936,6 +12008,11 @@ effect FileWrite { write(path: String, bytes: Bytes) }
 
 effect Diagnostic { write(text: String) }
 
+// Recoverable phase diagnostics are distinct from terminal label exits. The
+// payload remains structured and generic; a phase-local handler decides how to
+// store/render it and then resumes compilation.
+effect Report<D> { [1,1] emit(diagnostic: D) -> () }
+
 process_args() -> Vec<String> / ProcessArgs { ProcessArgs::get() }
 
 read_file(path: String) -> Bytes / FileRead { FileRead::read(move path) }
@@ -11059,9 +12136,74 @@ Effects = {} > {
 // every instantiated call is control-inlined and its error arm becomes a
 // direct LEAVE in the caller's frame.
 try<T, E, S, L>(value: Result<T, E>, exit: L) -> T where L: Label<Result<S, E>> {
-    if(value is Result::Err(error)) {
-        exit(Result::Err(error))
-    } else {
-        if(value is Result::Ok(inner)) { inner } else { unreachable() }
+    handle value {
+        Result::Ok(inner) => move inner,
+        Result::Err(error) => exit(Result::Err(move error))
     }
+}
+
+// Small branded guard vocabulary. These functions retain the caller's exact
+// result/error type and become direct leaves when their label is static.
+bail<T, E, L>(error: E, exit: L) -> ! where L: Label<Result<T, E>> {
+    exit(Result::Err(move error))
+}
+
+ensure<T, E, L>(condition: Bool, error: E, exit: L)
+where L: Label<Result<T, E>>,
+E: Use<[0, 1]> {
+    if(condition) { () } else { exit(Result::Err(move error)) }
+}
+
+leave_if<T, L>(condition: Bool, value: T, exit: L)
+where L: Label<T>,
+T: Use<[0, 1]> {
+    if(condition) { exit(move value) } else { () }
+}
+
+some_or_leave<T, R, L>(value: Option<T>, failure: R, exit: L) -> T
+where L: Label<R>,
+R: Use<[0, 1]> {
+    if(value is Option::Some(inner)) {
+        inner
+    } else {
+        exit(move failure)
+    }
+}
+
+ok_or_leave<T, E, S, L>(value: Result<T, E>, exit: L) -> T
+where L: Label<Result<S, E>> {
+    try(move value, exit)
+}
+
+require<T, E, S, L>(value: Option<T>, error: E, exit: L) -> T
+where L: Label<Result<S, E>>,
+E: Use<[0, 1]> {
+    if(value is Option::Some(inner)) {
+        inner
+    } else {
+        exit(Result::Err(move error))
+    }
+}
+
+require_eq<T, E, L>(equal: Bool, error: E, exit: L)
+where L: Label<Result<T, E>>,
+E: Use<[0, 1]> {
+    ensure(equal, error, exit)
+}
+
+require_index<T, E, S, L>(value: Option<T>, error: E, exit: L) -> T
+where L: Label<Result<S, E>>,
+E: Use<[0, 1]> {
+    require(value, error, exit)
+}
+
+require_conversion<T, E, S, L>(value: Result<T, E>, exit: L) -> T
+where L: Label<Result<S, E>> {
+    try(value, exit)
+}
+
+return_if<T, L>(condition: Bool, value: T, exit: L)
+where L: Label<T>,
+T: Use<[0, 1]> {
+    leave_if(condition, value, exit)
 }

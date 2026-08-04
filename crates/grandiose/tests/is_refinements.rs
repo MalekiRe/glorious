@@ -1,4 +1,8 @@
-use grandiose::{compile_source_to_bytecode, lexer, parser, validate};
+use grandiose::{
+    CompileOptions, OptimizationLevel, compile_source_to_bytecode,
+    compile_source_to_phases_with_options, lexer, parser, validate,
+};
+use grandiose_vm::{Value, Vm, verify};
 
 fn frontend(source: &str) -> Result<(), Vec<grandiose::diagnostic::Diagnostic>> {
     let tokens = lexer::lex(source).map_err(|error| vec![error])?;
@@ -218,6 +222,42 @@ fn negative_environment_excludes_the_tested_variant() {
         main() -> { () }
     "#;
     compile_source_to_bytecode("negative-refinement.glorious", source).unwrap();
+}
+
+#[test]
+fn nested_literal_failure_does_not_prove_the_complementary_enum_variant() {
+    let source = r#"
+        enum Choice { Yes(i64), No }
+        impl Use<[0,*]> for Choice {}
+        answer() -> i64 {
+            handle Choice::Yes(2) {
+                Choice::Yes(1) => 10,
+                Choice::Yes(2) => 20,
+                _ => 30
+            }
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases_with_options(
+        "nested-literal-negative-refinement.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let answer = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact).unwrap())
+            .run(answer, vec![])
+            .unwrap(),
+        Value::I64(20)
+    );
 }
 
 #[test]

@@ -215,7 +215,8 @@ fn compilation_driver_shares_frontend_work_with_interface_snapshots() {
             .iter()
             .any(|declaration| declaration.name == "helper")
     );
-    assert_eq!(driver.stats().frontend.lexed_segments, 2);
+    assert_eq!(driver.stats().frontend.lexed_segments, 1);
+    assert_eq!(driver.stats().frontend.reused_segments, 1);
 
     let cached = driver
         .compile_bundle_with_interfaces(&first, options())

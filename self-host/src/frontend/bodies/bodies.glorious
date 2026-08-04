@@ -10,6 +10,8 @@ pub struct ExprTag {}
 
 pub type ExprId = Id<ExprTag>;
 
+expr_id_from_u32(raw: u32) -> ExprId { Id::from_u32(raw) }
+
 pub struct HandleArmTag {}
 
 pub type HandleArmId = Id<HandleArmTag>;
@@ -55,7 +57,8 @@ pub type BodyTokenRange = super::syntax::TokenSpan;
 
 pub enum PatternBinder {
     Wildcard(usize),
-    Binding(Id<String>, usize)
+    Binding(Id<String>, usize),
+    Integer(usize)
 }
 
 impl Use<[0, *]> for PatternBinder {}
@@ -81,6 +84,7 @@ enum ExprKind {
     Number,
     Unit,
     Grouping(ExprId),
+    Move(ExprId),
     Prefix(BodyTokenRange, ExprId),
     Infix(BodyTokenRange, ExprId, ExprId),
     Call(ExprId, ExprEdgeRange),
@@ -110,6 +114,7 @@ pub enum BodyExpressionView<'a> {
     Number(BodyTokenRange),
     Unit(BodyTokenRange),
     Grouping(ExprId),
+    Move(ExprId),
     Prefix(BodyTokenRange, ExprId),
     Infix(BodyTokenRange, ExprId, ExprId),
     Call(ExprId, Slice<'a, ExprEdge>),
@@ -121,6 +126,322 @@ pub enum BodyExpressionView<'a> {
 }
 
 impl<'a> Use<[0, *]> for BodyExpressionView<'a> {}
+
+// Control-aware preorder traversal. The callback chooses whether the current
+// node's children are visited and may invoke `stop` from any nested helper to
+// leave the complete walk with a typed result.
+pub enum Visit { Descend, SkipChildren }
+
+impl Use<[0, *]> for Visit {}
+
+pub enum FoldVisit<A> { Descend(A), SkipChildren(A) }
+
+__g1_walk_expr_children<'a, L, R, F, e: EffectRow>(
+    body: &'a ParsedBody,
+    expression: ExprId,
+    child: u32,
+    count: u32,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(ExprId, BodyExpressionView<'a>, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    expression;
+    if(child < count) {
+        walk_expr(
+            body,
+            Id::from_u32(expression_child_at(body, Id::to_u32(expression), child)),
+            stop,
+            visitor
+        );
+        __g1_walk_expr_children(body, expression, child + 1, count, stop, visitor)
+    } else {
+        ()
+    }
+}
+
+pub walk_expr<'a, L, R, F, e: EffectRow>(
+    body: &'a ParsedBody,
+    expression: ExprId,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(ExprId, BodyExpressionView<'a>, L), Output=Visit, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle visitor(expression, expression_view(body, Id::to_u32(expression)), stop) {
+        Visit::Descend => __g1_walk_expr_children(
+            body,
+            expression,
+            0,
+            expression_child_count_at(body, Id::to_u32(expression)),
+            stop,
+            visitor
+        ),
+        Visit::SkipChildren => ()
+    }
+}
+
+__g1_fold_expr_children<'a, L, R, A, F, e: EffectRow>(
+    body: &'a ParsedBody,
+    expression: ExprId,
+    child: u32,
+    count: u32,
+    accumulator: A,
+    stop: L,
+    visitor: F
+) -> A
+where L: Label<R>,
+F: Fn<(A, ExprId, BodyExpressionView<'a>, L), Output=FoldVisit<A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    expression;
+    if(child < count) {
+        __g1_fold_expr_children(
+            body,
+            expression,
+            child + 1,
+            count,
+            fold_expr(
+                body,
+                Id::from_u32(expression_child_at(body, Id::to_u32(expression), child)),
+                accumulator,
+                stop,
+                visitor
+            ),
+            stop,
+            visitor
+        )
+    } else {
+        accumulator
+    }
+}
+
+pub fold_expr<'a, L, R, A, F, e: EffectRow>(
+    body: &'a ParsedBody,
+    expression: ExprId,
+    accumulator: A,
+    stop: L,
+    visitor: F
+) -> A
+where L: Label<R>,
+F: Fn<(A, ExprId, BodyExpressionView<'a>, L), Output=FoldVisit<A>, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle visitor(
+        accumulator,
+        expression,
+        expression_view(body, Id::to_u32(expression)),
+        stop
+    ) {
+        FoldVisit::Descend(next) => __g1_fold_expr_children(
+            body,
+            expression,
+            0,
+            expression_child_count_at(body, Id::to_u32(expression)),
+            next,
+            stop,
+            visitor
+        ),
+        FoldVisit::SkipChildren(next) => next
+    }
+}
+
+// A structural rewrite returns the node that should occupy the current slot
+// and independently chooses whether that node's children are rewritten. The
+// replacement is an arena ID, so callbacks can reuse an existing subtree or
+// allocate a new one through the ordinary body builder without exposing a
+// dynamic visitor object.
+pub enum RewriteVisit {
+    Descend(ExprId),
+    SkipChildren(ExprId)
+}
+
+impl Use<[0, *]> for RewriteVisit {}
+
+expression_edge_set_value(value: &mut ExprEdge, replacement: ExprId) {
+    (*value).value = replacement;
+    ()
+}
+
+handle_arm_set_body(value: &mut HandleArm, replacement: ExprId) {
+    (*value).body = replacement;
+    ()
+}
+
+expr_node_set_kind(value: &mut ExprNode, replacement: ExprKind) {
+    (*value).kind = move replacement;
+    ()
+}
+
+parsed_body_set_root(value: &mut ParsedBody, replacement: ExprId) {
+    (*value).root = replacement;
+    ()
+}
+
+expression_child_set(
+    value: &mut ParsedBody,
+    expression: ExprId,
+    child: u32,
+    replacement: ExprId
+) {
+    let kind = {
+        let node = Arena::index_mut(&mut value.nodes, expression);
+        replace(&mut (*node).kind, ExprKind::Unit)
+    };
+    let next = handle move kind {
+        ExprKind::Grouping(_) => ExprKind::Grouping(replacement),
+        ExprKind::Prefix(operator, _) => ExprKind::Prefix(operator, replacement),
+        ExprKind::Infix(operator, left, right) => if(child == 0) {
+            ExprKind::Infix(operator, replacement, right)
+        } else {
+            ExprKind::Infix(operator, left, replacement)
+        },
+        ExprKind::Call(callee, range) => if(child == 0) {
+            ExprKind::Call(replacement, range)
+        } else {
+            expression_edge_set_value(Vec::index_mut(
+                &mut value.edges,
+                usize_from_u32(range.start + child - 1)
+            ), replacement);
+            ExprKind::Call(callee, range)
+        },
+        ExprKind::Block(range) => {
+            expression_edge_set_value(Vec::index_mut(
+                &mut value.edges,
+                usize_from_u32(range.start + child)
+            ), replacement);
+            ExprKind::Block(range)
+        },
+        ExprKind::Tuple(range) => {
+            expression_edge_set_value(Vec::index_mut(
+                &mut value.edges,
+                usize_from_u32(range.start + child)
+            ), replacement);
+            ExprKind::Tuple(range)
+        },
+        ExprKind::Construction(names, range) => {
+            expression_edge_set_value(Vec::index_mut(
+                &mut value.edges,
+                usize_from_u32(range.start + child)
+            ), replacement);
+            ExprKind::Construction(names, range)
+        },
+        ExprKind::Projection(_, names) => ExprKind::Projection(replacement, names),
+        ExprKind::Handle(subject, arms) => if(child == 0) {
+            ExprKind::Handle(replacement, arms)
+        } else {
+            handle_arm_set_body(Vec::index_mut(
+                &mut value.handle_arms,
+                usize_from_u32(arms.start + child - 1)
+            ), replacement);
+            ExprKind::Handle(subject, arms)
+        },
+        other => { replacement; other }
+    };
+    expr_node_set_kind(
+        Arena::index_mut(&mut value.nodes, expression),
+        move next
+    );
+    ()
+}
+
+struct __ExprRewriteEdge { parent: ExprId, child: u32 }
+struct __ExprRewriteDecision { replacement: ExprId, descend: Bool }
+
+__g1_new_expr_rewrite_work() -> Vec<__ExprRewriteEdge> { Vec::new() }
+
+__g1_expr_rewrite_decision(value: RewriteVisit) -> __ExprRewriteDecision {
+    handle move value {
+        RewriteVisit::SkipChildren(replacement) =>
+            __ExprRewriteDecision { replacement: replacement, descend: false },
+        RewriteVisit::Descend(replacement) =>
+            __ExprRewriteDecision { replacement: replacement, descend: true }
+    }
+}
+
+__g1_push_expr_rewrite_children(
+    work: &mut Vec<__ExprRewriteEdge>,
+    expression: ExprId,
+    count: u32
+) {
+    if(count > 0) {
+        let child = count - 1;
+        Vec::push(
+            &mut *work,
+            __ExprRewriteEdge { parent: expression, child: child }
+        );
+        __g1_push_expr_rewrite_children(&mut *work, expression, child)
+    } else { () }
+}
+
+__g1_rewrite_expr_work<L, R, F, e: EffectRow>(
+    body: &mut ParsedBody,
+    work: Vec<__ExprRewriteEdge>,
+    stop: L,
+    visitor: F
+)
+where L: Label<R>,
+F: Fn<(&mut ParsedBody, ExprId, L), Output=RewriteVisit, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle Vec::pop(&mut work) {
+        Result::Err(_) => { work; () },
+        Result::Ok(edge) => {
+            let __ExprRewriteEdge { parent, child } = move edge;
+            let original = expr_id_from_u32(expression_child_at(
+                &*body,
+                Id::to_u32(parent),
+                child
+            ));
+            let __ExprRewriteDecision { replacement, descend } =
+                __g1_expr_rewrite_decision(visitor(&mut *body, original, stop));
+            expression_child_set(&mut *body, parent, child, replacement);
+            if(descend) {
+                let count = expression_child_count_at(
+                    &*body,
+                    Id::to_u32(replacement)
+                );
+                __g1_push_expr_rewrite_children(&mut work, replacement, count)
+            } else { () };
+            __g1_rewrite_expr_work(move body, move work, stop, visitor)
+        }
+    }
+}
+
+pub rewrite_expr<L, R, F, e: EffectRow>(
+    body: &mut ParsedBody,
+    root: ExprId,
+    stop: L,
+    visitor: F
+) -> ExprId
+where L: Label<R>,
+F: Fn<(&mut ParsedBody, ExprId, L), Output=RewriteVisit, Effects={| e}>,
+F: Use<[0, 0]> {
+    let __ExprRewriteDecision { replacement, descend } =
+        __g1_expr_rewrite_decision(visitor(&mut *body, root, stop));
+    let work = __g1_new_expr_rewrite_work();
+    if(descend) {
+        __g1_push_expr_rewrite_children(
+            &mut work,
+            replacement,
+            expression_child_count_at(&*body, Id::to_u32(replacement))
+        )
+    } else { () };
+    __g1_rewrite_expr_work(move body, move work, stop, visitor);
+    replacement
+}
+
+__g1_identity_rewrite_expr<L, R>(body: ParsedBody, stop: L) -> ParsedBody
+where L: Label<R> {
+    let root = body.root;
+    let rewritten = rewrite_expr(
+        &mut body,
+        root,
+        stop,
+        { _, expression, _ => RewriteVisit::Descend(expression) }
+    );
+    parsed_body_set_root(&mut body, rewritten);
+    move body
+}
 
 pub enum BodyError {
     ExpectedExpression(usize, usize),
@@ -152,6 +473,414 @@ struct BodyParser {
     pattern_binders: Vec<PatternBinder>
 }
 
+// A speculative parse owns one transaction over every mutable component of a
+// body. Any labeled transfer, propagated error, or ordinary early return drops
+// this guard and restores a state in which no partially allocated expression
+// can remain reachable.
+// The reusable cursor transaction owns every append-only arena coupled to the
+// cursor. `BodyParserCheckpoint` below is the compiler-specific spelling used
+// by parser combinators; keeping the generic name primary makes the cleanup
+// protocol visible to other bounded cursor consumers.
+pub struct CursorCheckpoint<'a> {
+    value: &'a mut BodyParser,
+    token_position: usize,
+    node_mark: usize,
+    edge_length: usize,
+    name_length: usize,
+    arm_length: usize,
+    binder_length: usize,
+    armed: Bool
+}
+
+impl<'a> Drop for CursorCheckpoint<'a> {
+    drop(&mut self) -> {
+        if(self.armed) {
+            let value = &mut *self.value;
+            super::syntax::cursor_set(
+                &mut (*value).tokens,
+                self.token_position
+            );
+            Vec::truncate(
+                &mut (*value).pattern_binders,
+                self.binder_length
+            );
+            Vec::truncate(&mut (*value).handle_arms, self.arm_length);
+            Vec::truncate(&mut (*value).names, self.name_length);
+            Vec::truncate(&mut (*value).edges, self.edge_length);
+            Arena::truncate(&mut (*value).nodes, self.node_mark)
+        } else {
+            ()
+        }
+    }
+}
+
+pub type BodyParserCheckpoint<'a> = CursorCheckpoint<'a>;
+
+body_parser_checkpoint<'a>(
+    value: &'a mut BodyParser
+) -> BodyParserCheckpoint<'a> {
+    let token_position = super::syntax::cursor_position(&value.tokens);
+    let node_mark = Arena::mark(&value.nodes);
+    let edge_length = Vec::len(&value.edges);
+    let name_length = Vec::len(&value.names);
+    let arm_length = Vec::len(&value.handle_arms);
+    let binder_length = Vec::len(&value.pattern_binders);
+    CursorCheckpoint {
+        token_position: move token_position,
+        node_mark: move node_mark,
+        edge_length: move edge_length,
+        name_length: move name_length,
+        arm_length: move arm_length,
+        binder_length: move binder_length,
+        value: move value,
+        armed: true
+    }
+}
+
+body_parser_checkpoint_commit<'a>(value: &mut BodyParserCheckpoint<'a>) {
+    (*value).armed = false;
+    ()
+}
+
+enum ParseAttempt<T, E> {
+    NoMatch,
+    Parsed(T),
+    Diagnostic(E)
+}
+
+impl<T, E> Use<[0, *]> for ParseAttempt<T, E>
+where T: Use<[0, *]>, E: Use<[0, *]> {}
+
+// `miss` is supplied by the caller so its generative label type remains in
+// lexical scope. Invoking it from any nested parser/helper drops the armed
+// checkpoint before leaving the alternative.
+attempt<L, T, E, F, e: EffectRow>(
+    value: &mut BodyParser,
+    miss: L,
+    body: F
+) -> ParseAttempt<T, E>
+where L: Label<ParseAttempt<T, E>>,
+F: Fn<(&mut BodyParser, L), Output=Result<T, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    let checkpoint = body_parser_checkpoint(move value);
+    handle body(&mut *checkpoint.value, miss) {
+        Result::Err(error) => ParseAttempt::Diagnostic(move error),
+        Result::Ok(parsed) => {
+            body_parser_checkpoint_commit(&mut checkpoint);
+            ParseAttempt::Parsed(move parsed)
+        }
+    }
+}
+
+// Internal combinators use a value-returning alternative in places where the
+// language cannot express a higher-ranked callback over the fresh label made
+// by `attempt`. It has the same transaction boundary: only `Parsed` commits;
+// both a recoverable miss and an authoritative diagnostic roll back every body
+// arena and cursor mutation.
+attempt_value<T, F, e: EffectRow>(
+    value: &mut BodyParser,
+    body: F
+) -> ParseAttempt<T, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, 0]> {
+    let checkpoint = body_parser_checkpoint(move value);
+    handle body(&mut *checkpoint.value) {
+        ParseAttempt::NoMatch => ParseAttempt::NoMatch,
+        ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error),
+        ParseAttempt::Parsed(parsed) => {
+            body_parser_checkpoint_commit(&mut checkpoint);
+            ParseAttempt::Parsed(move parsed)
+        }
+    }
+}
+
+attempt_item<T, F, e: EffectRow>(
+    value: &mut BodyParser,
+    body: F
+) -> ParseAttempt<T, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, 0]> {
+    attempt_value(value, body)
+}
+
+attempt_unit<F, e: EffectRow>(
+    value: &mut BodyParser,
+    body: F
+) -> ParseAttempt<(), BodyError>
+where F: Fn<(&mut BodyParser,), Output=ParseAttempt<(), BodyError>, Effects={| e}>,
+F: Use<[0, 0]> {
+    attempt_value(value, body)
+}
+
+// Try the second alternative only after the first has reported `NoMatch` and
+// its checkpoint has restored the complete parser state.
+choice<T, F, G, e: EffectRow>(
+    value: &mut BodyParser,
+    first: F,
+    second: G
+) -> ParseAttempt<T, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, 0]>,
+G: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+G: Use<[0, 0]> {
+    handle attempt_value(value, first) {
+        ParseAttempt::NoMatch => attempt_value(value, second),
+        ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error),
+        ParseAttempt::Parsed(parsed) => ParseAttempt::Parsed(move parsed)
+    }
+}
+
+optional<T, F, e: EffectRow>(
+    value: &mut BodyParser,
+    body: F
+) -> ParseAttempt<Option<T>, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, 0]> {
+    handle attempt_value(value, body) {
+        ParseAttempt::NoMatch => ParseAttempt::Parsed(None),
+        ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error),
+        ParseAttempt::Parsed(parsed) =>
+            ParseAttempt::Parsed(Option::Some(move parsed))
+    }
+}
+
+// Crossing a grammar commit point turns absence into an authoritative error.
+commit<T, E>(value: ParseAttempt<T, E>, error: E) -> ParseAttempt<T, E>
+where T: Use<[0, *]>, E: Use<[0, *]> {
+    handle move value {
+        ParseAttempt::NoMatch => ParseAttempt::Diagnostic(move error),
+        ParseAttempt::Diagnostic(found) => ParseAttempt::Diagnostic(move found),
+        ParseAttempt::Parsed(parsed) => ParseAttempt::Parsed(move parsed)
+    }
+}
+
+require_token<L, T>(
+    value: &mut BodyParser,
+    source: &super::lexer::LexedSource,
+    pattern: TokenPattern,
+    miss: L
+) -> Result<usize, BodyError>
+where L: Label<ParseAttempt<T, BodyError>> {
+    let token = super::syntax::cursor_position(&value.tokens);
+    if(super::syntax::cursor_eat(&mut value.tokens, source, pattern)) {
+        Result::Ok(move token)
+    } else {
+        miss(ParseAttempt::NoMatch)
+    }
+}
+
+struct RequiredIdent {
+    name: Id<String>,
+    token: usize
+}
+
+require_ident<L, T>(
+    value: &mut BodyParser,
+    source: &super::lexer::LexedSource,
+    miss: L
+) -> Result<RequiredIdent, BodyError>
+where L: Label<ParseAttempt<T, BodyError>> {
+    let token = super::syntax::cursor_position(&value.tokens);
+    if(token < super::syntax::cursor_limit(&value.tokens)) {
+        handle super::lexer::token_kind_at(source, token) {
+            TokenKind::Ident(name) => {
+                super::syntax::cursor_advance(&mut value.tokens);
+                Result::Ok(RequiredIdent { name: move name, token: move token })
+            },
+            _ => miss(ParseAttempt::NoMatch)
+        }
+    } else {
+        miss(ParseAttempt::NoMatch)
+    }
+}
+
+// `expect` is used only after a construct has committed to its grammar. Unlike
+// `require_token`, absence therefore becomes a diagnostic rather than a miss.
+expect(
+    value: &mut BodyParser,
+    source: &super::lexer::LexedSource,
+    pattern: TokenPattern,
+    error: BodyError
+) -> Result<usize, BodyError> {
+    let token = super::syntax::cursor_position(&value.tokens);
+    if(super::syntax::cursor_eat(&mut value.tokens, source, pattern)) {
+        Result::Ok(move token)
+    } else {
+        Result::Err(move error)
+    }
+}
+
+delimited<T, F, e: EffectRow>(
+    value: &mut BodyParser,
+    source: &super::lexer::LexedSource,
+    open: TokenPattern,
+    close: TokenPattern,
+    open_error: BodyError,
+    close_error: BodyError,
+    body: F
+) -> Result<T, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=Result<T, BodyError>, Effects={| e}>,
+F: Use<[0, 0]> {
+    let checkpoint = body_parser_checkpoint(move value);
+    handle expect(&mut *checkpoint.value, source, open, open_error) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(_) => handle body(&mut *checkpoint.value) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(parsed) => handle expect(
+                &mut *checkpoint.value,
+                source,
+                close,
+                close_error
+            ) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(_) => {
+                    body_parser_checkpoint_commit(&mut checkpoint);
+                    Result::Ok(move parsed)
+                }
+            }
+        }
+    }
+}
+
+__many<T, F, e: EffectRow>(
+    value: &mut BodyParser,
+    body: F,
+    output: Vec<T>
+) -> ParseAttempt<Vec<T>, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, *]> {
+    let before = super::syntax::cursor_position(&value.tokens);
+    handle attempt_value(value, body) {
+        ParseAttempt::NoMatch => ParseAttempt::Parsed(move output),
+        ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error),
+        ParseAttempt::Parsed(parsed) => {
+            let after = super::syntax::cursor_position(&value.tokens);
+            if(before < after) {
+                Vec::push(&mut output, move parsed);
+                __many(value, body, move output)
+            } else {
+                parsed;
+                ParseAttempt::Parsed(move output)
+            }
+        }
+    }
+}
+
+many<T, F, e: EffectRow>(
+    value: &mut BodyParser,
+    body: F
+) -> ParseAttempt<Vec<T>, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, *]> {
+    __many(value, body, Vec::new())
+}
+
+many1<T, F, e: EffectRow>(
+    value: &mut BodyParser,
+    body: F
+) -> ParseAttempt<Vec<T>, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, *]> {
+    handle many(value, body) {
+        ParseAttempt::Parsed(parsed) => if(Vec::is_empty(&parsed)) {
+            ParseAttempt::NoMatch
+        } else {
+            ParseAttempt::Parsed(move parsed)
+        },
+        ParseAttempt::NoMatch => ParseAttempt::NoMatch,
+        ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error)
+    }
+}
+
+__separated<T, F, G, e: EffectRow>(
+    value: &mut BodyParser,
+    item: F,
+    separator: G,
+    missing: BodyError,
+    output: Vec<T>
+) -> ParseAttempt<Vec<T>, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, *]>,
+G: Fn<(&mut BodyParser,), Output=ParseAttempt<(), BodyError>, Effects={| e}>,
+G: Use<[0, *]> {
+    handle attempt_unit(value, separator) {
+        ParseAttempt::NoMatch => ParseAttempt::Parsed(move output),
+        ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error),
+        ParseAttempt::Parsed(_) => handle attempt_item(value, item) {
+            ParseAttempt::Parsed(parsed) => {
+                Vec::push(&mut output, move parsed);
+                __separated(
+                    value,
+                    item,
+                    separator,
+                    missing,
+                    move output
+                )
+            },
+            // A separator commits the grammar to another item. The error is
+            // consumed only on that terminal branch, so successful recursive
+            // iterations retain the same diagnostic value.
+            ParseAttempt::NoMatch => ParseAttempt::Diagnostic(move missing),
+            ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error)
+        }
+    }
+}
+
+separated<T, F, G, e: EffectRow>(
+    value: &mut BodyParser,
+    item: F,
+    separator: G,
+    missing: BodyError
+) -> ParseAttempt<Vec<T>, BodyError>
+where T: Use<[0, *]>,
+F: Fn<(&mut BodyParser,), Output=ParseAttempt<T, BodyError>, Effects={| e}>,
+F: Use<[0, *]>,
+G: Fn<(&mut BodyParser,), Output=ParseAttempt<(), BodyError>, Effects={| e}>,
+G: Use<[0, *]> {
+    handle attempt_item(value, item) {
+        ParseAttempt::NoMatch => ParseAttempt::Parsed(Vec::new()),
+        ParseAttempt::Diagnostic(error) => ParseAttempt::Diagnostic(move error),
+        ParseAttempt::Parsed(parsed) => {
+            let output = Vec::new();
+            Vec::push(&mut output, move parsed);
+            __separated(
+                value,
+                item,
+                separator,
+                missing,
+                move output
+            )
+        }
+    }
+}
+
+// Recovery is deliberately single-shot and bounded by the cursor limit. It
+// leaves the synchronization token unconsumed so the enclosing parser decides
+// whether that token closes the current construct or starts the next one.
+recover_until(
+    value: &mut BodyParser,
+    source: &super::lexer::LexedSource,
+    pattern: TokenPattern
+) -> usize {
+    if(super::syntax::cursor_at(&value.tokens, source, pattern)) {
+        super::syntax::cursor_position(&value.tokens)
+    } else if(super::syntax::cursor_at_end(&value.tokens)) {
+        super::syntax::cursor_position(&value.tokens)
+    } else {
+        super::syntax::cursor_advance(&mut value.tokens);
+        recover_until(value, source, pattern)
+    }
+}
+
 struct OperatorUse {
     fixity: u32,
     start: usize,
@@ -169,6 +898,10 @@ struct PendingField {
 enum PendingStatement {
     Let(usize, ExprId),
     Expression(ExprId)
+}
+
+parse_statement_no_match() -> ParseAttempt<PendingStatement, BodyError> {
+    ParseAttempt::NoMatch
 }
 
 struct PendingHandleArm {
@@ -410,6 +1143,7 @@ pub expression_child_count_at(
         BodyExpressionView::Number(_) => 0,
         BodyExpressionView::Unit(_) => 0,
         BodyExpressionView::Grouping(_) => 1,
+        BodyExpressionView::Move(_) => 1,
         BodyExpressionView::Prefix(_, _) => 1,
         BodyExpressionView::Infix(_, _, _) => 2,
         BodyExpressionView::Call(_, arguments) =>
@@ -433,6 +1167,7 @@ pub expression_child_at(
 ) -> u32 {
     handle expression_view(value, expression) {
         BodyExpressionView::Grouping(found) => Id::to_u32(found),
+        BodyExpressionView::Move(found) => Id::to_u32(found),
         BodyExpressionView::Prefix(_, found) => Id::to_u32(found),
         BodyExpressionView::Infix(_, left, right) =>
             if(child == 0) { Id::to_u32(left) } else { Id::to_u32(right) },
@@ -521,6 +1256,7 @@ pub expression_view<'a>(
         ExprKind::Number => BodyExpressionView::Number(node.tokens),
         ExprKind::Unit => BodyExpressionView::Unit(node.tokens),
         ExprKind::Grouping(child) => BodyExpressionView::Grouping(child),
+        ExprKind::Move(child) => BodyExpressionView::Move(child),
         ExprKind::Prefix(operator, child) =>
             BodyExpressionView::Prefix(operator, child),
         ExprKind::Infix(operator, left, right) =>
@@ -575,6 +1311,20 @@ at_token(
 ) -> Bool {
     let tokens = &value.tokens;
     super::syntax::cursor_at(tokens, source, pattern)
+}
+
+token_is_contextual_ident(
+    source: &super::lexer::LexedSource,
+    token: usize,
+    expected: &String
+) -> Bool {
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
+            None => false,
+            Option::Some(found) => String::eq(found, expected)
+        },
+        _ => false
+    }
 }
 
 eat_token(
@@ -728,6 +1478,15 @@ push_grouping(
     end: usize
 ) -> ExprId {
     push_node(value, ExprKind::Grouping(child), token_range(start, end))
+}
+
+push_move(
+    value: &mut BodyParser,
+    child: ExprId,
+    start: usize,
+    end: usize
+) -> ExprId {
+    push_node(value, ExprKind::Move(child), token_range(start, end))
 }
 
 push_binary(
@@ -1104,6 +1863,25 @@ parse_primary(
     depth: u16
 ) -> Result<ExprId, BodyError> {
     if(depth < 128) {
+        let start = value.tokens.position;
+        if(token_is_contextual_ident(source, start, &"move")) {
+            value.tokens.position = start + 1;
+            let child = try(parse_primary(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth + 1
+            ), @parse_primary);
+            Result::Ok(push_move(
+                value,
+                child,
+                start,
+                node_tokens(&*value, child).end
+            ))
+        } else {
             let prefix = try(
                 peek_operator(
                     original,
@@ -1165,6 +1943,7 @@ parse_primary(
                     )
                 }
             }
+        }
     } else {
         Result::Err(BodyError::ExpressionDepthLimit(
             value.tokens.position,
@@ -1346,6 +2125,8 @@ pattern_binder_named(
         handle *Vec::index(value, index) {
             PatternBinder::Wildcard(_) =>
                 pattern_binder_named(value, name, index + 1),
+            PatternBinder::Integer(_) =>
+                pattern_binder_named(value, name, index + 1),
             PatternBinder::Binding(found, _) =>
                 if(found == name) {
                     true
@@ -1390,6 +2171,13 @@ parse_pattern_binder(
                     }
                 }
             }
+        },
+        TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) {
+            Result::Err(BodyError::ExpectedIdentifier(token, related))
+        } else {
+            Vec::push(&mut *binders, PatternBinder::Integer(token));
+            value.tokens.position = token + 1;
+            Result::Ok(())
         },
         _ => Result::Err(BodyError::ExpectedIdentifier(token, related))
     }
@@ -1547,7 +2335,38 @@ parse_handle_arm(
             ))
         }
     } else {
-        Result::Err(BodyError::ExpectedIdentifier(separator, enum_token))
+        // A bare arm name may denote a source-level pattern alias such as
+        // `true`, `false`, or `None`. Resolution canonicalizes that global
+        // alias to its enum variant; identical name/token pairs preserve the
+        // distinction from an explicitly qualified `Enum::Variant` arm.
+        if(separator < value.tokens.limit
+            and { super::lexer::token_matches_at(
+                source,
+                separator,
+                TokenPattern::FatArrow
+            ) }) {
+            value.tokens.position = separator + 1;
+            let body = try(parse_expression(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                0,
+                depth + 1
+            ), @parse_handle_arm);
+            Result::Ok(PendingHandleArm {
+                enum_name: enum_name,
+                enum_token: enum_token,
+                variant_name: enum_name,
+                variant_token: enum_token,
+                binders: Vec::new(),
+                body: body
+            })
+        } else {
+            Result::Err(BodyError::ExpectedIdentifier(separator, enum_token))
+        }
     }
 }
 
@@ -1868,6 +2687,69 @@ parse_atom(
     }
 }
 
+parse_call_argument_no_match() -> ParseAttempt<ExprId, BodyError> {
+    ParseAttempt::NoMatch
+}
+
+parse_call_argument_attempt(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16
+) -> ParseAttempt<ExprId, BodyError> {
+    if(super::syntax::cursor_at(
+        &value.tokens,
+        source,
+        TokenPattern::RParen
+    )) {
+        parse_call_argument_no_match()
+    } else {
+        handle parse_expression(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            0,
+            depth
+        ) {
+            Result::Err(error) => ParseAttempt::Diagnostic(move error),
+            Result::Ok(argument) => ParseAttempt::Parsed(move argument)
+        }
+    }
+}
+
+parse_call_separator_attempt(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser
+) -> ParseAttempt<(), BodyError> {
+    let comma = super::syntax::cursor_position(&value.tokens);
+    if(super::syntax::cursor_at(&value.tokens, source, TokenPattern::Comma)) {
+        let following = comma + 1;
+        if(following < super::syntax::cursor_limit(&value.tokens)) {
+            if(super::lexer::token_matches_at(
+                source,
+                following,
+                TokenPattern::RParen
+            )) {
+                ParseAttempt::NoMatch
+            } else {
+                super::syntax::cursor_advance(&mut value.tokens);
+                ParseAttempt::Parsed(())
+            }
+        } else {
+            super::syntax::cursor_advance(&mut value.tokens);
+            ParseAttempt::Parsed(())
+        }
+    } else {
+        ParseAttempt::NoMatch
+    }
+}
+
 parse_call_arguments(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -1879,64 +2761,42 @@ parse_call_arguments(
     arguments: &mut Vec<ExprId>,
     open: usize
 ) -> Result<(), BodyError> {
-    if(value.tokens.position < value.tokens.limit) {
-        if(super::lexer::token_matches_at(
+    let missing_position = super::syntax::cursor_position(&value.tokens);
+    handle separated(
+        &mut *value,
+        { parser => parse_call_argument_attempt(
+            original,
             source,
-            value.tokens.position,
-            TokenPattern::RParen
-        )) {
-            value.tokens.position = value.tokens.position + 1;
-                Result::Ok(())
-        } else {
-            let argument = try(
-                    parse_expression(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        value,
-                        owner,
-                        0,
-                        depth
-                    ),
-                    @parse_call_arguments
-                );
-                Vec::push(&mut *arguments, argument);
-                if(value.tokens.position < value.tokens.limit) {
-                    handle super::lexer::token_kind_at(
-                        source,
-                        value.tokens.position
-                    ) {
-                        TokenKind::RParen => {
-                            value.tokens.position = value.tokens.position + 1;
-                            Result::Ok(())
-                        },
-                        TokenKind::Comma => {
-                            value.tokens.position = value.tokens.position + 1;
-                            parse_call_arguments(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner,
-                                depth,
-                                arguments,
-                                open
-                            )
-                        },
-                        _ => Result::Err(
-                            BodyError::ExpectedCallClose(value.tokens.position, open)
-                        )
-                    }
-                } else {
-                    Result::Err(
-                        BodyError::ExpectedCallClose(value.tokens.position, open)
-                    )
-                }
+            declarations,
+            nominal,
+            parser,
+            owner,
+            depth
+        )},
+        { parser => parse_call_separator_attempt(source, parser) },
+        BodyError::ExpectedCallClose(missing_position, open)
+    ) {
+        ParseAttempt::NoMatch => unreachable(),
+        ParseAttempt::Diagnostic(error) => Result::Err(move error),
+        ParseAttempt::Parsed(parsed) => {
+            Vec::append(&mut *arguments, move parsed);
+            // Consume the optional trailing comma, then make the closing
+            // delimiter authoritative. `try` preserves the precise parser
+            // diagnostic instead of silently discarding `expect`'s result.
+            super::syntax::cursor_eat(
+                &mut value.tokens,
+                source,
+                TokenPattern::Comma
+            );
+            let close_position = super::syntax::cursor_position(&value.tokens);
+            try(expect(
+                &mut *value,
+                source,
+                TokenPattern::RParen,
+                BodyError::ExpectedCallClose(close_position, open)
+            ), @parse_call_arguments);
+            Result::Ok(())
         }
-    } else {
-        Result::Err(BodyError::ExpectedCallClose(value.tokens.position, open))
     }
 }
 
@@ -2519,6 +3379,82 @@ parse_expression(
     )
 }
 
+parse_let_statement_alternative<L>(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    parser: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    miss: L
+) -> Result<PendingStatement, BodyError>
+where L: Label<ParseAttempt<PendingStatement, BodyError>> {
+    let alternative_start = super::syntax::cursor_position(&parser.tokens);
+    handle super::lexer::token_kind_at(source, alternative_start) {
+        TokenKind::Keyword(Keyword::Let) =>
+            super::syntax::cursor_advance(&mut parser.tokens),
+        _ => miss(parse_statement_no_match())
+    };
+    let name_position = super::syntax::cursor_position(&parser.tokens);
+    handle expect(
+        &mut *parser,
+        source,
+        TokenPattern::Ident,
+        BodyError::InvalidLetSyntax(name_position, alternative_start)
+    ) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(name_token) => {
+            let equals_position = super::syntax::cursor_position(&parser.tokens);
+            handle expect(
+                &mut *parser,
+                source,
+                TokenPattern::Eq,
+                BodyError::InvalidLetSyntax(equals_position, alternative_start)
+            ) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(_) => handle parse_expression(
+                original,
+                source,
+                declarations,
+                nominal,
+                &mut *parser,
+                owner,
+                0,
+                depth
+            ) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(initializer) => Result::Ok(
+                    PendingStatement::Let(name_token, initializer)
+                )
+            }
+        }}
+    }
+}
+
+attempt_let_statement(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16
+) -> ParseAttempt<PendingStatement, BodyError> {
+    attempt(&mut *value, @attempt_let_statement, { parser, destination => {
+        parse_let_statement_alternative(
+            original,
+            source,
+            declarations,
+            nominal,
+            parser,
+            owner,
+            depth,
+            destination
+        )
+    }})
+}
+
 parse_block_statement(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -2529,72 +3465,30 @@ parse_block_statement(
     depth: u16,
     statements: &mut Vec<PendingStatement>
 ) -> Result<(), BodyError> {
-    let start = value.tokens.position;
-    handle super::lexer::token_kind_at(source, start) {
-        TokenKind::Keyword(Keyword::Let) => {
-            let name_token = start + 1;
-            if(name_token < value.tokens.limit) {
-                if(super::lexer::token_matches_at(
-                    source,
-                    name_token,
-                    TokenPattern::Ident
-                )) {
-                    let equals = name_token + 1;
-                        if(equals < value.tokens.limit) {
-                            if(super::lexer::token_matches_at(
-                                source,
-                                equals,
-                                TokenPattern::Eq
-                            )) {
-                                value.tokens.position = equals + 1;
-                                    let initializer = try(
-                                        parse_expression(
-                                            original,
-                                            source,
-                                            declarations,
-                                            nominal,
-                                            value,
-                                            owner,
-                                            0,
-                                            depth
-                                        ),
-                                        @parse_block_statement
-                                    );
-                                    Vec::push(
-                                        &mut *statements,
-                                        PendingStatement::Let(
-                                            name_token,
-                                            initializer
-                                        )
-                                    );
-                                    Result::Ok(())
-                            } else {
-                                Result::Err(
-                                    BodyError::InvalidLetSyntax(equals, start)
-                                )
-                            }
-                        } else {
-                            Result::Err(
-                                BodyError::InvalidLetSyntax(equals, start)
-                            )
-                        }
-                } else {
-                    Result::Err(
-                        BodyError::InvalidLetSyntax(name_token, start)
-                    )
-                }
-            } else {
-                Result::Err(BodyError::InvalidLetSyntax(name_token, start))
-            }
+    let parsed_let = attempt_let_statement(
+        original,
+        source,
+        declarations,
+        nominal,
+        &mut *value,
+        owner,
+        depth
+    );
+    handle move parsed_let {
+        ParseAttempt::Diagnostic(error) => Result::Err(move error),
+        ParseAttempt::Parsed(statement) => {
+            Vec::push(&mut *statements, move statement);
+            Result::Ok(())
         },
-        _ => {
+        ParseAttempt::NoMatch => {
+            let start = super::syntax::cursor_position(&value.tokens);
             let expression = try(
                 parse_expression(
                     original,
                     source,
                     declarations,
                     nominal,
-                    value,
+                    &mut *value,
                     owner,
                     0,
                     depth
@@ -2827,7 +3721,7 @@ pub parse_function_body(
                         handle_arms,
                         pattern_binders
                     } = parser;
-                    Result::Ok(ParsedBody {
+                    let output = ParsedBody {
                         shell: shell,
                         root: root,
                         nodes: nodes,
@@ -2835,7 +3729,11 @@ pub parse_function_body(
                         names: names,
                         handle_arms: handle_arms,
                         pattern_binders: pattern_binders
-                    })
+                    };
+                    Result::Ok(__g1_identity_rewrite_expr(
+                        move output,
+                        @parse_function_body
+                    ))
                 }
             }
         } else {

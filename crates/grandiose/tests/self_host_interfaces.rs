@@ -118,11 +118,12 @@ fn encode_type(
             arguments,
             lifetime_arguments,
         } => {
-            if !lifetime_arguments.is_empty() {
-                return Err(());
-            }
             output.push(5);
             encode_type(output, program, constructor)?;
+            push_u32(output, lifetime_arguments.len().try_into().unwrap());
+            for lifetime in lifetime_arguments {
+                push_string(output, &lifetime.lifetime.name);
+            }
             push_u32(output, arguments.len().try_into().unwrap());
             for argument in arguments {
                 encode_type(output, program, argument)?;
@@ -391,6 +392,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "read<T, E: EffectRow>(value: T) -> Result<T, !> / {Console, Io<T> | E} { value }",
         "mod outer { pub type A = u8; pub struct S { private x: u8 } pub enum E { V } pub f() { () } }",
         "type Borrowed<'a, T, E: EffectRow> = &'a T; type Double = ((u8)); enum GroupedPayload { V((u8), ((u16))) }",
+        "type View<'a, T> = core::View<'a, T>; borrow<'a, T>(value: &'a T) -> View<'a, T> { unreachable() }",
         "type First = u8; effect Ignored { ping() -> !; } struct Middle { value: First } enum Last { Done }",
         "infixl 30 +; infixr 1 else; infix 50 ==; prefix 90 !;",
         "prefix 0 not; infixl 0xFF <*>; infixr 0b1_000 cons; infix 2_5_5 &=;",
@@ -410,7 +412,6 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "enum Bad { Variant { value: u8 } }",
         "struct Unsupported<const N: u32> { value: u8 }",
         "type UnsupportedArray = [u8; 4];",
-        "type UnsupportedLifetime<'a, T> = View<'a, T>;",
         "infixl 256 too_high;",
         "infixr 1.5 fractional;",
         "infix 40 ;",

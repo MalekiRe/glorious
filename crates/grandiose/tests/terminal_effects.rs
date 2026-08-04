@@ -724,12 +724,15 @@ fn o2_o3_specialize_an_exact_forwarded_terminal_operation() {
         let function = &optimized.artifact.functions[selected as usize];
         let code = &optimized.artifact.code
             [function.code_start as usize..(function.code_start + function.code_len) as usize];
-        assert!(code.iter().all(|instruction| !matches!(
-            instruction,
-            Instruction::MakeHandler { .. }
-                | Instruction::Handle { .. }
-                | Instruction::Perform { .. }
-        )));
+        assert!(
+            code.iter().all(|instruction| !matches!(
+                instruction,
+                Instruction::MakeHandler { .. }
+                    | Instruction::Handle { .. }
+                    | Instruction::Perform { .. }
+            )),
+            "selected retained dynamic control at {level:?}: {code:#?}"
+        );
         assert_eq!(
             Vm::new(verify(optimized.artifact).unwrap())
                 .run(selected, vec![])
@@ -869,7 +872,15 @@ fn static_handler_specialization_keeps_deep_capture_and_loan_barriers() {
 
 #[test]
 fn terminal_handler_emits_exact_dynamic_descriptors_and_executes() {
-    let artifact = compile_source_to_bytecode("terminal.glorious", TERMINAL_PROGRAM).unwrap();
+    let artifact = compile_source_to_phases_with_options(
+        "terminal.glorious",
+        TERMINAL_PROGRAM,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        },
+    )
+    .unwrap()
+    .artifact;
     assert_eq!(artifact.required_features, 1 | (1 << 1) | (1 << 3));
     let stop = protocol_id(&artifact, "Stop");
     assert_eq!(artifact.protocols[stop as usize].operations.len(), 1);
@@ -954,8 +965,15 @@ fn terminal_handler_emits_exact_dynamic_descriptors_and_executes() {
 
 #[test]
 fn effect_core_and_mir_are_explicit_and_phase_fingerprints_are_deterministic() {
-    let first = compile_source_to_phases("terminal.glorious", TERMINAL_PROGRAM).unwrap();
-    let second = compile_source_to_phases("terminal.glorious", TERMINAL_PROGRAM).unwrap();
+    let options = CompileOptions {
+        optimization_level: OptimizationLevel::O0,
+    };
+    let first =
+        compile_source_to_phases_with_options("terminal.glorious", TERMINAL_PROGRAM, options)
+            .unwrap();
+    let second =
+        compile_source_to_phases_with_options("terminal.glorious", TERMINAL_PROGRAM, options)
+            .unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());

@@ -14,6 +14,10 @@ enum Opcode {
     EnumTag,
     Drop,
     Deconstruct,
+    Primitive,
+    HostCall,
+    Abort,
+    Unreachable,
     Jump,
     Switch,
     Call,
@@ -36,6 +40,10 @@ opcode_spec(opcode: Opcode) -> OpcodeSpec {
         Opcode::EnumTag => OpcodeSpec { code: 14, operand_words: 2 },
         Opcode::Drop => OpcodeSpec { code: 17, operand_words: 1 },
         Opcode::Deconstruct => OpcodeSpec { code: 19, operand_words: 1 },
+        Opcode::Primitive => OpcodeSpec { code: 69, operand_words: 4 },
+        Opcode::HostCall => OpcodeSpec { code: 68, operand_words: 4 },
+        Opcode::Abort => OpcodeSpec { code: 70, operand_words: 1 },
+        Opcode::Unreachable => OpcodeSpec { code: 39, operand_words: 0 },
         Opcode::Jump => OpcodeSpec { code: 32, operand_words: 1 },
         Opcode::Switch => OpcodeSpec { code: 33, operand_words: 4 },
         Opcode::Call => OpcodeSpec { code: 34, operand_words: 4 },
@@ -185,7 +193,9 @@ pub enum EmissionName {
     StructField(super::lowering::MirTypeId, usize),
     Variant(super::lowering::MirTypeId, usize),
     VariantField(super::lowering::MirTypeId, usize, usize),
-    Function(super::lowering::MirFunctionId)
+    Function(super::lowering::MirFunctionId),
+    HostCapability(u32),
+    HostSymbol(u32)
 }
 
 require_program_name(
@@ -299,6 +309,29 @@ collect_names(
     })
 }
 
+host_import_count(program: &super::lowering::MirProgram) -> u32 {
+    handle super::lowering::mir_program_host_function(program, 0, 0) {
+        None => 0,
+        Option::Some(_) => 4
+    }
+}
+
+collect_host_names(
+    program: &super::lowering::MirProgram,
+    output: &mut Vec<String>
+) {
+    if(host_import_count(program) == 0) { () } else {
+        Vec::push(&mut *output, "diagnostic");
+        Vec::push(&mut *output, "write");
+        Vec::push(&mut *output, "fs.read");
+        Vec::push(&mut *output, "read");
+        Vec::push(&mut *output, "fs.write");
+        Vec::push(&mut *output, "write");
+        Vec::push(&mut *output, "process.args");
+        Vec::push(&mut *output, "get")
+    }
+}
+
 collect_stage_field_names<'a>(
     program: &super::lowering::MirProgram,
     field_names: Slice<'a, u32>,
@@ -360,7 +393,11 @@ collect_type_names(
     for_range(Range::new(index, end), { current => {
         let type_id = super::lowering::mir_type_id_from_usize(current);
         handle super::lowering::mir_program_type_kind(program, type_id) {
+            MirTypeKind::Pending => (),
             MirTypeKind::Tuple => (),
+            MirTypeKind::Array => (),
+            MirTypeKind::SharedReference => (),
+            MirTypeKind::UniqueReference => (),
             MirTypeKind::Struct => {
                 let name_index =
                     super::lowering::mir_program_struct_name(program, type_id);
@@ -403,6 +440,27 @@ collect_type_names(
             }
         }
     } })
+}
+
+unary_structural_type_record(
+    program: &super::lowering::MirProgram,
+    index: usize,
+    tag: u8,
+    element: super::lowering::ArtifactTypeId,
+    copy_flag: u32
+) -> super::artifact::Record {
+    let payload = ByteBuf::new();
+    ByteBuf::write_u32_le(
+        &mut payload,
+        super::lowering::artifact_type_raw(element)
+    );
+    super::artifact::record(
+        tag,
+        wrapping_convert_to_u8(custom_type_flags(
+            program, index, copy_flag
+        )),
+        ByteBuf::finish(payload)
+    )
 }
 
 write_type_fields<'a>(
@@ -678,6 +736,9 @@ custom_type_record(
     let copy_flag =
         super::lowering::mir_program_type_copy_flag(program, mir_type);
     handle super::lowering::mir_program_type_kind(program, mir_type) {
+        MirTypeKind::Pending => Result::Err(
+            EmissionError::UnsupportedType(mir_type, 0)
+        ),
         MirTypeKind::Tuple =>
             Result::Ok(tuple_type_record(
                 program,
@@ -688,6 +749,31 @@ custom_type_record(
                 ),
                 copy_flag
             )),
+        MirTypeKind::Array => Result::Ok(unary_structural_type_record(
+            program,
+            index,
+            33,
+            super::lowering::mir_program_unary_element(program, mir_type),
+            copy_flag
+        )),
+        MirTypeKind::SharedReference => Result::Ok(
+            unary_structural_type_record(
+                program,
+                index,
+                36,
+                super::lowering::mir_program_unary_element(program, mir_type),
+                copy_flag
+            )
+        ),
+        MirTypeKind::UniqueReference => Result::Ok(
+            unary_structural_type_record(
+                program,
+                index,
+                37,
+                super::lowering::mir_program_unary_element(program, mir_type),
+                copy_flag
+            )
+        ),
         MirTypeKind::Struct => struct_type_record(
             program,
             names,
@@ -836,6 +922,80 @@ collect_signatures(
             )
         );
         Vec::push(&mut *output, key)
+    } })
+}
+
+host_role_at(index: usize) -> u32 {
+    handle index {
+        0 => 3,
+        1 => 1,
+        2 => 2,
+        _ => 0
+    }
+}
+
+host_capability(role: u32) -> String {
+    handle role {
+        3 => "diagnostic",
+        1 => "fs.read",
+        2 => "fs.write",
+        _ => "process.args"
+    }
+}
+
+host_symbol(role: u32) -> String {
+    handle role {
+        3 => "write",
+        1 => "read",
+        2 => "write",
+        _ => "get"
+    }
+}
+
+write_host_imports(
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
+    index: usize,
+    output: &mut ByteBuf
+) -> Result<(), EmissionError> {
+    try_for_range(Range::new(
+        index,
+        usize_from_u32(host_import_count(program))
+    ), { current => {
+        let role = host_role_at(current);
+        let function = handle super::lowering::mir_program_host_function(
+            program,
+            role,
+            0
+        ) {
+            None => unreachable(),
+            Option::Some(found) => found
+        };
+        let capability = try(require_name_value(
+            names,
+            host_capability(role),
+            EmissionName::HostCapability(role)
+        ), @write_host_imports);
+        let symbol = try(require_name_value(
+            names,
+            host_symbol(role),
+            EmissionName::HostSymbol(role)
+        ), @write_host_imports);
+        let signature = try(require_signature(
+            signatures,
+            &signature_key(super::lowering::mir_program_function_at(
+                program,
+                function
+            )),
+            function
+        ), @write_host_imports);
+        ByteBuf::write_u32_le(&mut *output, capability);
+        ByteBuf::write_u32_le(&mut *output, symbol);
+        ByteBuf::write_u32_le(&mut *output, signature);
+        ByteBuf::write_u32_le(&mut *output, 1);
+        ByteBuf::write_u64_le(&mut *output, 0);
+        Result::Ok(())
     } })
 }
 
@@ -1061,6 +1221,66 @@ write_instruction(
             code,
             super::lowering::register_raw(register)
         );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Primitive(
+        target,
+        primitive,
+        arguments_id
+    )) {
+        let arguments = super::lowering::mir_function_register_pack(
+            mir_function,
+            arguments_id
+        );
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(arguments, 0, operands);
+        write_opcode(&mut *code, Opcode::Primitive);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(&mut *code, primitive);
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_pack_count(arguments)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::HostCall(
+        target,
+        role,
+        arguments_id
+    )) {
+        let arguments = super::lowering::mir_function_register_pack(
+            mir_function,
+            arguments_id
+        );
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(arguments, 0, operands);
+        let destination = handle target {
+            None => super::artifact::absent_id(),
+            Option::Some(found) => super::lowering::register_raw(found)
+        };
+        let import = handle role {
+            3 => 0,
+            1 => 1,
+            2 => 2,
+            _ => 3
+        };
+        write_opcode(&mut *code, Opcode::HostCall);
+        ByteBuf::write_u32_le(&mut *code, destination);
+        ByteBuf::write_u32_le(&mut *code, import);
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_pack_count(arguments)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Abort) {
+        write_opcode(&mut *code, Opcode::Abort);
+        ByteBuf::write_u32_le(code, super::artifact::absent_id());
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Unreachable) {
+        write_opcode(&mut *code, Opcode::Unreachable);
         Result::Ok(())
     } else if(*instruction is MirInstruction::Jump(target)) {
         write_opcode(&mut *code, Opcode::Jump);
@@ -1384,6 +1604,7 @@ new_emission_context<'a>(
     let name_values = Vec::new();
     collect_names(program, 0, &mut name_values);
     collect_type_names(program, 0, &mut name_values);
+    collect_host_names(program, &mut name_values);
     let signature_values = Vec::new();
     collect_signatures(program, 0, &mut signature_values);
     let constant_values = Vec::new();
@@ -1468,6 +1689,14 @@ pub encode(
     write_operand_words(&context.operands, 0, &mut operand_bytes);
     let functions = ByteBuf::new();
     try(write_context_functions(&context, &mut functions), @encode);
+    let imports = ByteBuf::new();
+    try(write_host_imports(
+        context.program,
+        &context.names,
+        &context.signatures,
+        0,
+        &mut imports
+    ), @encode);
     let code_count = checked_u32(ByteBuf::len(&code) / 4);
     let code_bytes = ByteBuf::finish(code);
     let cleanup_count =
@@ -1497,6 +1726,14 @@ pub encode(
         &mut context.writer,
         super::artifact::SectionId::Signatures,
         super::artifact::variable_section(&signature_table_records)
+    );
+    super::artifact::set_section(
+        &mut context.writer,
+        super::artifact::SectionId::Imports,
+        super::artifact::section(
+            ByteBuf::finish(imports),
+            host_import_count(context.program)
+        )
     );
     super::artifact::set_section(
         &mut context.writer,
@@ -1535,7 +1772,14 @@ pub encode(
     let raw_entry = Option::map(entry, {
         found => super::lowering::mir_function_raw(found)
     });
-    handle super::artifact::encode_writer(&context.writer, raw_entry, 1) {
+    let required_features = if(host_import_count(context.program) == 0) {
+        1
+    } else { 32 };
+    handle super::artifact::encode_writer(
+        &context.writer,
+        raw_entry,
+        required_features
+    ) {
         Result::Err(error) =>
             Result::Err(EmissionError::ArtifactWrite(error)),
         Result::Ok(bytes) => Result::Ok(bytes)

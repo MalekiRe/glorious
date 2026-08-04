@@ -893,3 +893,42 @@ fn open_generic_method_impl_heads_preserve_their_where_evidence() {
         "{errors:#?}",
     );
 }
+
+#[test]
+fn divergent_first_match_arm_does_not_poison_later_operator_typing() {
+    let source = r#"
+        selected(value: Result<i64, ()>) -> i64 {
+            let found = handle value {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            if(found == 42) { found } else { 0 }
+        }
+        answer() -> i64 { selected(Result::Ok(42)) }
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "divergent-match-operator-context.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let answer = artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            Value::I64(42),
+            "{optimization_level:?}"
+        );
+    }
+}

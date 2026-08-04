@@ -851,6 +851,7 @@ fn instruction_definition(instruction: &InstructionKind) -> Option<Register> {
         | InstructionKind::ProjectBorrow { dst, .. }
         | InstructionKind::Reborrow { dst, .. }
         | InstructionKind::DerefCopy { dst, .. }
+        | InstructionKind::DerefReborrow { dst, .. }
         | InstructionKind::DerefMove { dst, .. }
         | InstructionKind::Construct { dst, .. }
         | InstructionKind::ProjectCopy { dst, .. }
@@ -898,6 +899,7 @@ fn instruction_uses(instruction: &InstructionKind) -> BTreeSet<Register> {
         | InstructionKind::ProjectBorrow { src, .. }
         | InstructionKind::Reborrow { src, .. }
         | InstructionKind::DerefCopy { src, .. }
+        | InstructionKind::DerefReborrow { src, .. }
         | InstructionKind::DerefMove { src, .. }
         | InstructionKind::EndBorrow { reference: src }
         | InstructionKind::Deconstruct { src }
@@ -1016,6 +1018,7 @@ fn block_local_uses(block: &BasicBlock) -> BTreeSet<Register> {
             | InstructionKind::ProjectBorrow { src, .. }
             | InstructionKind::Reborrow { src, .. }
             | InstructionKind::DerefCopy { src, .. }
+            | InstructionKind::DerefReborrow { src, .. }
             | InstructionKind::DerefMove { src, .. }
             | InstructionKind::EndBorrow { reference: src }
             | InstructionKind::Deconstruct { src }

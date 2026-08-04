@@ -16,6 +16,7 @@ use super::backend::emission::EmissionError;
 use super::backend::lowering::LoweringError;
 use super::frontend::bodies::BodyError;
 use super::frontend::elaboration::ElaborationError;
+use super::frontend::elaboration::CallableInstanceId;
 use super::frontend::elaboration::InterfaceCallableId;
 use super::frontend::elaboration::InterfaceNominalView;
 use super::frontend::elaboration::InterfaceTypeView;
@@ -70,6 +71,7 @@ struct CompilerSession<'a> {
 // syntax to Typed Core. Keeping this object local prevents a whole-program AST
 // or a second persistent HIR from becoming part of the architecture.
 struct BodyCompilation {
+    instance: CallableInstanceId,
     callable: InterfaceCallableId,
     name: String,
     syntax: bodies::ParsedBody,
@@ -141,10 +143,228 @@ function_name<'a>(
     }
 }
 
+enum RuntimeLeaf {
+    Primitive(u32),
+    Host(u32),
+    Abort
+}
+
+// Generation-1 runtime authority is attached to exact declaration identities
+// in the canonical trusted standard-library prefix. The spelling is checked
+// as a schema guard, but never grants authority to another declaration.
+runtime_leaf_identity(shell: ShellId, name: &String) -> Option<RuntimeLeaf> {
+    handle Id::to_u32(shell) {
+        0 => if(String::eq(name, &"__g1_text_byte_len")) {
+            Option::Some(RuntimeLeaf::Primitive(64))
+        } else { None },
+        1 => if(String::eq(name, &"__g1_text_concat")) {
+            Option::Some(RuntimeLeaf::Primitive(65))
+        } else { None },
+        2 => if(String::eq(name, &"__g1_text_eq")) {
+            Option::Some(RuntimeLeaf::Primitive(66))
+        } else { None },
+        3 => if(String::eq(name, &"__g1_text_from_utf8_checked")) {
+            Option::Some(RuntimeLeaf::Primitive(67))
+        } else { None },
+        4 => if(String::eq(name, &"__g1_text_as_bytes")) {
+            Option::Some(RuntimeLeaf::Primitive(68))
+        } else { None },
+        5 => if(String::eq(name, &"__g1_bytes_len")) {
+            Option::Some(RuntimeLeaf::Primitive(80))
+        } else { None },
+        6 => if(String::eq(name, &"__g1_bytes_concat")) {
+            Option::Some(RuntimeLeaf::Primitive(81))
+        } else { None },
+        7 => if(String::eq(name, &"__g1_bytes_get")) {
+            Option::Some(RuntimeLeaf::Primitive(82))
+        } else { None },
+        8 => if(String::eq(name, &"__g1_bytes_slice")) {
+            Option::Some(RuntimeLeaf::Primitive(83))
+        } else { None },
+        9 => if(String::eq(name, &"__g1_bytes_from_array_move")) {
+            Option::Some(RuntimeLeaf::Primitive(84))
+        } else { None },
+        10 => if(String::eq(name, &"__g1_bytes_to_array")) {
+            Option::Some(RuntimeLeaf::Primitive(85))
+        } else { None },
+        11 => if(String::eq(name, &"__g1_bytes_utf8_valid_up_to")) {
+            Option::Some(RuntimeLeaf::Primitive(86))
+        } else { None },
+        12 => if(String::eq(name, &"__g1_char_from_u32_checked")) {
+            Option::Some(RuntimeLeaf::Primitive(48))
+        } else { None },
+        13 => if(String::eq(name, &"__g1_char_to_u32")) {
+            Option::Some(RuntimeLeaf::Primitive(49))
+        } else { None },
+        14 => if(String::eq(name, &"__g1_abort")) {
+            Option::Some(RuntimeLeaf::Abort)
+        } else { None },
+        15 => runtime_primitive_named(name, &"__g1_f32_add", 32),
+        16 => runtime_primitive_named(name, &"__g1_f32_sub", 33),
+        17 => runtime_primitive_named(name, &"__g1_f32_mul", 34),
+        18 => runtime_primitive_named(name, &"__g1_f32_div", 35),
+        19 => runtime_primitive_named(name, &"__g1_f32_rem", 36),
+        20 => runtime_primitive_named(name, &"__g1_f32_neg", 44),
+        21 => runtime_primitive_named(name, &"__g1_f32_eq", 37),
+        22 => runtime_primitive_named(name, &"__g1_f32_ne", 38),
+        23 => runtime_primitive_named(name, &"__g1_f32_lt", 39),
+        24 => runtime_primitive_named(name, &"__g1_f32_le", 40),
+        25 => runtime_primitive_named(name, &"__g1_f32_gt", 41),
+        26 => runtime_primitive_named(name, &"__g1_f32_ge", 42),
+        27 => runtime_primitive_named(name, &"__g1_f64_add", 32),
+        28 => runtime_primitive_named(name, &"__g1_f64_sub", 33),
+        29 => runtime_primitive_named(name, &"__g1_f64_mul", 34),
+        30 => runtime_primitive_named(name, &"__g1_f64_div", 35),
+        31 => runtime_primitive_named(name, &"__g1_f64_rem", 36),
+        32 => runtime_primitive_named(name, &"__g1_f64_neg", 44),
+        33 => runtime_primitive_named(name, &"__g1_f64_eq", 37),
+        34 => runtime_primitive_named(name, &"__g1_f64_ne", 38),
+        35 => runtime_primitive_named(name, &"__g1_f64_lt", 39),
+        36 => runtime_primitive_named(name, &"__g1_f64_le", 40),
+        37 => runtime_primitive_named(name, &"__g1_f64_gt", 41),
+        38 => runtime_primitive_named(name, &"__g1_f64_ge", 42),
+        39 => runtime_primitive_named(name, &"__g1_f32_to_f64", 43),
+        40 => runtime_primitive_named(name, &"__g1_f64_to_f32", 43),
+        41 => runtime_primitive_named(name, &"__g1_u8_to_f32", 45),
+        42 => runtime_primitive_named(name, &"__g1_u16_to_f32", 45),
+        43 => runtime_primitive_named(name, &"__g1_u32_to_f32", 45),
+        44 => runtime_primitive_named(name, &"__g1_u64_to_f32", 45),
+        45 => runtime_primitive_named(name, &"__g1_u128_to_f32", 45),
+        46 => runtime_primitive_named(name, &"__g1_usize_to_f32", 45),
+        47 => runtime_primitive_named(name, &"__g1_i8_to_f32", 45),
+        48 => runtime_primitive_named(name, &"__g1_i16_to_f32", 45),
+        49 => runtime_primitive_named(name, &"__g1_i32_to_f32", 45),
+        50 => runtime_primitive_named(name, &"__g1_i64_to_f32", 45),
+        51 => runtime_primitive_named(name, &"__g1_i128_to_f32", 45),
+        52 => runtime_primitive_named(name, &"__g1_isize_to_f32", 45),
+        53 => runtime_primitive_named(name, &"__g1_u8_to_f64", 45),
+        54 => runtime_primitive_named(name, &"__g1_u16_to_f64", 45),
+        55 => runtime_primitive_named(name, &"__g1_u32_to_f64", 45),
+        56 => runtime_primitive_named(name, &"__g1_u64_to_f64", 45),
+        57 => runtime_primitive_named(name, &"__g1_u128_to_f64", 45),
+        58 => runtime_primitive_named(name, &"__g1_usize_to_f64", 45),
+        59 => runtime_primitive_named(name, &"__g1_i8_to_f64", 45),
+        60 => runtime_primitive_named(name, &"__g1_i16_to_f64", 45),
+        61 => runtime_primitive_named(name, &"__g1_i32_to_f64", 45),
+        62 => runtime_primitive_named(name, &"__g1_i64_to_f64", 45),
+        63 => runtime_primitive_named(name, &"__g1_i128_to_f64", 45),
+        64 => runtime_primitive_named(name, &"__g1_isize_to_f64", 45),
+        65 => runtime_primitive_named(name, &"__g1_f32_to_u8_checked", 46),
+        66 => runtime_primitive_named(name, &"__g1_f32_to_u16_checked", 46),
+        67 => runtime_primitive_named(name, &"__g1_f32_to_u32_checked", 46),
+        68 => runtime_primitive_named(name, &"__g1_f32_to_u64_checked", 46),
+        69 => runtime_primitive_named(name, &"__g1_f32_to_u128_checked", 46),
+        70 => runtime_primitive_named(name, &"__g1_f32_to_usize_checked", 46),
+        71 => runtime_primitive_named(name, &"__g1_f32_to_i8_checked", 46),
+        72 => runtime_primitive_named(name, &"__g1_f32_to_i16_checked", 46),
+        73 => runtime_primitive_named(name, &"__g1_f32_to_i32_checked", 46),
+        74 => runtime_primitive_named(name, &"__g1_f32_to_i64_checked", 46),
+        75 => runtime_primitive_named(name, &"__g1_f32_to_i128_checked", 46),
+        76 => runtime_primitive_named(name, &"__g1_f32_to_isize_checked", 46),
+        77 => runtime_primitive_named(name, &"__g1_f64_to_u8_checked", 46),
+        78 => runtime_primitive_named(name, &"__g1_f64_to_u16_checked", 46),
+        79 => runtime_primitive_named(name, &"__g1_f64_to_u32_checked", 46),
+        80 => runtime_primitive_named(name, &"__g1_f64_to_u64_checked", 46),
+        81 => runtime_primitive_named(name, &"__g1_f64_to_u128_checked", 46),
+        82 => runtime_primitive_named(name, &"__g1_f64_to_usize_checked", 46),
+        83 => runtime_primitive_named(name, &"__g1_f64_to_i8_checked", 46),
+        84 => runtime_primitive_named(name, &"__g1_f64_to_i16_checked", 46),
+        85 => runtime_primitive_named(name, &"__g1_f64_to_i32_checked", 46),
+        86 => runtime_primitive_named(name, &"__g1_f64_to_i64_checked", 46),
+        87 => runtime_primitive_named(name, &"__g1_f64_to_i128_checked", 46),
+        88 => runtime_primitive_named(name, &"__g1_f64_to_isize_checked", 46),
+        89 => runtime_primitive_named(name, &"__g1_f32_to_bits", 47),
+        90 => runtime_primitive_named(name, &"__g1_f32_from_bits", 50),
+        91 => runtime_primitive_named(name, &"__g1_f64_to_bits", 47),
+        92 => runtime_primitive_named(name, &"__g1_f64_from_bits", 50),
+        93 => runtime_primitive_named(name, &"__g1_array_new", 96),
+        94 => runtime_primitive_named(name, &"__g1_array_len", 97),
+        95 => runtime_primitive_named(name, &"__g1_array_get_copy", 98),
+        96 => runtime_primitive_named(name, &"__g1_array_get_move", 99),
+        97 => runtime_primitive_named(name, &"__g1_array_get_borrow_shared", 100),
+        98 => runtime_primitive_named(name, &"__g1_array_get_borrow_unique", 101),
+        99 => runtime_primitive_named(name, &"__g1_array_set_move", 102),
+        100 => runtime_primitive_named(name, &"__g1_array_empty", 103),
+        101 => runtime_primitive_named(name, &"__g1_array_push_move", 104),
+        102 => runtime_primitive_named(name, &"__g1_array_pop_move", 105),
+        103 => runtime_primitive_named(name, &"__g1_array_capacity", 106),
+        104 => runtime_primitive_named(name, &"__g1_array_reserve", 107),
+        105 => runtime_primitive_named(name, &"__g1_array_finish_drained", 108),
+        106 => runtime_primitive_named(name, &"__g1_int_checked_add", 0),
+        107 => runtime_primitive_named(name, &"__g1_int_equal", 14),
+        108 => runtime_primitive_named(name, &"__g1_int_less", 16),
+        109 => runtime_primitive_named(name, &"__g1_int_greater", 18),
+        110 => runtime_primitive_named(name, &"__g1_int_wrapping_add", 5),
+        111 => runtime_primitive_named(name, &"__g1_int_wrapping_sub", 6),
+        112 => runtime_primitive_named(name, &"__g1_int_wrapping_mul", 7),
+        113 => runtime_primitive_named(name, &"__g1_int_bit_and", 8),
+        114 => runtime_primitive_named(name, &"__g1_int_bit_or", 9),
+        115 => runtime_primitive_named(name, &"__g1_int_bit_xor", 10),
+        116 => runtime_primitive_named(name, &"__g1_int_bit_not", 11),
+        117 => runtime_primitive_named(name, &"__g1_int_shl", 12),
+        118 => runtime_primitive_named(name, &"__g1_int_shr", 13),
+        119 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_u8", 20),
+        120 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_u16", 20),
+        121 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_u32", 20),
+        122 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_u64", 20),
+        123 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_u128", 20),
+        124 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_usize", 20),
+        125 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_i8", 20),
+        126 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_i16", 20),
+        127 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_i32", 20),
+        128 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_i64", 20),
+        129 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_i128", 20),
+        130 => runtime_primitive_named(name, &"__g1_int_convert_checked_to_isize", 20),
+        131 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_u8", 21),
+        132 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_u16", 21),
+        133 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_u32", 21),
+        134 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_u64", 21),
+        135 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_u128", 21),
+        136 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_usize", 21),
+        137 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_i8", 21),
+        138 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_i16", 21),
+        139 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_i32", 21),
+        140 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_i64", 21),
+        141 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_i128", 21),
+        142 => runtime_primitive_named(name, &"__g1_int_convert_wrapping_to_isize", 21),
+        165 => runtime_host_named(name, &"__g1_process_args_get", 0),
+        166 => runtime_host_named(name, &"__g1_fs_read", 1),
+        167 => runtime_host_named(name, &"__g1_fs_write", 2),
+        168 => runtime_host_named(name, &"__g1_diagnostic_write", 3),
+        _ => None
+    }
+}
+
+runtime_primitive_named(
+    found: &String,
+    expected: &String,
+    primitive: u32
+) -> Option<RuntimeLeaf> {
+    if(String::eq(found, expected)) {
+        Option::Some(RuntimeLeaf::Primitive(primitive))
+    } else {
+        None
+    }
+}
+
+runtime_host_named(
+    found: &String,
+    expected: &String,
+    import: u32
+) -> Option<RuntimeLeaf> {
+    if(String::eq(found, expected)) {
+        Option::Some(RuntimeLeaf::Host(import))
+    } else { None }
+}
+
 prepare_body<'a>(
     session: &CompilerSession<'a>,
-    callable: InterfaceCallableId
+    instance: CallableInstanceId
 ) -> Result<BodyCompilation, CompileError> {
+    let callable = elaboration::callable_instance_callable(
+        &session.interfaces,
+        instance
+    );
     let shell = elaboration::interface_callable_shell(
         &session.interfaces,
         callable
@@ -178,6 +398,7 @@ prepare_body<'a>(
         @prepare_body
     );
     Result::Ok(BodyCompilation {
+        instance: instance,
         callable: callable,
         name: name,
         syntax: syntax,
@@ -187,9 +408,13 @@ prepare_body<'a>(
 
 lower_body<'a>(
     session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
     body: BodyCompilation
 ) -> Result<lowering::MirFunction, CompileError> {
     let BodyCompilation {
+        instance,
         callable,
         name,
         syntax,
@@ -201,59 +426,167 @@ lower_body<'a>(
     );
     let typed = try(
         Result::map_err(
-            elaboration::elaborate_function_body(
+            elaboration::elaborate_function_instance_body(
                 session.original,
                 &session.headers,
                 &session.declarations,
                 &mut session.interfaces,
                 &syntax,
-                &resolution
+                &resolution,
+                instance
             ),
             { found => CompileError::BodyElaboration(shell, found) }
         ),
         @lower_body
     );
+    try(lower_typed_body_types(
+        session,
+        map,
+        types,
+        type_names,
+        &typed
+    ), @lower_body);
     Result::map_err(
         lowering::lower_function(
             name,
             &session.interfaces,
             &typed,
-            callable
+            instance,
+            &*map
         ),
         { found => CompileError::Lowering(shell, found) }
     )
 }
 
+lower_callable<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    instance: CallableInstanceId
+) -> Result<lowering::MirFunction, CompileError> {
+    let callable = elaboration::callable_instance_callable(
+        &session.interfaces,
+        instance
+    );
+    let shell = elaboration::interface_callable_shell(
+        &session.interfaces,
+        callable
+    );
+    let parameter_count = elaboration::callable_instance_parameter_count(
+        &session.interfaces, instance
+    );
+    try(try_for_range(
+        Range::new(0, usize_from_u32(parameter_count)),
+        { index => {
+        let semantic = elaboration::callable_instance_parameter_at(
+            &session.interfaces, instance, index
+        );
+        try(lower_concrete_type(
+            &mut *session,
+            &mut *map,
+            &mut *types,
+            &mut *type_names,
+            semantic
+        ), @lower_callable);
+        Result::Ok(())
+        }}
+    ), @lower_callable);
+    let result = elaboration::callable_instance_result(
+        &session.interfaces, instance
+    );
+    try(lower_concrete_type(
+        session, map, types, type_names, result
+    ), @lower_callable);
+    let name = try(function_name(&*session, shell), @lower_callable);
+    handle runtime_leaf_identity(shell, &name) {
+        Option::Some(RuntimeLeaf::Primitive(primitive)) => Result::map_err(
+            lowering::lower_primitive_function(
+                name,
+                &session.interfaces,
+                instance,
+                primitive,
+                &*map
+            ),
+            { found => CompileError::Lowering(shell, found) }
+        ),
+        Option::Some(RuntimeLeaf::Abort) => Result::map_err(
+            lowering::lower_abort_function(
+                name,
+                &session.interfaces,
+                instance,
+                &*map
+            ),
+            { found => CompileError::Lowering(shell, found) }
+        ),
+        Option::Some(RuntimeLeaf::Host(import)) => Result::map_err(
+            lowering::lower_host_function(
+                name,
+                &session.interfaces,
+                instance,
+                import,
+                &*map
+            ),
+            { found => CompileError::Lowering(shell, found) }
+        ),
+        None => {
+            let body = try(
+                prepare_body(&*session, instance),
+                @lower_callable
+            );
+            lower_body(
+                &mut *session,
+                &mut *map,
+                &mut *types,
+                &mut *type_names,
+                body
+            )
+        }
+    }
+}
+
 lower_functions<'a>(
     session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
     index: usize,
     output: &mut MirFunctionArena
 ) -> Result<(), CompileError> {
-    let end = elaboration::interface_callable_count(&session.interfaces);
-    try_for_range(Range::new(index, end), { current => {
-        let callable = handle elaboration::interface_callable_id_at(
+    if(index < elaboration::callable_instance_count(&session.interfaces)) {
+        let instance = handle elaboration::callable_instance_id_at(
             &session.interfaces,
-            current
+            index
         ) {
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
-        let body = try(
-            prepare_body(&*session, callable),
-            @lower_functions
-        );
         let function = try(
-            lower_body(&mut *session, body),
+            lower_callable(
+                &mut *session,
+                &mut *map,
+                &mut *types,
+                &mut *type_names,
+                instance
+            ),
             @lower_functions
         );
         handle Arena::alloc(&mut *output, function) {
             Result::Err(_) => unreachable(),
-            Result::Ok(staged) => if(staged == callable) {
-                ()
+            Result::Ok(staged) => if(
+                Id::to_u32(staged) == Id::to_u32(instance)
+            ) {
+                lower_functions(
+                    session,
+                    map,
+                    types,
+                    type_names,
+                    index + 1,
+                    output
+                )
             } else { unreachable() }
-        };
-        Result::Ok(())
-    } })
+        }
+    } else { Result::Ok(()) }
 }
 
 find_entry(
@@ -527,6 +860,488 @@ collect_types<'a>(
     } })
 }
 
+append_concrete_type_arguments<'a>(
+    session: &CompilerSession<'a>,
+    ty: elaboration::TypeId,
+    output: &mut Formatter,
+    ordinal: u32
+) {
+    let start = elaboration::interface_type_b_at(
+        &session.interfaces,
+        Id::to_usize(ty)
+    );
+    let count = elaboration::interface_type_c_at(
+        &session.interfaces,
+        Id::to_usize(ty)
+    );
+    if(ordinal < count) {
+        if(ordinal == 0) {
+            Formatter::literal(&mut *output, &"<")
+        } else {
+            Formatter::literal(&mut *output, &",")
+        };
+        let argument = elaboration::interface_type_element_at(
+            &session.interfaces,
+            usize_from_u32(start + ordinal)
+        );
+        Formatter::append_u64(
+            &mut *output,
+            wrapping_convert_to_u64(Id::to_u32(argument))
+        );
+        append_concrete_type_arguments(
+            session, ty, output, ordinal + 1
+        )
+    } else {
+        if(count == 0) { () } else {
+            Formatter::literal(&mut *output, &">")
+        }
+    }
+}
+
+concrete_nominal_name<'a>(
+    session: &CompilerSession<'a>,
+    shell: ShellId,
+    application: Option<elaboration::TypeId>
+) -> Result<String, CompileError> {
+    let base = try(function_name(session, shell), @concrete_nominal_name);
+    handle application {
+        None => Result::Ok(base),
+        Option::Some(ty) => {
+            let output = Formatter::new();
+            Formatter::literal(&mut output, &base);
+            append_concrete_type_arguments(session, ty, &mut output, 0);
+            handle Formatter::finish(output) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => Result::Ok(found)
+            }
+        }
+    }
+}
+
+concrete_member_type<'a>(
+    session: &mut CompilerSession<'a>,
+    application: Option<elaboration::TypeId>,
+    member: elaboration::TypeId
+) -> elaboration::TypeId {
+    handle application {
+        None => member,
+        Option::Some(found) =>
+            elaboration::instantiate_application_member_type(
+                &session.headers,
+                &mut session.interfaces,
+                found,
+                member
+            )
+    }
+}
+
+lower_concrete_type_elements<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    output: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<Bool, CompileError> {
+    if(ordinal < count) {
+        let semantic = elaboration::interface_type_element_at(
+            &session.interfaces,
+            usize_from_u32(start + ordinal)
+        );
+        let artifact = try(lower_concrete_type(
+            session, map, types, type_names, semantic
+        ), @lower_concrete_type_elements);
+        let copyable = lowering::mapped_type_copyable(map, semantic);
+        Vec::push(&mut *output, artifact);
+        let following = try(lower_concrete_type_elements(
+            session,
+            map,
+            types,
+            type_names,
+            start,
+            count,
+            ordinal + 1,
+            output
+        ), @lower_concrete_type_elements);
+        Result::Ok(copyable and { following })
+    } else { Result::Ok(true) }
+}
+
+lower_concrete_struct_fields<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    application: Option<elaboration::TypeId>,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    field_names: &mut Vec<u32>,
+    fields: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<Bool, CompileError> {
+    if(ordinal < count) {
+        let index = usize_from_u32(start + ordinal);
+        let field = elaboration::interface_field_at_view(
+            &session.interfaces, index
+        );
+        let name = try(interface_name(
+            &*session,
+            elaboration::interface_field_view_name(&field),
+            InterfaceNameKind::Field,
+            start + ordinal
+        ), @lower_concrete_struct_fields);
+        Vec::push(&mut *field_names, checked_u32(Vec::len(&*type_names)));
+        Vec::push(&mut *type_names, name);
+        let member = Id::from_u32(
+            elaboration::interface_field_view_type(&field)
+        );
+        let semantic = concrete_member_type(session, application, member);
+        let artifact = try(lower_concrete_type(
+            session, map, types, type_names, semantic
+        ), @lower_concrete_struct_fields);
+        let copyable = lowering::mapped_type_copyable(map, semantic);
+        Vec::push(&mut *fields, artifact);
+        let following = try(lower_concrete_struct_fields(
+            session,
+            map,
+            types,
+            type_names,
+            application,
+            start,
+            count,
+            ordinal + 1,
+            field_names,
+            fields
+        ), @lower_concrete_struct_fields);
+        Result::Ok(copyable and { following })
+    } else { Result::Ok(true) }
+}
+
+lower_concrete_variant_payloads<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    application: Option<elaboration::TypeId>,
+    variant: usize,
+    ordinal: u32,
+    field_names: &mut Vec<u32>,
+    fields: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<Bool, CompileError> {
+    let count = elaboration::interface_variant_payload_count_at(
+        &session.interfaces, variant
+    );
+    if(ordinal < count) {
+        Vec::push(&mut *field_names, checked_u32(Vec::len(&*type_names)));
+        Vec::push(&mut *type_names, ordinal_name(usize_from_u32(ordinal)));
+        let member = elaboration::interface_variant_payload_at(
+            &session.interfaces,
+            variant,
+            usize_from_u32(ordinal)
+        );
+        let semantic = concrete_member_type(session, application, member);
+        let artifact = try(lower_concrete_type(
+            session, map, types, type_names, semantic
+        ), @lower_concrete_variant_payloads);
+        let copyable = lowering::mapped_type_copyable(map, semantic);
+        Vec::push(&mut *fields, artifact);
+        let following = try(lower_concrete_variant_payloads(
+            session,
+            map,
+            types,
+            type_names,
+            application,
+            variant,
+            ordinal + 1,
+            field_names,
+            fields
+        ), @lower_concrete_variant_payloads);
+        Result::Ok(copyable and { following })
+    } else { Result::Ok(true) }
+}
+
+lower_concrete_enum_variants<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    application: Option<elaboration::TypeId>,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    output: &mut Vec<lowering::MirVariant>
+) -> Result<Bool, CompileError> {
+    if(ordinal < count) {
+        let index = usize_from_u32(start + ordinal);
+        let name = try(interface_name(
+            &*session,
+            elaboration::interface_variant_name_at(
+                &session.interfaces, index
+            ),
+            InterfaceNameKind::Variant,
+            start + ordinal
+        ), @lower_concrete_enum_variants);
+        let name_index = checked_u32(Vec::len(&*type_names));
+        Vec::push(&mut *type_names, name);
+        let field_names = Vec::new();
+        let fields = Vec::new();
+        let copyable = try(lower_concrete_variant_payloads(
+            session,
+            map,
+            types,
+            type_names,
+            application,
+            index,
+            0,
+            &mut field_names,
+            &mut fields
+        ), @lower_concrete_enum_variants);
+        Vec::push(
+            &mut *output,
+            lowering::enum_variant(name_index, field_names, fields)
+        );
+        let following = try(lower_concrete_enum_variants(
+            session,
+            map,
+            types,
+            type_names,
+            application,
+            start,
+            count,
+            ordinal + 1,
+            output
+        ), @lower_concrete_enum_variants);
+        Result::Ok(copyable and { following })
+    } else { Result::Ok(true) }
+}
+
+lower_concrete_nominal<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    semantic: elaboration::TypeId,
+    nominal: u32,
+    application: Option<elaboration::TypeId>,
+    reserved: lowering::MirTypeId
+) -> Result<(), CompileError> {
+    let view = elaboration::interface_nominal_at_view(
+        &session.interfaces, usize_from_u32(nominal)
+    );
+    handle view {
+        InterfaceNominalView::Struct(shell, start, count) => {
+            let name = try(concrete_nominal_name(
+                &*session, shell, application
+            ), @lower_concrete_nominal);
+            let name_index = checked_u32(Vec::len(&*type_names));
+            Vec::push(&mut *type_names, name);
+            let field_names = Vec::new();
+            let fields = Vec::new();
+            let copyable = try(lower_concrete_struct_fields(
+                session,
+                map,
+                types,
+                type_names,
+                application,
+                start,
+                count,
+                0,
+                &mut field_names,
+                &mut fields
+            ), @lower_concrete_nominal);
+            lowering::set_struct_type(
+                types,
+                reserved,
+                name_index,
+                field_names,
+                fields,
+                if(copyable) { 1 } else { 0 }
+            );
+            lowering::set_mapped_type_copyable(map, semantic, copyable);
+            Result::Ok(())
+        },
+        InterfaceNominalView::Enum(shell, start, count) => {
+            let name = try(concrete_nominal_name(
+                &*session, shell, application
+            ), @lower_concrete_nominal);
+            let name_index = checked_u32(Vec::len(&*type_names));
+            Vec::push(&mut *type_names, name);
+            let variants = Vec::new();
+            let copyable = try(lower_concrete_enum_variants(
+                session,
+                map,
+                types,
+                type_names,
+                application,
+                start,
+                count,
+                0,
+                &mut variants
+            ), @lower_concrete_nominal);
+            lowering::set_enum_type(
+                types,
+                reserved,
+                name_index,
+                variants,
+                if(copyable) { 1 } else { 0 }
+            );
+            lowering::set_mapped_type_copyable(map, semantic, copyable);
+            Result::Ok(())
+        }
+    }
+}
+
+lower_concrete_type<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    semantic: elaboration::TypeId
+) -> Result<lowering::ArtifactTypeId, CompileError> {
+    handle lowering::mapped_artifact_type(&*map, semantic) {
+        Option::Some(found) => Result::Ok(found),
+        None => {
+            let index = Id::to_usize(semantic);
+            let tag = elaboration::interface_type_tag_at(
+                &session.interfaces, index
+            );
+            let a = elaboration::interface_type_a_at(
+                &session.interfaces, index
+            );
+            let b = elaboration::interface_type_b_at(
+                &session.interfaces, index
+            );
+            let c = elaboration::interface_type_c_at(
+                &session.interfaces, index
+            );
+            let reserved = lowering::reserve_mir_type(types);
+            let artifact = lowering::mir_type_artifact_id(reserved);
+            lowering::bind_artifact_type(
+                map,
+                elaboration::interface_type_count(&session.interfaces),
+                semantic,
+                artifact
+            );
+            if(tag == 4) {
+                let fields = Vec::new();
+                let copyable = try(lower_concrete_type_elements(
+                    session,
+                    map,
+                    types,
+                    type_names,
+                    a,
+                    b,
+                    0,
+                    &mut fields
+                ), @lower_concrete_type);
+                lowering::set_tuple_type(
+                    types,
+                    reserved,
+                    fields,
+                    if(copyable) { 1 } else { 0 }
+                );
+                lowering::set_mapped_type_copyable(map, semantic, copyable);
+                Result::Ok(artifact)
+            } else { if(tag == 9 or { tag == 6 } or { tag == 7 }) {
+                let child = Id::from_u32(a);
+                let element = try(lower_concrete_type(
+                    session, map, types, type_names, child
+                ), @lower_concrete_type);
+                let kind = if(tag == 9) {
+                    lowering::MirTypeKind::Array
+                } else { if(tag == 6) {
+                    lowering::MirTypeKind::SharedReference
+                } else { lowering::MirTypeKind::UniqueReference } };
+                let copyable = tag == 6;
+                lowering::set_unary_structural_type(
+                    types,
+                    reserved,
+                    kind,
+                    element,
+                    if(copyable) { 1 } else { 0 }
+                );
+                lowering::set_mapped_type_copyable(map, semantic, copyable);
+                Result::Ok(artifact)
+            } else { if(tag == 5) {
+                if(elaboration::interface_nominal_generic_count(
+                    &session.interfaces, usize_from_u32(a)
+                ) == 0) {
+                    try(lower_concrete_nominal(
+                        session,
+                        map,
+                        types,
+                        type_names,
+                        semantic,
+                        a,
+                        None,
+                        reserved
+                    ), @lower_concrete_type);
+                    Result::Ok(artifact)
+                } else { Result::Err(
+                    CompileError::UnsupportedInterfaceType(index)
+                ) }
+            } else { if(tag == 10) {
+                let nominal = handle
+                    elaboration::interface_application_nominal(
+                        &session.interfaces, semantic
+                    ) {
+                    None => @lower_concrete_type(Result::Err(
+                        CompileError::UnsupportedInterfaceType(index)
+                    )),
+                    Option::Some(found) => found
+                };
+                try(lower_concrete_nominal(
+                    session,
+                    map,
+                    types,
+                    type_names,
+                    semantic,
+                    nominal,
+                    Option::Some(semantic),
+                    reserved
+                ), @lower_concrete_type);
+                Result::Ok(artifact)
+            } else { c; Result::Err(
+                CompileError::UnsupportedInterfaceType(index)
+            ) } } } }
+        }
+    }
+}
+
+lower_typed_body_types<'a>(
+    session: &mut CompilerSession<'a>,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    body: &elaboration::TypedBody
+) -> Result<(), CompileError> {
+    let result = elaboration::typed_body_result_type(body);
+    try(lower_concrete_type(
+        session, map, types, type_names, result
+    ), @lower_typed_body_types);
+    elaboration::walk_core(
+        body,
+        elaboration::typed_body_root(body),
+        @lower_typed_body_types,
+        { _, view, failed => {
+            let semantic = elaboration::core_node_view_type(view);
+            handle lower_concrete_type(
+                &mut *session,
+                &mut *map,
+                &mut *types,
+                &mut *type_names,
+                semantic
+            ) {
+                Result::Err(error) => failed(Result::Err(error)),
+                Result::Ok(_) => bodies::Visit::Descend
+            }
+        }}
+    );
+    Result::Ok(())
+}
+
 prepare_session<'a>(
     original: &'a String
 ) -> Result<CompilerSession<'a>, CompileError> {
@@ -580,24 +1395,49 @@ prepare_session<'a>(
     })
 }
 
+seed_concrete_callables<'a>(
+    session: &mut CompilerSession<'a>,
+    index: usize
+) {
+    if(index < elaboration::interface_callable_count(&session.interfaces)) {
+        let callable = handle elaboration::interface_callable_id_at(
+            &session.interfaces,
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(elaboration::interface_callable_generic_count(
+            &session.interfaces,
+            callable
+        ) == 0) {
+            let substitutions = Vec::new();
+            elaboration::intern_callable_instance(
+                &mut session.interfaces,
+                callable,
+                &substitutions
+            );
+            ()
+        } else { () };
+        seed_concrete_callables(session, index + 1)
+    } else { () }
+}
+
 compile_session<'a>(
     session: CompilerSession<'a>
 ) -> Result<Bytes, CompileError> {
     let functions = Arena::new();
     let types = lowering::mir_types();
+    let type_map = lowering::artifact_type_map();
     let type_names = Vec::new();
+    seed_concrete_callables(&mut session, 0);
     try(lower_functions(
         &mut session,
+        &mut type_map,
+        &mut types,
+        &mut type_names,
         0,
         &mut functions
-    ), @compile_session);
-    // Body elaboration interns structural types into the shared interface arena,
-    // so freeze the emitted type table only after every body has been lowered.
-    try(collect_types(
-        &session,
-        14,
-        &mut types,
-        &mut type_names
     ), @compile_session);
     let program = lowering::finish_program(
         functions,

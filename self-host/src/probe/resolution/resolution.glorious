@@ -252,6 +252,15 @@ write_target(
                 shell
             )
         },
+        ResolvedTarget::FunctionAlias(shell) => {
+            ByteBuf::push(&mut *output, 2);
+            write_function_identity(
+                output,
+                source,
+                declarations,
+                shell
+            )
+        },
         ResolvedTarget::Struct(header) => {
             ByteBuf::push(&mut *output, 3);
             ByteBuf::write_u32_le(output, Id::to_u32(header))

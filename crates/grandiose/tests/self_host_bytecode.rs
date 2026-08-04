@@ -5,7 +5,7 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, LlvmOptions, OptimizationLevel, modules,
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{
@@ -25,6 +25,21 @@ const FIXTURE: &str = r#"
         Number(i64),
         Pair(i64, u64)
     }
+
+    enum TestBool { False, True }
+    enum Outer { Wrap(i64), Empty }
+    enum Inner { One(i64), None }
+    enum ScalarBranch { Select(u32) }
+
+    __g1_bool_from_u32(value: u32) -> TestBool { TestBool::True }
+    let test_true = TestBool::True;
+
+    infixl 20 <=;
+    infixl 30 +;
+    infixl 30 -;
+    infixl 40 *;
+    infixl 40 /;
+    infixl 40 %;
 
     identity(value: i64) -> i64 { value }
     answer() -> i64 {
@@ -63,6 +78,52 @@ const FIXTURE: &str = r#"
             Choice::Empty => identity(value),
             Choice::Number(_) => identity(value),
             Choice::Pair(_, _) => identity(value)
+        }
+    }
+    diverge() -> ! { diverge() }
+    never_last(choice: Choice) {
+        handle choice {
+            Choice::Empty => (),
+            Choice::Number(_) => (),
+            Choice::Pair(_, _) => diverge()
+        }
+    }
+    never_first(choice: Choice) {
+        handle choice {
+            Choice::Empty => diverge(),
+            Choice::Number(_) => (),
+            Choice::Pair(_, _) => ()
+        }
+    }
+    integer_arithmetic(value: i64) -> i64 {
+        (value + 2) * 3 - 4 / 2 % 5
+    }
+    integer_compare(value: u32) -> TestBool {
+        value <= 7
+    }
+    literal_left_compare(value: u8) -> TestBool {
+        128 <= value
+    }
+    alias_expression() -> TestBool { test_true }
+    inspect_scalar_branch(branch: ScalarBranch) -> i64 {
+        handle branch {
+            ScalarBranch::Select(0) => 31,
+            ScalarBranch::Select(_) => 37
+        }
+    }
+    matched_scalar_zero() -> i64 {
+        inspect_scalar_branch(ScalarBranch::Select(0))
+    }
+    matched_scalar_other() -> i64 {
+        inspect_scalar_branch(ScalarBranch::Select(9))
+    }
+    nested_handle_binders(outer: Outer, inner: Inner) -> i64 {
+        handle outer {
+            Outer::Wrap(value) => handle inner {
+                Inner::One(_) => value,
+                Inner::None => value
+            },
+            Outer::Empty => 0
         }
     }
     matched_empty() -> i64 { inspect_choice(Choice::Empty) }
@@ -382,6 +443,43 @@ fn repository_root() -> PathBuf {
         .to_owned()
 }
 
+fn self_host_module_paths(root: &Path) -> [PathBuf; 16] {
+    [
+        root.join("frontend/frontend.glorious"),
+        root.join("frontend/lexer/lexer.glorious"),
+        root.join("frontend/scanner/scanner.glorious"),
+        root.join("frontend/headers/headers.glorious"),
+        root.join("frontend/bodies/bodies.glorious"),
+        root.join("frontend/resolution/resolution.glorious"),
+        root.join("frontend/elaboration/elaboration.glorious"),
+        root.join("backend/backend.glorious"),
+        root.join("backend/artifact/artifact.glorious"),
+        root.join("backend/lowering/lowering.glorious"),
+        root.join("backend/emission/emission.glorious"),
+        root.join("compiler/compiler.glorious"),
+        root.join("diagnostics/diagnostics.glorious"),
+        root.join("diagnostics/model/model.glorious"),
+        root.join("diagnostics/source_errors/source_errors.glorious"),
+        root.join("diagnostics/backend_errors/backend_errors.glorious"),
+    ]
+}
+
+fn production_self_host_bundle() -> SourceBundle {
+    let root = repository_root().join("self-host/src");
+    let primary_path = root.join("main.glorious");
+    let primary = Segment::new(
+        primary_path.to_string_lossy(),
+        fs::read_to_string(&primary_path).unwrap(),
+    );
+    SourceBundle::distributed(
+        primary,
+        self_host_module_paths(&root).into_iter().map(|path| {
+            let source = fs::read_to_string(&path).unwrap();
+            Segment::new(path.to_string_lossy(), source)
+        }),
+    )
+}
+
 fn self_host_bundle() -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary_source = [
@@ -429,27 +527,9 @@ fn self_host_bundle() -> SourceBundle {
     ]
     .concat();
     let primary = Segment::new(root.join("main.glorious").to_string_lossy(), primary_source);
-    let paths = [
-        root.join("frontend/frontend.glorious"),
-        root.join("frontend/lexer/lexer.glorious"),
-        root.join("frontend/scanner/scanner.glorious"),
-        root.join("frontend/headers/headers.glorious"),
-        root.join("frontend/bodies/bodies.glorious"),
-        root.join("frontend/resolution/resolution.glorious"),
-        root.join("frontend/elaboration/elaboration.glorious"),
-        root.join("backend/backend.glorious"),
-        root.join("backend/artifact/artifact.glorious"),
-        root.join("backend/lowering/lowering.glorious"),
-        root.join("backend/emission/emission.glorious"),
-        root.join("compiler/compiler.glorious"),
-        root.join("diagnostics/diagnostics.glorious"),
-        root.join("diagnostics/model/model.glorious"),
-        root.join("diagnostics/source_errors/source_errors.glorious"),
-        root.join("diagnostics/backend_errors/backend_errors.glorious"),
-    ];
     SourceBundle::distributed(
         primary,
-        paths.into_iter().map(|path| {
+        self_host_module_paths(&root).into_iter().map(|path| {
             let source = fs::read_to_string(&path).unwrap();
             Segment::new(path.to_string_lossy(), source)
         }),
@@ -542,6 +622,8 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     let branch_final_empty = function_id(&decoded, "branch_final_empty");
     let branch_final_number = function_id(&decoded, "branch_final_number");
     let branch_final_pair = function_id(&decoded, "branch_final_pair");
+    let matched_scalar_zero = function_id(&decoded, "matched_scalar_zero");
+    let matched_scalar_other = function_id(&decoded, "matched_scalar_other");
     let main = function_id(&decoded, "main");
     assert!(decoded.types.iter().any(|ty| matches!(
         ty.representation(),
@@ -638,8 +720,8 @@ fn assert_compiled_artifact(bytes: &[u8]) {
         "enum handles must consume the matched aggregate shell"
     );
     let branch = &decoded.functions[branch_final as usize];
-    let branch_code = &decoded.code
-        [branch.code_start as usize..(branch.code_start + branch.code_len) as usize];
+    let branch_code =
+        &decoded.code[branch.code_start as usize..(branch.code_start + branch.code_len) as usize];
     assert!(
         branch_code
             .iter()
@@ -671,16 +753,34 @@ fn assert_compiled_artifact(bytes: &[u8]) {
         Value::U64(9)
     );
     assert_eq!(
-        Vm::new(verified.clone()).run(branch_final_empty, vec![]).unwrap(),
+        Vm::new(verified.clone())
+            .run(branch_final_empty, vec![])
+            .unwrap(),
         Value::I64(17)
     );
     assert_eq!(
-        Vm::new(verified.clone()).run(branch_final_number, vec![]).unwrap(),
+        Vm::new(verified.clone())
+            .run(branch_final_number, vec![])
+            .unwrap(),
         Value::I64(17)
     );
     assert_eq!(
-        Vm::new(verified.clone()).run(branch_final_pair, vec![]).unwrap(),
+        Vm::new(verified.clone())
+            .run(branch_final_pair, vec![])
+            .unwrap(),
         Value::I64(17)
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(matched_scalar_zero, vec![])
+            .unwrap(),
+        Value::I64(31)
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(matched_scalar_other, vec![])
+            .unwrap(),
+        Value::I64(37)
     );
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);
 }
@@ -692,6 +792,17 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
         .spawn(|| {
             if std::env::var_os("G1_SELF_HOST_BYTECODE_CHECK_ONLY").is_some() {
                 let bundle = self_host_bundle();
+                if let Some(offset) = std::env::var("G1_SPAN_TRACE")
+                    .ok()
+                    .and_then(|offset| offset.parse::<usize>().ok())
+                    && let Some(segment) = bundle.segment_at(offset)
+                {
+                    eprintln!(
+                        "trace span: {}:{}",
+                        segment.name(),
+                        offset - segment.global_range().start
+                    );
+                }
                 let phases = grandiose::compile_bundle_to_phases_with_options(
                     &bundle,
                     CompileOptions {
@@ -715,7 +826,8 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                     }
                     panic!("{errors:#?}")
                 });
-                load_verified(&phases.artifact.encode()).unwrap();
+                let encoded = phases.artifact.encode();
+                load_verified(&encoded).unwrap();
                 return;
             }
             let directory = tempfile::tempdir().unwrap();
@@ -730,7 +842,14 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             )
             .unwrap();
             let compiler_entry = phases.artifact.entry_function.unwrap();
-            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            let compiler_bytes = phases.artifact.encode();
+            if let Some(directory) = std::env::var_os("G1_SELF_HOST_REPLAY_DIR") {
+                let directory = PathBuf::from(directory);
+                fs::create_dir_all(&directory).unwrap();
+                fs::write(directory.join("fixture-stage1.grbc"), &compiler_bytes).unwrap();
+                fs::write(directory.join("fixture-input.glorious"), FIXTURE).unwrap();
+            }
+            let compiler = load_verified(&compiler_bytes).unwrap();
 
             assert_diagnostic_contracts(|name, args| {
                 Vm::with_host(
@@ -811,6 +930,89 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             let native_bytes = fs::read(&native_output).unwrap();
             assert_eq!(native_bytes, vm_bytes, "VM and LLVM hosts must agree");
             assert_compiled_artifact(&native_bytes);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release gate: bootstrap and run two complete self-compilation stages"]
+fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source_bundle = production_self_host_bundle();
+            let source_program = modules::parse_bundle(&source_bundle)
+                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
+            let source_resolution = modules::resolve_program(&source_bundle, source_program)
+                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
+            let monolithic_source =
+                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
+                    .expect("the self-host module graph must have a canonical one-file form");
+            let source = monolithic_source.as_bytes();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &source_bundle,
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
+            let stage1_bytes = phases.artifact.encode();
+            if let Some(directory) = std::env::var_os("G1_SELF_HOST_REPLAY_DIR") {
+                let directory = PathBuf::from(directory);
+                fs::create_dir_all(&directory).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to create self-host replay directory {}: {error}",
+                        directory.display()
+                    )
+                });
+                fs::write(directory.join("stage1.grbc"), &stage1_bytes).unwrap();
+                fs::write(directory.join("input.glorious"), source).unwrap();
+            }
+            let stage1 = load_verified(&stage1_bytes)
+                .expect("the Rust-bootstrap compiler artifact must verify");
+            let stage1_entry = phases
+                .artifact
+                .entry_function
+                .expect("the bootstrap compiler must have an entry function");
+
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("self-host-bundle.glorious");
+            let stage2_path = directory.path().join("stage2.grbc");
+            let stage3_path = directory.path().join("stage3.grbc");
+            fs::write(&input, source).unwrap();
+
+            let run_stage = |compiler, entry, output: &Path| {
+                let vm = Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        output.as_os_str().to_owned(),
+                        input.as_os_str().to_owned(),
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+                fs::read(output).unwrap_or_else(|error| {
+                    panic!(
+                        "the self-hosted compiler did not emit {}: {error}",
+                        output.display()
+                    )
+                })
+            };
+
+            let stage2 = run_stage(stage1, stage1_entry, &stage2_path);
+            let decoded_stage2 = Artifact::decode(&stage2).expect("stage 2 must decode");
+            assert_eq!(decoded_stage2.encode(), stage2, "stage 2 must be canonical");
+            let stage2_entry = decoded_stage2
+                .entry_function
+                .expect("stage 2 must have an entry function");
+            let verified_stage2 = load_verified(&stage2).expect("stage 2 must verify");
+
+            let stage3 = run_stage(verified_stage2, stage2_entry, &stage3_path);
+            load_verified(&stage3).expect("stage 3 must verify");
+            assert_eq!(stage2, stage3, "stage 2 and stage 3 must be byte-identical");
         })
         .unwrap()
         .join()

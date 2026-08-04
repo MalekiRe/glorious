@@ -60,6 +60,47 @@ fn self_host_bundle() -> SourceBundle {
     )
 }
 
+fn artifact_function_id(artifact: &grandiose_vm::Artifact, suffix: &str) -> u32 {
+    artifact
+        .functions
+        .iter()
+        .position(|function| function.name.ends_with(suffix))
+        .unwrap_or_else(|| panic!("self-host probe is missing function `{suffix}`"))
+        .try_into()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "targeted self-host semantic arena debugger"]
+fn inspect_self_host_interface_type_metadata() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":interface_type_metadata");
+    let verified = verify(phases.artifact).unwrap();
+    let source = fs::read_to_string(repository_root().join("target/self-host-replay/input.glorious"))
+        .unwrap();
+    for index in [363_u64, 364] {
+        let vm = Vm::with_host(
+            verified.clone(),
+            ["process.args", "fs.read", "fs.write", "diagnostic"],
+            SystemHost::new(Vec::<OsString>::new()),
+        )
+        .unwrap();
+        let value = vm
+            .run(
+                function,
+                vec![Value::Text(source.clone().into()), Value::U64(index)],
+            )
+            .unwrap();
+        eprintln!("self-host semantic type {index}: {value:?}");
+    }
+}
+
 fn push_u32(output: &mut Vec<u8>, value: u32) {
     output.extend(value.to_le_bytes());
 }
@@ -775,6 +816,43 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          probe_forward_alias(value: Forward) -> Forward { value }",
         "mod aliases { pub type Count = u64; } \
          probe_qualified_alias(value: aliases::Count) -> aliases::Count { value }",
+        "enum GenericResult<T, E> { Ok(T), Err(E) } \
+         struct GenericPair<T, U> { left: T, right: U } \
+         probe_generic_interfaces() { () }",
+        "struct CharacterSlot { value: char } \
+         probe_character_interface() { () }",
+        "mod imported { pub struct TokenSpan { start: usize } } \
+         use imported::TokenSpan; \
+         struct ImportedHolder { span: TokenSpan } \
+         probe_imported_interface() { () }",
+        "struct Boxed<T> { value: T } \
+         mod local_alias { \
+             pub struct Tag {} \
+             pub type LocalId = Boxed<Tag>; \
+             pub struct Holder { value: LocalId } \
+         } \
+         probe_local_generic_alias() { () }",
+        "mod qualified { \
+             pub struct Range<T> { value: T } \
+             pub mod nested { \
+                 pub type LocalRange = super::Range<u64>; \
+                 pub struct Holder { value: LocalRange } \
+             } \
+         } \
+         probe_super_qualified_interface() { () }",
+        "mod selected { pub struct LeftTag {} pub type TypeId = LeftTag; } \
+         mod unselected { pub struct RightTag {} pub type TypeId = RightTag; } \
+         use selected::TypeId; \
+         struct ImportedDuplicateHolder { value: TypeId } \
+         probe_exact_import_identity() { () }",
+        "mod module_source { \
+             pub mod imported_module { pub struct Thing {} } \
+         } \
+         mod module_user { \
+             use super::module_source::imported_module; \
+             pub struct Holder { value: imported_module::Thing } \
+         } \
+         probe_imported_module_identity() { () }",
     ];
     let errors = [
         "probe_bad_result() -> i64 { () }",

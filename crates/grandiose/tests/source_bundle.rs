@@ -3,14 +3,52 @@ use grandiose::{
     compile_source_to_bytecode_with_options, compile_source_to_phases,
     eval::{Host, Value},
     lexer::{self, TokenKind},
-    run_bundle, run_source,
-    source_bundle::{Segment, SourceBundle},
+    modules, run_bundle, run_source,
+    source_bundle::{DISTRIBUTED_STANDARD_LIBRARY_SOURCE, Segment, SourceBundle},
     span::Span,
 };
 use grandiose_vm::{Value as VmValue, Vm, verify};
 
 #[derive(Default)]
 struct NoHost;
+
+#[test]
+fn resolved_external_modules_have_a_canonical_monolithic_source() {
+    let bundle = SourceBundle::distributed(
+        Segment::new(
+            "/project/main.glorious",
+            "pub mod alpha; main() { alpha::beta::answer(); () }",
+        ),
+        [
+            Segment::new(
+                "/project/alpha/alpha.glorious",
+                "pub mod beta; pub identity(value: i64) -> i64 { value }",
+            ),
+            Segment::new(
+                "/project/alpha/beta/beta.glorious",
+                "pub answer() -> i64 { super::identity(42) }",
+            ),
+        ],
+    );
+    let program = modules::parse_bundle(&bundle).unwrap();
+    let resolved = modules::resolve_program(&bundle, program).unwrap();
+    let monolithic = modules::monolithic_source(&bundle, &resolved.resolution).unwrap();
+
+    assert!(!monolithic.contains("mod alpha;"));
+    assert!(!monolithic.contains("mod beta;"));
+    assert!(monolithic.contains("pub mod alpha {"));
+    assert!(monolithic.contains("pub mod beta {"));
+
+    let user_monolithic = monolithic
+        .strip_prefix(DISTRIBUTED_STANDARD_LIBRARY_SOURCE)
+        .and_then(|source| source.strip_prefix('\n'))
+        .unwrap();
+    let monolithic_bundle =
+        SourceBundle::distributed(Segment::new("/project/main.glorious", user_monolithic), []);
+    let artifact = compile_bundle_to_bytecode(&bundle).unwrap();
+    let monolithic_artifact = compile_bundle_to_bytecode(&monolithic_bundle).unwrap();
+    assert_eq!(artifact.encode(), monolithic_artifact.encode());
+}
 
 impl Host for NoHost {
     fn perform(
@@ -2379,7 +2417,7 @@ fn private_fields_allow_defining_segment_deconstruction_and_cross_segment_transf
         inspect(value: Vault) -> i64 { value.secret }
         open(value: Vault) -> i64 {
             let Vault { secret, visible } = value;
-            secret + visible
+            secret
         }
     "#;
     let caller = r#"
@@ -2444,7 +2482,7 @@ fn private_fields_reject_cross_segment_projection_even_with_equal_segment_names(
 #[test]
 fn private_fields_reject_cross_segment_struct_deconstruction() {
     for caller in [
-        "open(value: Vault) -> i64 { let Vault { secret, visible } = value; secret + visible } main() -> { open(make()); () }",
+        "open(value: Vault) -> i64 { let Vault { secret, visible } = value; secret } main() -> { open(make()); () }",
         "open(value: Vault) -> i64 { let Vault { visible } = value; visible } main() -> { open(make()); () }",
         "open(value: Vault) -> i64 { let Vault { visible, .. } = value; visible } main() -> { open(make()); () }",
     ] {

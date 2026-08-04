@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, error::Error, fmt, ops::Range};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    error::Error,
+    fmt,
+    ops::Range,
+};
 
 pub type TypeId = u32;
 pub type Register = u32;
@@ -710,6 +715,14 @@ pub enum Instruction {
         src: Register,
     },
     DerefCopy {
+        dst: Register,
+        src: Register,
+    },
+    DerefReborrowShared {
+        dst: Register,
+        src: Register,
+    },
+    DerefReborrowUnique {
         dst: Register,
         src: Register,
     },
@@ -1455,16 +1468,31 @@ impl Artifact {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::decode_impl(bytes, true).map(|decoded| decoded.tables.into_artifact())
+        Self::decode_impl(bytes, true, None).map(|decoded| decoded.tables.into_artifact())
+    }
+
+    /// Decode a compiler-development snapshot while preserving its explicit
+    /// pre-final register types. Ordinary G1 artifacts omit these types and
+    /// infer them from instructions; a pre-oracle snapshot can still contain
+    /// intentionally ambiguous conversion temporaries, so replay supplies the
+    /// compiler's table as checked constraints rather than weakening normal
+    /// decoding.
+    pub fn decode_with_register_type_hints(
+        bytes: &[u8],
+        register_types: &[Vec<TypeId>],
+    ) -> Result<Self, DecodeError> {
+        Self::decode_impl(bytes, true, Some(register_types))
+            .map(|decoded| decoded.tables.into_artifact())
     }
 
     pub(crate) fn decode_internal(bytes: &[u8]) -> Result<DecodedArtifact, DecodeError> {
-        Self::decode_impl(bytes, false)
+        Self::decode_impl(bytes, false, None)
     }
 
     fn decode_impl(
         bytes: &[u8],
         materialize_constant_payloads: bool,
+        register_type_hints: Option<&[Vec<TypeId>]>,
     ) -> Result<DecodedArtifact, DecodeError> {
         if bytes.len() < HEADER_LEN {
             return Err(DecodeError::Truncated);
@@ -1703,6 +1731,7 @@ impl Artifact {
             &imports,
             &mut functions,
             &code,
+            register_type_hints,
         )?;
         let exports = decode_exports(sections[&12].0, &strings, &signatures, &functions)?;
         validate_function_metadata(&functions, &exports, &drop_glue)?;
@@ -3747,6 +3776,8 @@ fn encode_instruction(
         Instruction::DerefCopy { dst, src } => (0x014, vec![*dst, *src]),
         Instruction::DerefMove { dst, src } => (0x015, vec![*dst, *src]),
         Instruction::DerefStore { dst, src } => (0x016, vec![*dst, *src]),
+        Instruction::DerefReborrowShared { dst, src } => (0x017, vec![*dst, *src]),
+        Instruction::DerefReborrowUnique { dst, src } => (0x018, vec![*dst, *src]),
         Instruction::Drop { register } => (0x011, vec![*register]),
         Instruction::Deconstruct { src } => (0x013, vec![*src]),
         Instruction::Primitive { dst, op, args } => {
@@ -4088,6 +4119,20 @@ fn decode_instructions_with_messages(
                     src: w[1],
                 }
             }
+            0x017 => {
+                fixed(2)?;
+                Instruction::DerefReborrowShared {
+                    dst: w[0],
+                    src: w[1],
+                }
+            }
+            0x018 => {
+                fixed(2)?;
+                Instruction::DerefReborrowUnique {
+                    dst: w[0],
+                    src: w[1],
+                }
+            }
             0x00f => {
                 fixed(5)?;
                 Instruction::MakeCallable {
@@ -4331,6 +4376,100 @@ fn decode_instructions_with_messages(
     }
     Ok((out, abort_messages))
 }
+/// Recover equality constraints between label result slots and the values
+/// transferred by their statically resolved LEAVEs.
+fn infer_label_result_constraints(
+    code: &[Instruction],
+) -> Result<Vec<(Register, Register)>, DecodeError> {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Label {
+        slot: u32,
+        result: Register,
+        target: u32,
+    }
+
+    if code.is_empty() {
+        return Err(DecodeError::InvalidTable("function code"));
+    }
+    let mut states = vec![None::<Vec<Label>>; code.len()];
+    states[0] = Some(Vec::new());
+    let mut work = VecDeque::from([0usize]);
+    let mut constraints = Vec::new();
+    while let Some(pc) = work.pop_front() {
+        let mut labels = states[pc]
+            .clone()
+            .ok_or(DecodeError::InvalidTable("label state"))?;
+        let instruction = &code[pc];
+        let successors = match instruction {
+            Instruction::LabelPush {
+                slot,
+                result_register,
+                target,
+            } => {
+                labels.push(Label {
+                    slot: *slot,
+                    result: *result_register,
+                    target: *target,
+                });
+                vec![pc + 1]
+            }
+            Instruction::LabelPop { slot } => {
+                if labels.last().map(|label| label.slot) != Some(*slot) {
+                    return Err(DecodeError::InvalidTable("label state"));
+                }
+                labels.pop();
+                vec![pc + 1]
+            }
+            Instruction::Leave { slot, value } => {
+                let index = labels
+                    .iter()
+                    .rposition(|label| label.slot == *slot)
+                    .ok_or(DecodeError::InvalidTable("label state"))?;
+                let label = labels[index].clone();
+                constraints.push((label.result, *value));
+                labels.truncate(index);
+                vec![label.target as usize]
+            }
+            Instruction::Jump { target } => vec![*target as usize],
+            Instruction::Switch {
+                cases, otherwise, ..
+            } => cases
+                .iter()
+                .map(|(_, target)| *target as usize)
+                .chain(std::iter::once(*otherwise as usize))
+                .collect(),
+            Instruction::Return { .. }
+            | Instruction::TailCall { .. }
+            | Instruction::TailCallSelf { .. }
+            | Instruction::TailCallKnownReceiver { .. }
+            | Instruction::TailCallIndirect { .. }
+            | Instruction::TailResume { .. }
+            | Instruction::Perform { dst: None, .. }
+            | Instruction::Unreachable
+            | Instruction::Abort { .. } => Vec::new(),
+            _ => vec![pc + 1],
+        };
+        for successor in successors {
+            let state = states
+                .get_mut(successor)
+                .ok_or(DecodeError::InvalidTable("label target"))?;
+            match state {
+                Some(existing) if existing != &labels => {
+                    return Err(DecodeError::InvalidTable("label state"));
+                }
+                Some(_) => {}
+                None => {
+                    *state = Some(labels.clone());
+                    work.push_back(successor);
+                }
+            }
+        }
+    }
+    constraints.sort_unstable();
+    constraints.dedup();
+    Ok(constraints)
+}
+
 fn infer_register_types(
     types: &[Type],
     constants: &[Constant],
@@ -4339,6 +4478,7 @@ fn infer_register_types(
     imports: &[Import],
     fs: &mut [Function],
     code: &[Instruction],
+    register_type_hints: Option<&[Vec<TypeId>]>,
 ) -> Result<(), DecodeError> {
     if fs.iter().any(|function| function.register_types.is_empty()) {
         return Err(DecodeError::InvalidTable("register count"));
@@ -4355,8 +4495,22 @@ fn infer_register_types(
             )
         })
         .collect();
-    for f in fs {
-        let mut t: Vec<Option<u32>> = vec![None; f.register_types.len()];
+    if register_type_hints.is_some_and(|hints| hints.len() != fs.len()) {
+        return Err(DecodeError::InvalidTable("register type hints"));
+    }
+    for (function_index, f) in fs.iter_mut().enumerate() {
+        let mut t: Vec<Option<u32>> = match register_type_hints {
+            Some(hints) => {
+                let hints = &hints[function_index];
+                if hints.len() != f.register_types.len()
+                    || hints.iter().any(|ty| *ty as usize >= types.len())
+                {
+                    return Err(DecodeError::InvalidTable("register type hints"));
+                }
+                hints.iter().copied().map(Some).collect()
+            }
+            None => vec![None; f.register_types.len()],
+        };
         if t.is_empty() {
             return Err(DecodeError::InvalidTable("register count"));
         }
@@ -4367,19 +4521,35 @@ fn infer_register_types(
         }
         let ins = &code[f.code_start as usize..(f.code_start + f.code_len) as usize];
         let enum_variants = infer_enum_variant_facts(constants, t.len(), ins)?;
+        let label_constraints = infer_label_result_constraints(ins)?;
+        let set = |t: &mut [Option<u32>], r: u32, x: u32| -> Result<(), DecodeError> {
+            let s = t
+                .get_mut(r as usize)
+                .ok_or(DecodeError::InvalidTable("register"))?;
+            if s.is_some_and(|y| y != x) {
+                return Err(DecodeError::InvalidTable("register type"));
+            }
+            *s = Some(x);
+            Ok(())
+        };
         for _ in 0..t.len() + 1 {
             let old = t.clone();
+            for &(result, value) in &label_constraints {
+                let result_ty = t
+                    .get(result as usize)
+                    .copied()
+                    .ok_or(DecodeError::InvalidTable("register"))?;
+                let value_ty = t
+                    .get(value as usize)
+                    .copied()
+                    .ok_or(DecodeError::InvalidTable("register"))?;
+                match (result_ty, value_ty) {
+                    (Some(ty), _) => set(&mut t, value, ty)?,
+                    (_, Some(ty)) => set(&mut t, result, ty)?,
+                    _ => {}
+                }
+            }
             for (pc, i) in ins.iter().enumerate() {
-                let set = |t: &mut [Option<u32>], r: u32, x: u32| -> Result<(), DecodeError> {
-                    let s = t
-                        .get_mut(r as usize)
-                        .ok_or(DecodeError::InvalidTable("register"))?;
-                    if s.is_some_and(|y| y != x) {
-                        return Err(DecodeError::InvalidTable("register type"));
-                    }
-                    *s = Some(x);
-                    Ok(())
-                };
                 match i {
                     Instruction::Const { dst, constant } => set(
                         &mut t,
@@ -4604,6 +4774,49 @@ fn infer_register_types(
                                 _ => false,
                             });
                             if let Some(wanted) = wanted {
+                                set(&mut t, *dst, wanted)?;
+                            }
+                        }
+                    }
+                    Instruction::DerefReborrowShared { dst, src }
+                    | Instruction::DerefReborrowUnique { dst, src } => {
+                        if let Some(src_ty) = t[*src as usize] {
+                            let (outer_unique, inner) =
+                                match types[src_ty as usize].representation() {
+                                    Type::RefShared { referent } => (false, *referent),
+                                    Type::RefUnique { referent } => (true, *referent),
+                                    _ => {
+                                        return Err(DecodeError::InvalidTable(
+                                            "stored-reference reborrow source",
+                                        ));
+                                    }
+                                };
+                            let (inner_unique, referent) =
+                                match types[inner as usize].representation() {
+                                    Type::RefShared { referent } => (false, *referent),
+                                    Type::RefUnique { referent } => (true, *referent),
+                                    _ => {
+                                        return Err(DecodeError::InvalidTable(
+                                            "stored-reference reborrow target",
+                                        ));
+                                    }
+                                };
+                            let requested_unique =
+                                matches!(i, Instruction::DerefReborrowUnique { .. });
+                            if requested_unique && (!outer_unique || !inner_unique) {
+                                return Err(DecodeError::InvalidTable(
+                                    "stored-reference unique reborrow",
+                                ));
+                            }
+                            if let Some(wanted) = unique_type(types, |ty| match ty {
+                                Type::RefShared { referent: actual } => {
+                                    !requested_unique && *actual == referent
+                                }
+                                Type::RefUnique { referent: actual } => {
+                                    requested_unique && *actual == referent
+                                }
+                                _ => false,
+                            }) {
                                 set(&mut t, *dst, wanted)?;
                             }
                         }
@@ -5118,6 +5331,80 @@ fn infer_register_types(
             }
         }
         if t.iter().any(Option::is_none) {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                let missing = t
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(register, ty)| ty.is_none().then_some(register))
+                    .collect::<Vec<_>>();
+                let mentions = ins
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, instruction)| {
+                        let debug = format!("{instruction:?}");
+                        debug
+                            .split(|character: char| !character.is_ascii_digit())
+                            .filter_map(|token| token.parse::<usize>().ok())
+                            .any(|number| missing.contains(&number))
+                    })
+                    .collect::<Vec<_>>();
+                let projection_context = ins
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pc, instruction)| match instruction {
+                        Instruction::ProjectMove { dst, src, field }
+                        | Instruction::ProjectCopy { dst, src, field }
+                            if missing.contains(&(*dst as usize)) =>
+                        {
+                            Some((
+                                pc,
+                                *dst,
+                                *src,
+                                *field,
+                                t[*src as usize],
+                                enum_variants[pc][*src as usize],
+                                t[*src as usize]
+                                    .and_then(|ty| types.get(ty as usize))
+                                    .map(Type::representation),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let projection_windows = projection_context
+                    .iter()
+                    .map(|(pc, _, src, ..)| {
+                        let start = pc.saturating_sub(160);
+                        let end = pc.saturating_add(32).min(ins.len() - 1);
+                        (
+                            *src,
+                            ins[start..=end]
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, instruction)| {
+                                    let instruction_pc = start + offset;
+                                    (
+                                        instruction_pc,
+                                        instruction,
+                                        enum_variants[instruction_pc][*src as usize],
+                                        enum_variants[instruction_pc]
+                                            .iter()
+                                            .enumerate()
+                                            .filter_map(|(register, variant)| {
+                                                variant.map(|variant| (register, variant))
+                                            })
+                                            .collect::<Vec<_>>(),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "g1-decoder function `{}` uninferred registers: {missing:?}; mentions={mentions:?}; projections={projection_context:?}; projection_windows={projection_windows:?}",
+                    f.name
+                );
+            }
             return Err(DecodeError::InvalidTable("uninferred register type"));
         }
         f.register_types = t.into_iter().map(Option::unwrap).collect()
@@ -5136,6 +5423,7 @@ fn infer_enum_variant_facts(
 ) -> Result<Vec<Vec<Option<u32>>>, DecodeError> {
     #[derive(Clone, PartialEq, Eq)]
     struct Facts {
+        initialized: Vec<bool>,
         tag_origins: Vec<Option<Register>>,
         variants: Vec<Option<u32>>,
     }
@@ -5144,181 +5432,296 @@ fn infer_enum_variant_facts(
         return Ok(Vec::new());
     }
     let empty = Facts {
+        initialized: vec![false; register_count],
         tag_origins: vec![None; register_count],
         variants: vec![None; register_count],
     };
     let mut states = vec![None; code.len()];
-    states[0] = Some(empty);
+    let mut components = vec![None; code.len()];
+    states[0] = Some(empty.clone());
+    components[0] = Some(0usize);
     let mut work = std::collections::VecDeque::from([0usize]);
+    let mut next_component = 1usize;
 
-    while let Some(pc) = work.pop_front() {
-        let mut state = states[pc].clone().expect("queued enum fact state");
-        let instruction = &code[pc];
-        let clear = |state: &mut Facts, register: Register| -> Result<usize, DecodeError> {
-            let index = register as usize;
-            *state
-                .variants
-                .get_mut(index)
-                .ok_or(DecodeError::InvalidTable("register"))? = None;
-            *state
-                .tag_origins
-                .get_mut(index)
-                .ok_or(DecodeError::InvalidTable("register"))? = None;
-            Ok(index)
-        };
-        match instruction {
-            Instruction::Construct { dst, variant, .. } => {
-                let dst = clear(&mut state, *dst)?;
-                state.variants[dst] = *variant;
-            }
-            Instruction::Move { dst, src } => {
-                let dst = clear(&mut state, *dst)?;
-                let src = *src as usize;
-                if src >= register_count {
-                    return Err(DecodeError::InvalidTable("register"));
-                }
-                state.variants[dst] = state.variants[src].take();
-                state.tag_origins[dst] = state.tag_origins[src].take();
-                for origin in state.tag_origins.iter_mut().flatten() {
-                    if *origin as usize == src {
-                        *origin = dst as Register;
-                    }
-                }
-            }
-            Instruction::Copy { dst, src } => {
-                let dst = clear(&mut state, *dst)?;
-                let src = *src as usize;
-                if src >= register_count {
-                    return Err(DecodeError::InvalidTable("register"));
-                }
-                state.variants[dst] = state.variants[src];
-                state.tag_origins[dst] = state.tag_origins[src];
-            }
-            Instruction::EnumTag { dst, src } => {
-                let dst = clear(&mut state, *dst)?;
-                if *src as usize >= register_count {
-                    return Err(DecodeError::InvalidTable("register"));
-                }
-                state.tag_origins[dst] = Some(*src);
-            }
-            Instruction::Drop { register }
-            | Instruction::Deconstruct { src: register }
-            | Instruction::Return {
-                src: Some(register),
-            } => {
-                clear(&mut state, *register)?;
-            }
-            Instruction::DerefStore { src, .. } => {
-                clear(&mut state, *src)?;
-            }
-            Instruction::Const { dst, .. }
-            | Instruction::BorrowShared { dst, .. }
-            | Instruction::BorrowUnique { dst, .. }
-            | Instruction::ReborrowShared { dst, .. }
-            | Instruction::ReborrowUnique { dst, .. }
-            | Instruction::DerefCopy { dst, .. }
-            | Instruction::DerefMove { dst, .. }
-            | Instruction::ProjectMove { dst, .. }
-            | Instruction::ProjectCopy { dst, .. }
-            | Instruction::ProjectBorrowShared { dst, .. }
-            | Instruction::ProjectBorrowUnique { dst, .. }
-            | Instruction::Primitive { dst, .. }
-            | Instruction::MakeCallable { dst, .. }
-            | Instruction::MakeHandler { dst, .. }
-            | Instruction::MakeHandlerShared { dst, .. }
-            | Instruction::MakeBindingPack { dst, .. }
-            | Instruction::Handle { dst, .. } => {
-                clear(&mut state, *dst)?;
-            }
-            Instruction::Call { dst: Some(dst), .. }
-            | Instruction::CallSelf { dst: Some(dst), .. }
-            | Instruction::CallKnownReceiver { dst: Some(dst), .. }
-            | Instruction::CallIndirect { dst: Some(dst), .. }
-            | Instruction::Perform { dst: Some(dst), .. }
-            | Instruction::HostCall { dst: Some(dst), .. }
-            | Instruction::Resume { dst, .. }
-            | Instruction::Cancel { dst, .. } => {
-                clear(&mut state, *dst)?;
-            }
-            _ => {}
-        }
-
-        let mut successors = Vec::new();
-        match instruction {
-            Instruction::Switch {
-                discr,
-                cases,
-                otherwise,
-            } => {
-                let origin = *state
+    loop {
+        while let Some(pc) = work.pop_front() {
+            let component = components[pc].expect("queued enum fact component");
+            let mut state = states[pc].clone().expect("queued enum fact state");
+            let instruction = &code[pc];
+            let reset = |state: &mut Facts,
+                         register: Register,
+                         initialized: bool|
+             -> Result<usize, DecodeError> {
+                let index = register as usize;
+                *state
+                    .variants
+                    .get_mut(index)
+                    .ok_or(DecodeError::InvalidTable("register"))? = None;
+                *state
                     .tag_origins
-                    .get(*discr as usize)
-                    .ok_or(DecodeError::InvalidTable("register"))?;
-                for &(constant, target) in cases {
-                    let mut edge = state.clone();
-                    if let Some(origin) = origin {
-                        let variant = match constants.get(constant as usize) {
-                            Some(Constant::U32(variant)) => *variant,
-                            _ => return Err(DecodeError::InvalidTable("enum switch")),
-                        };
-                        edge.variants[origin as usize] = Some(variant);
+                    .get_mut(index)
+                    .ok_or(DecodeError::InvalidTable("register"))? = None;
+                state.initialized[index] = initialized;
+                Ok(index)
+            };
+            match instruction {
+                Instruction::Construct { dst, variant, .. } => {
+                    let dst = reset(&mut state, *dst, true)?;
+                    state.variants[dst] = *variant;
+                }
+                Instruction::Move { dst, src } => {
+                    let dst = reset(&mut state, *dst, false)?;
+                    let src = *src as usize;
+                    if src >= register_count {
+                        return Err(DecodeError::InvalidTable("register"));
                     }
-                    successors.push((target as usize, edge));
+                    state.initialized[dst] = state.initialized[src];
+                    state.variants[dst] = state.variants[src].take();
+                    state.tag_origins[dst] = state.tag_origins[src].take();
+                    state.initialized[src] = false;
+                    for origin in state.tag_origins.iter_mut().flatten() {
+                        if *origin as usize == src {
+                            *origin = dst as Register;
+                        }
+                    }
                 }
-                let mut edge = state;
-                if let Some(origin) = origin {
-                    edge.variants[origin as usize] = None;
+                Instruction::Copy { dst, src } => {
+                    let dst = reset(&mut state, *dst, false)?;
+                    let src = *src as usize;
+                    if src >= register_count {
+                        return Err(DecodeError::InvalidTable("register"));
+                    }
+                    state.initialized[dst] = state.initialized[src];
+                    state.variants[dst] = state.variants[src];
+                    state.tag_origins[dst] = state.tag_origins[src];
                 }
-                successors.push((*otherwise as usize, edge));
+                Instruction::EnumTag { dst, src } => {
+                    let dst = reset(&mut state, *dst, true)?;
+                    if *src as usize >= register_count {
+                        return Err(DecodeError::InvalidTable("register"));
+                    }
+                    state.tag_origins[dst] = Some(*src);
+                }
+                Instruction::Drop { register }
+                | Instruction::Deconstruct { src: register }
+                | Instruction::Return {
+                    src: Some(register),
+                } => {
+                    reset(&mut state, *register, false)?;
+                }
+                Instruction::DerefStore { src, .. } => {
+                    reset(&mut state, *src, false)?;
+                }
+                Instruction::Const { dst, .. }
+                | Instruction::BorrowShared { dst, .. }
+                | Instruction::BorrowUnique { dst, .. }
+                | Instruction::ReborrowShared { dst, .. }
+                | Instruction::ReborrowUnique { dst, .. }
+                | Instruction::DerefCopy { dst, .. }
+                | Instruction::DerefMove { dst, .. }
+                | Instruction::ProjectMove { dst, .. }
+                | Instruction::ProjectCopy { dst, .. }
+                | Instruction::ProjectBorrowShared { dst, .. }
+                | Instruction::ProjectBorrowUnique { dst, .. }
+                | Instruction::Primitive { dst, .. }
+                | Instruction::MakeCallable { dst, .. }
+                | Instruction::MakeHandler { dst, .. }
+                | Instruction::MakeHandlerShared { dst, .. }
+                | Instruction::MakeBindingPack { dst, .. }
+                | Instruction::Handle { dst, .. } => {
+                    reset(&mut state, *dst, true)?;
+                }
+                Instruction::Call { dst: Some(dst), .. }
+                | Instruction::CallSelf { dst: Some(dst), .. }
+                | Instruction::CallKnownReceiver { dst: Some(dst), .. }
+                | Instruction::CallIndirect { dst: Some(dst), .. }
+                | Instruction::Perform { dst: Some(dst), .. }
+                | Instruction::HostCall { dst: Some(dst), .. }
+                | Instruction::Resume { dst, .. }
+                | Instruction::Cancel { dst, .. } => {
+                    reset(&mut state, *dst, true)?;
+                }
+                _ => {}
             }
-            Instruction::Jump { target } => successors.push((*target as usize, state)),
-            Instruction::Return { .. }
-            | Instruction::TailCall { .. }
-            | Instruction::TailCallSelf { .. }
-            | Instruction::TailCallKnownReceiver { .. }
-            | Instruction::TailCallIndirect { .. }
-            | Instruction::TailResume { .. }
-            | Instruction::Perform { dst: None, .. }
-            | Instruction::Unreachable
-            | Instruction::Abort { .. }
-            | Instruction::Leave { .. } => {}
-            _ if pc + 1 < code.len() => successors.push((pc + 1, state)),
-            _ => {}
-        }
 
-        for (target, incoming) in successors {
-            let slot = states
-                .get_mut(target)
-                .ok_or(DecodeError::InvalidTable("enum switch target"))?;
-            match slot {
-                Some(existing) => {
-                    let mut changed = false;
-                    for (old, new) in existing.variants.iter_mut().zip(&incoming.variants) {
-                        if *old != *new && old.take().is_some() {
-                            changed = true;
+            let mut successors = Vec::new();
+            match instruction {
+                Instruction::Switch {
+                    discr,
+                    cases,
+                    otherwise,
+                } => {
+                    let origin = *state
+                        .tag_origins
+                        .get(*discr as usize)
+                        .ok_or(DecodeError::InvalidTable("register"))?;
+                    for &(constant, target) in cases {
+                        let mut edge = state.clone();
+                        if let Some(origin) = origin {
+                            let variant = match constants.get(constant as usize) {
+                                Some(Constant::U32(variant)) => *variant,
+                                _ => return Err(DecodeError::InvalidTable("enum switch")),
+                            };
+                            edge.variants[origin as usize] = Some(variant);
+                        }
+                        successors.push((target as usize, edge));
+                    }
+                    let mut edge = state;
+                    if let Some(origin) = origin {
+                        edge.variants[origin as usize] = None;
+                    }
+                    successors.push((*otherwise as usize, edge));
+                }
+                Instruction::Jump { target } => successors.push((*target as usize, state)),
+                Instruction::Return { .. }
+                | Instruction::TailCall { .. }
+                | Instruction::TailCallSelf { .. }
+                | Instruction::TailCallKnownReceiver { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::Perform { dst: None, .. }
+                | Instruction::Unreachable
+                | Instruction::Abort { .. }
+                | Instruction::Leave { .. } => {}
+                _ if pc + 1 < code.len() => successors.push((pc + 1, state)),
+                _ => {}
+            }
+
+            for (target, incoming) in successors {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some()
+                    && (target == 2111 || target == 2032)
+                    && (matches!(
+                        code.get(2124),
+                        Some(Instruction::ProjectMove {
+                            dst: 80,
+                            src: 81,
+                            field: 0
+                        })
+                    ) || matches!(
+                        code.get(2045),
+                        Some(Instruction::ProjectMove {
+                            dst: 80,
+                            src: 81,
+                            field: 0
+                        })
+                    ))
+                {
+                    eprintln!(
+                        "enum-entry-{target} from={pc} component={component} incoming-r89=({},{:?}) incoming-r92=({},{:?}) existing-component={:?} existing-r89={:?} existing-r92={:?}",
+                        incoming.initialized[89],
+                        incoming.variants[89],
+                        incoming.initialized[92],
+                        incoming.variants[92],
+                        components[target],
+                        states[target]
+                            .as_ref()
+                            .map(|state| (state.initialized[89], state.variants[89])),
+                        states[target]
+                            .as_ref()
+                            .map(|state| (state.initialized[92], state.variants[92]))
+                    );
+                }
+                let slot = states
+                    .get_mut(target)
+                    .ok_or(DecodeError::InvalidTable("enum switch target"))?;
+                match slot {
+                    Some(existing) => {
+                        let mut changed = false;
+                        for register in 0..register_count {
+                            match (
+                                existing.initialized[register],
+                                incoming.initialized[register],
+                            ) {
+                                (false, true) => {
+                                    existing.initialized[register] = true;
+                                    existing.variants[register] = incoming.variants[register];
+                                    existing.tag_origins[register] = incoming.tag_origins[register];
+                                    changed = true;
+                                }
+                                (true, true) => {
+                                    if existing.variants[register] != incoming.variants[register]
+                                        && existing.variants[register].take().is_some()
+                                    {
+                                        changed = true;
+                                    }
+                                    if existing.tag_origins[register]
+                                        != incoming.tag_origins[register]
+                                        && existing.tag_origins[register].take().is_some()
+                                    {
+                                        changed = true;
+                                    }
+                                }
+                                (false, false) | (true, false) => {}
+                            }
+                        }
+                        if changed {
+                            work.push_back(target);
                         }
                     }
-                    for (old, new) in existing.tag_origins.iter_mut().zip(&incoming.tag_origins) {
-                        if *old != *new && old.take().is_some() {
-                            changed = true;
-                        }
-                    }
-                    if changed {
+                    slot @ None => {
+                        *slot = Some(incoming);
+                        components[target] = Some(component);
                         work.push_back(target);
                     }
                 }
-                slot @ None => {
-                    *slot = Some(incoming);
-                    work.push_back(target);
-                }
             }
         }
+        let Some(root) = states.iter().position(Option::is_none) else {
+            break;
+        };
+        states[root] = Some(empty.clone());
+        components[root] = Some(next_component);
+        next_component = next_component.saturating_add(1);
+        work.push_back(root);
+    }
+
+    if std::env::var_os("G1_VERIFY_TRACE").is_some()
+        && matches!(
+            code.get(1974),
+            Some(Instruction::ProjectMove {
+                dst: 146,
+                src: 142,
+                field: 0
+            })
+        )
+    {
+        for pc in 1942..=1974 {
+            let state = states[pc].as_ref().expect("analyzed enum facts");
+            eprintln!(
+                "enum-facts pc={pc} component={:?} r137=({},{:?}) r139=({},{:?}) r142=({},{:?}) instruction={:?}",
+                components[pc],
+                state.initialized[137],
+                state.variants[137],
+                state.initialized[139],
+                state.variants[139],
+                state.initialized[142],
+                state.variants[142],
+                code[pc]
+            );
+        }
+    }
+    if std::env::var_os("G1_VERIFY_TRACE").is_some()
+        && matches!(
+            code.get(2124),
+            Some(Instruction::ProjectMove {
+                dst: 80,
+                src: 81,
+                field: 0
+            })
+        )
+    {
+        eprintln!(
+            "late-cleanup-window={:?}; err-predecessor-window={:?}",
+            &code[2110..=2155],
+            &code[1690..=1740]
+        );
     }
 
     Ok(states
         .into_iter()
         .map(|state| {
             state.unwrap_or_else(|| Facts {
+                initialized: vec![false; register_count],
                 tag_origins: vec![None; register_count],
                 variants: vec![None; register_count],
             })
@@ -5426,6 +5829,68 @@ fn infer_primitive_types(
     };
     use Primitive::*;
     match op {
+        IntCheckedAdd | IntCheckedSub | IntCheckedMul | IntCheckedDiv | IntCheckedRem
+        | IntWrappingAdd | IntWrappingSub | IntWrappingMul | IntBitAnd | IntBitOr | IntBitXor => {
+            if let Some(ty) = known(dst, inferred)
+                .or_else(|| args.iter().find_map(|register| known(*register, inferred)))
+            {
+                set(inferred, dst, ty)?;
+                for &argument in args {
+                    set(inferred, argument, ty)?;
+                }
+            }
+        }
+        IntBitNot | IntCheckedNeg | IntWrappingNeg => {
+            if let Some(ty) = known(dst, inferred)
+                .or_else(|| args.first().and_then(|register| known(*register, inferred)))
+            {
+                set(inferred, dst, ty)?;
+                set_arg(0, ty, inferred)?;
+            }
+        }
+        IntEq | IntNe | IntLt | IntLe | IntGt | IntGe => {
+            set(inferred, dst, U32)?;
+            if let Some(ty) = args.iter().find_map(|register| known(*register, inferred)) {
+                for &argument in args {
+                    set(inferred, argument, ty)?;
+                }
+            }
+        }
+        IntShl | IntShr => {
+            set_arg(1, U32, inferred)?;
+            if let Some(ty) = known(dst, inferred)
+                .or_else(|| args.first().and_then(|register| known(*register, inferred)))
+            {
+                set(inferred, dst, ty)?;
+                set_arg(0, ty, inferred)?;
+            }
+        }
+        FloatAdd | FloatSub | FloatMul | FloatDiv | FloatRem => {
+            if let Some(ty) = known(dst, inferred)
+                .or_else(|| args.iter().find_map(|register| known(*register, inferred)))
+            {
+                set(inferred, dst, ty)?;
+                for &argument in args {
+                    set(inferred, argument, ty)?;
+                }
+            }
+        }
+        FloatEq | FloatNe | FloatLt | FloatLe | FloatGt | FloatGe => {
+            set(inferred, dst, U32)?;
+            if let Some(ty) = args.iter().find_map(|register| known(*register, inferred)) {
+                for &argument in args {
+                    set(inferred, argument, ty)?;
+                }
+            }
+        }
+        FloatNeg => {
+            if let Some(ty) = known(dst, inferred)
+                .or_else(|| args.first().and_then(|register| known(*register, inferred)))
+            {
+                set(inferred, dst, ty)?;
+                set_arg(0, ty, inferred)?;
+            }
+        }
         BytesFromArrayMove => {
             set(inferred, dst, BYTES)?;
             if let Some(array) = array(U8) {
@@ -5639,6 +6104,150 @@ mod tests {
         } else {
             artifact
         }
+    }
+
+    #[test]
+    fn decoder_infers_a_label_result_used_only_by_drop() {
+        let mut artifact = Artifact {
+            functions: vec![Function {
+                flags: 0,
+                name: "label_drop".into(),
+                params: vec![I64],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, I64, I64],
+                code_start: 0,
+                code_len: 4,
+                label_slot_count: 1,
+            }],
+            code: vec![
+                Instruction::LabelPush {
+                    slot: 0,
+                    result_register: 2,
+                    target: 2,
+                },
+                Instruction::Leave { slot: 0, value: 1 },
+                Instruction::Drop { register: 2 },
+                Instruction::Return { src: None },
+            ],
+            cleanups: vec![
+                CleanupPlan {
+                    function: 0,
+                    first_instruction: 1,
+                    end_instruction: 2,
+                    registers: vec![1, 2],
+                },
+                CleanupPlan {
+                    function: 0,
+                    first_instruction: 2,
+                    end_instruction: 3,
+                    registers: vec![2],
+                },
+            ],
+            ..Artifact::default()
+        };
+        artifact.required_features = used_features(&artifact.types, &artifact.code, false, false);
+        artifact = crate::verify::with_compiler_seeded_cleanup_plans(artifact).unwrap();
+
+        let decoded = Artifact::decode(&artifact.encode()).unwrap();
+        assert_eq!(decoded.functions[0].register_types[2], I64);
+    }
+
+    #[test]
+    fn decoder_infers_a_projected_field_in_a_disconnected_cleanup_block() {
+        let enum_ty = Type::predefined().len() as TypeId;
+        let mut artifact = Artifact {
+            constants: vec![Constant::I64(7)],
+            functions: vec![Function {
+                flags: 0,
+                name: "known_enum_projection".into(),
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, I64, enum_ty, enum_ty, I64],
+                code_start: 0,
+                code_len: 8,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Return { src: None },
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Construct {
+                    dst: 2,
+                    ty: enum_ty,
+                    variant: Some(0),
+                    fields: vec![1],
+                },
+                Instruction::Copy { dst: 3, src: 2 },
+                Instruction::ProjectMove {
+                    dst: 4,
+                    src: 3,
+                    field: 0,
+                },
+                Instruction::Deconstruct { src: 3 },
+                Instruction::Drop { register: 4 },
+                Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        artifact.types.push(
+            Type::Enum {
+                name: "EitherWidth".into(),
+                variants: vec![
+                    EnumVariant {
+                        name: "Wide".into(),
+                        fields: vec![Field {
+                            name: "value".into(),
+                            ty: I64,
+                        }],
+                    },
+                    EnumVariant {
+                        name: "Narrow".into(),
+                        fields: vec![Field {
+                            name: "value".into(),
+                            ty: U32,
+                        }],
+                    },
+                ],
+                copy: true,
+            }
+            .restricted(true, true),
+        );
+        artifact.required_features = used_features(&artifact.types, &artifact.code, false, false);
+        artifact = crate::verify::with_generated_cleanup_plans(artifact).unwrap();
+
+        let decoded = Artifact::decode(&artifact.encode()).unwrap();
+        assert_eq!(decoded.functions[0].register_types[4], I64);
+    }
+
+    #[test]
+    fn enum_facts_ignore_an_uninitialized_cleanup_join() {
+        let constants = [];
+        let code = [
+            Instruction::Return { src: None },
+            Instruction::Jump { target: 5 },
+            Instruction::Construct {
+                dst: 1,
+                ty: 0,
+                variant: Some(0),
+                fields: vec![],
+            },
+            Instruction::Copy { dst: 2, src: 1 },
+            Instruction::Jump { target: 5 },
+            Instruction::ProjectMove {
+                dst: 3,
+                src: 2,
+                field: 0,
+            },
+        ];
+
+        let facts = infer_enum_variant_facts(&constants, 4, &code).unwrap();
+        assert_eq!(facts[5][2], Some(0));
     }
 
     #[test]
@@ -6063,6 +6672,81 @@ mod tests {
         let bytes = artifact.encode();
         assert_eq!(Artifact::decode(&bytes).unwrap(), canonical(artifact));
         assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
+    }
+
+    #[test]
+    fn stored_reference_reborrow_opcodes_roundtrip_at_permanent_assignments() {
+        let instructions = [
+            Instruction::DerefReborrowShared { dst: 7, src: 8 },
+            Instruction::DerefReborrowUnique { dst: 9, src: 10 },
+        ];
+        let mut words = Vec::new();
+        let mut operands = Vec::new();
+        for instruction in &instructions {
+            encode_instruction(instruction, &BTreeMap::new(), &mut words, &mut operands);
+        }
+        assert_eq!(words, vec![0x2017, 7, 8, 0x2018, 9, 10]);
+        assert!(operands.is_empty());
+        assert_eq!(
+            decode_instructions(&words, &operands, &[]).unwrap(),
+            instructions
+        );
+
+        let mut types = Type::predefined();
+        let shared_i64 = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let unique_i64 = types.len() as TypeId;
+        types.push(Type::RefUnique { referent: I64 });
+        let shared_stored = types.len() as TypeId;
+        types.push(Type::RefShared {
+            referent: shared_i64,
+        });
+        let unique_stored = types.len() as TypeId;
+        types.push(Type::RefUnique {
+            referent: unique_i64,
+        });
+        let artifact = Artifact {
+            required_features: CORE_G1 | REFERENCES_G1,
+            types,
+            functions: vec![
+                Function {
+                    flags: 0,
+                    name: "shared-stored-reborrow".into(),
+                    params: vec![shared_stored],
+                    return_type: shared_i64,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, shared_stored, shared_i64],
+                    code_start: 0,
+                    code_len: 2,
+                    label_slot_count: 0,
+                },
+                Function {
+                    flags: 0,
+                    name: "unique-stored-reborrow".into(),
+                    params: vec![unique_stored],
+                    return_type: unique_i64,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, unique_stored, unique_i64],
+                    code_start: 2,
+                    code_len: 2,
+                    label_slot_count: 0,
+                },
+            ],
+            code: vec![
+                Instruction::DerefReborrowShared { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+                Instruction::DerefReborrowUnique { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        let bytes = artifact.encode();
+        let decoded = Artifact::decode(&bytes).unwrap();
+        assert_eq!(decoded.functions[0].register_types[2], shared_i64);
+        assert_eq!(decoded.functions[1].register_types[2], unique_i64);
+        assert_eq!(decoded.encode(), bytes);
     }
 
     #[test]
@@ -6522,6 +7206,51 @@ mod tests {
         let artifact = Artifact {
             functions,
             code,
+            ..Artifact::default()
+        };
+        let bytes = artifact.encode();
+        assert_eq!(Artifact::decode(&bytes).unwrap(), canonical(artifact));
+    }
+
+    #[test]
+    fn numeric_same_type_primitive_anchors_conversion_temporaries() {
+        let artifact = Artifact {
+            constants: vec![Constant::U8(3)],
+            functions: vec![Function {
+                flags: 0,
+                name: "conversion-chain".into(),
+                params: vec![I64],
+                return_type: I64,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, I64, U8, U8, U8, U8, I64],
+                code_start: 0,
+                code_len: 6,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Primitive {
+                    dst: 2,
+                    op: Primitive::IntConvertWrapping,
+                    args: vec![1],
+                },
+                Instruction::Move { dst: 3, src: 2 },
+                Instruction::Const {
+                    dst: 4,
+                    constant: 0,
+                },
+                Instruction::Primitive {
+                    dst: 5,
+                    op: Primitive::IntCheckedRem,
+                    args: vec![3, 4],
+                },
+                Instruction::Primitive {
+                    dst: 6,
+                    op: Primitive::IntConvertWrapping,
+                    args: vec![5],
+                },
+                Instruction::Return { src: Some(6) },
+            ],
             ..Artifact::default()
         };
         let bytes = artifact.encode();

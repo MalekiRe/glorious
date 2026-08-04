@@ -65,6 +65,41 @@ fn external_modules_resolve_from_the_crate_root_exception() {
 }
 
 #[test]
+fn generic_drop_target_tracks_its_module_qualified_nominal() {
+    let bundle = bundle(
+        ("/work/src/main.glorious", "mod guard; main() -> { () }"),
+        &[(
+            "/work/src/guard/guard.glorious",
+            r#"
+            pub struct Guard<'a> { private value: &'a mut i64 }
+            impl<'a> Drop for Guard<'a> { drop(&mut self) -> { () } }
+            "#,
+        )],
+    );
+    let parsed = grandiose::modules::parse_bundle(&bundle).unwrap();
+    let resolved = grandiose::modules::resolve_program(&bundle, parsed).unwrap();
+    let guard = resolved
+        .program
+        .structs
+        .iter()
+        .find(|declaration| declaration.name.contains("Guard"))
+        .expect("qualified guard nominal");
+    let drop = resolved
+        .program
+        .drops
+        .iter()
+        .find(|declaration| declaration.target.contains("Guard"))
+        .expect("guard Drop hook");
+    assert_eq!(drop.target, guard.name);
+    assert_eq!(drop.target_type.simple_name(), None);
+    let grandiose::ast::TypeSyntaxKind::Application { constructor, .. } = &drop.target_type.kind
+    else {
+        panic!("generic Drop target remains an application")
+    };
+    assert_eq!(constructor.simple_name(), Some(guard.name.as_str()));
+}
+
+#[test]
 fn unresolved_qualified_root_call_is_rejected_during_module_resolution() {
     let bundle = bundle(
         (
@@ -374,7 +409,7 @@ fn dependency_roots_are_explicit_packages_and_crate_is_package_local() {
         &[(
             "cool-pkg",
             "/deps/cool/src/lib.glorious",
-            "mod inner; helper()->i64{40} pub answer()->i64{crate::helper()+inner::two()}",
+            "mod inner; helper()->i64{40} pub answer()->i64{crate::helper() + inner::two()}",
         )],
         &[("/deps/cool/src/inner/inner.glorious", "pub two()->i64{2}")],
     );
@@ -390,7 +425,8 @@ fn dependency_control_callables_and_fixities_retain_specialization_identity() {
             use control::{when, otherwise};
             condition() -> Result<(), ()> { Result::Ok(()) }
             probe() -> i64 {
-                when(condition()) { 42 } otherwise { 0 }
+                let captured = 40;
+                when(condition()) { captured + 2 } otherwise { 0 }
             }
             main() -> { () }
             "#,

@@ -1,8 +1,10 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    fmt,
+    fmt, fs,
     rc::Rc,
+    time::Instant,
 };
 
 use crate::{
@@ -13,7 +15,7 @@ use crate::{
     value::{
         AggregateValue, ArenaObject, ArrayValue, CallableValue, ControlHandle, HandlerValue,
         ReclamationScope, ReferenceTarget, ResumptionValue, RuntimeFrame, RuntimeLabel, SlotStore,
-        Value,
+        Value, reclamation_diagnostic_counts,
     },
     verify::{ExecutionImage, ImageConstant, VerifiedArtifact, VerifyError, verify},
 };
@@ -199,6 +201,7 @@ pub struct Vm {
     host: Option<Box<dyn Host>>,
     imports: Result<Vec<ResolvedImport>, HostLinkError>,
     slots: SlotStore,
+    last_location: Cell<Option<(u32, u32)>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,6 +218,280 @@ type Frame = RuntimeFrame;
 enum CapturePruning {
     Multishot,
     Cancellation,
+}
+
+const DEFAULT_MEMORY_PROFILE_STEPS: u64 = 1_000_000;
+
+struct VmProgressTrace {
+    interval: u64,
+    countdown: u64,
+    steps: u64,
+    started: Instant,
+}
+
+impl VmProgressTrace {
+    fn from_env() -> Option<Self> {
+        let interval = std::env::var("G1_VM_PROGRESS_STEPS")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .filter(|steps| *steps > 0)?;
+        Some(Self {
+            interval,
+            countdown: 0,
+            steps: 0,
+            started: Instant::now(),
+        })
+    }
+
+    fn observe(&mut self, function: u32, name: &str, pc: u32, depth: usize) {
+        self.steps = self.steps.saturating_add(1);
+        if self.countdown > 0 {
+            self.countdown -= 1;
+            return;
+        }
+        self.countdown = self.interval.saturating_sub(1);
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let rate = if elapsed == 0.0 {
+            0.0
+        } else {
+            self.steps as f64 / elapsed
+        };
+        eprintln!(
+            "g1-vm-progress steps={} elapsed={elapsed:.3}s rate={rate:.0}/s function={function} name={name:?} pc={pc} depth={depth}",
+            self.steps
+        );
+    }
+}
+
+struct VmMemoryProfile {
+    sample_countdown: u64,
+    sample_steps: u64,
+    steps: u64,
+    report_increment_kib: u64,
+    next_report_rss_kib: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessMemory {
+    virtual_kib: u64,
+    rss_kib: u64,
+}
+
+#[derive(Default)]
+struct FrameCounts {
+    active: usize,
+    deferred: usize,
+    live_registers: usize,
+    register_slots: usize,
+    guards: usize,
+    labels: usize,
+}
+
+/// Opt-in, allocation-light VM breakpoint used to diagnose generated compiler
+/// artifacts. `G1_VM_BREAKPOINT=FUNCTION:PC` selects a location and
+/// `G1_VM_BREAK_U64=REGISTER:VALUE` can restrict it to one scalar argument.
+struct VmBreakpoint {
+    function: u32,
+    pc: u32,
+    u64_filter: Option<(usize, u64)>,
+}
+
+impl VmBreakpoint {
+    fn from_env() -> Option<Self> {
+        let (function, pc) = parse_u32_pair(&std::env::var("G1_VM_BREAKPOINT").ok()?)?;
+        let u64_filter = std::env::var("G1_VM_BREAK_U64")
+            .ok()
+            .and_then(|value| parse_usize_u64_pair(&value));
+        Some(Self {
+            function,
+            pc,
+            u64_filter,
+        })
+    }
+
+    fn matches(&self, frame: &Frame) -> bool {
+        self.function == frame.function
+            && self.pc == frame.pc
+            && self.u64_filter.is_none_or(|(register, expected)| {
+                matches!(
+                    frame.registers.get(register).and_then(Option::as_ref),
+                    Some(Value::U64(actual)) if *actual == expected
+                )
+            })
+    }
+
+    fn report(&self, stack: &[Frame], image: &ExecutionImage) {
+        eprintln!(
+            "g1-vm-breakpoint function={} pc={} depth={}",
+            self.function,
+            self.pc,
+            stack.len()
+        );
+        for (depth, frame) in stack.iter().enumerate() {
+            let name = image
+                .functions
+                .get(frame.function as usize)
+                .map_or("<invalid>", |function| function.name.as_str());
+            eprintln!(
+                "  frame depth={depth} function={} name={name:?} pc={}",
+                frame.function, frame.pc
+            );
+        }
+        if let Some(frame) = stack.last() {
+            for (register, value) in frame.registers.iter().enumerate() {
+                match value.as_ref() {
+                    Some(Value::I64(value)) => {
+                        eprintln!("  register r{register}=i64:{value}")
+                    }
+                    Some(Value::I128(value)) => {
+                        eprintln!("  register r{register}=i128:{value}")
+                    }
+                    Some(Value::U64(value)) => {
+                        eprintln!("  register r{register}=u64:{value}")
+                    }
+                    Some(Value::U128(value)) => {
+                        eprintln!("  register r{register}=u128:{value}")
+                    }
+                    Some(Value::F32(value)) => {
+                        eprintln!("  register r{register}=f32:{value}")
+                    }
+                    Some(Value::F64(value)) => {
+                        eprintln!("  register r{register}=f64:{value}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn parse_u32_pair(value: &str) -> Option<(u32, u32)> {
+    let (left, right) = value.split_once(':')?;
+    Some((left.parse().ok()?, right.parse().ok()?))
+}
+
+fn parse_usize_u64_pair(value: &str) -> Option<(usize, u64)> {
+    let (left, right) = value.split_once(':')?;
+    Some((left.parse().ok()?, right.parse().ok()?))
+}
+
+impl VmMemoryProfile {
+    fn from_env() -> Option<Self> {
+        let report_increment_mib = std::env::var("G1_VM_MEMORY_PROFILE_MIB")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .filter(|increment| *increment > 0)?;
+        let sample_steps = std::env::var("G1_VM_MEMORY_PROFILE_STEPS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|steps| *steps > 0)
+            .unwrap_or(DEFAULT_MEMORY_PROFILE_STEPS);
+        Some(Self {
+            sample_countdown: 0,
+            sample_steps,
+            steps: 0,
+            report_increment_kib: report_increment_mib.saturating_mul(1024),
+            next_report_rss_kib: None,
+        })
+    }
+
+    fn observe(&mut self, stack: &[Frame], slots: &SlotStore, image: &ExecutionImage) {
+        self.steps = self.steps.saturating_add(1);
+        if self.sample_countdown > 0 {
+            self.sample_countdown -= 1;
+            return;
+        }
+        self.sample_countdown = self.sample_steps.saturating_sub(1);
+        let Some(memory) = process_memory() else {
+            return;
+        };
+        if self
+            .next_report_rss_kib
+            .is_some_and(|threshold| memory.rss_kib < threshold)
+        {
+            return;
+        }
+
+        let Some(frame) = stack.last() else {
+            return;
+        };
+        let mut counts = FrameCounts::default();
+        let mut suspended_sites = BTreeMap::<(u32, u32), usize>::new();
+        for active in stack {
+            counts.active += 1;
+            count_frame(active, &mut counts);
+            *suspended_sites
+                .entry((active.function, active.pc))
+                .or_default() += 1;
+        }
+        let mut suspended_sites = suspended_sites.into_iter().collect::<Vec<_>>();
+        suspended_sites.sort_by_key(|(site, count)| (std::cmp::Reverse(*count), *site));
+        let suspended_sites = suspended_sites
+            .into_iter()
+            .take(8)
+            .map(|((function, return_pc), count)| format!("f{function}:pc{return_pc}={count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let (occupied_place_slots, retained_place_slots) = slots.diagnostic_counts();
+        let (tracked_reclamation_nodes, live_reclamation_nodes) = reclamation_diagnostic_counts();
+        let name = image
+            .functions
+            .get(frame.function as usize)
+            .map_or("<invalid>", |function| function.name.as_str());
+        eprintln!(
+            "g1-vm-memory steps={} rss_mib={:.1} virtual_mib={:.1} function={} name={:?} pc={} active_frames={} deferred_frames={} live_registers={} register_slots={} guards={} labels={} occupied_place_slots={} retained_place_slots={} tracked_reclamation_nodes={} live_reclamation_nodes={} suspended_sites=[{}]",
+            self.steps,
+            memory.rss_kib as f64 / 1024.0,
+            memory.virtual_kib as f64 / 1024.0,
+            frame.function,
+            name,
+            frame.pc,
+            counts.active,
+            counts.deferred,
+            counts.live_registers,
+            counts.register_slots,
+            counts.guards,
+            counts.labels,
+            occupied_place_slots,
+            retained_place_slots,
+            tracked_reclamation_nodes,
+            live_reclamation_nodes,
+            suspended_sites,
+        );
+        self.next_report_rss_kib = Some(memory.rss_kib.saturating_add(self.report_increment_kib));
+    }
+}
+
+fn count_frame(frame: &Frame, counts: &mut FrameCounts) {
+    counts.live_registers += frame
+        .registers
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
+    counts.register_slots += frame.registers.len();
+    counts.guards += frame.guards.len();
+    counts.labels += frame.labels.len();
+    for deferred in &frame.deferred_frames {
+        counts.deferred += 1;
+        count_frame(deferred, counts);
+    }
+}
+
+fn process_memory() -> Option<ProcessMemory> {
+    parse_process_status(&fs::read_to_string("/proc/self/status").ok()?)
+}
+
+fn parse_process_status(status: &str) -> Option<ProcessMemory> {
+    fn kib(status: &str, field: &str) -> Option<u64> {
+        let line = status.lines().find(|line| line.starts_with(field))?;
+        line.split_ascii_whitespace().nth(1)?.parse().ok()
+    }
+    Some(ProcessMemory {
+        virtual_kib: kib(status, "VmSize:")?,
+        rss_kib: kib(status, "VmRSS:")?,
+    })
 }
 
 impl Vm {
@@ -235,6 +512,7 @@ impl Vm {
             host: None,
             imports,
             slots: SlotStore::default(),
+            last_location: Cell::new(None),
         }
     }
     pub fn from_artifact(artifact: Artifact) -> Result<Self, VerifyError> {
@@ -270,13 +548,38 @@ impl Vm {
             host: Some(Box::new(host)),
             imports: Ok(imports),
             slots: SlotStore::default(),
+            last_location: Cell::new(None),
         })
     }
 
     pub fn run(&self, function: u32, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let scope = ReclamationScope::begin();
         scope.track_values(&args);
+        let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        if trace_errors {
+            self.last_location.set(None);
+        }
         let result = self.run_inner(function, args);
+        if trace_errors
+            && let Err(error) = &result
+            && let Some((function, pc)) = self.last_location.get()
+        {
+            let instruction = self.artifact.function(function).and_then(|function| {
+                let checked = function.checked_pc(pc)?;
+                Some((
+                    function.descriptor().name.as_str(),
+                    function.instruction(checked),
+                ))
+            });
+            match instruction {
+                Some((name, instruction)) => eprintln!(
+                    "g1-vm-error error={error:?} function={function} name={name:?} pc={pc} instruction={instruction:?}"
+                ),
+                None => eprintln!(
+                    "g1-vm-error error={error:?} function={function} pc={pc} instruction=<unavailable>"
+                ),
+            }
+        }
         scope.finish();
         result
     }
@@ -288,7 +591,23 @@ impl Vm {
             .map_err(|error| RuntimeError::HostLink(error.clone()))?;
         let a = self.artifact.image();
         let mut stack = vec![make_frame(a, function, args, Value::Unit, None)?];
+        let mut memory_profile = VmMemoryProfile::from_env();
+        let mut progress_trace = VmProgressTrace::from_env();
+        let breakpoint = VmBreakpoint::from_env();
+        let traced_function = std::env::var("G1_VM_FUNCTION").ok();
+        let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
         loop {
+            if let Some(profile) = &mut memory_profile {
+                profile.observe(&stack, &self.slots, a);
+            }
+            let stack_depth = stack.len();
+            if breakpoint.as_ref().is_some_and(|breakpoint| {
+                stack
+                    .last()
+                    .is_some_and(|frame| breakpoint.matches(frame))
+            }) {
+                breakpoint.as_ref().unwrap().report(&stack, a);
+            }
             let frame = stack.last_mut().expect("execution stack cannot be empty");
             let verified_fun = self
                 .artifact
@@ -299,6 +618,18 @@ impl Vm {
                 .checked_pc(frame.pc)
                 .ok_or(RuntimeError::TypeConfusion)?;
             let ins = verified_fun.instruction(verified_pc);
+            if let Some(trace) = &mut progress_trace {
+                trace.observe(frame.function, &fun.name, frame.pc, stack_depth);
+            }
+            if trace_errors {
+                self.last_location.set(Some((frame.function, frame.pc)));
+            }
+            if traced_function.as_deref() == Some(fun.name.as_str()) {
+                eprintln!(
+                    "g1-vm function {} `{}` pc {}: {ins:?}",
+                    frame.function, fun.name, frame.pc
+                );
+            }
             match ins {
                 Instruction::Nop => frame.pc += 1,
                 Instruction::Const { dst, constant } => {
@@ -309,7 +640,16 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Move { dst, src } => {
-                    let v = take(frame, src)?;
+                    // MOVE relocates storage identity as well as its value.
+                    // A register materialized as `Place` may still be the
+                    // target of references transported by the same verified
+                    // MIR edge bundle. Unwrapping and reclaiming that slot
+                    // here would leave those references dangling at runtime.
+                    // Destructive consumers continue to use `take`, which
+                    // unwraps the place once its borrow lifetime has ended.
+                    let v = frame.registers[src as usize]
+                        .take()
+                        .ok_or(RuntimeError::EmptyRegister(src))?;
                     put(frame, dst, v)?;
                     frame.pc += 1;
                 }
@@ -364,6 +704,36 @@ impl Vm {
                     };
                     let value = copy_reference_target(a, referent_type, &target)?;
                     put(frame, dst, value)?;
+                    frame.pc += 1;
+                }
+                Instruction::DerefReborrowShared { dst, src }
+                | Instruction::DerefReborrowUnique { dst, src } => {
+                    let requested_unique = matches!(ins, Instruction::DerefReborrowUnique { .. });
+                    let (outer_unique, outer_target) = match get(frame, src)? {
+                        Value::Reference { unique, target, .. } => (unique, target),
+                        _ => return Err(RuntimeError::TypeConfusion),
+                    };
+                    let Value::Reference {
+                        referent_type,
+                        unique: inner_unique,
+                        target,
+                        ..
+                    } = observe_reference_target(&outer_target)?
+                    else {
+                        return Err(RuntimeError::TypeConfusion);
+                    };
+                    if requested_unique && (!outer_unique || !inner_unique) {
+                        return Err(RuntimeError::TypeConfusion);
+                    }
+                    put(
+                        frame,
+                        dst,
+                        Value::Reference {
+                            referent_type,
+                            unique: requested_unique,
+                            target,
+                        },
+                    )?;
                     frame.pc += 1;
                 }
                 Instruction::DerefMove { dst, src } => {
@@ -548,14 +918,48 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Drop { register } => {
-                    self.destroy_typed(
-                        fun.register_types[register as usize],
-                        take(frame, register)?,
-                    )?;
+                    let value = match frame.registers[register as usize].take() {
+                        Some(Value::Place(slot)) => slot
+                            .take_and_reclaim_if_initialized()
+                            .map_err(|_| RuntimeError::EmptyRegister(register))?,
+                        Some(value) => Some(value),
+                        None => None,
+                    };
+                    if let Some(value) = value {
+                        let expected = fun.register_types[register as usize];
+                        self.destroy_typed(expected, value)?;
+                    }
                     frame.pc += 1;
                 }
                 Instruction::Deconstruct { src } => {
-                    release_aggregate_shell(take(frame, src)?)?;
+                    let shell = take(frame, src)?;
+                    if trace_errors {
+                        match &shell {
+                            Value::Aggregate(aggregate) => {
+                                let aggregate = aggregate.borrow();
+                                let occupied = aggregate
+                                    .fields
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(field, value)| value.is_some().then_some(field))
+                                    .collect::<Vec<_>>();
+                                if !occupied.is_empty() {
+                                    eprintln!(
+                                        "g1-vm-deconstruct-mismatch register={src} declared_type={} runtime_type={} variant={:?} occupied_fields={occupied:?}",
+                                        fun.register_types[src as usize],
+                                        aggregate.ty,
+                                        aggregate.variant,
+                                    );
+                                }
+                            }
+                            value => eprintln!(
+                                "g1-vm-deconstruct-mismatch register={src} declared_type={} runtime_kind={}",
+                                fun.register_types[src as usize],
+                                runtime_value_kind(value),
+                            ),
+                        }
+                    }
+                    release_aggregate_shell(shell)?;
                     frame.pc += 1;
                 }
                 Instruction::Primitive { dst, op, args } => {
@@ -1277,12 +1681,55 @@ impl Vm {
                     put(frame, label.result_register, protected)?;
                     frame.pc = label.target;
                 }
-                Instruction::Unreachable => return Err(RuntimeError::ReachedUnreachable),
+                Instruction::Unreachable => {
+                    if std::env::var_os("G1_VM_STATE_TRACE").is_some() {
+                        eprintln!(
+                            "g1-vm reached unreachable in function {} `{}` at pc {}",
+                            frame.function, fun.name, frame.pc
+                        );
+                    }
+                    return Err(RuntimeError::ReachedUnreachable);
+                }
                 Instruction::Abort { message } => {
                     let message = a
                         .abort_message((fun.code_start + frame.pc) as usize)
                         .map(str::to_owned)
                         .or(message);
+                    if trace_errors {
+                        eprintln!("g1-vm-error stack-begin depth={}", stack.len());
+                        for (depth, traced) in stack.iter().rev().enumerate() {
+                            let traced_instruction = self
+                                .artifact
+                                .function(traced.function)
+                                .and_then(|function| {
+                                    let checked = function.checked_pc(traced.pc)?;
+                                    Some((
+                                        function.descriptor().name.as_str(),
+                                        function.instruction(checked),
+                                    ))
+                                });
+                            match traced_instruction {
+                                Some((name, instruction)) => eprintln!(
+                                    "g1-vm-error frame={depth} function={} name={name:?} pc={} instruction={instruction:?}",
+                                    traced.function, traced.pc
+                                ),
+                                None => eprintln!(
+                                    "g1-vm-error frame={depth} function={} pc={} instruction=<unavailable>",
+                                    traced.function, traced.pc
+                                ),
+                            }
+                            if let Some(caller_pc) = traced.pc.checked_sub(1)
+                                && let Some(function) = self.artifact.function(traced.function)
+                                && let Some(checked) = function.checked_pc(caller_pc)
+                            {
+                                eprintln!(
+                                    "g1-vm-error frame={depth} previous_pc={caller_pc} previous_instruction={:?}",
+                                    function.instruction(checked)
+                                );
+                            }
+                        }
+                        eprintln!("g1-vm-error stack-end");
+                    }
                     return Err(RuntimeError::Aborted(message));
                 }
             }
@@ -1526,19 +1973,36 @@ impl Vm {
         let pc = function
             .checked_pc(frame.pc)
             .ok_or(RuntimeError::TypeConfusion)?;
-        let mut retained = match pruning {
+        let retained = match pruning {
             CapturePruning::Multishot => function.multishot_registers(pc),
             CapturePruning::Cancellation => function.cancellation_registers(pc),
         }
-        .peekable();
-        for register in 0..frame.registers.len() {
-            if retained.peek().copied() == Some(register as u32) {
-                retained.next();
-            } else if let Some(value) = frame.registers[register].take() {
+        .collect::<BTreeSet<_>>();
+        // Cancellation is an early frame exit, so excluded values must obey
+        // the verifier's borrow-aware cleanup order. Register order is not an
+        // ownership order: a projected owner can have a lower register than
+        // the reference which must be ended before it.
+        for register in function.cleanup_registers(pc).iter().copied() {
+            if retained.contains(&register) {
+                continue;
+            }
+            if let Some(value) = frame.registers[register as usize].take() {
+                self.destroy_typed(
+                    function.descriptor().register_types[register as usize],
+                    value,
+                )?;
+            }
+        }
+        // Cleanup metadata orders ownership-bearing values. Empty/copy-only
+        // temporaries can remain outside that plan; discard any such excluded
+        // residue only after every ordered loan and owner has been released.
+        for (register, value) in frame.registers.iter_mut().enumerate() {
+            if !retained.contains(&(register as u32))
+                && let Some(value) = value.take()
+            {
                 self.destroy_typed(function.descriptor().register_types[register], value)?;
             }
         }
-        debug_assert!(retained.next().is_none());
         Ok(())
     }
 
@@ -1760,6 +2224,27 @@ fn take(f: &mut Frame, r: u32) -> Result<Value, RuntimeError> {
         value => Ok(value),
     }
 }
+
+fn runtime_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Unit => "unit",
+        Value::I64(_) => "i64",
+        Value::I128(_) => "i128",
+        Value::U64(_) => "u64",
+        Value::U128(_) => "u128",
+        Value::F32(_) => "f32",
+        Value::F64(_) => "f64",
+        Value::Text(_) => "text",
+        Value::Bytes(_) => "bytes",
+        Value::Place(_) => "place",
+        Value::Array(_) => "array",
+        Value::Reference { .. } => "reference",
+        Value::Aggregate(_) => "aggregate",
+        Value::Callable(_) => "callable",
+        Value::Handler(_) => "handler",
+        Value::Resumption(_) => "resumption",
+    }
+}
 fn get(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
     let value = f.registers[r as usize]
         .as_ref()
@@ -1826,6 +2311,48 @@ fn copy_reference_target(
             .ok_or(RuntimeError::TypeConfusion)?,
     };
     copy_value(artifact, referent_type, &value)
+}
+
+/// Observe a reference value stored behind another reference without applying
+/// ordinary value-copy rules. The verifier has already established a child
+/// loan and suspended the parent capability, so cloning this runtime handle
+/// does not create a second source-level owner of a unique reference.
+fn observe_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeError> {
+    let value = match target {
+        ReferenceTarget::DropSlot(slot) | ReferenceTarget::WholePlace(slot) => {
+            slot.get().map_err(|_| RuntimeError::TypeConfusion)?
+        }
+        ReferenceTarget::CallableCapture(slot) => slot
+            .try_borrow()
+            .map_err(|_| RuntimeError::TypeConfusion)?
+            .as_ref()
+            .cloned()
+            .ok_or(RuntimeError::TypeConfusion)?,
+        ReferenceTarget::ArrayElement { array, index } => array
+            .try_borrow()
+            .map_err(|_| RuntimeError::TypeConfusion)?
+            .slots
+            .get(*index)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(RuntimeError::TypeConfusion)?,
+        ReferenceTarget::AggregateField { aggregate, field } => aggregate
+            .try_borrow()
+            .map_err(|_| RuntimeError::TypeConfusion)?
+            .fields
+            .get(*field)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or(RuntimeError::TypeConfusion)?,
+        ReferenceTarget::Array(_) | ReferenceTarget::Aggregate(_) => {
+            return Err(RuntimeError::TypeConfusion);
+        }
+    };
+    if matches!(value, Value::Reference { .. }) {
+        Ok(value)
+    } else {
+        Err(RuntimeError::TypeConfusion)
+    }
 }
 
 fn reference_target_enum_tag(target: &ReferenceTarget) -> Result<u32, RuntimeError> {
@@ -4247,6 +4774,19 @@ mod tests {
     }
     fn prim(result: TypeId, op: Primitive, values: &[Value]) -> Result<Value, RuntimeError> {
         primitive(&image(Artifact::default()), result, op, values)
+    }
+
+    #[test]
+    fn parses_linux_process_memory_status() {
+        let status = "Name:\tgrvm\nVmSize:\t  8388608 kB\nVmRSS:\t  7340032 kB\n";
+        assert_eq!(
+            parse_process_status(status),
+            Some(ProcessMemory {
+                virtual_kib: 8_388_608,
+                rss_kib: 7_340_032,
+            })
+        );
+        assert_eq!(parse_process_status("VmRSS:\t1 kB\n"), None);
     }
 
     #[test]

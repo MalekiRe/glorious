@@ -39,7 +39,10 @@ const SOURCE: &str = r#"
     result_unique<'a>(value:&'a mut Result<i64,i64>)->Result<&'a mut i64,&'a mut i64>{Result::as_mut(value)}
     result_mutate(value:Result<i64,i64>)->i64 {
         let projected=Result::as_mut(&mut value);
-        if(projected is Result::Ok(_)){*projected.0=42;()}else{*projected.0=42;()};
+        handle projected {
+            Result::Ok(item) => {*item=42;()},
+            Result::Err(item) => {*item=42;()}
+        };
         if(value is Result::Ok(_)){value.0}else{value.0}
     }
     option_shared(value:Option<i64>)->i64 {
@@ -49,7 +52,7 @@ const SOURCE: &str = r#"
     option_unique<'a>(value:&'a mut Option<i64>)->Option<&'a mut i64>{Option::as_mut(value)}
     option_mutate(value:Option<i64>)->i64 {
         let projected=Option::as_mut(&mut value);
-        if(projected is Option::Some(_)){*projected.0=42;()}else{()};
+        handle projected { Option::Some(item) => {*item=42;()}, None => () };
         if(value is Option::Some(_)){value.0}else{42}
     }
     ok_shared()->i64{result_shared(ok(42))}
@@ -60,7 +63,7 @@ const SOURCE: &str = r#"
     none_shared()->i64{option_shared(none())}
     some_mutate()->i64{option_mutate(some(1))}
     none_mutate()->i64{option_mutate(none())}
-    answer()->i64{ok_shared()+err_shared()+some_shared()+none_shared()}
+    answer()->i64{ok_shared() + err_shared() + some_shared() + none_shared()}
     main()->(){()}
 "#;
 

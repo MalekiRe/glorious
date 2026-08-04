@@ -156,6 +156,11 @@ write_pattern_binders<'a>(
             PatternBinder::Binding(name, token) => {
                 ByteBuf::push(output, 1);
                 write_name(output, source, name, token)
+            },
+            PatternBinder::Integer(token) => {
+                ByteBuf::push(output, 2);
+                ByteBuf::write_u32_le(output, u32_from_usize(token));
+                Result::Ok(())
             }
         }
     })
@@ -266,6 +271,10 @@ write_expression(
         },
         BodyExpressionView::Grouping(child) =>
             write_expression(output, original, source, value, Id::to_u32(child)),
+        BodyExpressionView::Move(child) => {
+            ByteBuf::push(output, 13);
+            write_expression(output, original, source, value, Id::to_u32(child))
+        },
         BodyExpressionView::Prefix(operator, child) => {
             ByteBuf::push(output, 5);
             let spelling = range_text(original, source, &operator);

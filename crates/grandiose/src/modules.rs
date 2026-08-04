@@ -118,6 +118,104 @@ impl ModuleResolution {
     }
 }
 
+/// Renders a resolved distributed bundle as one ordinary source file by
+/// replacing every external module declaration with its recursively rendered
+/// inline body. This is the canonical input form for compiler stages whose
+/// host boundary accepts one file; semantic module paths and visibility remain
+/// unchanged, and no segment is appended outside its declaring module.
+pub fn monolithic_source(
+    bundle: &SourceBundle,
+    resolution: &ModuleResolution,
+) -> Result<String, String> {
+    fn segment<'a>(
+        bundle: &'a SourceBundle,
+        id: SegmentId,
+    ) -> Result<&'a crate::source_bundle::Segment, String> {
+        bundle
+            .segments()
+            .iter()
+            .find(|segment| segment.id() == Some(id))
+            .ok_or_else(|| format!("module graph references missing source segment {id:?}"))
+    }
+
+    fn render_module(
+        bundle: &SourceBundle,
+        resolution: &ModuleResolution,
+        module: ModuleId,
+        active: &mut BTreeSet<ModuleId>,
+    ) -> Result<String, String> {
+        if !active.insert(module) {
+            return Err(format!("external module cycle reaches module {module:?}"));
+        }
+        let info = resolution.module(module);
+        let segment_id = info
+            .segment
+            .ok_or_else(|| format!("external module {module:?} has no source segment"))?;
+        let owner = segment(bundle, segment_id)?;
+        let range = owner.global_range();
+        let mut replacements = resolution
+            .modules
+            .iter()
+            .filter_map(|child| {
+                let declaration = child.declaration?;
+                let child_segment = child.segment?;
+                (child_segment != segment_id
+                    && declaration.start >= range.start
+                    && declaration.end <= range.end)
+                    .then_some((declaration, child.id))
+            })
+            .collect::<Vec<_>>();
+        replacements.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+
+        let mut source = owner.source().to_owned();
+        for (declaration, child) in replacements {
+            let local_start = declaration.start - range.start;
+            let local_end = declaration.end - range.start;
+            if local_start > local_end || local_end > source.len() {
+                return Err(format!(
+                    "module declaration {:?} does not belong to segment {}",
+                    declaration,
+                    owner.name()
+                ));
+            }
+            let child_info = resolution.module(child);
+            let body = render_module(bundle, resolution, child, active)?;
+            // Module spans begin at `mod`; a preceding `pub` remains in the
+            // parent segment and must not be duplicated here.
+            let replacement = format!("mod {} {{\n{body}\n}}", child_info.name);
+            source.replace_range(local_start..local_end, &replacement);
+        }
+        active.remove(&module);
+        Ok(source)
+    }
+
+    let mut output = String::new();
+    if let Some(standard) = bundle.trusted_standard_segment_id() {
+        output.push_str(segment(bundle, standard)?.source());
+        output.push('\n');
+    }
+    let mut active = BTreeSet::new();
+    output.push_str(&render_module(
+        bundle,
+        resolution,
+        ModuleId(0),
+        &mut active,
+    )?);
+    for package in resolution
+        .modules
+        .iter()
+        .filter(|module| module.parent.is_none() && module.id != ModuleId(0))
+    {
+        output.push('\n');
+        output.push_str("pub mod ");
+        output.push_str(&package.name);
+        output.push_str(" {\n");
+        output.push_str(&render_module(bundle, resolution, package.id, &mut active)?);
+        output.push_str("\n}");
+    }
+    Ok(output)
+}
+
 #[derive(Clone, Debug)]
 pub struct ResolvedProgram {
     pub program: Program,
@@ -410,6 +508,15 @@ struct AstRewriter<'a> {
 }
 
 impl AstRewriter<'_> {
+    fn span_is_exact_path(path: &[String], span: Span) -> bool {
+        let lexical_len = path
+            .iter()
+            .map(String::len)
+            .sum::<usize>()
+            .saturating_add(path.len().saturating_sub(1).saturating_mul(2));
+        span.end.saturating_sub(span.start) == lexical_len
+    }
+
     fn definition(&mut self, namespace: Namespace, path: &[String], span: Span) -> Option<DefId> {
         resolve_definition(
             self.resolution,
@@ -430,9 +537,15 @@ impl AstRewriter<'_> {
     ) -> Option<String> {
         let definition = self.definition(namespace, path, span)?;
         let spelling = self.resolution.backend_spelling(&definition);
-        self.resolution
-            .resolved_paths
-            .insert((span.start, span.end), definition);
+        // Surface normalization synthesizes variables and variant patterns
+        // whose semantic span deliberately covers an enclosing arm or
+        // handler. Those nodes still need name resolution, but they are not
+        // source path occurrences and must not pollute the occurrence table.
+        if Self::span_is_exact_path(path, span) {
+            self.resolution
+                .resolved_paths
+                .insert((span.start, span.end), definition);
+        }
         Some(spelling)
     }
 
@@ -534,7 +647,13 @@ impl AstRewriter<'_> {
         }
         let (member, owner) = path.split_last()?;
         for namespace in [Namespace::Type, Namespace::Trait] {
-            if let Some(spelling) = self.resolved_spelling(namespace, owner, span) {
+            if let Some(definition) = self.definition(namespace, owner, span) {
+                let spelling = self.resolution.backend_spelling(&definition);
+                if Self::span_is_exact_path(path, span) {
+                    self.resolution
+                        .resolved_paths
+                        .insert((span.start, span.end), definition);
+                }
                 return Some(vec![spelling, member.clone()]);
             }
         }
@@ -1180,6 +1299,17 @@ fn rewrite_program_ast(
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
         rewrite.rewrite_type(&mut declaration.target_type);
+        let target = declaration.target_type.simple_name().or_else(|| {
+            let crate::ast::TypeSyntaxKind::Application { constructor, .. } =
+                &declaration.target_type.kind
+            else {
+                return None;
+            };
+            constructor.simple_name()
+        });
+        if let Some(target) = target {
+            declaration.target = target.to_owned();
+        }
         rewrite.rewrite_where_clause(declaration.where_clause.as_mut());
         rewrite.rewrite_expression(&mut declaration.body, &BTreeSet::from(["self".to_string()]));
     }

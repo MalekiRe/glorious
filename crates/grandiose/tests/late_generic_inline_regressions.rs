@@ -53,6 +53,109 @@ fn canonical_function_section<'a>(text: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
+fn user_named_label_control_helper_forms_a_cached_structural_loop() {
+    let source = r#"
+        custom_walk<L, F>(
+            index: usize,
+            limit: usize,
+            exit: L,
+            body: F
+        )
+        where L: Label<usize>,
+        F: Fn<(usize, L), Output = ()> {
+            handle index == limit {
+                true => (),
+                false => {
+                    body(index, exit);
+                    custom_walk(index + 1, limit, exit, body)
+                }
+            }
+        }
+
+        answer() -> usize {
+            @done: usize {
+                custom_walk(0, 4, @done, { index, done =>
+                    if(index == 2) { done(7) } else { () }
+                });
+                90
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    let phases = compile_source_to_phases("user-control-summary.glorious", source).unwrap();
+    let answer = phases
+        .core
+        .functions
+        .iter()
+        .find(|function| function.name == "answer")
+        .unwrap();
+    let core = format!("{:#?}", answer.body);
+    assert_eq!(
+        core.match_indices("kind: ControlLoop {").count(),
+        1,
+        "a structurally valid user helper should form exactly one control loop"
+    );
+    assert!(
+        core.contains("kind: Leave {"),
+        "the callback's branded exit should become a direct Core leave"
+    );
+    assert!(
+        phases
+            .artifact
+            .functions
+            .iter()
+            .all(|function| !function.name.starts_with("custom_walk")),
+        "the static control helper must not survive as a runtime callable"
+    );
+    let function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact).unwrap())
+            .run(function, vec![])
+            .unwrap(),
+        Value::U64(7)
+    );
+}
+
+#[test]
+fn function_label_resolves_lexically_named_ground_generic_payload() {
+    let source = r#"
+        enum Failure { Rejected }
+        enum Attempt<T, E> { NoMatch, Parsed(T), Diagnostic(E) }
+
+        concrete_miss() -> Attempt<(), Failure> { Attempt::NoMatch }
+
+        leave_miss<L>(destination: L) -> !
+        where L: Label<Attempt<(), Failure>> {
+            destination(concrete_miss())
+        }
+
+        probe() -> Attempt<(), Failure> { leave_miss(@probe) }
+
+        answer() -> i64 {
+            handle probe() {
+                Attempt::NoMatch => 7,
+                Attempt::Parsed(_) => 8,
+                Attempt::Diagnostic(_) => 9
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("ground-generic-label-payload.glorious", source, "answer"),
+        Value::I64(7)
+    );
+}
+
+#[test]
 fn static_control_closure_preserves_colliding_mutable_capture() {
     let source = r#"
         values() -> Vec<usize> {
@@ -1233,6 +1336,36 @@ fn pure_literal_range_callbacks_fuse_but_ordinary_generic_callbacks_do_not() {
             );
         }
     }
+}
+
+#[test]
+fn control_inlined_callback_preserves_manifest_primitive_calls() {
+    let source = r#"
+        empty_usizes() -> Vec<usize> { Vec::new() }
+
+        collected_length() -> usize {
+            let values = fold_range(
+                Range::new(0, 4),
+                empty_usizes(),
+                { values, index => {
+                    Vec::push(&mut values, index);
+                    move values
+                } }
+            );
+            Vec::len(&values)
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run(
+            "control-inline-manifest-leaf.glorious",
+            source,
+            "collected_length"
+        ),
+        Value::U64(4)
+    );
 }
 
 #[test]

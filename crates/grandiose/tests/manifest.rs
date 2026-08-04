@@ -227,6 +227,7 @@ fn external_open_trait_for_local_generic_nominals_gates_all_consumers_determinis
     let manifest = manifest_with([foreign.clone(), unused.clone()]);
     let manifest_reordered = manifest_with([unused, foreign]);
     let source = r#"
+        infixl 40 /;
         trait Marker {}
         struct Wrap<T>{value:T}
         struct Ticket<T>{marker:i64}
@@ -237,7 +238,7 @@ fn external_open_trait_for_local_generic_nominals_gates_all_consumers_determinis
             where Wrap<T>:Foreign<T,Item=T> {}
         impl<T> Drop for Bomb<T>
             where Wrap<T>:Foreign<T,Item=T> {
-            drop(&mut self)->{self.value;1/0;()}
+            drop(&mut self)->{self.value;1 / 0;()}
         }
         pass<T>(value:T)->T where Wrap<T>:Foreign<T,Item=T>{value}
         answer(value:i64)->i64{pass(value)}
@@ -250,6 +251,7 @@ fn external_open_trait_for_local_generic_nominals_gates_all_consumers_determinis
         main()->{let bomb=make_bomb();()}
     "#;
     let reordered = r#"
+        infixl 40 /;
         main()->{let bomb=make_bomb();()}
         make_bomb()->Bomb<i64>{Bomb{value:1}}
         bomb_no(value:Bomb<Text>)->Bomb<Text>{value}
@@ -259,7 +261,7 @@ fn external_open_trait_for_local_generic_nominals_gates_all_consumers_determinis
         projected(value:<Wrap<i64> as Foreign<i64>>::Item)->i64{value}
         answer(value:i64)->i64{pass(value)}
         pass<T>(value:T)->T where Wrap<T>:Foreign<T,Item=T>{value}
-        impl<T> Drop for Bomb<T> where Wrap<T>:Foreign<T,Item=T>{drop(&mut self)->{self.value;1/0;()}}
+        impl<T> Drop for Bomb<T> where Wrap<T>:Foreign<T,Item=T>{drop(&mut self)->{self.value;1 / 0;()}}
         impl<T> Use<[0,1]> for Ticket<T> where Wrap<T>:Foreign<T,Item=T>{}
         impl<T> Foreign<T> for Wrap<T> where T:Marker{type Item=T;}
         impl Marker for i64{}

@@ -574,7 +574,8 @@ fn infer_array_call_summary(
                     symbols[*dst as usize] = symbols[src.register as usize].clone();
                 }
                 InstructionKind::Borrow { dst, src, .. }
-                | InstructionKind::Reborrow { dst, src, .. } => {
+                | InstructionKind::Reborrow { dst, src, .. }
+                | InstructionKind::DerefReborrow { dst, src, .. } => {
                     symbols[*dst as usize] = symbols[*src as usize].clone();
                 }
                 InstructionKind::Primitive {
@@ -2337,7 +2338,38 @@ impl Interpreter<'_> {
     fn consume(&mut self, register: Register, action: &str) -> Result<(), FlowError> {
         self.expect_live(register, action)?;
         if let Some(loan) = self.state.loans.remove(&register) {
-            self.unsuspend(loan.parent);
+            let children = self
+                .state
+                .loans
+                .iter()
+                .filter_map(|(child, loan)| (loan.parent == Some(register)).then_some(*child))
+                .collect::<Vec<_>>();
+            let replacement_alias = self.state.loans.iter().find_map(|(reference, candidate)| {
+                (candidate.id == loan.id
+                    && candidate.unique == loan.unique
+                    && candidate.external == loan.external
+                    && candidate.borrowed == loan.borrowed
+                    && candidate.parent == loan.parent)
+                    .then_some(*reference)
+            });
+            let replacement_parent = replacement_alias.or(loan.parent);
+            // Consuming a reference handle is not the same operation as
+            // ending the loan represented by every descendant. `EndBorrow`
+            // validates that distinction before reaching `consume`; an
+            // explicit `Drop` can instead retire an intermediate proof
+            // handle while a reborrow continues. Prefer another live handle
+            // for the identical loan (a copied shared reference), otherwise
+            // splice each child to the retired handle's parent. The authority
+            // chain then contains no dead register, and the replacement
+            // receives the exact suspension count.
+            for child in &children {
+                self.state
+                    .loans
+                    .get_mut(child)
+                    .expect("a collected reborrow child remains live")
+                    .parent = replacement_parent;
+            }
+            self.recompute_loan_suspensions();
             self.state.holes.remove(&register);
         }
         self.check_not_borrowed(register, action)?;
@@ -2361,11 +2393,23 @@ impl Interpreter<'_> {
         Ok(())
     }
 
-    fn unsuspend(&mut self, parent: Option<Register>) {
-        if let Some(parent) = parent
-            && let Some(loan) = self.state.loans.get_mut(&parent)
-        {
-            loan.suspended = loan.suspended.saturating_sub(1);
+    fn recompute_loan_suspensions(&mut self) {
+        let parents = self
+            .state
+            .loans
+            .values()
+            .filter_map(|loan| loan.parent)
+            .collect::<Vec<_>>();
+        for loan in self.state.loans.values_mut() {
+            loan.suspended = 0;
+        }
+        for parent in parents {
+            if let Some(loan) = self.state.loans.get_mut(&parent) {
+                loan.suspended = loan
+                    .suspended
+                    .checked_add(1)
+                    .expect("live reborrow suspension count overflowed");
+            }
         }
     }
 
@@ -2478,30 +2522,24 @@ impl Interpreter<'_> {
                 }
                 let ty = self.context.register_type(src.register);
                 if self.context.is_reference(ty) {
-                    let loan = self
-                        .state
-                        .loans
-                        .get(&src.register)
-                        .cloned()
-                        .unwrap_or(LiveLoan {
-                            id: u32::MAX,
-                            unique: self.context.is_unique_reference(ty),
-                            external: true,
-                            borrowed: Place::local(src.register),
-                            parent: None,
-                            suspended: 0,
-                        });
-                    self.state.loans.insert(
-                        *dst,
-                        LiveLoan {
-                            id: u32::MAX,
-                            borrowed: loan.borrowed,
-                            parent: loan.parent,
-                            unique: loan.unique,
-                            external: loan.external,
-                            suspended: 0,
-                        },
-                    );
+                    let mut loan =
+                        self.state
+                            .loans
+                            .get(&src.register)
+                            .cloned()
+                            .unwrap_or(LiveLoan {
+                                id: u32::MAX,
+                                unique: self.context.is_unique_reference(ty),
+                                external: true,
+                                borrowed: Place::local(src.register),
+                                parent: None,
+                                suspended: 0,
+                            });
+                    // A copied handle aliases the same loan but has no child
+                    // edges of its own. Suspension is derived from exact
+                    // `parent` links, not copied as value payload.
+                    loan.suspended = 0;
+                    self.state.loans.insert(*dst, loan);
                 }
                 Ok(())
             }
@@ -2568,33 +2606,53 @@ impl Interpreter<'_> {
                 } else if !self.context.strict {
                     self.state.order.push(*dst);
                 }
-                if let Some(mut loan) = self.state.loans.remove(&src.register) {
-                    let rebases_opaque_external_root = loan.external
-                        && loan.id == u32::MAX
-                        && loan.parent.is_none()
-                        && loan.borrowed == Place::local(src.register);
-                    if rebases_opaque_external_root {
-                        // Opaque caller-provided references use their current
-                        // SSA register as a symbolic place. A Move is a pure
-                        // rename, so keep that placeholder canonical instead
-                        // of leaking an edge-transfer temporary into child
-                        // reborrows observed on the next dataflow iteration.
-                        loan.borrowed = Place::local(*dst);
-                    }
+                let rebases_opaque_external_root =
+                    self.state.loans.get(&src.register).is_some_and(|loan| {
+                        loan.external
+                            && loan.id == u32::MAX
+                            && loan.parent.is_none()
+                            && loan.borrowed == Place::local(src.register)
+                    });
+                if let Some(loan) = self.state.loans.remove(&src.register) {
                     self.state.loans.insert(*dst, loan);
-                    // Move is a pure SSA rename for a reference loan. Any
-                    // simultaneously live reborrow must follow that rename so
-                    // its eventual retirement unsuspends the transferred
-                    // parent rather than the now-consumed source register.
-                    for child in self.state.loans.values_mut() {
-                        if child.parent == Some(src.register) {
-                            child.parent = Some(*dst);
+                }
+                // Move is a pure SSA rename, both for a reference handle and
+                // for an owner that is the base of other live loans. Rebase
+                // every dependent place and parent link. Restricting this to
+                // the moved register's own loan loses the owner relationship
+                // across edge-parameter relocation and can permit cleanup to
+                // destroy the renamed owner before an older alias is ended.
+                for loan in self.state.loans.values_mut() {
+                    if loan.parent == Some(src.register) {
+                        loan.parent = Some(*dst);
+                    }
+                    if loan.borrowed.base == src.register
+                        && (!loan.external || rebases_opaque_external_root)
+                    {
+                        loan.borrowed.base = *dst;
+                    }
+                }
+                for origins in self.state.aggregate_reference_origins.values_mut() {
+                    for origin in origins.values_mut() {
+                        if origin.parent == Some(src.register) {
+                            origin.parent = Some(*dst);
                         }
-                        if rebases_opaque_external_root
-                            && child.external
-                            && child.borrowed.base == src.register
+                        if origin.borrowed.base == src.register
+                            && (!origin.external || rebases_opaque_external_root)
                         {
-                            child.borrowed.base = *dst;
+                            origin.borrowed.base = *dst;
+                        }
+                    }
+                }
+                for slots in self.state.array_slots.values_mut() {
+                    for origin in slots.reference_origins.values_mut() {
+                        if origin.parent == Some(src.register) {
+                            origin.parent = Some(*dst);
+                        }
+                        if origin.borrowed.base == src.register
+                            && (!origin.external || rebases_opaque_external_root)
+                        {
+                            origin.borrowed.base = *dst;
                         }
                     }
                 }
@@ -2722,6 +2780,42 @@ impl Interpreter<'_> {
                 );
                 Ok(())
             }
+            InstructionKind::DerefReborrow { dst, src, unique } => {
+                let Some(parent) = self.state.loans.get(src).cloned() else {
+                    return Err(self.error(format!(
+                        "DerefReborrow reads through r{src}, which holds no live loan"
+                    )));
+                };
+                if self.state.holes.contains(src) || parent.suspended > 0 {
+                    return Err(self.error(format!(
+                        "DerefReborrow reads through unavailable reference r{src}"
+                    )));
+                }
+                if *unique && !parent.unique {
+                    return Err(
+                        self.error(format!("DerefReborrow requires unique authority in r{src}"))
+                    );
+                }
+                let mut borrowed = parent.borrowed.clone();
+                borrowed.projection.push(Projection::Deref);
+                self.check_loan_conflict(&borrowed, *unique, Some(*src))?;
+                if let Some(loan) = self.state.loans.get_mut(src) {
+                    loan.suspended += 1;
+                }
+                self.define(*dst, "DerefReborrow")?;
+                self.state.loans.insert(
+                    *dst,
+                    LiveLoan {
+                        id: self.issued_loan_id(),
+                        unique: *unique,
+                        external: parent.external,
+                        borrowed,
+                        parent: Some(*src),
+                        suspended: 0,
+                    },
+                );
+                Ok(())
+            }
             InstructionKind::DerefCopy { dst, src } => {
                 self.expect_live(*src, "DerefCopy")?;
                 if self.state.holes.contains(src) {
@@ -2808,9 +2902,35 @@ impl Interpreter<'_> {
                     });
                 };
                 if loan.suspended > 0 {
-                    return Err(self.error(format!(
-                        "EndBorrow ends r{reference} while a reborrow of it is still live"
-                    )));
+                    if loan.external && !loan.unique {
+                        // Shared reborrows of a caller-owned place do not
+                        // require the intermediate proof handle to remain
+                        // live. Cleanup may retire that handle at a control
+                        // frontier while a child continues; detach each child
+                        // to the exact external place. Unique and local loans
+                        // remain strict because their parent carries exclusive
+                        // or storage-lifetime authority.
+                        for child in self.state.loans.values_mut() {
+                            if child.parent == Some(*reference) {
+                                child.parent = None;
+                            }
+                        }
+                        if let Some(parent) = self.state.loans.get_mut(reference) {
+                            parent.suspended = 0;
+                        }
+                    } else {
+                        let children = self
+                            .state
+                            .loans
+                            .iter()
+                            .filter_map(|(child, loan)| {
+                                (loan.parent == Some(*reference)).then_some(*child)
+                            })
+                            .collect::<Vec<_>>();
+                        return Err(self.error(format!(
+                            "EndBorrow ends r{reference} while live reborrows {children:?} still depend on it"
+                        )));
+                    }
                 }
                 if self.state.holes.contains(reference) {
                     return Err(self.error(format!(
@@ -3271,19 +3391,26 @@ impl Interpreter<'_> {
             }
             InstructionKind::Drop { owner } => {
                 let register = owner.register;
-                if matches!(self.state.regs[register as usize], RegState::MaybeLive) {
+                if matches!(
+                    self.state.regs[register as usize],
+                    RegState::MaybeLive | RegState::Consumed
+                ) && self.context.has_drop_flag(register)
+                {
                     // Conditional destruction through the governing drop
-                    // flag; at runtime the VM Empty state skips the owner.
+                    // flag; at runtime the VM Empty state skips an owner
+                    // which was already consumed on this predecessor.
+                    self.state.regs[register as usize] = RegState::Consumed;
+                    self.state.quantity_groups[register as usize] = None;
+                    self.state.order.retain(|live| *live != register);
+                    return Ok(());
+                }
+                if matches!(self.state.regs[register as usize], RegState::MaybeLive) {
                     if !self.context.has_drop_flag(register) {
                         return Err(self.error(format!(
                             "Drop reads r{register}, which is only conditionally \
                              initialized and has no governing drop flag"
                         )));
                     }
-                    self.state.regs[register as usize] = RegState::Consumed;
-                    self.state.quantity_groups[register as usize] = None;
-                    self.state.order.retain(|live| *live != register);
-                    return Ok(());
                 }
                 self.expect_live(register, "Drop")?;
                 if self.state.loans.contains_key(&register)
@@ -3510,13 +3637,24 @@ pub(crate) fn solve(context: &FlowContext<'_>) -> Result<FlowSolution, FlowError
     let mut cleanup_lists: BTreeMap<u32, Vec<Vec<Register>>> = BTreeMap::new();
     entries.insert(context.function.entry, context.entry_state());
     let mut work = VecDeque::from([context.function.entry]);
+    // A valid acyclic fan-in can revisit its join once per predecessor. Keep
+    // the cycle guard proportional to both the CFG and the ownership lattice
+    // instead of rejecting large matches at an unrelated fixed threshold.
+    // Widening still starts on the second visit, so genuinely unstable cycles
+    // converge well before this conservative structural bound.
+    let visit_limit = context
+        .function
+        .blocks
+        .len()
+        .saturating_add(context.locals.len())
+        .saturating_add(64);
     while let Some(id) = work.pop_front() {
         let visit_count = {
             let counter = visits.entry(id).or_insert(0);
             *counter += 1;
             *counter
         };
-        if visit_count > 64 {
+        if usize::try_from(visit_count).unwrap_or(usize::MAX) > visit_limit {
             return Err(flow_error(
                 id,
                 "ownership dataflow failed to stabilize; widening limit exceeded",
@@ -3661,6 +3799,7 @@ fn apply_edge(
                         .aggregate_reference_origins
                         .get(&argument.register)
                         .cloned();
+                    let reference_loan = interpreter.state.loans.get(&argument.register).cloned();
                     interpreter.operand(argument, "edge argument")?;
                     interpreter.state.regs[temporary as usize] = RegState::Live;
                     interpreter.state.order.push(temporary);
@@ -3687,17 +3826,19 @@ fn apply_edge(
                         );
                     }
                     if interpreter.context.is_reference(ty) {
-                        interpreter.state.loans.insert(
-                            temporary,
-                            LiveLoan {
-                                id: u32::MAX,
-                                unique: interpreter.context.is_unique_reference(ty),
-                                external: true,
-                                borrowed: Place::local(temporary),
-                                parent: None,
-                                suspended: 0,
-                            },
-                        );
+                        let mut loan = reference_loan.unwrap_or(LiveLoan {
+                            id: u32::MAX,
+                            unique: interpreter.context.is_unique_reference(ty),
+                            external: true,
+                            borrowed: Place::local(temporary),
+                            parent: None,
+                            suspended: 0,
+                        });
+                        // The edge snapshot is a new reference handle. Child
+                        // edges still name the original handle and therefore
+                        // do not suspend this copied temporary.
+                        loan.suspended = 0;
+                        interpreter.state.loans.insert(temporary, loan);
                     }
                 }
             }
@@ -3712,6 +3853,48 @@ fn apply_edge(
             },
         })?;
     }
+
+    // Edge arguments are transferred in parallel. A child reference can
+    // retain a parent operand's predecessor register when that parent crossed
+    // the same edge by Copy: moving the copied temporary into its block
+    // parameter cannot discover children that still name the original. In
+    // the target block, canonicalize every such parent edge to the first
+    // corresponding parameter and derive suspension counts from the result.
+    let transported_parents = edge.args.iter().zip(params.iter().skip(skip)).fold(
+        BTreeMap::new(),
+        |mut transported, (argument, parameter)| {
+            transported
+                .entry(argument.register)
+                .or_insert(parameter.register);
+            transported
+        },
+    );
+    for loan in interpreter.state.loans.values_mut() {
+        if let Some(parent) = loan.parent
+            && let Some(destination) = transported_parents.get(&parent)
+        {
+            loan.parent = Some(*destination);
+        }
+    }
+    for origins in interpreter.state.aggregate_reference_origins.values_mut() {
+        for origin in origins.values_mut() {
+            if let Some(parent) = origin.parent
+                && let Some(destination) = transported_parents.get(&parent)
+            {
+                origin.parent = Some(*destination);
+            }
+        }
+    }
+    for slots in interpreter.state.array_slots.values_mut() {
+        for origin in slots.reference_origins.values_mut() {
+            if let Some(parent) = origin.parent
+                && let Some(destination) = transported_parents.get(&parent)
+            {
+                origin.parent = Some(*destination);
+            }
+        }
+    }
+    interpreter.recompute_loan_suspensions();
 
     let temporary_end = interpreter.state.regs.len();
     debug_assert!(
@@ -3852,8 +4035,49 @@ fn terminator_transfer(
             result,
             args,
             normal,
+        } => {
+            for argument in args {
+                interpreter.operand(argument, "Call argument")?;
+            }
+            // A unique recursive receiver aliases the same capture
+            // environment in the parent and child activation. Every normal
+            // child return has discharged fields whose types require at
+            // least one use, so those fields are definitely absent from the
+            // parent's environment as well.
+            if context.function.receiver_mode == Some(1)
+                && let Some(fields) = context.aggregate_fields(context.register_type(0), None)
+            {
+                for (field, ty) in fields.iter().copied().enumerate() {
+                    if context.type_admits_zero_use(ty) {
+                        continue;
+                    }
+                    interpreter.field_access(0, field as u32, "CallSelf receiver")?;
+                }
+                let bitmap = match &mut interpreter.state.regs[0] {
+                    RegState::Partial(bitmap) => bitmap,
+                    slot @ RegState::Live => {
+                        *slot = RegState::Partial(vec![true; fields.len()]);
+                        let RegState::Partial(bitmap) = slot else {
+                            unreachable!()
+                        };
+                        bitmap
+                    }
+                    RegState::Undefined | RegState::MaybeLive | RegState::Consumed => {
+                        return Err(interpreter.error(
+                            "CallSelf uses a unique receiver which is not fully available",
+                        ));
+                    }
+                };
+                for (field, ty) in fields.into_iter().enumerate() {
+                    if !context.type_admits_zero_use(ty) {
+                        bitmap[field] = false;
+                    }
+                }
+            }
+            let state = apply_edge(interpreter, normal, params_of(normal.target), *result)?;
+            successors.push((normal.target, state));
         }
-        | Terminator::HostCall {
+        Terminator::HostCall {
             result,
             args,
             normal,
@@ -4595,6 +4819,7 @@ fn join_states(
             && matches!(
                 context.locals[register as usize].ownership,
                 OwnershipCategory::SharedRef
+                    | OwnershipCategory::UniqueRef
                     | OwnershipCategory::CopyValue
                     | OwnershipCategory::ZstErased
             )
@@ -4613,6 +4838,7 @@ fn join_states(
             let ownership_is_unrestricted = matches!(
                 ownership,
                 OwnershipCategory::SharedRef
+                    | OwnershipCategory::UniqueRef
                     | OwnershipCategory::CopyValue
                     | OwnershipCategory::ZstErased
             );
@@ -4636,10 +4862,12 @@ fn join_states(
             }
         }
         joined.regs[register as usize] = if discard_conditional_value {
-            // An unrestricted SSA temporary which exists on only one
-            // predecessor cannot be observed after the join. End it (and any
-            // reference loan) at the edge; a later use is correctly rejected
-            // as use-after-consume, while no runtime presence flag is needed.
+            // A proof/reference handle or unrestricted SSA temporary which
+            // exists on only one predecessor cannot be observed after the
+            // join. End it (and any reference loan) at the edge; a later use
+            // is correctly rejected as use-after-consume, while no runtime
+            // presence flag is needed. A unique reference is not copyable,
+            // but conditionally retiring its single handle is still sound.
             RegState::Consumed
         } else {
             match (&left, &right) {
@@ -4662,7 +4890,8 @@ fn join_states(
     }
     if joined.order != incoming.order {
         let order_is_observable = |register: &&Register| {
-            !matches!(joined.regs[**register as usize], RegState::MaybeLive)
+            joined.regs[**register as usize].is_live()
+                && !matches!(joined.regs[**register as usize], RegState::MaybeLive)
                 && !matches!(
                     context.locals[**register as usize].ownership,
                     OwnershipCategory::SharedRef
@@ -4670,15 +4899,83 @@ fn join_states(
                         | OwnershipCategory::ZstErased
                 )
         };
-        let strict_conflict = joined
+        let joined_observable = joined
             .order
             .iter()
             .filter(order_is_observable)
-            .ne(incoming.order.iter().filter(order_is_observable));
+            .copied()
+            .collect::<Vec<_>>();
+        let incoming_observable = incoming
+            .order
+            .iter()
+            .filter(order_is_observable)
+            .copied()
+            .collect::<Vec<_>>();
+        let independent_unique_cleanup = |left: Register, right: Register| {
+            let left_unique = matches!(
+                context.locals[left as usize].ownership,
+                OwnershipCategory::UniqueRef
+            );
+            let right_unique = matches!(
+                context.locals[right as usize].ownership,
+                OwnershipCategory::UniqueRef
+            );
+            if !left_unique && !right_unique {
+                return false;
+            }
+            [&joined, incoming]
+                .into_iter()
+                .all(|state| match (left_unique, right_unique) {
+                    (true, true) => state
+                        .loans
+                        .get(&left)
+                        .zip(state.loans.get(&right))
+                        .is_some_and(|(left, right)| left.borrowed.disjoint(&right.borrowed)),
+                    (true, false) => state
+                        .loans
+                        .get(&left)
+                        .is_some_and(|loan| loan.borrowed.disjoint(&Place::local(right))),
+                    (false, true) => state
+                        .loans
+                        .get(&right)
+                        .is_some_and(|loan| loan.borrowed.disjoint(&Place::local(left))),
+                    (false, false) => false,
+                })
+        };
+        let same_owners = joined_observable.iter().copied().collect::<BTreeSet<_>>()
+            == incoming_observable.iter().copied().collect::<BTreeSet<_>>();
+        let incoming_positions = incoming_observable
+            .iter()
+            .enumerate()
+            .map(|(position, register)| (*register, position))
+            .collect::<BTreeMap<_, _>>();
+        let incompatible_inversion = joined_observable.iter().enumerate().any(|(index, left)| {
+            joined_observable[index + 1..].iter().any(|right| {
+                incoming_positions.get(left) > incoming_positions.get(right)
+                    && !independent_unique_cleanup(*left, *right)
+            })
+        });
+        let strict_conflict = !same_owners || incompatible_inversion;
         if context.strict && strict_conflict {
             return Err(flow_error(
                 block,
-                "block join has conflicting owner cleanup orders",
+                format!(
+                    "block join has conflicting owner cleanup orders ({joined_observable:?} vs {incoming_observable:?}); joined loans={:?}, incoming loans={:?}",
+                    joined_observable
+                        .iter()
+                        .filter_map(|register| joined
+                            .loans
+                            .get(register)
+                            .map(|loan| (*register, loan)))
+                        .collect::<Vec<_>>(),
+                    incoming_observable
+                        .iter()
+                        .filter_map(|register| incoming
+                            .loans
+                            .get(register)
+                            .map(|loan| (*register, loan)))
+                        .collect::<Vec<_>>(),
+                ),
             ));
         }
         for register in &incoming.order {
@@ -4724,7 +5021,38 @@ fn join_states(
             }
         }
     };
+    let flatten_external_shared_parents = |loans: &mut BTreeMap<Register, LiveLoan>| {
+        for loan in loans.values_mut() {
+            if loan.external && !loan.unique {
+                // A shared loan of a caller-owned place is authorized by its
+                // exact `borrowed` place, not by the lifetime of an
+                // intermediate proof handle. Loop edges can legitimately
+                // copy, collapse, or rebuild that handle chain. Canonicalize
+                // the non-observable topology at joins; unique and local
+                // loans retain their exact parent structure.
+                loan.parent = None;
+            }
+        }
+    };
+    let flatten_orphaned_external_parents = |loans: &mut BTreeMap<Register, LiveLoan>| {
+        let live_references = loans.keys().copied().collect::<BTreeSet<_>>();
+        for loan in loans.values_mut() {
+            if loan.external
+                && loan
+                    .parent
+                    .is_some_and(|parent| !live_references.contains(&parent))
+            {
+                // Edge transport can collapse an intermediate proof handle
+                // while retaining its external descendant as the new unique
+                // authority for the same caller-owned place. The absent
+                // parent cannot remain suspended or constrain later cleanup.
+                loan.parent = None;
+            }
+        }
+    };
     retain_live_loans(&mut joined.loans, &joined_live);
+    flatten_external_shared_parents(&mut joined.loans);
+    flatten_orphaned_external_parents(&mut joined.loans);
     recompute_suspensions(&mut joined.loans);
     for (reference, loan) in &mut joined.loans {
         if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
@@ -4741,10 +5069,83 @@ fn join_states(
         .collect::<Vec<_>>();
     let mut incoming_loans = incoming.loans.clone();
     retain_live_loans(&mut incoming_loans, &incoming_live);
+    flatten_external_shared_parents(&mut incoming_loans);
+    flatten_orphaned_external_parents(&mut incoming_loans);
     recompute_suspensions(&mut incoming_loans);
     for (reference, loan) in &mut incoming_loans {
         if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
             loan.borrowed = Place::local(*reference);
+        }
+    }
+    let joined_opaque_roots = joined
+        .loans
+        .iter()
+        .filter_map(|(reference, loan)| {
+            (loan.external
+                && loan.id == u32::MAX
+                && loan.parent.is_none()
+                && loan.borrowed == Place::local(*reference))
+            .then_some(*reference)
+        })
+        .collect::<BTreeSet<_>>();
+    let incoming_opaque_roots = incoming_loans
+        .iter()
+        .filter_map(|(reference, loan)| {
+            (loan.external
+                && loan.id == u32::MAX
+                && loan.parent.is_none()
+                && loan.borrowed == Place::local(*reference))
+            .then_some(*reference)
+        })
+        .collect::<BTreeSet<_>>();
+    for (reference, joined_loan) in &mut joined.loans {
+        let Some(incoming_loan) = incoming_loans.get_mut(reference) else {
+            continue;
+        };
+        let joined_opaque = joined_loan.external
+            && (joined_opaque_roots.contains(reference)
+                || joined_opaque_roots.contains(&joined_loan.borrowed.base));
+        let incoming_opaque = incoming_loan.external
+            && (incoming_opaque_roots.contains(reference)
+                || incoming_opaque_roots.contains(&incoming_loan.borrowed.base));
+        if joined_loan.external
+            && incoming_loan.external
+            && joined_loan.unique == incoming_loan.unique
+            && joined_loan.suspended == 0
+            && incoming_loan.suspended == 0
+            && (joined_opaque || incoming_opaque)
+        {
+            // Opaque external provenance is the less precise abstract state.
+            // If one predecessor transported an exact caller-owned place and
+            // another crossed a control boundary that retained only the
+            // reference value, the join must widen both to opaque rather than
+            // rejecting two incarnations of the same phi reference.
+            let opaque = LiveLoan {
+                id: u32::MAX,
+                unique: joined_loan.unique,
+                external: true,
+                borrowed: Place::local(*reference),
+                parent: None,
+                suspended: 0,
+            };
+            *joined_loan = opaque.clone();
+            *incoming_loan = opaque;
+            continue;
+        }
+        if joined_loan.external
+            && incoming_loan.external
+            && joined_loan.unique == incoming_loan.unique
+            && joined_loan.borrowed == incoming_loan.borrowed
+            && joined_loan.parent == incoming_loan.parent
+            && joined_loan.suspended == incoming_loan.suspended
+        {
+            // Re-entering a fused loop can issue a fresh proof-only loan for
+            // the same external place on each iteration. At a join, the same
+            // reference register denotes mutually exclusive incarnations;
+            // canonicalize issuance only after every semantic field agrees.
+            let canonical = joined_loan.id.min(incoming_loan.id);
+            joined_loan.id = canonical;
+            incoming_loan.id = canonical;
         }
     }
     if joined.loans != incoming_loans {
@@ -5091,6 +5492,52 @@ mod ownership_engine_tests {
     }
 
     #[test]
+    fn ownership_dataflow_accepts_large_acyclic_fan_in() {
+        let types = Type::predefined();
+        let join_id = 102;
+        let cases = (0..100)
+            .map(|value| {
+                (
+                    grandiose_vm::Constant::U32(value),
+                    Edge {
+                        target: value + 1,
+                        args: vec![],
+                    },
+                )
+            })
+            .collect();
+        let mut blocks = vec![block(
+            0,
+            vec![],
+            Terminator::Switch {
+                discr: Operand {
+                    register: 1,
+                    mode: UseMode::Copy,
+                },
+                cases,
+                otherwise: Edge {
+                    target: 101,
+                    args: vec![],
+                },
+            },
+        )];
+        blocks.extend((1..=101).map(|id| {
+            block(
+                id,
+                vec![],
+                Terminator::Goto(Edge {
+                    target: join_id,
+                    args: vec![],
+                }),
+            )
+        }));
+        blocks.push(block(join_id, vec![], Terminator::Return { value: None }));
+        let function = exported_function(vec![UNIT, grandiose_vm::U32], 1, blocks, &types);
+
+        solve_function(&function, &types).expect("large acyclic fan-in must stabilize");
+    }
+
+    #[test]
     fn equal_cfg_projections_of_an_aggregate_parameter_share_one_symbolic_origin() {
         let (mut types, shared, _) = reference_types();
         let pair = types.len() as grandiose_vm::TypeId;
@@ -5340,6 +5787,50 @@ mod ownership_engine_tests {
 
         solve_function(&function, &types)
             .expect("a consuming use through a copied view discharges the shared quantity");
+    }
+
+    #[test]
+    fn reference_copies_across_loop_edges_preserve_the_source_loan() {
+        let mut types = Type::predefined();
+        let shared = types.len() as grandiose_vm::TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let function = exported_function(
+            vec![UNIT, shared, shared],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![Operand {
+                            register: 1,
+                            mode: UseMode::Copy,
+                        }],
+                    }),
+                ),
+                BasicBlock {
+                    id: 1,
+                    params: vec![BlockParam {
+                        register: 2,
+                        ty: shared,
+                        role: BlockParamRole::Ordinary,
+                    }],
+                    statements: vec![],
+                    terminator: Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![Operand {
+                            register: 2,
+                            mode: UseMode::Copy,
+                        }],
+                    }),
+                },
+            ],
+            &types,
+        );
+
+        solve_function(&function, &types)
+            .expect("a copied shared reference keeps one stable loan around a loop");
     }
 
     #[test]
@@ -7778,6 +8269,110 @@ mod ownership_engine_tests {
     }
 
     #[test]
+    fn dropping_a_reference_alias_transfers_live_reborrows_to_the_surviving_alias() {
+        let (types, shared, _) = reference_types();
+        let mut join = block(
+            3,
+            vec![
+                statement(InstructionKind::EndBorrow { reference: 4 }),
+                statement(InstructionKind::EndBorrow { reference: 2 }),
+                statement(InstructionKind::Drop {
+                    owner: move_operand(1),
+                }),
+            ],
+            Terminator::Return { value: None },
+        );
+        join.params = vec![];
+        let function = exported_function(
+            vec![UNIT, I64, shared, shared, shared, grandiose_vm::U32, shared],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![
+                        statement(InstructionKind::Borrow {
+                            dst: 2,
+                            src: 1,
+                            unique: false,
+                        }),
+                        statement(InstructionKind::Copy {
+                            dst: 3,
+                            src: Operand {
+                                register: 2,
+                                mode: UseMode::Copy,
+                            },
+                        }),
+                        statement(InstructionKind::Reborrow {
+                            dst: 4,
+                            src: 3,
+                            unique: false,
+                        }),
+                        statement(InstructionKind::Const {
+                            dst: 5,
+                            value: grandiose_vm::Constant::U32(0),
+                        }),
+                    ],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 5,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(0),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    vec![statement(InstructionKind::Drop {
+                        owner: move_operand(3),
+                    })],
+                    Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![],
+                    }),
+                ),
+                block(
+                    2,
+                    vec![
+                        statement(InstructionKind::Move {
+                            dst: 6,
+                            src: move_operand(3),
+                        }),
+                        statement(InstructionKind::Drop {
+                            owner: move_operand(6),
+                        }),
+                    ],
+                    Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![],
+                    }),
+                ),
+                join,
+            ],
+            &types,
+        );
+
+        let solution = solve_function(&function, &types).expect(
+            "retiring a reference handle must preserve the surviving child's exact authority",
+        );
+        let joined = solution
+            .entries
+            .get(&3)
+            .expect("the common cleanup block has a solved entry state");
+        assert_eq!(joined.loans.get(&4).and_then(|loan| loan.parent), Some(2));
+        assert_eq!(joined.loans.get(&2).map(|loan| loan.suspended), Some(1));
+    }
+
+    #[test]
     fn array_borrow_primitive_transfers_source_loan_to_projected_result() {
         let mut types = Type::predefined();
         let array = types.len() as grandiose_vm::TypeId;
@@ -7936,6 +8531,74 @@ mod ownership_engine_tests {
     }
 
     #[test]
+    fn edge_copy_canonicalizes_a_transported_child_to_the_parent_parameter() {
+        let (types, shared, _) = reference_types();
+        let mut destination = block(
+            1,
+            vec![
+                statement(InstructionKind::EndBorrow { reference: 5 }),
+                statement(InstructionKind::EndBorrow { reference: 4 }),
+                statement(InstructionKind::EndBorrow { reference: 2 }),
+                statement(InstructionKind::Drop {
+                    owner: move_operand(1),
+                }),
+            ],
+            Terminator::Return { value: None },
+        );
+        destination.params = vec![
+            BlockParam {
+                register: 4,
+                ty: shared,
+                role: BlockParamRole::Ordinary,
+            },
+            BlockParam {
+                register: 5,
+                ty: shared,
+                role: BlockParamRole::Ordinary,
+            },
+        ];
+        let function = exported_function(
+            vec![UNIT, I64, shared, shared, shared, shared],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![
+                        statement(InstructionKind::Borrow {
+                            dst: 2,
+                            src: 1,
+                            unique: false,
+                        }),
+                        statement(InstructionKind::Reborrow {
+                            dst: 3,
+                            src: 2,
+                            unique: false,
+                        }),
+                    ],
+                    Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![
+                            Operand {
+                                register: 2,
+                                mode: UseMode::Copy,
+                            },
+                            move_operand(3),
+                        ],
+                    }),
+                ),
+                destination,
+            ],
+            &types,
+        );
+
+        let solution = solve_function(&function, &types)
+            .expect("parallel edge transfer must preserve the child loan");
+        let entry = solution.entries.get(&1).expect("the target is reachable");
+        assert_eq!(entry.loans.get(&5).and_then(|loan| loan.parent), Some(4));
+        assert_eq!(entry.loans.get(&4).map(|loan| loan.suspended), Some(1));
+    }
+
+    #[test]
     fn consuming_a_borrowed_owner_is_rejected_until_the_loan_ends() {
         let (types, _, unique) = reference_types();
         let function = exported_function(
@@ -7957,6 +8620,66 @@ mod ownership_engine_tests {
             )],
             &types,
         );
+        let error = solve_function(&function, &types).unwrap_err();
+        assert!(
+            error.message.contains("while the loan held by r2 is live"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn edge_owner_renames_rebase_retained_reference_aliases() {
+        let (types, shared, _) = reference_types();
+        let mut destination = block(
+            1,
+            vec![
+                statement(InstructionKind::EndBorrow { reference: 4 }),
+                statement(InstructionKind::Drop {
+                    owner: move_operand(3),
+                }),
+                statement(InstructionKind::EndBorrow { reference: 2 }),
+            ],
+            Terminator::Return { value: None },
+        );
+        destination.params = vec![
+            BlockParam {
+                register: 3,
+                ty: I64,
+                role: BlockParamRole::Ordinary,
+            },
+            BlockParam {
+                register: 4,
+                ty: shared,
+                role: BlockParamRole::Ordinary,
+            },
+        ];
+        let function = exported_function(
+            vec![UNIT, I64, shared, I64, shared],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![statement(InstructionKind::Borrow {
+                        dst: 2,
+                        src: 1,
+                        unique: false,
+                    })],
+                    Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![
+                            move_operand(1),
+                            Operand {
+                                register: 2,
+                                mode: UseMode::Copy,
+                            },
+                        ],
+                    }),
+                ),
+                destination,
+            ],
+            &types,
+        );
+
         let error = solve_function(&function, &types).unwrap_err();
         assert!(
             error.message.contains("while the loan held by r2 is live"),

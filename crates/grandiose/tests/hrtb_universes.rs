@@ -14,8 +14,8 @@ fn higher_ranked_type_and_lifetime_prerequisites_compile_with_rigid_evidence() {
         impl<T, 'a> Every<T, 'a> for Text {}
         impl Universal for Witness where for<T, 'a> Text: Every<T, 'a> {}
 
-        require<X>(value: X) -> X where X: Universal { value }
-        answer() -> Witness { require(Witness { marker: 42 }) }
+        require_universal<X>(value: X) -> X where X: Universal { value }
+        answer() -> Witness { require_universal(Witness { marker: 42 }) }
         main() -> () { () }
     "#;
     for optimization_level in [
@@ -43,8 +43,8 @@ fn one_concrete_impl_does_not_prove_a_higher_ranked_type_goal() {
         impl Only<i64> for Text {}
         impl Universal for Witness where for<T> Text: Only<T> {}
 
-        require<X>(value: X) -> X where X: Universal { value }
-        bad() -> Witness { require(Witness { marker: 42 }) }
+        require_universal<X>(value: X) -> X where X: Universal { value }
+        bad() -> Witness { require_universal(Witness { marker: 42 }) }
         main() -> () { () }
     "#;
     let errors = compile_source_to_bytecode("hrtb-negative.glorious", source)
@@ -67,8 +67,8 @@ fn higher_ranked_const_prerequisites_use_fresh_rigid_values() {
         struct Witness { marker: i64 }
         impl<const N: u32> Every<N> for Text {}
         impl Universal for Witness where for<const N: u32> Text: Every<N> {}
-        require<X>(value: X) -> X where X: Universal { value }
-        answer() -> Witness { require(Witness { marker: 42 }) }
+        require_universal<X>(value: X) -> X where X: Universal { value }
+        answer() -> Witness { require_universal(Witness { marker: 42 }) }
         main() -> () { () }
     "#;
     verify(
@@ -83,8 +83,8 @@ fn higher_ranked_const_prerequisites_use_fresh_rigid_values() {
         struct Witness { marker: i64 }
         impl Only<7> for Text {}
         impl Universal for Witness where for<const N: u32> Text: Only<N> {}
-        require<X>(value: X) -> X where X: Universal { value }
-        bad() -> Witness { require(Witness { marker: 42 }) }
+        require_universal<X>(value: X) -> X where X: Universal { value }
+        bad() -> Witness { require_universal(Witness { marker: 42 }) }
         main() -> () { () }
     "#;
     let errors = compile_source_to_bytecode("hrtb-const-negative.glorious", negative)
@@ -112,8 +112,8 @@ fn higher_ranked_effect_row_gat_prerequisites_are_universal() {
         }
         impl Universal for Witness
             where for<r: EffectRow> Carrier: Capability<Effects<r> = {Ask | r}> {}
-        require<X>(value: X) -> X where X: Universal { value }
-        answer() -> Witness { require(Witness { marker: 42 }) }
+        require_universal<X>(value: X) -> X where X: Universal { value }
+        answer() -> Witness { require_universal(Witness { marker: 42 }) }
         main() -> () { () }
     "#;
     verify(

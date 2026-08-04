@@ -1246,8 +1246,43 @@ impl TypedProgram {
                     core::ExprKind::TemporaryProjectBorrow { .. }
                 ) if source.ordinal == u32::MAX
             );
+            // The allocation-independent pass deliberately defaults bare
+            // numeric literals to i64/f64. Typed Core may subsequently apply
+            // an exact contextual scalar type supplied by an operator or
+            // callable parameter; that is agreement, not a typing mismatch.
+            let contextually_typed_literal = matches!(
+                (&typed.kind, typed.ty.as_ref(), &core.kind),
+                (
+                    TypedExprKind::Leaf,
+                    Some(ProvisionalType::Predefined(default)),
+                    core::ExprKind::Constant(
+                        grandiose_vm::Constant::U8(_)
+                            | grandiose_vm::Constant::U16(_)
+                            | grandiose_vm::Constant::U32(_)
+                            | grandiose_vm::Constant::U64(_)
+                            | grandiose_vm::Constant::U128(_)
+                            | grandiose_vm::Constant::I8(_)
+                            | grandiose_vm::Constant::I16(_)
+                            | grandiose_vm::Constant::I32(_)
+                            | grandiose_vm::Constant::I64(_)
+                            | grandiose_vm::Constant::I128(_)
+                            | grandiose_vm::Constant::Usize(_)
+                            | grandiose_vm::Constant::Isize(_)
+                    )
+                ) if default == "i64"
+            ) || matches!(
+                (&typed.kind, typed.ty.as_ref(), &core.kind),
+                (
+                    TypedExprKind::Leaf,
+                    Some(ProvisionalType::Predefined(default)),
+                    core::ExprKind::Constant(
+                        grandiose_vm::Constant::F32(_) | grandiose_vm::Constant::F64(_)
+                    )
+                ) if default == "f64"
+            );
             if !effect_boundary
                 && !anonymous_borrow_boundary
+                && !contextually_typed_literal
                 && typed
                     .ty
                     .as_ref()

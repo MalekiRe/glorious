@@ -506,6 +506,14 @@ pub enum InstructionKind {
         dst: Register,
         src: Register,
     },
+    /// Reborrow a reference value stored behind a live reference. Unlike
+    /// `DerefCopy`, this creates a child loan and therefore admits a non-Copy
+    /// reference referent without duplicating its authority.
+    DerefReborrow {
+        dst: Register,
+        src: Register,
+        unique: bool,
+    },
     /// Move the initialized referent out through a live unique reference. The
     /// reference/loan remains live and records an uninitialized referent.
     DerefMove {
@@ -610,6 +618,7 @@ impl InstructionKind {
             | Self::ProjectBorrow { dst, .. }
             | Self::Reborrow { dst, .. }
             | Self::DerefCopy { dst, .. }
+            | Self::DerefReborrow { dst, .. }
             | Self::DerefMove { dst, .. }
             | Self::Construct { dst, .. }
             | Self::ProjectCopy { dst, .. }
@@ -638,6 +647,7 @@ impl InstructionKind {
             | Self::ProjectBorrow { dst, .. }
             | Self::Reborrow { dst, .. }
             | Self::DerefCopy { dst, .. }
+            | Self::DerefReborrow { dst, .. }
             | Self::DerefMove { dst, .. }
             | Self::Construct { dst, .. }
             | Self::ProjectCopy { dst, .. }
@@ -675,6 +685,7 @@ impl InstructionKind {
             | Self::ProjectBorrow { src, .. }
             | Self::Reborrow { src, .. }
             | Self::DerefCopy { src, .. }
+            | Self::DerefReborrow { src, .. }
             | Self::DerefMove { src, .. }
             | Self::EnumTag { src, .. } => visit(*src, RegisterUseKind::Inspect),
             Self::EndBorrow { reference } | Self::Deconstruct { src: reference } => {

@@ -43,7 +43,10 @@ fn compiled(source_name: &str, source: &str, function_name: &str) -> Value {
 }
 
 fn has_message(source_name: &str, source: &str, needles: &[&str]) {
-    let diagnostics = compile_source_to_bytecode(source_name, source).unwrap_err();
+    let diagnostics = match compile_source_to_bytecode(source_name, source) {
+        Ok(_) => panic!("{source_name}: expected compilation failure"),
+        Err(diagnostics) => diagnostics,
+    };
     assert!(
         diagnostics.iter().any(|diagnostic| {
             needles
@@ -449,7 +452,7 @@ fn typed_closures_chain_through_indirect_callable_values() {
 }
 
 #[test]
-fn monomorphic_typed_callable_forms_at_an_unplanned_generic_wrapper_site() {
+fn monomorphic_typed_callable_forms_are_planned_at_a_generic_wrapper_site() {
     let source = r#"
         apply<F, T, R>(value: T, body: F) -> R
             where F: Fn<(T), Output=R> { body(value) }
@@ -476,8 +479,15 @@ fn monomorphic_typed_callable_forms_at_an_unplanned_generic_wrapper_site() {
             artifact
                 .functions
                 .iter()
-                .any(|function| function.name.starts_with("$runtime$closure$")),
-            "{optimization_level:?}: expected the runtime fallback synthetic"
+                .any(|function| function.name.starts_with("$closure$")),
+            "{optimization_level:?}: expected a planned closure synthetic"
+        );
+        assert!(
+            artifact
+                .functions
+                .iter()
+                .all(|function| !function.name.starts_with("$runtime$closure$")),
+            "{optimization_level:?}: discovery should not require the runtime fallback"
         );
         let function = artifact
             .functions
@@ -495,7 +505,7 @@ fn monomorphic_typed_callable_forms_at_an_unplanned_generic_wrapper_site() {
 }
 
 #[test]
-fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
+fn planned_callable_wrappers_enforce_region_and_effect_contracts() {
     let exact_reference = r#"
             struct Receiver { selected: &i64 }
             apply<F, T, R>(value: T, body: F) -> R
@@ -523,7 +533,13 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
             artifact
                 .functions
                 .iter()
-                .any(|function| function.name.starts_with("$runtime$closure$"))
+                .any(|function| function.name.starts_with("$closure$"))
+        );
+        assert!(
+            artifact
+                .functions
+                .iter()
+                .all(|function| !function.name.starts_with("$runtime$closure$"))
         );
         let answer = artifact
             .functions
@@ -562,7 +578,7 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
             }
             main() -> { () }
         "#,
-        &["VM-sealed callable", "exact symbolic parameter path"],
+        &["exact symbolic reference route"],
     );
     for (name, source, needle) in [
         (
@@ -618,9 +634,7 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
             );
         }
     }
-    has_message(
-        "typed-runtime-effect-negative.glorious",
-        r#"
+    let effectful = r#"
             effect Escape { escape(value: i64) -> ! }
             apply<F, T, R>(value: T, body: F) -> R
                 where F: Fn<(T), Output=R> { body(value) }
@@ -630,8 +644,30 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
                 })
             }
             main() -> { () }
-        "#,
-        &["apply", "not a callable"],
+        "#;
+    let artifact = compile_source_to_bytecode("typed-planned-effect.glorious", effectful).unwrap();
+    assert!(
+        artifact
+            .functions
+            .iter()
+            .any(|function| function.name.starts_with("$closure$"))
+    );
+    assert!(
+        artifact
+            .functions
+            .iter()
+            .all(|function| !function.name.starts_with("$runtime$closure$"))
+    );
+    let bad = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "bad")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(bad, vec![Value::I64(42)])
+            .unwrap(),
+        Value::I64(42)
     );
 }
 

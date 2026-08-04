@@ -41,7 +41,7 @@ fn shared_terminal_alternatives_capture_zero_or_one_shot_resumption() {
                 handle { perform Carry::take() } {
                     Carry::take() with k => {
                         handle { perform Gate::left() } {
-                            Gate::left() => { let held = &k; 10 }
+                            Gate::left() => { let held = &k; 10 },
                             Gate::right() => { let held = &k; 20 }
                         }
                     }
@@ -64,7 +64,7 @@ fn shared_terminal_alternatives_capture_exact_one_shot_resumption() {
                 handle { perform Carry::take() } {
                     Carry::take() with k => {
                         handle { perform Gate::left() } {
-                            Gate::left() => resume(k, 10)
+                            Gate::left() => resume(k, 10),
                             Gate::right() => resume(k, 20)
                         }
                     }
@@ -90,11 +90,11 @@ fn shared_terminal_alternatives_capture_exact_two_shot_resumption() {
                             Gate::left() => {
                                 let ignored = resume(k, 10);
                                 resume(move k, 11)
-                            }
+                            },
                             Gate::right() => {
                                 let ignored = resume(k, 20);
                                 resume(move k, 21)
-                            }
+                            },
                         }
                     }
                 }
@@ -123,7 +123,7 @@ fn mixed_terminal_and_resumptive_alternatives_capture_two_shot_resumption() {
                                 let marker = token.value;
                                 let ignored = resume(k, marker);
                                 resume(move k, marker + 1)
-                            }
+                            },
                             Gate::inspect() with inner => {
                                 let marker = token.value;
                                 let inspected = resume(inner, marker);

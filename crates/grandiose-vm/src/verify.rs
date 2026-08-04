@@ -660,7 +660,10 @@ impl RuntimeLayout {
                             pc: pc as u32,
                             multishot_registers,
                             cancellation_registers: cancellation_capture_registers(
-                                artifact, function, &live,
+                                artifact,
+                                function,
+                                &live,
+                                cleanup_registers(artifact, function_id as u32, pc as u32),
                             ),
                         });
                     }
@@ -690,16 +693,34 @@ fn cancellation_capture_registers(
     artifact: &Artifact,
     function: &Function,
     live: &[bool],
+    cleanup_order: &[u32],
 ) -> CompactRegisterSet {
-    CompactRegisterSet::from_sorted(live.iter().copied().enumerate().filter_map(
-        |(register, live)| {
+    let mut retained = live
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(register, live)| {
             let ty = function.register_types[register];
             (live
                 || residual_contains_custom_drop(artifact, ty, None, None, &mut Vec::new())
                 || !residual_zero_use_allowed(artifact, ty, None, None))
             .then_some(register as u32)
-        },
-    ))
+        })
+        .collect::<BTreeSet<_>>();
+    // A retained reference (including one nested in an aggregate) cannot
+    // outlive the place authorities ordered after it in the cleanup plan.
+    // Capture that suffix conservatively; the plan is already the verifier's
+    // topological destruction order, so this closes the retained set under
+    // every potentially required owner without reconstructing dynamic loan
+    // identities in the compact runtime layout.
+    let first_reference = cleanup_order.iter().position(|register| {
+        retained.contains(register)
+            && !reference_leaves(artifact, function.register_types[*register as usize]).is_empty()
+    });
+    if let Some(first_reference) = first_reference {
+        retained.extend(cleanup_order[first_reference..].iter().copied());
+    }
+    CompactRegisterSet::from_sorted(retained)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -998,8 +1019,26 @@ pub fn with_compiler_seeded_cleanup_plans_unverified(
     {
         return Err(VerifyError::InvalidFunction(u32::MAX));
     }
-    artifact.cleanups = verify_artifact(&artifact, false, true)?;
-    Ok(artifact)
+    // Seeded destinations participate in the state propagated by LEAVE.  An
+    // augmented destination can therefore reveal another dominating owner on
+    // the next pass. Iterate to the finite cleanup-membership fixed point;
+    // every changing pass must add information to a bounded per-PC register
+    // lattice.
+    let iteration_limit = artifact
+        .functions
+        .iter()
+        .map(|function| {
+            (function.code_len as usize).saturating_mul(function.register_types.len().max(1))
+        })
+        .fold(2usize, usize::saturating_add);
+    for _ in 0..iteration_limit {
+        let completed = verify_artifact(&artifact, false, true)?;
+        if completed == artifact.cleanups {
+            return Ok(artifact);
+        }
+        artifact.cleanups = completed;
+    }
+    Err(VerifyError::InvalidFunction(u32::MAX))
 }
 
 fn verify_artifact(
@@ -1030,11 +1069,31 @@ fn verify_artifact(
             || f.receiver_mode.is_some()
             || !f.outward_protocols.is_empty()
         {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier entry {entry} `{}` params={} result={} receiver={:?} effects={:?}",
+                    f.name,
+                    f.params.len(),
+                    f.return_type,
+                    f.receiver_mode,
+                    f.outward_protocols
+                );
+            }
             return Err(VerifyError::InvalidFunction(entry));
         }
     }
-    verify_types(artifact)?;
-    verify_function_metadata(artifact)?;
+    if let Err(error) = verify_types(artifact) {
+        if timing_enabled || std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!("g1-verifier artifact stage types: {error}");
+        }
+        return Err(error);
+    }
+    if let Err(error) = verify_function_metadata(artifact) {
+        if timing_enabled || std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!("g1-verifier artifact stage function-metadata: {error}");
+        }
+        return Err(error);
+    }
     if require_cleanup_metadata {
         verify_cleanup_tables(artifact)?;
     } else if !allow_seeded_leave_generation
@@ -1058,16 +1117,35 @@ fn verify_artifact(
     let functions_started = std::time::Instant::now();
     let mut cleanups = Vec::new();
     for (i, f) in artifact.functions.iter().enumerate() {
-        cleanups.extend(verify_function(
+        let verified = verify_function(
             artifact,
             i as u32,
             f,
             require_cleanup_metadata,
             allow_seeded_leave_generation,
             &quantity_cache,
-        )?);
+        );
+        match verified {
+            Ok(plans) => cleanups.extend(plans),
+            Err(error) => {
+                if timing_enabled || std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {} `{}` stage late-body: {error}",
+                        i, f.name
+                    );
+                }
+                return Err(error);
+            }
+        }
     }
-    verify_handler_parameter_quantity_dispositions(artifact, &quantity_cache.owned)?;
+    if let Err(error) =
+        verify_handler_parameter_quantity_dispositions(artifact, &quantity_cache.owned)
+    {
+        if timing_enabled || std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!("g1-verifier artifact stage handler-parameter-quantities: {error}");
+        }
+        return Err(error);
+    }
     if timing_enabled {
         eprintln!(
             "g1-verifier functions: {:.3}s total={:.3}s",
@@ -1083,14 +1161,32 @@ fn verify_function_metadata(a: &Artifact) -> Result<(), VerifyError> {
     for (id, function) in a.functions.iter().enumerate() {
         let id = id as u32;
         if function.flags & !valid_flags != 0 {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {id} `{}` metadata flags",
+                    function.name
+                );
+            }
             return Err(VerifyError::InvalidFunction(id));
         }
         let exported = a.exports.iter().any(|export| export.function == id);
         if (function.flags & EXPORTED != 0) != exported {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {id} `{}` metadata export",
+                    function.name
+                );
+            }
             return Err(VerifyError::InvalidFunction(id));
         }
         let is_drop_hook = a.drop_glue.iter().any(|glue| glue.function == id);
         if (function.flags & DROP_HOOK != 0) != is_drop_hook {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {id} `{}` metadata drop-hook",
+                    function.name
+                );
+            }
             return Err(VerifyError::InvalidFunction(id));
         }
         if function.flags & NO_RETURN != 0
@@ -1098,6 +1194,12 @@ fn verify_function_metadata(a: &Artifact) -> Result<(), VerifyError> {
                 .iter()
                 .any(|instruction| matches!(instruction, Instruction::Return { .. }))
         {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {id} `{}` metadata no-return",
+                    function.name
+                );
+            }
             return Err(VerifyError::InvalidFunction(id));
         }
     }
@@ -1121,10 +1223,42 @@ fn verify_function_metadata(a: &Artifact) -> Result<(), VerifyError> {
             || !hook.outward_protocols.is_empty()
             || !matches!(type_at(a, hook.params[0])?, Type::RefUnique { referent } if *referent == glue.ty)
         {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier drop glue type {} points to function {} `{}` params={:?} result={} effects={:?}",
+                    glue.ty,
+                    glue.function,
+                    hook.name,
+                    hook.params,
+                    hook.return_type,
+                    hook.outward_protocols
+                );
+            }
             return Err(VerifyError::InvalidFunction(glue.function));
         }
-        verify_drop_hook_reachable(a, glue.function, &mut std::collections::BTreeSet::new())?;
-        verify_drop_hook_move_restrictions(a, glue.function)?;
+        if let Err(error) = verify_drop_hook_reachable(
+            a,
+            glue.function,
+            &std::collections::BTreeSet::new(),
+            &mut std::collections::BTreeSet::new(),
+        ) {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier drop glue type {} hook {} `{}` stage reachable: {error}",
+                    glue.ty, glue.function, hook.name
+                );
+            }
+            return Err(error);
+        }
+        if let Err(error) = verify_drop_hook_move_restrictions(a, glue.function) {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier drop glue type {} hook {} `{}` stage move-restrictions: {error}",
+                    glue.ty, glue.function, hook.name
+                );
+            }
+            return Err(error);
+        }
     }
 
     for (caller_id, caller) in a.functions.iter().enumerate() {
@@ -1140,6 +1274,12 @@ fn verify_function_metadata(a: &Artifact) -> Result<(), VerifyError> {
                     .get(target as usize)
                     .is_some_and(|function| function.flags & DROP_HOOK != 0)
             }) {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {caller_id} `{}` directly calls drop hook {target:?}",
+                        caller.name
+                    );
+                }
                 return Err(VerifyError::InvalidFunction(caller_id as u32));
             }
         }
@@ -1235,42 +1375,196 @@ fn function_code<'a>(
 fn verify_drop_hook_reachable(
     a: &Artifact,
     function_id: u32,
-    visited: &mut std::collections::BTreeSet<u32>,
+    allowed_terminal_performs: &std::collections::BTreeSet<(u32, u32)>,
+    visited: &mut std::collections::BTreeSet<(u32, Vec<(u32, u32)>)>,
 ) -> Result<(), VerifyError> {
-    if !visited.insert(function_id) {
+    let context = (
+        function_id,
+        allowed_terminal_performs
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+    );
+    if !visited.insert(context) {
         return Ok(());
     }
     let function = a
         .functions
         .get(function_id as usize)
         .ok_or(VerifyError::InvalidFunction(function_id))?;
-    if !function.outward_protocols.is_empty() || function.label_slot_count != 0 {
+    let outward_is_locally_handled = function.outward_protocols.iter().all(|protocol| {
+        a.protocols
+            .get(*protocol as usize)
+            .is_some_and(|descriptor| {
+                (0..descriptor.operations.len() as u32)
+                    .all(|operation| allowed_terminal_performs.contains(&(*protocol, operation)))
+            })
+    });
+    if !outward_is_locally_handled || function.label_slot_count != 0 {
+        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!(
+                "g1-verifier drop reachable function {function_id} `{}` rejected metadata effects={:?} labels={} allowed={allowed_terminal_performs:?}",
+                function.name, function.outward_protocols, function.label_slot_count
+            );
+        }
         return Err(VerifyError::InvalidFunction(function_id));
     }
     for instruction in function_code(a, function)? {
         match instruction {
             Instruction::Call { function, .. } | Instruction::TailCall { function, .. } => {
-                verify_drop_hook_reachable(a, *function, visited)?;
+                verify_drop_hook_reachable(a, *function, allowed_terminal_performs, visited)?;
+            }
+            Instruction::MakeHandler {
+                handler_def,
+                clauses,
+                ..
+            } => {
+                let definition = drop_safe_terminal_handler(a, *handler_def, function_id)?;
+                for clause in clauses {
+                    let callable_type = *function
+                        .register_types
+                        .get(*clause as usize)
+                        .ok_or(VerifyError::InvalidFunction(function_id))?;
+                    let producers = callable_type_producers(a, callable_type);
+                    if producers.is_empty() {
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier drop reachable function {function_id} `{}` handler clause r{clause} has no static producer",
+                                function.name
+                            );
+                        }
+                        return Err(VerifyError::InvalidFunction(function_id));
+                    }
+                    for producer in producers {
+                        verify_drop_hook_reachable(
+                            a,
+                            producer,
+                            allowed_terminal_performs,
+                            visited,
+                        )?;
+                    }
+                }
+                let _ = definition;
+            }
+            Instruction::MakeHandlerShared {
+                handler_def,
+                functions,
+                ..
+            } => {
+                drop_safe_terminal_handler(a, *handler_def, function_id)?;
+                for producer in functions {
+                    verify_drop_hook_reachable(a, *producer, allowed_terminal_performs, visited)?;
+                }
+            }
+            Instruction::Handle { handler, body, .. } => {
+                let handler_type = *function
+                    .register_types
+                    .get(*handler as usize)
+                    .ok_or(VerifyError::InvalidFunction(function_id))?;
+                let Type::Handler { handler_def, .. } = type_at(a, handler_type)? else {
+                    return Err(VerifyError::InvalidFunction(function_id));
+                };
+                let definition = drop_safe_terminal_handler(a, *handler_def, function_id)?;
+                let mut handled = allowed_terminal_performs.clone();
+                handled.extend(
+                    definition
+                        .clauses
+                        .iter()
+                        .map(|clause| (clause.protocol, clause.operation)),
+                );
+                let body_type = *function
+                    .register_types
+                    .get(*body as usize)
+                    .ok_or(VerifyError::InvalidFunction(function_id))?;
+                let producers = callable_type_producers(a, body_type);
+                if producers.is_empty() {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "g1-verifier drop reachable function {function_id} `{}` handler body r{body} has no static producer",
+                            function.name
+                        );
+                    }
+                    return Err(VerifyError::InvalidFunction(function_id));
+                }
+                for producer in producers {
+                    verify_drop_hook_reachable(a, producer, &handled, visited)?;
+                }
+            }
+            Instruction::Perform {
+                protocol,
+                operation,
+                ..
+            } if allowed_terminal_performs.contains(&(*protocol, *operation)) => {}
+            Instruction::CallIndirect { callable, .. }
+            | Instruction::TailCallIndirect { callable, .. } => {
+                let callable_type = *function
+                    .register_types
+                    .get(*callable as usize)
+                    .ok_or(VerifyError::InvalidFunction(function_id))?;
+                let producers = callable_type_producers(a, callable_type);
+                if producers.is_empty() {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "g1-verifier drop reachable function {function_id} `{}` indirect callable r{callable} has no closed producer set",
+                            function.name
+                        );
+                    }
+                    return Err(VerifyError::InvalidFunction(function_id));
+                }
+                for producer in producers {
+                    verify_drop_hook_reachable(a, producer, allowed_terminal_performs, visited)?;
+                }
             }
             Instruction::LabelPush { .. }
             | Instruction::LabelPop { .. }
             | Instruction::Leave { .. }
-            | Instruction::MakeHandler { .. }
-            | Instruction::MakeHandlerShared { .. }
-            | Instruction::Handle { .. }
             | Instruction::Perform { .. }
             | Instruction::Resume { .. }
             | Instruction::TailResume { .. }
             | Instruction::Cancel { .. }
-            | Instruction::HostCall { .. }
-            | Instruction::CallIndirect { .. }
-            | Instruction::TailCallIndirect { .. } => {
+            | Instruction::HostCall { .. } => {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier drop reachable function {function_id} `{}` rejected instruction {instruction:?}",
+                        function.name
+                    );
+                }
                 return Err(VerifyError::InvalidFunction(function_id));
             }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn drop_safe_terminal_handler<'a>(
+    a: &'a Artifact,
+    handler_def: u32,
+    function_id: u32,
+) -> Result<&'a crate::bytecode::HandlerDef, VerifyError> {
+    let definition = a
+        .handler_defs
+        .get(handler_def as usize)
+        .ok_or(VerifyError::InvalidFunction(function_id))?;
+    if definition.partial
+        || definition.clauses.is_empty()
+        || definition.clauses.iter().any(|clause| {
+            clause.resumption_type.is_some()
+                || a.protocols
+                    .get(clause.protocol as usize)
+                    .and_then(|protocol| protocol.operations.get(clause.operation as usize))
+                    .is_none_or(|operation| !operation.terminal)
+        })
+    {
+        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!(
+                "g1-verifier drop reachable function {function_id} rejected handler h{handler_def}: partial={} clauses={:?}",
+                definition.partial, definition.clauses
+            );
+        }
+        return Err(VerifyError::InvalidFunction(function_id));
+    }
+    Ok(definition)
 }
 
 fn verify_cleanup_tables(a: &Artifact) -> Result<(), VerifyError> {
@@ -1585,16 +1879,41 @@ fn verify_function(
     allow_seeded_leave_generation: bool,
     quantity_cache: &QuantityVerificationCache,
 ) -> Result<Vec<crate::bytecode::CleanupPlan>, VerifyError> {
+    macro_rules! stage {
+        ($name:literal, $expression:expr) => {
+            match $expression {
+                Ok(value) => value,
+                Err(error) => {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` stage {}: {error}",
+                            f.name, $name
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        };
+    }
     if f.outward_protocols
         .iter()
         .any(|protocol| *protocol as usize >= a.protocols.len())
         || !f.outward_protocols.windows(2).all(|pair| pair[0] < pair[1])
     {
+        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!(
+                "g1-verifier function {fid} `{}` stage outward-protocols",
+                f.name
+            );
+        }
         return Err(VerifyError::InvalidFunction(fid));
     }
     if f.params.len() + 1 > f.register_types.len()
         || f.params != f.register_types[1..1 + f.params.len()]
     {
+        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!("g1-verifier function {fid} `{}` stage parameters", f.name);
+        }
         return Err(VerifyError::InvalidFunction(fid));
     }
     let receiver = f.register_types[0];
@@ -1603,7 +1922,12 @@ fn verify_function(
         | (Some(0), Type::RefShared { .. })
         | (Some(1), Type::RefUnique { .. })
         | (Some(2), _) => {}
-        _ => return Err(VerifyError::InvalidFunction(fid)),
+        _ => {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!("g1-verifier function {fid} `{}` stage receiver", f.name);
+            }
+            return Err(VerifyError::InvalidFunction(fid));
+        }
     }
     for &ty in f
         .register_types
@@ -1612,6 +1936,12 @@ fn verify_function(
     {
         type_at(a, ty)?;
         if matches!(type_at(a, ty)?, Type::Available { .. }) {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {fid} `{}` stage available-type",
+                    f.name
+                );
+            }
             return Err(VerifyError::InvalidFunction(fid));
         }
     }
@@ -1620,25 +1950,51 @@ fn verify_function(
         .checked_add(f.code_len as usize)
         .ok_or(VerifyError::InvalidFunction(fid))?;
     if f.code_len == 0 || end > a.code.len() {
+        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!("g1-verifier function {fid} `{}` stage code-range", f.name);
+        }
         return Err(VerifyError::InvalidFunction(fid));
     }
-    for (local, ins) in a.code[start..end].iter().enumerate() {
-        shape(a, fid, local as u32, f, ins)?;
+    if std::env::var("G1_VERIFY_FUNCTION").is_ok_and(|name| name == f.name) {
+        for (pc, instruction) in a.code[start..end].iter().enumerate() {
+            eprintln!(
+                "g1-verifier function {fid} `{}` pc {pc}: {instruction:?}",
+                f.name
+            );
+        }
     }
-    let label_states = verify_labels(a, fid, f)?;
-    let continuation_live = continuation_live_registers(a, f, &label_states)?;
-    let loan_live = loan_live_registers(a, f, &label_states)?;
-    let callable_targets = callable_targets_at_pcs(a, fid, f, &label_states)?;
-    verify_resumption_quantities_with_cache(
-        a,
-        fid,
-        f,
-        &label_states,
-        &callable_targets,
-        quantity_cache,
-    )?;
-    let (enum_facts, _, _) = verify_enum_dominance(a, fid, f, &label_states)?;
-    let move_path_states = verify_move_paths(a, fid, f, &enum_facts, &label_states)?;
+    for (local, ins) in a.code[start..end].iter().enumerate() {
+        stage!("instruction-shape", shape(a, fid, local as u32, f, ins));
+    }
+    let label_states = stage!("labels", verify_labels(a, fid, f));
+    let continuation_live = stage!(
+        "continuation-liveness",
+        continuation_live_registers(a, f, &label_states)
+    );
+    let loan_live = stage!("loan-liveness", loan_live_registers(a, f, &label_states));
+    let callable_targets = stage!(
+        "callable-targets",
+        callable_targets_at_pcs(a, fid, f, &label_states)
+    );
+    stage!(
+        "resumption-quantities",
+        verify_resumption_quantities_with_cache(
+            a,
+            fid,
+            f,
+            &label_states,
+            &callable_targets,
+            quantity_cache,
+        )
+    );
+    let (enum_facts, _, _) = stage!(
+        "enum-dominance",
+        verify_enum_dominance(a, fid, f, &label_states)
+    );
+    let move_path_states = stage!(
+        "move-paths",
+        verify_move_paths(a, fid, f, &enum_facts, &label_states)
+    );
     let result_leaves = reference_leaves(a, f.return_type);
     let single_result_leaf = single_reference_leaf(a, f.return_type);
     let direct_reference_result = matches!(
@@ -1674,19 +2030,22 @@ fn verify_function(
             )?;
         }
     }
-    let loan_states = verify_loans(
-        a,
-        fid,
-        f,
-        &enum_facts,
-        &label_states,
-        &loan_live,
-        &quantity_cache.reference_returns,
-        &quantity_cache.reference_types,
-        &quantity_cache.may_return,
-        &quantity_cache.array_writes,
-        &quantity_cache.carrier_returns,
-    )?;
+    let loan_states = stage!(
+        "loans",
+        verify_loans(
+            a,
+            fid,
+            f,
+            &enum_facts,
+            &label_states,
+            &loan_live,
+            &quantity_cache.reference_returns,
+            &quantity_cache.reference_types,
+            &quantity_cache.may_return,
+            &quantity_cache.array_writes,
+            &quantity_cache.carrier_returns,
+        )
+    );
     let mut entry = vec![false; f.register_types.len()];
     entry[0] = f.receiver_mode.is_some();
     entry[1..1 + f.params.len()].fill(true);
@@ -1704,18 +2063,87 @@ fn verify_function(
     order_states[0] = Some(std::mem::take(&mut order_entry));
     shell_age_states[0] = Some(vec![None; f.register_types.len()]);
     let mut expected_cleanup = vec![None; f.code_len as usize];
+    let seeded_label_targets = a.code[start..end]
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::LabelPush { target, .. } => Some(*target),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     let mut work = VecDeque::from([0u32]);
     while let Some(pc) = work.pop_front() {
         let mut state = states[pc as usize].clone().unwrap();
         let mut order = order_states[pc as usize].clone().unwrap();
         let mut shell_ages = shell_age_states[pc as usize].clone().unwrap();
+        let ins = &a.code[start + pc as usize];
+        // A lowered MIR LEAVE may be preceded by a snapshot/commit bundle for
+        // ordinary destination parameters. The protected payload is still
+        // transported atomically by the trailing LEAVE, so compiler-seeded
+        // cleanup states throughout that bundle may name the empty label
+        // result slot in place of the live payload source.
+        let protected_leave_substitution = {
+            let mut cursor = pc as usize;
+            let leave = loop {
+                match a.code.get(start + cursor) {
+                    Some(
+                        Instruction::Move { .. } | Instruction::Copy { .. } | Instruction::Nop,
+                    ) => {
+                        cursor += 1;
+                        if cursor >= f.code_len as usize {
+                            break None;
+                        }
+                    }
+                    Some(Instruction::Leave { slot, value }) => break Some((*slot, *value)),
+                    _ => break None,
+                }
+            };
+            leave.and_then(|(slot, value)| {
+                label_states[pc as usize]
+                    .iter()
+                    .rfind(|entry| entry.slot == slot)
+                    .map(|entry| (value, entry.result_register))
+            })
+        };
         let expected = order.iter().rev().copied().collect::<Vec<_>>();
-        let seeded = allow_seeded_leave_generation
-            .then(|| cleanup_registers(a, fid, pc))
-            .filter(|registers| !registers.is_empty());
-        if let Some(seed) = seeded
-            && !expected.iter().all(|register| seed.contains(register))
+        let mut seeded = (allow_seeded_leave_generation
+            && (matches!(ins, Instruction::Leave { .. }) || seeded_label_targets.contains(&pc)))
+        .then(|| cleanup_registers(a, fid, pc))
+        .filter(|registers| !registers.is_empty())
+        .map(<[u32]>::to_vec);
+        if let Some(seed) = &mut seeded {
+            for (expected_index, register) in expected.iter().copied().enumerate() {
+                if seed.contains(&register)
+                    || protected_leave_substitution.is_some_and(|(source, destination)| {
+                        register == source && seed.contains(&destination)
+                    })
+                {
+                    continue;
+                }
+                let before = expected[..expected_index]
+                    .iter()
+                    .rev()
+                    .find_map(|candidate| seed.iter().position(|current| current == candidate));
+                let after = expected[expected_index + 1..]
+                    .iter()
+                    .find_map(|candidate| seed.iter().position(|current| current == candidate));
+                let position = before.map_or_else(|| after.unwrap_or(seed.len()), |at| at + 1);
+                seed.insert(position, register);
+            }
+        }
+        if let Some(seed) = seeded.as_deref()
+            && !expected.iter().all(|register| {
+                seed.contains(register)
+                    || protected_leave_substitution.is_some_and(|(source, destination)| {
+                        *register == source && seed.contains(&destination)
+                    })
+            })
         {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {fid} `{}` late-body seeded cleanup mismatch at pc {pc}: expected={expected:?} seed={seed:?} substitution={protected_leave_substitution:?} instruction={ins:?}",
+                    f.name
+                );
+            }
             return Err(VerifyError::StateMismatch {
                 function: fid,
                 instruction: pc,
@@ -1725,44 +2153,12 @@ fn verify_function(
         // result slot. Preserve that exact suffix in the generated table;
         // ordinary liveness alone cannot reconstruct the protected-value
         // substitution performed by LEAVE.
-        expected_cleanup[pc as usize] = Some(
-            seeded
-                .map(<[u32]>::to_vec)
-                .unwrap_or_else(|| expected.clone()),
-        );
-        if require_cleanup_metadata {
-            let plan = cleanup_registers(a, fid, pc);
-            let exact = if f.label_slot_count == 0 {
-                let mut planned_members = plan.to_vec();
-                planned_members.sort_unstable();
-                let mut expected_members = expected.clone();
-                expected_members.sort_unstable();
-                planned_members == expected_members
-                    && plan
-                        .iter()
-                        .filter(|register| !is_copy(a, f.register_types[**register as usize]))
-                        .eq(expected
-                            .iter()
-                            .filter(|register| !is_copy(a, f.register_types[**register as usize])))
-            } else {
-                // Label result slots may be listed before `LEAVE` initializes
-                // them so source and destination cleanup lists can have the
-                // required suffix relationship. Runtime skips that empty slot.
-                expected.iter().all(|register| plan.contains(register))
-            };
-            if !exact {
-                return Err(VerifyError::StateMismatch {
-                    function: fid,
-                    instruction: pc,
-                });
-            }
-        }
-        let ins = &a.code[start + pc as usize];
+        expected_cleanup[pc as usize] = Some(seeded.unwrap_or_else(|| expected.clone()));
         let before = state.clone();
         if let Instruction::Deconstruct { src } = ins {
             shell_ages[*src as usize] = order.iter().position(|register| register == src);
         }
-        let mut successors = transfer(
+        let transferred = transfer(
             TransferContext {
                 artifact: a,
                 function_id: fid,
@@ -1782,7 +2178,19 @@ fn verify_function(
             },
             ins,
             &mut state,
-        )?;
+        );
+        let mut successors = match transferred {
+            Ok(successors) => successors,
+            Err(error) => {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {fid} `{}` stage transfer pc {pc} instruction {ins:?}: {error}",
+                        f.name
+                    );
+                }
+                return Err(error);
+            }
+        };
         let nonreturning_call = match ins {
             Instruction::Call { function, .. }
             | Instruction::CallKnownReceiver { function, .. } => {
@@ -1795,12 +2203,18 @@ fn verify_function(
             successors.clear();
         }
         if let Instruction::Move { dst, src } = ins {
-            let position = order.iter().position(|register| register == src).ok_or(
+            let position = order.iter().position(|register| register == src).ok_or_else(|| {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {fid} `{}` late-body move-order mismatch at pc {pc}: order={order:?} instruction={ins:?}",
+                        f.name
+                    );
+                }
                 VerifyError::StateMismatch {
                     function: fid,
                     instruction: pc,
-                },
-            )?;
+                }
+            })?;
             order[position] = *dst;
         }
         order.retain(|register| state[*register as usize]);
@@ -1828,14 +2242,42 @@ fn verify_function(
                     target,
                 });
             }
-            match &states[target as usize] {
-                Some(old) if old != &state => {
-                    return Err(VerifyError::StateMismatch {
-                        function: fid,
-                        instruction: target,
-                    });
+            match &mut states[target as usize] {
+                Some(old) => {
+                    let mut widened = false;
+                    for register in 0..old.len() {
+                        if old[register] == state[register] {
+                            continue;
+                        }
+                        let conditionally_discardable = is_copy(a, f.register_types[register])
+                            || matches!(
+                                type_at(a, f.register_types[register])?.representation(),
+                                Type::RefShared { .. } | Type::RefUnique { .. }
+                            )
+                            || !has_custom_drop(a, f.register_types[register]);
+                        if conditionally_discardable {
+                            widened |= old[register];
+                            old[register] = false;
+                            if let Some(order) = &mut order_states[target as usize] {
+                                order.retain(|current| *current != register as u32);
+                            }
+                            continue;
+                        }
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` late-body state join from pc {pc} to {target}: r{register} differs; previous={old:?} incoming={state:?} instruction={ins:?}",
+                                f.name
+                            );
+                        }
+                        return Err(VerifyError::StateMismatch {
+                            function: fid,
+                            instruction: target,
+                        });
+                    }
+                    if widened && !work.contains(&target) {
+                        work.push_back(target);
+                    }
                 }
-                Some(_) => {}
                 None => {
                     states[target as usize] = Some(state.clone());
                     order_states[target as usize] = Some(order.clone());
@@ -1846,13 +2288,29 @@ fn verify_function(
             if let Some(previous) = &order_states[target as usize]
                 && previous != &order
             {
-                let observable =
-                    |register: &&u32| !is_copy(a, f.register_types[**register as usize]);
+                let joined_state = states[target as usize]
+                    .as_ref()
+                    .expect("a reached CFG target has a move state");
+                let observable = |register: &&u32| {
+                    joined_state[**register as usize]
+                        && !is_copy(a, f.register_types[**register as usize])
+                        && !matches!(
+                            type_at(a, f.register_types[**register as usize])
+                                .map(Type::representation),
+                            Ok(Type::RefShared { .. })
+                        )
+                };
                 if previous
                     .iter()
                     .filter(observable)
                     .ne(order.iter().filter(observable))
                 {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` late-body order join from pc {pc} to {target}: previous={previous:?} incoming={order:?} instruction={ins:?}",
+                            f.name
+                        );
+                    }
                     return Err(VerifyError::StateMismatch {
                         function: fid,
                         instruction: target,
@@ -1870,6 +2328,72 @@ fn verify_function(
                 if changed && !work.contains(&target) {
                     work.push_back(target);
                 }
+            }
+        }
+    }
+    // Validate cleanup metadata only after the dataflow worklist converges.
+    // A target can be visited with one predecessor before a later predecessor
+    // widens a conditional owner to Empty; rejecting that provisional state
+    // makes verification depend on worklist order.
+    if require_cleanup_metadata {
+        for pc in 0..f.code_len {
+            let expected = expected_cleanup[pc as usize].as_deref().unwrap_or(&[]);
+            let plan = cleanup_registers(a, fid, pc);
+            let protected_leave_substitution = {
+                let mut cursor = pc as usize;
+                let leave = loop {
+                    match a.code.get(start + cursor) {
+                        Some(
+                            Instruction::Move { .. } | Instruction::Copy { .. } | Instruction::Nop,
+                        ) => {
+                            cursor += 1;
+                            if cursor >= f.code_len as usize {
+                                break None;
+                            }
+                        }
+                        Some(Instruction::Leave { slot, value }) => break Some((*slot, *value)),
+                        _ => break None,
+                    }
+                };
+                leave.and_then(|(slot, value)| {
+                    label_states[pc as usize]
+                        .iter()
+                        .rfind(|entry| entry.slot == slot)
+                        .map(|entry| (value, entry.result_register))
+                })
+            };
+            let exact = if f.label_slot_count == 0 {
+                let mut planned_members = plan.to_vec();
+                planned_members.sort_unstable();
+                let mut expected_members = expected.to_vec();
+                expected_members.sort_unstable();
+                planned_members == expected_members
+                    && plan
+                        .iter()
+                        .filter(|register| !is_copy(a, f.register_types[**register as usize]))
+                        .eq(expected
+                            .iter()
+                            .filter(|register| !is_copy(a, f.register_types[**register as usize])))
+            } else {
+                expected.iter().all(|register| {
+                    plan.contains(register)
+                        || protected_leave_substitution.is_some_and(|(source, destination)| {
+                            *register == source && plan.contains(&destination)
+                        })
+                })
+            };
+            if !exact {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {fid} `{}` late-body required cleanup mismatch at pc {pc}: expected={expected:?} plan={plan:?} substitution={protected_leave_substitution:?} instruction={:?}",
+                        f.name,
+                        a.code[start + pc as usize]
+                    );
+                }
+                return Err(VerifyError::StateMismatch {
+                    function: fid,
+                    instruction: pc,
+                });
             }
         }
     }
@@ -2616,13 +3140,29 @@ fn analyze_borrowed_receiver_resume_deltas(
                     return None;
                 }
                 let target_deltas = summaries.get(target as usize)?.as_ref()?;
-                let receiver_origins = origins.get(receiver)?;
-                if receiver_origins.len() != target_deltas.len() {
+                let receiver_leaves =
+                    function_receiver_quantity_leaf_types(a, a.functions.get(target as usize)?);
+                if origins.get(receiver)?.len() != target_deltas.len()
+                    || receiver_leaves.len() != target_deltas.len()
+                {
                     return None;
                 }
-                for (origin, delta) in receiver_origins.iter().zip(target_deltas) {
-                    let origin = origin.as_ref().copied()?;
-                    deltas[origin] = deltas[origin].checked_add(*delta)?;
+                for (index, (&delta, &leaf_ty)) in
+                    target_deltas.iter().zip(&receiver_leaves).enumerate()
+                {
+                    let origin = origins[receiver][index].as_ref().copied()?;
+                    deltas[origin] = deltas[origin].checked_add(delta)?;
+                    let Type::Resumption { upper_uses, .. } =
+                        a.types[leaf_ty as usize].representation()
+                    else {
+                        return None;
+                    };
+                    if a.functions[target as usize].receiver_mode == Some(1)
+                        && upper_uses == &Some(1)
+                        && delta == 1
+                    {
+                        origins[receiver][index] = None;
+                    }
                 }
             }
             Instruction::TailCallSelf { args }
@@ -2672,6 +3212,17 @@ fn analyze_borrowed_receiver_resume_deltas(
             | Instruction::Nop
             | Instruction::Unreachable
             | Instruction::Abort { .. } => {}
+            _ if instruction_register_uses(instruction)
+                .iter()
+                .all(|register| origins[*register as usize].is_empty())
+                && instruction_destination(instruction)
+                    .is_none_or(|dst| origins[dst as usize].is_empty()) =>
+            {
+                // Quantity-free bookkeeping in a function which happens to
+                // carry a receiver resumption cannot affect the receiver's
+                // delta summary. This includes enum-shell deconstruction and
+                // ordinary scalar cleanup introduced by MIR lowering.
+            }
             _ => {
                 if count != 0 {
                     return None;
@@ -3752,7 +4303,10 @@ fn owned_receiver_quantity_summaries_with_facts(
                     callable,
                     receiver_mode: 2,
                     args,
-                } if args.iter().all(|argument| shapes[*argument as usize] == 0) => {
+                } if (shapes[*callable as usize] != 0
+                    || dst.is_some_and(|dst| shapes[dst as usize] != 0))
+                    && args.iter().all(|argument| shapes[*argument as usize] == 0) =>
+                {
                     let targets = targets_at_pcs.get(pc)?.get(*callable as usize)?;
                     let inputs = state.origins[*callable as usize].clone();
                     if let Some(deltas) = canonical_borrowed_receiver_resume_deltas(a, targets) {
@@ -3811,7 +4365,8 @@ fn owned_receiver_quantity_summaries_with_facts(
                     callable,
                     receiver_mode,
                     args,
-                } if dst.is_none_or(|dst| shapes[dst as usize] == 0)
+                } if shapes[*callable as usize] != 0
+                    && dst.is_none_or(|dst| shapes[dst as usize] == 0)
                     && args.iter().all(|argument| shapes[*argument as usize] == 0) =>
                 {
                     let targets = targets_at_pcs.get(pc)?.get(*callable as usize)?;
@@ -4440,7 +4995,15 @@ fn verify_handler_parameter_quantity_dispositions(
                 let summary = summaries
                     .get(producer as usize)
                     .and_then(Option::as_ref)
-                    .ok_or(VerifyError::InvalidFunction(producer))?;
+                    .ok_or_else(|| {
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier handler parameter quantities: function {producer} `{}` has no owned quantity summary",
+                                function.name
+                            );
+                        }
+                        VerifyError::InvalidFunction(producer)
+                    })?;
                 let mut origin = quantity_leaf_types(a, function.register_types[0]).len();
                 for (parameter, &parameter_type) in
                     clause.callable_signature.params.iter().enumerate()
@@ -4471,6 +5034,12 @@ fn verify_handler_parameter_quantity_dispositions(
                             || (fresh_resumption
                                 && disposition == QuantityTerminalDisposition::Returned)
                         {
+                            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                                eprintln!(
+                                    "g1-verifier handler parameter quantities: function {producer} `{}` origin={origin} resumes={resumes} bounds=[{lower_uses},{upper_uses:?}] disposition={disposition:?} fresh={fresh_resumption} summary={summary:?}",
+                                    function.name
+                                );
+                            }
                             return Err(VerifyError::InvalidFunction(producer));
                         }
                         origin += 1;
@@ -4932,41 +5501,48 @@ fn verify_resumption_quantities_for_variants(
     while let Some(pc) = work.pop_front() {
         let mut state = states[pc as usize].clone().unwrap();
         let instruction = &a.code[start + pc as usize];
-        let transfer_pristine =
-            |state: &mut QuantityState, arguments: &[u32]| -> Result<(), VerifyError> {
-                for &register in arguments {
-                    for group in state.registers[register as usize].iter().copied() {
-                        let Some(group) = group else { continue };
-                        let locations = state
-                            .registers
-                            .iter()
-                            .enumerate()
-                            .flat_map(|(owner, slots)| {
-                                slots
-                                    .iter()
-                                    .filter(move |candidate| **candidate == Some(group))
-                                    .map(move |_| owner)
-                            })
-                            .collect::<Vec<_>>();
-                        let one_shared_environment = !locations.is_empty()
-                            && locations.iter().all(|owner| *owner == register as usize)
-                            && state.shared_handler_environment[register as usize];
-                        if state.counts[group] != Some(UseInterval { min: 0, max: 0 })
-                            || (locations.len() != 1 && !one_shared_environment)
-                        {
-                            return Err(VerifyError::InvalidFunction(fid));
+        let transfer_pristine = |state: &mut QuantityState,
+                                 arguments: &[u32]|
+         -> Result<(), VerifyError> {
+            for &register in arguments {
+                for group in state.registers[register as usize].iter().copied() {
+                    let Some(group) = group else { continue };
+                    let locations = state
+                        .registers
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(owner, slots)| {
+                            slots
+                                .iter()
+                                .filter(move |candidate| **candidate == Some(group))
+                                .map(move |_| owner)
+                        })
+                        .collect::<Vec<_>>();
+                    let one_shared_environment = !locations.is_empty()
+                        && locations.iter().all(|owner| *owner == register as usize)
+                        && state.shared_handler_environment[register as usize];
+                    if state.counts[group] != Some(UseInterval { min: 0, max: 0 })
+                        || (locations.len() != 1 && !one_shared_environment)
+                    {
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier function {fid} transfer-pristine r{register} group {group}: count={:?}, locations={locations:?}, shared-environment={one_shared_environment}",
+                                state.counts[group],
+                            );
                         }
+                        return Err(VerifyError::InvalidFunction(fid));
                     }
                 }
-                for &register in arguments {
-                    for slot in &mut state.registers[register as usize] {
-                        if let Some(group) = slot.take() {
-                            state.counts[group] = None;
-                        }
+            }
+            for &register in arguments {
+                for slot in &mut state.registers[register as usize] {
+                    if let Some(group) = slot.take() {
+                        state.counts[group] = None;
                     }
                 }
-                Ok(())
-            };
+            }
+            Ok(())
+        };
         let replay_array_summary = |state: &mut QuantityState,
                                     summary: &ArrayQuantityCallSummary,
                                     input_registers: &[Option<u32>],
@@ -5576,7 +6152,14 @@ fn verify_resumption_quantities_for_variants(
                             &state.callable_targets[*clause as usize]
                         };
                         let representative =
-                            *targets.first().ok_or(VerifyError::InvalidFunction(fid))?;
+                            *targets.first().ok_or_else(|| {
+                                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                                    eprintln!(
+                                        "g1-verifier function {fid} make-handler pc {pc}: clause r{clause} has no finite callable target"
+                                    );
+                                }
+                                VerifyError::InvalidFunction(fid)
+                            })?;
                         let receiver_len = function_receiver_quantity_leaf_types(
                             a,
                             &a.functions[representative as usize],
@@ -5594,6 +6177,13 @@ fn verify_resumption_quantities_for_variants(
                             )
                             .is_some()
                             || canonical_borrowed_receiver_resume_deltas(a, targets).is_some());
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier function {fid} make-handler pc {pc}: clause r{clause}, targets={targets:?}, representative={representative}, receiver-leaves={receiver_len}, owned-summary={:?}, borrowed-deltas={:?}, canonical={canonical}",
+                                canonical_owned_receiver_quantity_summary(&owned_summaries, targets),
+                                canonical_borrowed_receiver_resume_deltas(a, targets),
+                            );
+                        }
                         canonical
                             .then_some(representative)
                             .ok_or(VerifyError::InvalidFunction(fid))
@@ -5972,6 +6562,14 @@ fn verify_resumption_quantities_for_variants(
                                     )
                             })
                         });
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {fid} handle pc {pc}: dst-leaves={}, handler-leaves={}, body-leaves={}, handler-targets={handler_targets:?}, body-targets={body_targets:?}, exact-owned-disposition={has_exact_owned_disposition}",
+                        leaf_types[*dst as usize].len(),
+                        leaf_types[*handler as usize].len(),
+                        leaf_types[*body as usize].len(),
+                    );
+                }
                 if !leaf_types[*dst as usize].is_empty()
                     && state.registers[*handler as usize].is_empty()
                     && let Some(effect) = canonical_terminal_effect_payload_summary(
@@ -7107,6 +7705,19 @@ fn verify_resumption_quantities_for_variants(
                         || previous.array_slots != state.array_slots
                         || previous.array_roots != state.array_roots
                     {
+                        if std::env::var_os("G1_VM_STATE_TRACE").is_some() {
+                            eprintln!(
+                                "VM join f{fid} pc{target}: handler/array state mismatch; previous handlers={:?}/{:?}, incoming={:?}/{:?}, previous arrays={:?}/{:?}, incoming={:?}/{:?}",
+                                previous.handler_targets,
+                                previous.shared_handler_environment,
+                                state.handler_targets,
+                                state.shared_handler_environment,
+                                previous.array_slots,
+                                previous.array_roots,
+                                state.array_slots,
+                                state.array_roots,
+                            );
+                        }
                         return Err(VerifyError::StateMismatch {
                             function: fid,
                             instruction: target,
@@ -7141,6 +7752,13 @@ fn verify_resumption_quantities_for_variants(
                                             .get_or_insert(UseInterval { min: 0, max: 0 });
                                     }
                                     _ => {
+                                        if std::env::var_os("G1_VM_STATE_TRACE").is_some() {
+                                            eprintln!(
+                                                "VM join f{fid} pc{target} r{register}: enum leaf mismatch previous={:?} incoming={:?}",
+                                                previous.registers[register],
+                                                state.registers[register],
+                                            );
+                                        }
                                         return Err(VerifyError::StateMismatch {
                                             function: fid,
                                             instruction: target,
@@ -7151,6 +7769,16 @@ fn verify_resumption_quantities_for_variants(
                         } else if previous.registers[register] != state.registers[register]
                             || previous.enum_variants[register] != state.enum_variants[register]
                         {
+                            if std::env::var_os("G1_VM_STATE_TRACE").is_some() {
+                                eprintln!(
+                                    "VM join f{fid} pc{target} r{register}: previous={:?} incoming={:?}, variants=({:?}, {:?}), cleanup={:?}",
+                                    previous.registers[register],
+                                    state.registers[register],
+                                    previous.enum_variants[register],
+                                    state.enum_variants[register],
+                                    cleanup_registers(a, fid, target),
+                                );
+                            }
                             return Err(VerifyError::StateMismatch {
                                 function: fid,
                                 instruction: target,
@@ -7179,6 +7807,11 @@ fn verify_resumption_quantities_for_variants(
                             }
                             (None, None) => {}
                             _ => {
+                                if std::env::var_os("G1_VM_STATE_TRACE").is_some() {
+                                    eprintln!(
+                                        "VM join f{fid} pc{target}: quantity counts mismatch; previous={old:?}, incoming={incoming:?}"
+                                    );
+                                }
                                 return Err(VerifyError::StateMismatch {
                                     function: fid,
                                     instruction: target,
@@ -7227,6 +7860,11 @@ fn cleanup_prefix(a: &Artifact, fid: u32, pc: u32, target: u32) -> Result<&[u32]
     if source.len() < destination.len()
         || source[source.len() - destination.len()..] != *destination
     {
+        if std::env::var_os("G1_VM_STATE_TRACE").is_some() {
+            eprintln!(
+                "VM cleanup prefix f{fid} pc{pc} -> pc{target}: source={source:?}, destination={destination:?}"
+            );
+        }
         return Err(VerifyError::StateMismatch {
             function: fid,
             instruction: pc,
@@ -8088,7 +8726,20 @@ fn continue_move_path_successors(
                                     .collect(),
                             ))
                         }
+                        // Move-path state is a definite-initialization
+                        // analysis.  A value present on only one predecessor
+                        // is not definitely initialized after the join.  The
+                        // runtime register on the other edge is Empty, so a
+                        // later structural DROP remains a safe no-op; any
+                        // value-requiring use (including custom drop glue) is
+                        // still rejected by `ensure_complete`.
+                        (Some(_), None) | (None, Some(_)) => None,
                         _ => {
+                            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                                eprintln!(
+                                    "g1-verifier function {fid} move-path join from pc {pc} to {successor}: previous={old:?} incoming={incoming:?}"
+                                );
+                            }
                             return Err(VerifyError::StateMismatch {
                                 function: fid,
                                 instruction: successor,
@@ -8669,42 +9320,43 @@ fn aggregate_reference_return_origins(
     )
 }
 
+fn carrier_path_covers(broad: &[u32], exact: &[u32]) -> bool {
+    if broad.iter().any(|field| *field > u32::MAX / 2) {
+        return false;
+    }
+    let mut exact = exact.iter().copied().filter(|field| *field <= u32::MAX / 2);
+    broad
+        .iter()
+        .copied()
+        .all(|field| exact.next() == Some(field))
+}
+
+fn carrier_origin_covers(broad: &CarrierOrigin, exact: &CarrierOrigin) -> bool {
+    match (broad, exact) {
+        (
+            CarrierOrigin::Parameter {
+                parameter: broad_parameter,
+                path: broad_path,
+            },
+            CarrierOrigin::Parameter {
+                parameter: exact_parameter,
+                path: exact_path,
+            },
+        ) => broad_parameter == exact_parameter && carrier_path_covers(broad_path, exact_path),
+        (
+            CarrierOrigin::Receiver { path: broad_path },
+            CarrierOrigin::Receiver { path: exact_path },
+        ) => carrier_path_covers(broad_path, exact_path),
+        (CarrierOrigin::Local, CarrierOrigin::Local) => true,
+        _ => false,
+    }
+}
+
 fn carrier_contract_covers(broad: &CarrierOrigins, exact: &CarrierOrigins) -> bool {
-    let path_covers = |broad: &[u32], exact: &[u32]| {
-        if broad.iter().any(|field| *field > u32::MAX / 2) {
-            return false;
-        }
-        let mut exact = exact.iter().copied().filter(|field| *field <= u32::MAX / 2);
-        broad
-            .iter()
-            .copied()
-            .all(|field| exact.next() == Some(field))
-    };
     broad.len() == exact.len()
         && broad.iter().zip(exact).all(
             |((broad_result, broad_origin), (exact_result, exact_origin))| {
-                broad_result == exact_result
-                    && match (broad_origin, exact_origin) {
-                        (
-                            CarrierOrigin::Parameter {
-                                parameter: broad_parameter,
-                                path: broad_path,
-                            },
-                            CarrierOrigin::Parameter {
-                                parameter: exact_parameter,
-                                path: exact_path,
-                            },
-                        ) => {
-                            broad_parameter == exact_parameter
-                                && path_covers(broad_path, exact_path)
-                        }
-                        (
-                            CarrierOrigin::Receiver { path: broad_path },
-                            CarrierOrigin::Receiver { path: exact_path },
-                        ) => path_covers(broad_path, exact_path),
-                        (CarrierOrigin::Local, CarrierOrigin::Local) => true,
-                        _ => false,
-                    }
+                broad_result == exact_result && carrier_origin_covers(broad_origin, exact_origin)
             },
         )
 }
@@ -8893,6 +9545,14 @@ fn aggregate_reference_return_origins_with(
         // exactly, so metadata cannot manufacture an escape.
         candidates = vec![declared];
     }
+    let trace_contract =
+        std::env::var("G1_VERIFY_FUNCTION").is_ok_and(|name| name == function.name);
+    if trace_contract {
+        eprintln!(
+            "g1-verifier function {fid} `{}` aggregate-reference candidates={candidates:?}",
+            function.name
+        );
+    }
     let mut fixed_points = Vec::new();
     for candidate in candidates {
         provisional.insert(fid, candidate.clone());
@@ -8900,6 +9560,12 @@ fn aggregate_reference_return_origins_with(
         let result = aggregate_reference_return_origins_inner(a, fid, visiting, provisional);
         visiting.pop();
         provisional.remove(&fid);
+        if trace_contract {
+            eprintln!(
+                "g1-verifier function {fid} `{}` aggregate-reference candidate={candidate:?} body={result:?}",
+                function.name
+            );
+        }
         if let Ok(result) = result
             && (result == candidate
                 || has_declared_contract && carrier_contract_covers(&candidate, &result))
@@ -8929,6 +9595,7 @@ fn aggregate_reference_return_origins_inner(
         .functions
         .get(fid as usize)
         .ok_or(VerifyError::InvalidFunction(fid))?;
+    let trace_contract = std::env::var("G1_VERIFY_FUNCTION").is_ok_and(|name| name == f.name);
     let label_states = verify_labels(a, fid, f)?;
     let live_registers = continuation_live_registers(a, f, &label_states)?;
     let (enum_variants, _, enum_successors) = verify_enum_dominance(a, fid, f, &label_states)?;
@@ -8951,8 +9618,10 @@ fn aggregate_reference_return_origins_inner(
     let mut states = vec![None; f.code_len as usize];
     states[0] = Some(entry);
     let mut work = VecDeque::from([0u32]);
-    let mut returned = None::<CarrierOrigins>;
-    let mut returned_from_empty_alternative = false;
+    // A shared terminal can be reached before all of its predecessors have
+    // widened. Retain the latest carrier state per terminal and validate the
+    // completed set only after the worklist converges.
+    let mut terminal_returns = vec![None::<(CarrierOrigins, bool)>; f.code_len as usize];
     let start = f.code_start as usize;
     while let Some(pc) = work.pop_front() {
         let mut state = states[pc as usize].clone().unwrap();
@@ -9338,28 +10007,14 @@ fn aggregate_reference_return_origins_inner(
                 let contract = carrier_return_contract_with(a, *function, visiting, provisional)?;
                 let origins =
                     instantiate_carrier_contract(&contract, None, args, &state, *function)?;
-                record_carrier_return(
-                    fid,
-                    origins.into(),
-                    false,
-                    provisional.get(&fid),
-                    &mut returned,
-                    &mut returned_from_empty_alternative,
-                )?;
+                terminal_returns[pc as usize] = Some((origins.into(), false));
             }
             Instruction::TailCallSelf { args }
                 if !reference_leaves(a, f.return_type).is_empty() =>
             {
                 let contract = carrier_return_contract_with(a, fid, visiting, provisional)?;
                 let origins = instantiate_carrier_contract(&contract, Some(0), args, &state, fid)?;
-                record_carrier_return(
-                    fid,
-                    origins.into(),
-                    false,
-                    provisional.get(&fid),
-                    &mut returned,
-                    &mut returned_from_empty_alternative,
-                )?;
+                terminal_returns[pc as usize] = Some((origins.into(), false));
             }
             Instruction::TailCallKnownReceiver {
                 function,
@@ -9388,14 +10043,7 @@ fn aggregate_reference_return_origins_inner(
                     .ok_or(VerifyError::InvalidFunction(*function))?;
                     origins.push((result_path, source));
                 }
-                record_carrier_return(
-                    fid,
-                    origins.into(),
-                    false,
-                    provisional.get(&fid),
-                    &mut returned,
-                    &mut returned_from_empty_alternative,
-                )?;
+                terminal_returns[pc as usize] = Some((origins.into(), false));
             }
             Instruction::TailCallIndirect { callable, args, .. }
                 if !reference_leaves(a, f.return_type).is_empty() =>
@@ -9406,14 +10054,7 @@ fn aggregate_reference_return_origins_inner(
                         .map_err(|_| VerifyError::InvalidFunction(fid))?;
                 let origins =
                     instantiate_carrier_contract(&contract, Some(*callable), args, &state, fid)?;
-                record_carrier_return(
-                    fid,
-                    origins.into(),
-                    false,
-                    provisional.get(&fid),
-                    &mut returned,
-                    &mut returned_from_empty_alternative,
-                )?;
+                terminal_returns[pc as usize] = Some((origins.into(), false));
             }
             Instruction::Return { src: Some(src) } => {
                 let empty_alternative = state[*src as usize].is_empty();
@@ -9424,15 +10065,16 @@ fn aggregate_reference_return_origins_inner(
                     provisional.get(&fid),
                     fid,
                 );
+                if trace_contract {
+                    eprintln!(
+                        "g1-verifier function {fid} `{}` aggregate-reference return pc {pc}: source={:?} expected={:?} remapped={remapped:?}",
+                        f.name,
+                        state[*src as usize],
+                        provisional.get(&fid)
+                    );
+                }
                 let origins = remapped?;
-                record_carrier_return(
-                    fid,
-                    origins.into(),
-                    empty_alternative,
-                    provisional.get(&fid),
-                    &mut returned,
-                    &mut returned_from_empty_alternative,
-                )?;
+                terminal_returns[pc as usize] = Some((origins.into(), empty_alternative));
             }
             Instruction::Leave { slot, value } => {
                 let entry = label_states[pc as usize]
@@ -9485,6 +10127,12 @@ fn aggregate_reference_return_origins_inner(
                 _ => vec![pc + 1],
             }
         };
+        if trace_contract && matches!(instruction, Instruction::Switch { .. }) {
+            eprintln!(
+                "g1-verifier function {fid} `{}` aggregate-reference switch pc {pc}: candidates={successors:?} reachable={:?}",
+                f.name, enum_successors[pc as usize]
+            );
+        }
         for successor in successors {
             if !enum_successors[pc as usize].contains(&successor) {
                 continue;
@@ -9494,6 +10142,24 @@ fn aggregate_reference_return_origins_inner(
                 .ok_or(VerifyError::InvalidFunction(fid))?;
             match slot {
                 Some(existing) if existing != &state => {
+                    if trace_contract {
+                        let differences = existing
+                            .iter()
+                            .zip(&state)
+                            .enumerate()
+                            .filter(|(_, (left, right))| left != right)
+                            .filter(|(_, (left, right))| !left.is_empty() || !right.is_empty())
+                            .map(|(register, (left, right))| {
+                                (register, left.clone(), right.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        if !differences.is_empty() {
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` aggregate-reference merge pc {pc} -> {successor}: {differences:?}",
+                                f.name
+                            );
+                        }
+                    }
                     let mut changed = false;
                     for register in 0..existing.len() {
                         if existing[register] == state[register] {
@@ -9525,6 +10191,12 @@ fn aggregate_reference_return_origins_inner(
                                     .is_some_and(|(_, other)| other != origin)
                             })
                         {
+                            if trace_contract {
+                                eprintln!(
+                                    "g1-verifier function {fid} `{}` aggregate-reference join pc {pc} -> {successor} r{register}: existing={:?} incoming={:?}",
+                                    f.name, existing[register], state[register]
+                                );
+                            }
                             return Err(VerifyError::InvalidFunction(fid));
                         }
                         for candidate in &state[register] {
@@ -9546,6 +10218,24 @@ fn aggregate_reference_return_origins_inner(
                 }
             }
         }
+    }
+    let mut returned = None::<CarrierOrigins>;
+    let mut returned_from_empty_alternative = false;
+    for (origins, empty_alternative) in terminal_returns.into_iter().flatten() {
+        record_carrier_return(
+            fid,
+            origins,
+            empty_alternative,
+            provisional.get(&fid),
+            &mut returned,
+            &mut returned_from_empty_alternative,
+        )?;
+    }
+    if trace_contract && returned.is_none() {
+        eprintln!(
+            "g1-verifier function {fid} `{}` aggregate-reference reached no return",
+            f.name
+        );
     }
     returned.ok_or(VerifyError::InvalidFunction(fid))
 }
@@ -10268,16 +10958,21 @@ fn remap_carrier_origins_with_expected(
                 })
             })
             .collect::<Option<std::collections::BTreeSet<_>>>()
-        && sources.iter().all(|candidate| expected.contains(candidate))
+        && sources.iter().all(|(source_path, source_origin)| {
+            expected.iter().any(|(expected_path, expected_origin)| {
+                expected_path == source_path
+                    && carrier_origin_covers(expected_origin, source_origin)
+            })
+        })
         && expected.iter().all(|(path, origin)| {
             let active = path
                 .first()
                 .map(|marker| u32::MAX - *marker)
                 .is_some_and(|variant| active_variants.contains(&variant));
             !active
-                || sources
-                    .iter()
-                    .any(|candidate| candidate.0 == *path && candidate.1 == *origin)
+                || sources.iter().any(|(source_path, source_origin)| {
+                    source_path == path && carrier_origin_covers(origin, source_origin)
+                })
         })
     {
         // A branch join may have accumulated several, but not yet all,
@@ -10936,6 +11631,11 @@ struct Loan {
     place: BorrowedPlace,
     unique: bool,
     suspended_parent: Option<u32>,
+    /// False after an explicit parent EndBorrow retires a descendant whose
+    /// carrier remains solely for structural destruction. Such a loan still
+    /// protects the physical owner from Move/Drop, but no longer participates
+    /// in alias authorization conflicts.
+    authorization_active: bool,
     /// `false` only between DEREF_MOVE and the matching DEREF_STORE through
     /// this unique handle.  Keeping this on the loan makes the transient hole
     /// follow ordinary register moves and participate in CFG join equality.
@@ -10972,6 +11672,34 @@ fn authorized_carrier_chain(source: u32, loans: &[CarrierLoans]) -> BTreeSet<u32
     authorized
 }
 
+/// Authority for a shared access through a descendant place. Shared children
+/// do not suspend shared parents, so a shared-to-shared reborrow has no parent
+/// edge with which to retain an earlier unique root. Recover those roots from
+/// live strict-ancestor places and include each ancestor's explicit unique
+/// suspension chain. An unrelated overlapping unique alias remains outside
+/// this set and therefore still conflicts.
+fn authorized_shared_descendant_chain(
+    source: u32,
+    place: &BorrowedPlace,
+    loans: &[CarrierLoans],
+) -> BTreeSet<u32> {
+    let mut authorized = authorized_carrier_chain(source, loans);
+    for (register, carried) in loans.iter().enumerate() {
+        let [ancestor] = carried.as_slice() else {
+            continue;
+        };
+        if ancestor.loan.place.owner == place.owner
+            && ancestor.loan.place.projections.len() < place.projections.len()
+            && place
+                .projections
+                .starts_with(&ancestor.loan.place.projections)
+        {
+            authorized.extend(authorized_carrier_chain(register as u32, loans));
+        }
+    }
+    authorized
+}
+
 fn conflicts_outside_authorized_chain(
     place: &BorrowedPlace,
     unique: bool,
@@ -10983,7 +11711,11 @@ fn conflicts_outside_authorized_chain(
         .enumerate()
         .filter(|(register, _)| !authorized.contains(&(*register as u32)))
         .flat_map(|(_, loans)| loans)
-        .any(|loan| places_overlap(place, &loan.loan.place) && (unique || loan.loan.unique))
+        .any(|loan| {
+            loan.loan.authorization_active
+                && places_overlap(place, &loan.loan.place)
+                && (unique || loan.loan.unique)
+        })
 }
 
 /// Merge loans carried by mutually exclusive enum alternatives at a CFG join.
@@ -11049,6 +11781,7 @@ fn merge_exclusive_enum_carrier_loans(
                         old == new
                             || (old.loan.unique == new.loan.unique
                                 && old.loan.suspended_parent == new.loan.suspended_parent
+                                && old.loan.authorization_active == new.loan.authorization_active
                                 && old.loan.referent_initialized == new.loan.referent_initialized
                                 && !places_overlap(&old.loan.place, &new.loan.place))
                     })
@@ -11501,7 +12234,7 @@ fn places_overlap(a: &BorrowedPlace, b: &BorrowedPlace) -> bool {
 /// Identify the snapshot/commit move bundles emitted for MIR block edges.
 ///
 /// Before peephole folding, a bundle is a maximal move-only suffix immediately
-/// before a jump. Its first half snapshots pairwise-distinct sources into
+/// before a jump or label leave. Its first half snapshots pairwise-distinct sources into
 /// fresh scratch registers; its second half moves each scratch exactly once
 /// into a pairwise-distinct block parameter. Peephole folding may collapse
 /// that shape to a direct COPY/MOVE run whose sources and destinations are
@@ -11526,8 +12259,11 @@ fn parallel_edge_move_members(a: &Artifact, f: &Function) -> Vec<Option<BTreeSet
         })
         .collect::<BTreeSet<_>>();
     for boundary in 0..len {
-        let ends_in_jump = matches!(a.code[start + boundary], Instruction::Jump { .. });
-        if !ends_in_jump && !explicit_targets.contains(&(boundary as u32)) {
+        let ends_in_edge = matches!(
+            a.code[start + boundary],
+            Instruction::Jump { .. } | Instruction::Leave { .. }
+        );
+        if !ends_in_edge && !explicit_targets.contains(&(boundary as u32)) {
             continue;
         }
         let mut first = boundary;
@@ -11576,19 +12312,71 @@ fn parallel_edge_move_members(a: &Artifact, f: &Function) -> Vec<Option<BTreeSet
                         .collect::<BTreeSet<_>>()
                 })
             });
-        let members = direct.or_else(|| {
-            if !transfers.len().is_multiple_of(2)
-                || transfers
+        // Peephole folding may collapse only the non-cyclic parts of a
+        // two-phase transfer. The resulting hybrid consists of direct
+        // source-to-parameter assignments plus scratch chains. Authenticate
+        // it when destinations and sources are single-assignment, every
+        // scratch is defined before one consuming use, and the remaining
+        // roots and final destinations are disjoint.
+        let hybrid = transfers
+            .iter()
+            .map(|instruction| match instruction {
+                Instruction::Copy { dst, src } => Some((false, *src, *dst)),
+                Instruction::Move { dst, src } => Some((true, *src, *dst)),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .and_then(|parsed| {
+                let sources = parsed
                     .iter()
-                    .any(|instruction| !matches!(instruction, Instruction::Move { .. }))
-            {
+                    .map(|(_, source, _)| *source)
+                    .collect::<BTreeSet<_>>();
+                let destinations = parsed
+                    .iter()
+                    .map(|(_, _, destination)| *destination)
+                    .collect::<BTreeSet<_>>();
+                let internal = sources
+                    .intersection(&destinations)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let roots = sources
+                    .difference(&internal)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let finals = destinations
+                    .difference(&internal)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let valid_internal = internal.iter().all(|register| {
+                    let definition = parsed
+                        .iter()
+                        .position(|(_, _, destination)| destination == register);
+                    let use_site = parsed.iter().position(|(_, source, _)| source == register);
+                    definition
+                        .zip(use_site)
+                        .is_some_and(|(definition, use_site)| {
+                            definition < use_site && parsed[use_site].0
+                        })
+                });
+                (!internal.is_empty()
+                    && finals.len() >= 2
+                    && sources.len() == parsed.len()
+                    && destinations.len() == parsed.len()
+                    && roots.is_disjoint(&finals)
+                    && valid_internal)
+                    .then(|| sources.into_iter().chain(destinations).collect())
+            });
+        let members = direct.or(hybrid).or_else(|| {
+            if !transfers.len().is_multiple_of(2) {
                 return None;
             }
             let count = transfers.len() / 2;
             let snapshots = transfers[..count]
                 .iter()
                 .filter_map(|instruction| match instruction {
-                    Instruction::Move { dst, src } => Some((*src, *dst)),
+                    Instruction::Copy { dst, src } | Instruction::Move { dst, src } => {
+                        Some((*src, *dst))
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -11624,6 +12412,67 @@ fn parallel_edge_move_members(a: &Artifact, f: &Function) -> Vec<Option<BTreeSet
                     .chain(destinations)
                     .collect()
             })
+        });
+        // A MIR statement may materialize the first edge argument immediately
+        // before the actual snapshot/commit bundle. That produces one extra
+        // leading MOVE in the maximal move-only suffix (and its destination
+        // becomes the first authenticated source), so the whole suffix is not
+        // itself a parallel transfer. Find the earliest valid proper suffix;
+        // all of its scratches and destinations remain pairwise disjoint and
+        // it is still terminated by this exact control edge.
+        let members = members.or_else(|| {
+            for candidate_first in first + 1..boundary {
+                let candidate = &a.code[start + candidate_first..start + boundary];
+                if candidate.len() < 2 || !candidate.len().is_multiple_of(2) {
+                    continue;
+                }
+                let count = candidate.len() / 2;
+                let snapshots = candidate[..count]
+                    .iter()
+                    .filter_map(|instruction| match instruction {
+                        Instruction::Copy { dst, src } | Instruction::Move { dst, src } => {
+                            Some((*src, *dst))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let commits = candidate[count..]
+                    .iter()
+                    .filter_map(|instruction| match instruction {
+                        Instruction::Move { dst, src } => Some((*src, *dst)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let sources = snapshots
+                    .iter()
+                    .map(|(src, _)| *src)
+                    .collect::<BTreeSet<_>>();
+                let scratches = snapshots
+                    .iter()
+                    .map(|(_, dst)| *dst)
+                    .collect::<BTreeSet<_>>();
+                let committed = commits.iter().map(|(src, _)| *src).collect::<BTreeSet<_>>();
+                let destinations = commits.iter().map(|(_, dst)| *dst).collect::<BTreeSet<_>>();
+                if snapshots.len() == count
+                    && commits.len() == count
+                    && sources.len() == count
+                    && scratches.len() == count
+                    && destinations.len() == count
+                    && scratches == committed
+                    && sources.is_disjoint(&scratches)
+                    && destinations.is_disjoint(&scratches)
+                {
+                    first = candidate_first;
+                    return Some(
+                        sources
+                            .into_iter()
+                            .chain(scratches)
+                            .chain(destinations)
+                            .collect(),
+                    );
+                }
+            }
+            None
         });
         let Some(members) = members else {
             continue;
@@ -11697,6 +12546,7 @@ fn verify_loans(
                     },
                     unique,
                     suspended_parent: None,
+                    authorization_active: true,
                     referent_initialized: true,
                 },
             })
@@ -11704,22 +12554,36 @@ fn verify_loans(
     }
     states[0] = Some(entry);
     let mut work = VecDeque::from([0u32]);
+    let mut unresolved_loan_reads = BTreeSet::new();
     while let Some(pc) = work.pop_front() {
         let mut loans = states[pc as usize].clone().unwrap();
+        // Physical carrier loans and their parent chains remain present until
+        // an instruction actually consumes or ends the register. Clearing a
+        // future-dead carrier or compressing it out of the chain would either
+        // permit moving its referent too early or make a live child conflict
+        // with the very authority that created it.
         let instruction = &a.code[start + pc as usize];
-        let conflict = |register| VerifyError::BorrowConflict {
-            function: fid,
-            instruction: pc,
-            register,
+        let conflict = |register| {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {fid} `{}` loan conflict at pc {pc}: register=r{register} instruction={instruction:?}",
+                    f.name
+                );
+            }
+            VerifyError::BorrowConflict {
+                function: fid,
+                instruction: pc,
+                register,
+            }
         };
         let whole = |owner| BorrowedPlace {
             owner,
             projections: vec![],
         };
-        let conflicts = |place: &BorrowedPlace,
-                         unique: bool,
-                         ignored: Option<u32>,
-                         loans: &[CarrierLoans]| {
+        let physical_conflicts = |place: &BorrowedPlace,
+                                  unique: bool,
+                                  ignored: Option<u32>,
+                                  loans: &[CarrierLoans]| {
             loans
                 .iter()
                 .enumerate()
@@ -11727,13 +12591,36 @@ fn verify_loans(
                 .flat_map(|(_, loans)| loans)
                 .any(|loan| places_overlap(place, &loan.loan.place) && (unique || loan.loan.unique))
         };
-        let is_suspended = |register: u32, loans: &[CarrierLoans]| {
+        let conflicts =
+            |place: &BorrowedPlace, unique: bool, ignored: Option<u32>, loans: &[CarrierLoans]| {
+                loans
+                    .iter()
+                    .enumerate()
+                    .filter(|(register, _)| Some(*register as u32) != ignored)
+                    .flat_map(|(_, loans)| loans)
+                    .any(|loan| {
+                        loan.loan.authorization_active
+                            && places_overlap(place, &loan.loan.place)
+                            && (unique || loan.loan.unique)
+                    })
+            };
+        let physically_suspended = |register: u32, loans: &[CarrierLoans]| {
             loans
                 .iter()
                 .enumerate()
                 .filter(|(carrier, _)| *carrier != register as usize)
                 .flat_map(|(_, loans)| loans)
                 .any(|loan| loan.loan.suspended_parent == Some(register))
+        };
+        let is_suspended = |register: u32, loans: &[CarrierLoans]| {
+            loans
+                .iter()
+                .enumerate()
+                .filter(|(carrier, _)| *carrier != register as usize)
+                .flat_map(|(_, loans)| loans)
+                .any(|loan| {
+                    loan.loan.authorization_active && loan.loan.suspended_parent == Some(register)
+                })
         };
         let end_reference = |loans: &mut [CarrierLoans], register: u32| {
             if loans[register as usize]
@@ -11746,7 +12633,9 @@ fn verify_loans(
             Ok(())
         };
         let consume_owner = |loans: &[CarrierLoans], register: u32| {
-            if conflicts(&whole(register), true, None, loans) || is_suspended(register, loans) {
+            if physical_conflicts(&whole(register), true, None, loans)
+                || physically_suspended(register, loans)
+            {
                 Err(conflict(register))
             } else {
                 Ok(())
@@ -11756,6 +12645,17 @@ fn verify_loans(
             Instruction::BorrowShared { dst, src } => {
                 let place = whole(*src);
                 if conflicts(&place, false, None, &loans) {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        let active = loans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, carried)| !carried.is_empty())
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` BorrowShared conflict details at pc {pc}: place={place:?} active={active:?}",
+                            f.name
+                        );
+                    }
                     return Err(conflict(*src));
                 }
                 loans[*dst as usize] = vec![CarrierLoan {
@@ -11764,6 +12664,7 @@ fn verify_loans(
                         place,
                         unique: false,
                         suspended_parent: None,
+                        authorization_active: true,
                         referent_initialized: true,
                     },
                 }];
@@ -11779,16 +12680,107 @@ fn verify_loans(
                         place,
                         unique: true,
                         suspended_parent: None,
+                        authorization_active: true,
                         referent_initialized: true,
                     },
                 }];
             }
             Instruction::DerefCopy { src, .. } => {
-                if is_suspended(*src, &loans)
+                if loans[*src as usize].is_empty() {
+                    // Loan flow is a forward union analysis. At a join, an
+                    // early-exit predecessor can arrive before the arm which
+                    // transports the reference payload. Defer this obligation
+                    // until convergence; an incoming loan requeues the block,
+                    // while a genuinely unproven dereference remains in the
+                    // set and is rejected below.
+                    unresolved_loan_reads.insert(pc);
+                } else if is_suspended(*src, &loans)
                     || !matches!(loans[*src as usize].as_slice(), [loan] if loan.path.is_empty() && loan.loan.referent_initialized)
                 {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` DerefCopy conflict details at pc {pc}: source={:?} suspended={} enum_variant={:?}",
+                            f.name,
+                            loans[*src as usize],
+                            is_suspended(*src, &loans),
+                            enum_facts[pc as usize][*src as usize]
+                        );
+                    }
+                    return Err(conflict(*src));
+                } else {
+                    unresolved_loan_reads.remove(&pc);
+                }
+            }
+            Instruction::DerefReborrowShared { dst, src }
+            | Instruction::DerefReborrowUnique { dst, src } => {
+                let unique = matches!(instruction, Instruction::DerefReborrowUnique { .. });
+                if is_suspended(*src, &loans) {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        let children = loans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, carried)| {
+                                carried
+                                    .iter()
+                                    .any(|loan| loan.loan.suspended_parent == Some(*src))
+                            })
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` DerefReborrow suspended at pc {pc}: source=r{src} carried={:?} children={children:?}",
+                            f.name, loans[*src as usize]
+                        );
+                    }
                     return Err(conflict(*src));
                 }
+                let source = loans[*src as usize]
+                    .first()
+                    .filter(|loan| {
+                        loans[*src as usize].len() == 1
+                            && loan.path.is_empty()
+                            && loan.loan.referent_initialized
+                            && (!unique || loan.loan.unique)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` DerefReborrow source mismatch at pc {pc}: source=r{src} unique={unique} carried={:?}",
+                                f.name, loans[*src as usize]
+                            );
+                        }
+                        conflict(*src)
+                    })?;
+                let mut place = source.loan.place.clone();
+                place.projections.push(STORED_REFERENCE_DEREF);
+                let authorized = if unique {
+                    authorized_carrier_chain(*src, &loans)
+                } else {
+                    authorized_shared_descendant_chain(*src, &place, &loans)
+                };
+                if conflicts_outside_authorized_chain(&place, unique, &authorized, &loans) {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        let active = loans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, carried)| !carried.is_empty())
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` DerefReborrow alias conflict at pc {pc}: source=r{src} place={place:?} authorized={authorized:?} active={active:?}",
+                            f.name
+                        );
+                    }
+                    return Err(conflict(*src));
+                }
+                loans[*dst as usize] = vec![CarrierLoan {
+                    path: vec![],
+                    loan: Loan {
+                        place,
+                        unique,
+                        suspended_parent: source.loan.unique.then_some(*src),
+                        authorization_active: true,
+                        referent_initialized: true,
+                    },
+                }];
             }
             Instruction::DerefMove { src, .. } => {
                 if is_suspended(*src, &loans) {
@@ -11822,7 +12814,18 @@ fn verify_loans(
                 end_reference(&mut loans, *src)?;
             }
             Instruction::ReborrowShared { dst, src } => {
-                let source = loans[*src as usize]
+                if loans[*src as usize].is_empty() {
+                    // Loan flow is a forward union analysis. An enum/label
+                    // join can reach this instruction first through an empty
+                    // alternative, before the reference-bearing predecessor
+                    // updates and requeues it. Defer the obligation exactly
+                    // as for DerefCopy; a genuinely missing carrier is
+                    // rejected after fixed-point convergence below.
+                    unresolved_loan_reads.insert(pc);
+                    loans[*dst as usize].clear();
+                } else {
+                    unresolved_loan_reads.remove(&pc);
+                    let source = loans[*src as usize]
                     .first()
                     .filter(|loan| {
                         loans[*src as usize].len() == 1
@@ -11830,32 +12833,56 @@ fn verify_loans(
                             && loan.loan.referent_initialized
                     })
                     .cloned()
-                    .ok_or(VerifyError::BorrowConflict {
-                        function: fid,
-                        instruction: pc,
-                        register: *src,
+                    .ok_or_else(|| {
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` ReborrowShared source mismatch at pc {pc}: source=r{src} carried={:?}",
+                                f.name, loans[*src as usize]
+                            );
+                        }
+                        conflict(*src)
                     })?;
-                let authorized = authorized_carrier_chain(*src, &loans);
-                if conflicts_outside_authorized_chain(
-                    &source.loan.place,
-                    false,
-                    &authorized,
-                    &loans,
-                ) {
-                    return Err(conflict(*src));
+                    let authorized =
+                        authorized_shared_descendant_chain(*src, &source.loan.place, &loans);
+                    if conflicts_outside_authorized_chain(
+                        &source.loan.place,
+                        false,
+                        &authorized,
+                        &loans,
+                    ) {
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            let active = loans
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, carried)| !carried.is_empty())
+                                .collect::<Vec<_>>();
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` ReborrowShared alias conflict at pc {pc}: source=r{src} place={:?} authorized={authorized:?} active={active:?}",
+                                f.name, source.loan.place
+                            );
+                        }
+                        return Err(conflict(*src));
+                    }
+                    loans[*dst as usize] = vec![CarrierLoan {
+                        path: vec![],
+                        loan: Loan {
+                            place: source.loan.place,
+                            unique: false,
+                            suspended_parent: source.loan.unique.then_some(*src),
+                            authorization_active: true,
+                            referent_initialized: true,
+                        },
+                    }];
                 }
-                loans[*dst as usize] = vec![CarrierLoan {
-                    path: vec![],
-                    loan: Loan {
-                        place: source.loan.place,
-                        unique: false,
-                        suspended_parent: source.loan.unique.then_some(*src),
-                        referent_initialized: true,
-                    },
-                }];
             }
             Instruction::ReborrowUnique { dst, src } => {
                 if is_suspended(*src, &loans) {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` ReborrowUnique suspended at pc {pc}: source=r{src} carried={:?}",
+                            f.name, loans[*src as usize]
+                        );
+                    }
                     return Err(conflict(*src));
                 }
                 let source = loans[*src as usize]
@@ -11867,14 +12894,29 @@ fn verify_loans(
                             && loan.loan.referent_initialized
                     })
                     .cloned()
-                    .ok_or(VerifyError::BorrowConflict {
-                        function: fid,
-                        instruction: pc,
-                        register: *src,
+                    .ok_or_else(|| {
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` ReborrowUnique source mismatch at pc {pc}: source=r{src} carried={:?}",
+                                f.name, loans[*src as usize]
+                            );
+                        }
+                        conflict(*src)
                     })?;
                 let authorized = authorized_carrier_chain(*src, &loans);
                 if conflicts_outside_authorized_chain(&source.loan.place, true, &authorized, &loans)
                 {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        let active = loans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, carried)| !carried.is_empty())
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` ReborrowUnique alias conflict at pc {pc}: source=r{src} place={:?} authorized={authorized:?} active={active:?}",
+                            f.name, source.loan.place
+                        );
+                    }
                     return Err(conflict(*src));
                 }
                 loans[*dst as usize] = vec![CarrierLoan {
@@ -11883,13 +12925,96 @@ fn verify_loans(
                         place: source.loan.place,
                         unique: true,
                         suspended_parent: Some(*src),
+                        authorization_active: true,
                         referent_initialized: true,
                     },
                 }];
             }
             Instruction::EndBorrow { reference } => {
-                if is_suspended(*reference, &loans) {
-                    return Err(conflict(*reference));
+                if physically_suspended(*reference, &loans) {
+                    let mut descendants = BTreeSet::new();
+                    let mut pending = vec![*reference];
+                    while let Some(parent) = pending.pop() {
+                        for (carrier, carried) in loans.iter().enumerate() {
+                            let carrier = carrier as u32;
+                            if carried
+                                .iter()
+                                .any(|loan| loan.loan.suspended_parent == Some(parent))
+                                && descendants.insert(carrier)
+                            {
+                                pending.push(carrier);
+                            }
+                        }
+                    }
+                    let has_live_descendant = descendants
+                        .iter()
+                        .any(|carrier| live_registers[pc as usize][*carrier as usize]);
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        let children = loans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, carried)| {
+                                carried
+                                    .iter()
+                                    .any(|loan| loan.loan.suspended_parent == Some(*reference))
+                            })
+                            .collect::<Vec<_>>();
+                        let child_registers = children
+                            .iter()
+                            .map(|(register, _)| *register as u32)
+                            .collect::<BTreeSet<_>>();
+                        let child_liveness = child_registers
+                            .iter()
+                            .map(|register| {
+                                (*register, live_registers[pc as usize][*register as usize])
+                            })
+                            .collect::<Vec<_>>();
+                        let child_uses = a.code[start..start + f.code_len as usize]
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(use_pc, instruction)| {
+                                instruction_register_uses(instruction)
+                                    .into_iter()
+                                    .any(|register| child_registers.contains(&register))
+                                    .then_some((use_pc, instruction))
+                            })
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` EndBorrow suspended at pc {pc}: reference=r{reference} carried={:?} children={children:?} child_liveness={child_liveness:?} child_uses={child_uses:?}",
+                            f.name, loans[*reference as usize]
+                        );
+                    }
+                    if has_live_descendant {
+                        return Err(conflict(*reference));
+                    }
+                    // Descendants retained solely so their enclosing values
+                    // can be structurally dropped no longer participate in
+                    // authorization. Keep their physical loans so they still
+                    // protect the referent until destruction, while retiring
+                    // and detaching the complete descendant chain.
+                    for carried in &mut loans {
+                        for loan in carried {
+                            if loan.loan.suspended_parent == Some(*reference)
+                                || loan
+                                    .loan
+                                    .suspended_parent
+                                    .is_some_and(|parent| descendants.contains(&parent))
+                            {
+                                loan.loan.suspended_parent = None;
+                                loan.loan.authorization_active = false;
+                            }
+                        }
+                    }
+                }
+                if std::env::var_os("G1_VERIFY_TRACE").is_some()
+                    && loans[*reference as usize]
+                        .iter()
+                        .any(|loan| !loan.loan.referent_initialized)
+                {
+                    eprintln!(
+                        "g1-verifier function {fid} `{}` EndBorrow uninitialized at pc {pc}: reference=r{reference} carried={:?}",
+                        f.name, loans[*reference as usize]
+                    );
                 }
                 end_reference(&mut loans, *reference)?;
             }
@@ -11919,10 +13044,18 @@ fn verify_loans(
                                     .map(|loan| &loan.loan.place)
                             })
                             .collect::<Vec<_>>();
-                        members.contains(src)
+                        let accepted = members.contains(src)
                             && members.contains(dst)
                             && borrowed_place_dependents.iter().all(|carrier| {
                                 if relocated_authority.contains(carrier) {
+                                    return true;
+                                }
+                                // A reference whose remaining uses are only
+                                // structural EndBorrow/Drop does not need to
+                                // travel in the edge bundle. Retain its loan
+                                // and rebase the place below so it continues
+                                // to protect the relocated owner physically.
+                                if !live_registers[pc as usize][*carrier as usize] {
                                     return true;
                                 }
                                 let [stationary] = loans[*carrier as usize].as_slice() else {
@@ -11932,6 +13065,24 @@ fn verify_loans(
                                     return false;
                                 }
                                 let place = &stationary.loan.place;
+                                // A dominating whole-owner shared borrow does
+                                // not need an SSA destination on every edge.
+                                // The owner MOVE relocates the same place
+                                // identity and the rewrite below follows that
+                                // identity in the verifier state.
+                                if place.projections.is_empty() {
+                                    return true;
+                                }
+                                // Shared references are freely copyable.  A
+                                // duplicate may remain in a dominating
+                                // register while an edge transports another
+                                // copy alongside the owner.  MOVE preserves
+                                // the owner's place identity, and the
+                                // relocation below retargets every duplicate
+                                // to the destination register.
+                                if relocated_places.iter().any(|relocated| *relocated == place) {
+                                    return true;
+                                }
                                 let proper_prefix =
                                     |left: &BorrowedPlace, right: &BorrowedPlace| {
                                         left.owner == right.owner
@@ -11944,9 +13095,39 @@ fn verify_loans(
                                     && relocated_places
                                         .iter()
                                         .any(|descendant| proper_prefix(place, descendant))
-                            })
+                            });
+                        accepted
                     });
-                if conflicts(&whole(*src), true, Some(*src), &loans) && !authenticated_relocation {
+                if physical_conflicts(&whole(*src), true, Some(*src), &loans)
+                    && !authenticated_relocation
+                {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        let active = loans
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, carried)| !carried.is_empty())
+                            .collect::<Vec<_>>();
+                        let dependent_liveness = borrowed_place_dependents
+                            .iter()
+                            .map(|register| {
+                                (*register, live_registers[pc as usize][*register as usize])
+                            })
+                            .collect::<Vec<_>>();
+                        let dependent_uses = a.code[start..start + f.code_len as usize]
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(use_pc, instruction)| {
+                                instruction_register_uses(instruction)
+                                    .into_iter()
+                                    .any(|register| borrowed_place_dependents.contains(&register))
+                                    .then_some((use_pc, instruction))
+                            })
+                            .collect::<Vec<_>>();
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` MOVE relocation details at pc {pc}: src=r{src} dst=r{dst} dependents={borrowed_place_dependents:?} dependent_liveness={dependent_liveness:?} dependent_uses={dependent_uses:?} members={:?} active={active:?}",
+                            f.name, parallel_move_members[pc as usize]
+                        );
+                    }
                     return Err(conflict(*src));
                 }
                 loans[*dst as usize] = std::mem::take(&mut loans[*src as usize]);
@@ -11974,7 +13155,7 @@ fn verify_loans(
                 loans[*dst as usize] = loans[*src as usize].clone();
             }
             Instruction::Drop { register } => {
-                if is_suspended(*register, &loans) {
+                if physically_suspended(*register, &loans) {
                     if !matches!(
                         type_at(a, f.register_types[*register as usize])?,
                         Type::RefShared { .. } | Type::RefUnique { .. }
@@ -12290,6 +13471,16 @@ fn verify_loans(
                 let prefix = enum_facts[pc as usize][*src as usize]
                     .map(|variant| vec![u32::MAX - variant, *field])
                     .unwrap_or_else(|| vec![*field]);
+                if std::env::var_os("G1_VERIFY_TRACE").is_some()
+                    && loans[*src as usize].iter().any(|loan| {
+                        !loan.path.starts_with(&prefix) && loan.path.last() == Some(field)
+                    })
+                {
+                    eprintln!(
+                        "g1-verifier function {fid} `{}` ProjectMove carrier-path mismatch at pc {pc}: source={:?} prefix={prefix:?} enum_variant={:?} instruction={instruction:?}",
+                        f.name, loans[*src as usize], enum_facts[pc as usize][*src as usize]
+                    );
+                }
                 loans[*src as usize].retain(|loan| {
                     if loan.path.starts_with(&prefix) {
                         let mut loan = loan.clone();
@@ -12300,6 +13491,17 @@ fn verify_loans(
                         true
                     }
                 });
+                if std::env::var_os("G1_VERIFY_TRACE").is_some()
+                    && projected.is_empty()
+                    && !reference_types
+                        .leaves(a, f.register_types[*dst as usize])
+                        .is_empty()
+                {
+                    eprintln!(
+                        "g1-verifier function {fid} `{}` ProjectMove lost reference carrier at pc {pc}: source={:?} prefix={prefix:?} enum_variant={:?} instruction={instruction:?}",
+                        f.name, loans[*src as usize], enum_facts[pc as usize][*src as usize]
+                    );
+                }
                 projected.sort_by(|left, right| left.path.cmp(&right.path));
                 projected.dedup();
                 loans[*dst as usize] = projected;
@@ -12365,6 +13567,7 @@ fn verify_loans(
                                         place,
                                         unique,
                                         suspended_parent: root.loan.suspended_parent,
+                                        authorization_active: root.loan.authorization_active,
                                         referent_initialized: root.loan.referent_initialized,
                                     },
                                 })
@@ -12395,51 +13598,55 @@ fn verify_loans(
                     type_at(a, f.register_types[*src as usize]),
                     Ok(Type::RefShared { .. } | Type::RefUnique { .. })
                 );
-                let inherited = source_is_reference
-                    .then(|| match loans[*src as usize].as_slice() {
-                        [loan] if loan.path.is_empty() => Some(loan.clone()),
-                        _ => None,
-                    })
-                    .flatten();
-                if inherited
-                    .as_ref()
-                    .is_some_and(|loan| !loan.loan.referent_initialized)
-                {
-                    return Err(conflict(*src));
+                if source_is_reference && loans[*src as usize].is_empty() {
+                    unresolved_loan_reads.insert(pc);
+                    loans[*dst as usize].clear();
+                } else {
+                    unresolved_loan_reads.remove(&pc);
+                    let inherited = source_is_reference
+                        .then(|| match loans[*src as usize].as_slice() {
+                            [loan] if loan.path.is_empty() => Some(loan.clone()),
+                            _ => None,
+                        })
+                        .flatten();
+                    if inherited
+                        .as_ref()
+                        .is_some_and(|loan| !loan.loan.referent_initialized)
+                    {
+                        return Err(conflict(*src));
+                    }
+                    let mut place = inherited
+                        .as_ref()
+                        .map_or_else(|| whole(*src), |loan| loan.loan.place.clone());
+                    place.projections.push(*field);
+                    // Shared nested projections may pass through multiple
+                    // shared carrier handles after descending from a
+                    // suspended unique root. Recover every strict ancestor's
+                    // authority chain without exempting unrelated aliases.
+                    let authorized = inherited.as_ref().map_or_else(BTreeSet::new, |_| {
+                        if unique {
+                            authorized_carrier_chain(*src, &loans)
+                        } else {
+                            authorized_shared_descendant_chain(*src, &place, &loans)
+                        }
+                    });
+                    if conflicts_outside_authorized_chain(&place, unique, &authorized, &loans) {
+                        return Err(conflict(*src));
+                    }
+                    loans[*dst as usize] = vec![CarrierLoan {
+                        path: vec![],
+                        loan: Loan {
+                            place,
+                            unique,
+                            suspended_parent: inherited
+                                .as_ref()
+                                .is_some_and(|loan| loan.loan.unique)
+                                .then_some(*src),
+                            authorization_active: true,
+                            referent_initialized: true,
+                        },
+                    }];
                 }
-                let mut place = inherited
-                    .as_ref()
-                    .map_or_else(|| whole(*src), |loan| loan.loan.place.clone());
-                place.projections.push(*field);
-                // A nested projection through a reference is a descendant
-                // access authorized by that reference's whole carrier chain.
-                // The source may already be suspended by another child: the
-                // exact place comparison below admits a statically disjoint
-                // sibling while rejecting an overlapping child. Every carrier
-                // in the chain names the same root place and would otherwise
-                // conflict with the child it is authorizing. Exempt only those
-                // exact carriers; unrelated aliases still conflict.
-                let authorized = inherited
-                    .is_some()
-                    .then(|| authorized_carrier_chain(*src, &loans))
-                    .unwrap_or_default();
-                let has_conflict =
-                    conflicts_outside_authorized_chain(&place, unique, &authorized, &loans);
-                if has_conflict {
-                    return Err(conflict(*src));
-                }
-                loans[*dst as usize] = vec![CarrierLoan {
-                    path: vec![],
-                    loan: Loan {
-                        place,
-                        unique,
-                        suspended_parent: inherited
-                            .as_ref()
-                            .is_some_and(|loan| loan.loan.unique)
-                            .then_some(*src),
-                        referent_initialized: true,
-                    },
-                }];
             }
             Instruction::EnumTag { src, .. } => {
                 if conflicts(&whole(*src), false, None, &loans) {
@@ -13066,6 +14273,7 @@ fn verify_loans(
                                         place: whole(*callable),
                                         unique: *unique,
                                         suspended_parent: Some(*callable),
+                                        authorization_active: true,
                                         referent_initialized: true,
                                     },
                                 }]
@@ -13269,6 +14477,50 @@ fn verify_loans(
                         if old[register] == loans[register] {
                             continue;
                         }
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some()
+                            && (old[register].is_empty() || loans[register].is_empty())
+                            && !reference_types
+                                .leaves(a, f.register_types[register])
+                                .is_empty()
+                        {
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` carrier join at pc {successor}: r{register} live={} existing={:?} incoming={:?}",
+                                f.name,
+                                live_registers[successor as usize][register],
+                                old[register],
+                                loans[register]
+                            );
+                        }
+                        let differs_only_in_hole_state = old[register].len()
+                            == loans[register].len()
+                            && old[register].iter().zip(&loans[register]).all(
+                                |(existing, incoming)| {
+                                    existing.path == incoming.path
+                                        && existing.loan.place == incoming.loan.place
+                                        && existing.loan.unique == incoming.loan.unique
+                                        && existing.loan.suspended_parent
+                                            == incoming.loan.suspended_parent
+                                        && existing.loan.authorization_active
+                                            == incoming.loan.authorization_active
+                                },
+                            );
+                        if differs_only_in_hole_state {
+                            // A DEREF_MOVE hole is physical state, not merely
+                            // future authorization. Even a handle whose only
+                            // remaining operation is EndBorrow must agree at a
+                            // join so the verifier cannot accept a path that
+                            // ends an uninitialized referent.
+                            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                                eprintln!(
+                                    "g1-verifier function {fid} `{}` carrier hole-state mismatch at pc {successor}: r{register} existing={:?} incoming={:?}",
+                                    f.name, old[register], loans[register]
+                                );
+                            }
+                            return Err(VerifyError::StateMismatch {
+                                function: fid,
+                                instruction: successor,
+                            });
+                        }
                         if !live_registers[successor as usize][register] {
                             if !old[register].is_empty() {
                                 old[register].clear();
@@ -13293,6 +14545,15 @@ fn verify_loans(
                             changed |= merged;
                             continue;
                         }
+                        if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                            eprintln!(
+                                "g1-verifier function {fid} `{}` carrier state mismatch at pc {successor}: r{register} live={} existing={:?} incoming={:?}",
+                                f.name,
+                                live_registers[successor as usize][register],
+                                old[register],
+                                loans[register]
+                            );
+                        }
                         return Err(VerifyError::StateMismatch {
                             function: fid,
                             instruction: successor,
@@ -13308,6 +14569,20 @@ fn verify_loans(
                 }
             }
         }
+    }
+    if let Some(&pc) = unresolved_loan_reads.iter().next() {
+        let register = match a.code[start + pc as usize] {
+            Instruction::DerefCopy { src, .. }
+            | Instruction::ReborrowShared { src, .. }
+            | Instruction::ProjectBorrowShared { src, .. }
+            | Instruction::ProjectBorrowUnique { src, .. } => src,
+            _ => return Err(VerifyError::InvalidFunction(fid)),
+        };
+        return Err(VerifyError::BorrowConflict {
+            function: fid,
+            instruction: pc,
+            register,
+        });
     }
     Ok(states
         .into_iter()
@@ -13363,6 +14638,8 @@ fn shape(
         Instruction::ReborrowShared { dst, src }
         | Instruction::ReborrowUnique { dst, src }
         | Instruction::DerefCopy { dst, src }
+        | Instruction::DerefReborrowShared { dst, src }
+        | Instruction::DerefReborrowUnique { dst, src }
         | Instruction::DerefMove { dst, src }
         | Instruction::DerefStore { dst, src } => {
             reg(*dst)?;
@@ -14338,6 +15615,57 @@ fn transfer(
             write(s, *dst)?;
             next()
         }
+        Instruction::DerefReborrowShared { dst, src }
+        | Instruction::DerefReborrowUnique { dst, src } => {
+            read(s, *src)?;
+            let unique = matches!(i, Instruction::DerefReborrowUnique { .. });
+            let outer_unique = matches!(
+                type_at(a, f.register_types[*src as usize])?,
+                Type::RefUnique { .. }
+            );
+            let outer_referent = match type_at(a, f.register_types[*src as usize])? {
+                Type::RefShared { referent } | Type::RefUnique { referent } => *referent,
+                _ => {
+                    return Err(VerifyError::InvalidAggregate {
+                        function: fid,
+                        instruction: pc,
+                    });
+                }
+            };
+            let inner_referent = match type_at(a, outer_referent)? {
+                Type::RefShared { referent } if !unique => *referent,
+                Type::RefUnique { referent } if outer_unique => *referent,
+                Type::RefShared { .. } | Type::RefUnique { .. } => {
+                    return Err(VerifyError::BorrowConflict {
+                        function: fid,
+                        instruction: pc,
+                        register: *src,
+                    });
+                }
+                _ => {
+                    return Err(VerifyError::InvalidAggregate {
+                        function: fid,
+                        instruction: pc,
+                    });
+                }
+            };
+            if !matches!(
+                type_at(a, f.register_types[*dst as usize])?,
+                Type::RefUnique { referent } if unique && *referent == inner_referent
+            ) && !matches!(
+                type_at(a, f.register_types[*dst as usize])?,
+                Type::RefShared { referent } if !unique && *referent == inner_referent
+            ) {
+                return Err(VerifyError::TypeMismatch {
+                    function: fid,
+                    instruction: pc,
+                    expected: outer_referent,
+                    actual: f.register_types[*dst as usize],
+                });
+            }
+            write(s, *dst)?;
+            next()
+        }
         Instruction::EndBorrow { reference } => {
             if !matches!(
                 type_at(a, f.register_types[*reference as usize])?,
@@ -14559,6 +15887,12 @@ fn transfer(
         }
         Instruction::Drop { register } => {
             let ty = f.register_types[*register as usize];
+            if !s[*register as usize] {
+                // A conditionally initialized owner is represented by Empty
+                // on the predecessor where it was moved elsewhere. DROP is
+                // the lowered drop-flag test and is a no-op on that path.
+                return next();
+            }
             if !residual_quantity_drop_allowed(
                 a,
                 ty,
@@ -14826,6 +16160,15 @@ fn transfer(
                 return Err(VerifyError::InvalidType(f.register_types[*body as usize]));
             };
             if signature.result != definition.result_type || args.len() != signature.params.len() {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {fid} handle transfer pc {pc}: signature/result mismatch body-result={} handler-result={} args={} params={} handler-def={handler_def}",
+                        signature.result,
+                        definition.result_type,
+                        args.len(),
+                        signature.params.len(),
+                    );
+                }
                 return Err(VerifyError::InvalidFunction(fid));
             }
             let handled = definition
@@ -14836,6 +16179,12 @@ fn transfer(
             if !signature.outward_protocols.iter().all(|protocol| {
                 handled.contains(protocol) || f.outward_protocols.contains(protocol)
             }) {
+                if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                    eprintln!(
+                        "g1-verifier function {fid} handle transfer pc {pc}: body protocols {:?}, handled={handled:?}, enclosing={:?}, handler-def={handler_def}",
+                        signature.outward_protocols, f.outward_protocols,
+                    );
+                }
                 return Err(VerifyError::InvalidFunction(fid));
             }
             read(s, *handler)?;
@@ -15928,7 +17277,11 @@ fn loan_live_registers(
     function: &Function,
     label_states: &[Vec<LabelEntry>],
 ) -> Result<Vec<Vec<bool>>, VerifyError> {
-    register_live_registers(a, function, label_states, false)
+    // Dropping a reference-containing value or executing its proof-only
+    // EndBorrow does not access the referent.  Excluding those terminal uses
+    // gives loans their ordinary non-lexical lifetime while the physical
+    // carrier may remain until structural cleanup.
+    register_live_registers(a, function, label_states, true)
 }
 
 fn register_live_registers(
@@ -16041,6 +17394,8 @@ fn instruction_register_uses(instruction: &Instruction) -> Vec<u32> {
         | Instruction::BorrowUnique { src, .. }
         | Instruction::DerefCopy { src, .. }
         | Instruction::DerefMove { src, .. }
+        | Instruction::DerefReborrowShared { src, .. }
+        | Instruction::DerefReborrowUnique { src, .. }
         | Instruction::ProjectMove { src, .. }
         | Instruction::ProjectCopy { src, .. }
         | Instruction::ReborrowShared { src, .. }
@@ -16706,6 +18061,26 @@ mod tests {
     }
 
     #[test]
+    fn declared_carrier_roots_cover_provisional_projected_enum_alternatives() {
+        let broad = CarrierOrigin::Parameter {
+            parameter: 0,
+            path: vec![],
+        };
+        let projected = CarrierOrigin::Parameter {
+            parameter: 0,
+            path: vec![4, 0],
+        };
+        let other_parameter = CarrierOrigin::Parameter {
+            parameter: 1,
+            path: vec![4, 0],
+        };
+
+        assert!(carrier_origin_covers(&broad, &projected));
+        assert!(!carrier_origin_covers(&projected, &broad));
+        assert!(!carrier_origin_covers(&broad, &other_parameter));
+    }
+
+    #[test]
     fn continuation_register_sets_roundtrip_sparse_large_frame_indices_compactly() {
         let registers = [0, 1, 2, 127, 128, 16_384, u32::MAX];
         let encoded = CompactRegisterSet::from_sorted(registers);
@@ -16739,6 +18114,7 @@ mod tests {
             &artifact,
             &artifact.functions[0],
             &[false, true, false],
+            &[2, 1, 0],
         )
         .deltas;
         let retained = CompactRegisterIter {
@@ -16748,6 +18124,33 @@ mod tests {
         }
         .collect::<Vec<_>>();
         assert_eq!(retained, [1, 2]);
+    }
+
+    #[test]
+    fn cancellation_capture_plan_retains_reference_owner_suffix() {
+        let mut artifact = base(
+            vec![Instruction::Return { src: Some(2) }],
+            vec![UNIT, 19, 20],
+        );
+        artifact.types.push(Type::Tuple {
+            fields: vec![I64],
+            copy: false,
+        });
+        artifact.types.push(Type::RefUnique { referent: I64 });
+        let registers = cancellation_capture_registers(
+            &artifact,
+            &artifact.functions[0],
+            &[false, false, true],
+            &[2, 1, 0],
+        )
+        .deltas;
+        let retained = CompactRegisterIter {
+            bytes: &registers,
+            offset: 0,
+            previous: None,
+        }
+        .collect::<Vec<_>>();
+        assert_eq!(retained, [0, 1, 2]);
     }
 
     fn verify(artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
@@ -16807,6 +18210,269 @@ mod tests {
             crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
 
         verify(artifact).expect("a disjoint edge transfer relocates the loan and its owner");
+    }
+
+    #[test]
+    fn parallel_edge_relocation_preserves_a_stationary_shared_duplicate() {
+        let reference = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 2, src: 1 },
+                Instruction::Copy { dst: 5, src: 2 },
+                Instruction::Move { dst: 4, src: 2 },
+                Instruction::Move { dst: 3, src: 1 },
+                Instruction::Jump { target: 5 },
+                Instruction::EndBorrow { reference: 5 },
+                Instruction::EndBorrow { reference: 4 },
+                Instruction::Drop { register: 3 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, reference, I64, reference, reference],
+        );
+        artifact.types.push(Type::RefShared { referent: I64 });
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact)
+            .expect("an exact shared duplicate can remain stationary while its owner is relocated");
+    }
+
+    #[test]
+    fn two_phase_edge_relocation_accepts_a_shared_copy_snapshot() {
+        let reference = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 2, src: 1 },
+                Instruction::Copy { dst: 5, src: 2 },
+                Instruction::Move { dst: 6, src: 1 },
+                Instruction::Move { dst: 4, src: 5 },
+                Instruction::Move { dst: 3, src: 6 },
+                Instruction::Jump { target: 6 },
+                Instruction::EndBorrow { reference: 2 },
+                Instruction::EndBorrow { reference: 4 },
+                Instruction::Drop { register: 3 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, reference, I64, reference, reference, I64],
+        );
+        artifact.types.push(Type::RefShared { referent: I64 });
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact)
+            .expect("a two-phase edge may copy a shared carrier while relocating its owner");
+    }
+
+    #[test]
+    fn partially_folded_edge_relocation_authenticates_direct_and_scratch_paths() {
+        let reference = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 2, src: 1 },
+                Instruction::Copy { dst: 5, src: 2 },
+                Instruction::Move { dst: 6, src: 1 },
+                Instruction::Move { dst: 3, src: 6 },
+                Instruction::Jump { target: 5 },
+                Instruction::EndBorrow { reference: 2 },
+                Instruction::EndBorrow { reference: 5 },
+                Instruction::Drop { register: 3 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, reference, I64, UNIT, reference, I64],
+        );
+        artifact.types.push(Type::RefShared { referent: I64 });
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact)
+            .expect("a partially folded edge remains an authenticated parallel relocation");
+    }
+
+    #[test]
+    fn parallel_edge_relocation_preserves_a_dominating_shared_root() {
+        let reference = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 3, src: 1 },
+                Instruction::Move { dst: 5, src: 1 },
+                Instruction::Move { dst: 6, src: 2 },
+                Instruction::Jump { target: 4 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::Drop { register: 5 },
+                Instruction::Drop { register: 6 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, I64, reference, UNIT, I64, I64],
+        );
+        artifact.types.push(Type::RefShared { referent: I64 });
+        artifact.functions[0].params = vec![I64, I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact)
+            .expect("a dominating shared root remains valid across owner edge relocation");
+    }
+
+    #[test]
+    fn move_path_join_accepts_conditionally_initialized_structural_owners() {
+        let aggregate = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::Switch {
+                    discr: 2,
+                    cases: vec![(0, 1)],
+                    otherwise: 3,
+                },
+                Instruction::Move { dst: 3, src: 1 },
+                Instruction::Jump { target: 4 },
+                Instruction::Jump { target: 4 },
+                Instruction::Drop { register: 3 },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, aggregate, I64, aggregate],
+        );
+        artifact.types.push(
+            Type::Tuple {
+                fields: vec![I64],
+                copy: false,
+            }
+            .restricted(false, false),
+        );
+        artifact.functions[0].params = vec![aggregate, I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact).expect(
+            "a structural owner may be initialized on only one predecessor and dropped after the join",
+        );
+    }
+
+    #[test]
+    fn parent_borrow_can_end_before_an_otherwise_unused_child_is_dropped() {
+        let unique = Type::predefined().len() as TypeId;
+        let wrapper = unique + 1;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::ReborrowUnique { dst: 3, src: 2 },
+                Instruction::Construct {
+                    dst: 4,
+                    ty: wrapper,
+                    variant: None,
+                    fields: vec![3],
+                },
+                Instruction::EndBorrow { reference: 2 },
+                Instruction::Drop { register: 4 },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, unique, unique, wrapper],
+        );
+        artifact.types.extend([
+            Type::RefUnique { referent: I64 },
+            Type::Tuple {
+                fields: vec![unique],
+                copy: false,
+            }
+            .restricted(false, true),
+        ]);
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact)
+            .expect("a child handle retained only for structural drop no longer extends its loan");
+    }
+
+    #[test]
+    fn structurally_retained_child_does_not_block_a_later_unique_borrow() {
+        let unique = Type::predefined().len() as TypeId;
+        let wrapper = unique + 1;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::ReborrowUnique { dst: 3, src: 2 },
+                Instruction::Construct {
+                    dst: 4,
+                    ty: wrapper,
+                    variant: None,
+                    fields: vec![3],
+                },
+                Instruction::EndBorrow { reference: 2 },
+                Instruction::BorrowUnique { dst: 5, src: 1 },
+                Instruction::EndBorrow { reference: 5 },
+                Instruction::Drop { register: 4 },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, unique, unique, wrapper, unique],
+        );
+        artifact.types.extend([
+            Type::RefUnique { referent: I64 },
+            Type::Tuple {
+                fields: vec![unique],
+                copy: false,
+            }
+            .restricted(false, true),
+        ]);
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact).expect(
+            "a structurally retained but authorization-inactive child permits a later borrow",
+        );
+    }
+
+    #[test]
+    fn dereference_reborrows_keep_their_source_loan_live() {
+        assert_eq!(
+            instruction_register_uses(&Instruction::DerefReborrowShared { dst: 9, src: 4 }),
+            [4]
+        );
+        assert_eq!(
+            instruction_register_uses(&Instruction::DerefReborrowUnique { dst: 9, src: 5 }),
+            [5]
+        );
+    }
+
+    #[test]
+    fn dead_unique_intermediates_preserve_live_child_authority() {
+        let unique = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::ReborrowUnique { dst: 3, src: 2 },
+                Instruction::ReborrowUnique { dst: 4, src: 3 },
+                Instruction::ReborrowUnique { dst: 5, src: 4 },
+                Instruction::EndBorrow { reference: 5 },
+                Instruction::EndBorrow { reference: 4 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::EndBorrow { reference: 2 },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, unique, unique, unique, unique],
+        );
+        artifact.types.push(Type::RefUnique { referent: I64 });
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact)
+            .expect("dead intermediate handles must not sever a live unique authority chain");
     }
 
     #[test]
@@ -16905,6 +18571,8 @@ mod tests {
                 Instruction::Move { dst: 5, src: 1 },
                 Instruction::Move { dst: 6, src: 2 },
                 Instruction::Jump { target: 8 },
+                Instruction::Copy { dst: 9, src: 8 },
+                Instruction::EndBorrow { reference: 9 },
                 Instruction::EndBorrow { reference: 7 },
                 Instruction::EndBorrow { reference: 3 },
                 Instruction::EndBorrow { reference: 8 },
@@ -16921,6 +18589,7 @@ mod tests {
                 outer,
                 outer_reference,
                 leaf_reference,
+                inner_reference,
                 inner_reference,
             ],
         );
@@ -16944,14 +18613,18 @@ mod tests {
         artifact.required_features =
             crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
 
-        assert!(matches!(
-            verify(artifact),
-            Err(VerifyError::BorrowConflict {
-                function: 0,
-                instruction: 5,
-                register: 1,
-            })
-        ));
+        let result = verify(artifact);
+        assert!(
+            matches!(
+                result,
+                Err(VerifyError::BorrowConflict {
+                    function: 0,
+                    instruction: 5,
+                    register: 1,
+                })
+            ),
+            "{result:?}"
+        );
     }
 
     #[test]
@@ -18049,6 +19722,83 @@ mod tests {
                 ty: 19,
             })
         ));
+    }
+
+    #[test]
+    fn stored_unique_reference_can_be_reborrowed_without_copying_its_handle() {
+        let unique_i64 = Type::predefined().len() as TypeId;
+        let holder = unique_i64 + 1;
+        let unique_holder = holder + 1;
+        let unique_unique_i64 = unique_holder + 1;
+        let mut artifact = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::Construct {
+                    dst: 3,
+                    ty: holder,
+                    variant: None,
+                    fields: vec![2],
+                },
+                Instruction::BorrowUnique { dst: 4, src: 3 },
+                Instruction::ProjectBorrowUnique {
+                    dst: 5,
+                    src: 4,
+                    field: 0,
+                },
+                Instruction::DerefReborrowUnique { dst: 6, src: 5 },
+                Instruction::DerefCopy { dst: 7, src: 6 },
+                Instruction::EndBorrow { reference: 6 },
+                Instruction::EndBorrow { reference: 5 },
+                Instruction::EndBorrow { reference: 4 },
+                Instruction::ProjectMove {
+                    dst: 8,
+                    src: 3,
+                    field: 0,
+                },
+                Instruction::Deconstruct { src: 3 },
+                Instruction::EndBorrow { reference: 8 },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: Some(7) },
+            ],
+            vec![
+                UNIT,
+                I64,
+                unique_i64,
+                holder,
+                unique_holder,
+                unique_unique_i64,
+                unique_i64,
+                I64,
+                unique_i64,
+            ],
+        );
+        artifact.types.extend([
+            Type::RefUnique { referent: I64 },
+            Type::Struct {
+                name: "ReferenceHolder".into(),
+                fields: vec![Field {
+                    name: "value".into(),
+                    ty: unique_i64,
+                }],
+                copy: false,
+            },
+            Type::RefUnique { referent: holder },
+            Type::RefUnique {
+                referent: unique_i64,
+            },
+        ]);
+        artifact.required_features |= 1 << 1;
+
+        let verified = verify(artifact)
+            .expect("a child loan may reborrow a stored unique reference without copying it");
+        assert_eq!(
+            crate::Vm::new(verified).run(0, vec![]).unwrap(),
+            crate::Value::I64(2)
+        );
     }
 
     #[test]
@@ -19927,6 +21677,7 @@ mod tests {
                 place,
                 unique,
                 suspended_parent,
+                authorization_active: true,
                 referent_initialized: true,
             },
         };
@@ -19947,6 +21698,42 @@ mod tests {
         assert!(conflicts_outside_authorized_chain(
             &place,
             true,
+            &authorized,
+            &loans,
+        ));
+    }
+
+    #[test]
+    fn shared_descendant_recovers_the_suspended_unique_ancestor_chain() {
+        let root = BorrowedPlace {
+            owner: 9,
+            projections: vec![],
+        };
+        let descendant = BorrowedPlace {
+            owner: 9,
+            projections: vec![0, 0],
+        };
+        let loan = |place: BorrowedPlace, unique, suspended_parent| CarrierLoan {
+            path: vec![],
+            loan: Loan {
+                place,
+                unique,
+                suspended_parent,
+                authorization_active: true,
+                referent_initialized: true,
+            },
+        };
+        let loans = vec![
+            vec![loan(root.clone(), true, None)],
+            vec![loan(root, true, Some(0))],
+            vec![loan(descendant.clone(), false, None)],
+        ];
+
+        let authorized = authorized_shared_descendant_chain(2, &descendant, &loans);
+        assert_eq!(authorized, BTreeSet::from([0, 1, 2]));
+        assert!(!conflicts_outside_authorized_chain(
+            &descendant,
+            false,
             &authorized,
             &loans,
         ));
@@ -27706,6 +29493,182 @@ mod tests {
 
         verify(artifact)
             .expect("a staged join may accumulate several exclusive enum carrier alternatives");
+    }
+
+    #[test]
+    fn declared_enum_carrier_contract_waits_for_a_deeper_return_predecessor() {
+        let mut types = Type::predefined();
+        types.push(Type::RefShared { referent: I64 });
+        types.push(Type::Enum {
+            name: "BorrowedView".into(),
+            variants: ["Immediate", "Delayed"]
+                .into_iter()
+                .map(|name| EnumVariant {
+                    name: name.into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: 19,
+                    }],
+                })
+                .collect(),
+            copy: true,
+        });
+        let route = |variant| ReferenceReturnRoute {
+            result_path: vec![u32::MAX - variant, 0],
+            origin: ReferenceReturnOrigin::Parameter {
+                parameter: 0,
+                path: vec![],
+            },
+        };
+        let artifact = Artifact {
+            types,
+            constants: vec![Constant::U32(0)],
+            reference_return_contracts: vec![ReferenceReturnContract {
+                function: 0,
+                routes: vec![route(0), route(1)],
+            }],
+            functions: vec![Function {
+                flags: 0,
+                name: "staggered_borrowed_view".into(),
+                params: vec![19, U32],
+                return_type: 20,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 19, U32, 19, 19, 20],
+                code_start: 0,
+                code_len: 9,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Switch {
+                    discr: 2,
+                    cases: vec![(0, 1)],
+                    otherwise: 4,
+                },
+                Instruction::Copy { dst: 3, src: 1 },
+                Instruction::Construct {
+                    dst: 5,
+                    ty: 20,
+                    variant: Some(0),
+                    fields: vec![3],
+                },
+                Instruction::Jump { target: 8 },
+                Instruction::Nop,
+                Instruction::Copy { dst: 4, src: 1 },
+                Instruction::Construct {
+                    dst: 5,
+                    ty: 20,
+                    variant: Some(1),
+                    fields: vec![4],
+                },
+                Instruction::Jump { target: 8 },
+                Instruction::Return { src: Some(5) },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        };
+
+        verify(artifact).expect("aggregate return validation must use the converged carrier state");
+    }
+
+    #[test]
+    fn shared_reborrow_waits_for_a_reference_bearing_enum_predecessor() {
+        let mut types = Type::predefined();
+        types.push(Type::Struct {
+            name: "Payload".into(),
+            fields: vec![Field {
+                name: "value".into(),
+                ty: I64,
+            }],
+            copy: true,
+        });
+        types.push(Type::RefShared { referent: 19 });
+        types.push(Type::Enum {
+            name: "MaybeBorrowed".into(),
+            variants: vec![
+                EnumVariant {
+                    name: "Empty".into(),
+                    fields: vec![],
+                },
+                EnumVariant {
+                    name: "Borrowed".into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: 20,
+                    }],
+                },
+            ],
+            copy: false,
+        });
+        types.push(Type::RefShared { referent: I64 });
+        let artifact = Artifact {
+            types,
+            constants: vec![Constant::U32(0), Constant::U32(1)],
+            functions: vec![Function {
+                flags: 0,
+                name: "staged_maybe_borrowed".into(),
+                params: vec![20, U32],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 20, U32, 21, 21, U32, 20, 20, 22],
+                code_start: 0,
+                code_len: 18,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Switch {
+                    discr: 2,
+                    cases: vec![(0, 1)],
+                    otherwise: 4,
+                },
+                Instruction::Drop { register: 1 },
+                Instruction::Construct {
+                    dst: 3,
+                    ty: 21,
+                    variant: Some(0),
+                    fields: vec![],
+                },
+                Instruction::Jump { target: 6 },
+                Instruction::Construct {
+                    dst: 3,
+                    ty: 21,
+                    variant: Some(1),
+                    fields: vec![1],
+                },
+                Instruction::Jump { target: 6 },
+                Instruction::EnumTag { dst: 5, src: 3 },
+                Instruction::Switch {
+                    discr: 5,
+                    cases: vec![(1, 8)],
+                    otherwise: 16,
+                },
+                Instruction::ProjectMove {
+                    dst: 6,
+                    src: 3,
+                    field: 0,
+                },
+                Instruction::ReborrowShared { dst: 7, src: 6 },
+                Instruction::ProjectBorrowShared {
+                    dst: 8,
+                    src: 7,
+                    field: 0,
+                },
+                Instruction::Deconstruct { src: 3 },
+                Instruction::EndBorrow { reference: 8 },
+                Instruction::EndBorrow { reference: 7 },
+                Instruction::EndBorrow { reference: 6 },
+                Instruction::Return { src: None },
+                Instruction::Deconstruct { src: 3 },
+                Instruction::Return { src: None },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        };
+
+        verify(artifact).expect(
+            "an initially empty enum path must not reject a later reference-bearing predecessor",
+        );
     }
 
     fn indirect_two_reference_artifact() -> Artifact {

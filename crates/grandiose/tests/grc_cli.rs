@@ -475,6 +475,73 @@ fn textual_phase_outputs_are_deterministic_and_use_kind_aware_defaults() {
 }
 
 #[test]
+fn control_plan_emission_is_deterministic_and_reports_fusion_residuals() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("control.glorious");
+    write(
+        &input,
+        r#"
+            custom_walk<L, F>(index: usize, limit: usize, exit: L, body: F)
+            where L: Label<usize>, F: Fn<(usize, L), Output = ()> {
+                handle index == limit {
+                    true => (),
+                    false => {
+                        body(index, exit);
+                        custom_walk(index + 1, limit, exit, body)
+                    }
+                }
+            }
+            answer() -> usize {
+                @done: usize {
+                    custom_walk(0, 2, @done, { index, done =>
+                        if(index == 1) { done(7) } else { () }
+                    });
+                    90
+                }
+            }
+            main() -> () { () }
+        "#,
+    );
+
+    let first = grc()
+        .args(["--emit", "control-plan"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let output = input.with_extension("control-plan");
+    let expected = fs::read_to_string(&output).unwrap();
+    assert!(expected.contains("helper: custom_walk"), "{expected}");
+    assert!(expected.contains("tail-recursive cycle: yes"), "{expected}");
+    assert!(
+        expected.contains("formed control loop: control#"),
+        "{expected}"
+    );
+    assert!(
+        expected.contains("residual callable allocation: no"),
+        "{expected}"
+    );
+    assert!(
+        expected.contains("residual effect handler: no"),
+        "{expected}"
+    );
+    assert!(expected.contains("failure reason: —"), "{expected}");
+
+    fs::remove_file(&output).unwrap();
+    let second = grc()
+        .arg("--emit=control-plan")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(second.status.success());
+    assert_eq!(fs::read_to_string(output).unwrap(), expected);
+}
+
+#[test]
 fn diagnostics_are_mapped_to_the_failing_additional_input() {
     let directory = tempdir().unwrap();
     let primary = directory.path().join("main.glorious");

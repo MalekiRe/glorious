@@ -15,6 +15,7 @@ pub enum ResolvedTarget {
     Parameter(ParameterId),
     Local(LocalId),
     Function(ShellId),
+    FunctionAlias(ShellId),
     Struct(super::headers::StructHeaderId),
     Variant(super::headers::VariantHeaderId)
 }
@@ -28,7 +29,8 @@ pub struct LocalBinding {
 
 pub enum ResolvedPatternBinder {
     Wildcard,
-    Local(LocalId)
+    Local(LocalId),
+    Integer(usize)
 }
 
 impl Use<[0, *]> for ResolvedPatternBinder {}
@@ -209,29 +211,69 @@ scope_restore(scope: &mut ScopeMap, mark: usize) {
     if(Vec::len(&scope.journal) <= mark) {
         ()
     } else {
-        let binding = handle Vec::pop(&mut scope.journal) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
-        handle HashMap::remove(&mut scope.values, &binding.name) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(_) => ()
-        };
-        handle binding.previous {
+        handle Vec::pop(&mut scope.journal) {
             Result::Err(_) => (),
-            Result::Ok(previous) => {
-                handle HashMap::insert(
-                    &mut scope.values,
-                    binding.name,
-                    previous
-                ) {
+            Result::Ok(binding) => {
+                let removed = HashMap::remove(&mut scope.values, &binding.name);
+                removed;
+                handle binding.previous {
                     Result::Err(_) => (),
-                    Result::Ok(_) => unreachable()
-                }
+                    Result::Ok(previous) => {
+                        let replaced = HashMap::insert(
+                            &mut scope.values,
+                            binding.name,
+                            previous
+                        );
+                        replaced;
+                        ()
+                    }
+                };
+                scope_restore(scope, mark)
             }
-        };
-        scope_restore(scope, mark)
+        }
     }
+}
+
+// A lexical binding transaction. The frame deliberately remains armed during
+// normal resolution: bindings introduced by a nested block are never meant to
+// escape it. Label propagation runs Drop before LEAVE, so error exits restore
+// precisely the same journal prefix as successful returns.
+// One journal-backed transaction implements both lexical scope frames and
+// temporary map overrides. Restoring the journal re-establishes overwritten
+// entries as well as removing newly introduced bindings.
+struct TemporaryMapOverride<'a> {
+    scope: &'a mut ScopeMap,
+    mark: usize,
+    armed: Bool
+}
+
+impl<'a> Drop for TemporaryMapOverride<'a> {
+    drop(&mut self) -> {
+        if(self.armed) {
+            scope_restore(&mut *self.scope, self.mark)
+        } else { () }
+    }
+}
+
+type ScopeFrame<'a> = TemporaryMapOverride<'a>;
+type BindingFrame<'a> = ScopeFrame<'a>;
+
+temporary_map_override<'a>(scope: &'a mut ScopeMap) -> TemporaryMapOverride<'a> {
+    let mark = scope_mark(&*scope);
+    TemporaryMapOverride { scope: move scope, mark: move mark, armed: true }
+}
+
+temporary_map_override_commit<'a>(frame: &mut TemporaryMapOverride<'a>) {
+    (*frame).armed = false;
+    ()
+}
+
+scope_frame<'a>(scope: &'a mut ScopeMap) -> ScopeFrame<'a> {
+    temporary_map_override(move scope)
+}
+
+scope_frame_commit<'a>(frame: &mut ScopeFrame<'a>) {
+    temporary_map_override_commit(move frame)
 }
 
 push_resolution(
@@ -638,6 +680,273 @@ resolve_variant_name(
     }
 }
 
+global_let_token(
+    source: &super::lexer::LexedSource,
+    start: usize,
+    end: usize
+) -> Option<usize> {
+    if(start < end and { start < end and {
+        super::lexer::token_kind_at(source, start)
+            is TokenKind::Keyword(super::lexer::Keyword::Let)
+    } }) {
+        Option::Some(start)
+    } else { if(start + 1 < end and {
+        super::lexer::token_kind_at(source, start + 1)
+            is TokenKind::Keyword(super::lexer::Keyword::Let)
+    }) {
+        Option::Some(start + 1)
+    } else { None } }
+}
+
+global_alias_path_matches(
+    source: &super::lexer::LexedSource,
+    shell: &super::scanner::DeclarationShell,
+    first: u32,
+    second: Option<u32>
+) -> Bool {
+    if(super::scanner::shell_kind(shell)
+        is super::scanner::DeclarationKind::Global) {
+        let header = super::scanner::shell_header(shell);
+        let let_token = global_let_token(
+            source,
+            super::syntax::token_start(header),
+            super::syntax::token_end(header)
+        );
+        handle let_token {
+            None => false,
+            Option::Some(found) => {
+                let first_token = found + 1;
+                handle super::lexer::token_kind_at(source, first_token) {
+                    TokenKind::Ident(name) => if(Id::to_u32(name) == first) {
+                        handle second {
+                            None => super::lexer::token_kind_at(
+                                source, first_token + 1
+                            ) is TokenKind::Eq,
+                            Option::Some(expected) => if(
+                                super::lexer::token_kind_at(
+                                    source, first_token + 1
+                                ) is TokenKind::DoubleColon
+                            ) {
+                                handle super::lexer::token_kind_at(
+                                    source, first_token + 2
+                                ) {
+                                    TokenKind::Ident(found) =>
+                                        Id::to_u32(found) == expected,
+                                    _ => false
+                                }
+                            } else { false }
+                        }
+                    } else { false },
+                    _ => false
+                }
+            }
+        }
+    } else { false }
+}
+
+find_global_alias(
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    first: u32,
+    second: Option<u32>,
+    module: Option<ShellId>,
+    index: usize
+) -> Option<ShellId> {
+    if(index < super::scanner::shell_count(declarations)) {
+        let id = Id::from_u32(wrapping_convert_to_u32(index));
+        let shell = handle super::scanner::shell_at(declarations, id) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(*super::scanner::shell_parent(shell) == module and {
+            global_alias_path_matches(source, shell, first, second)
+        }) {
+            Option::Some(id)
+        } else {
+            find_global_alias(
+                source,
+                declarations,
+                first,
+                second,
+                module,
+                index + 1
+            )
+        }
+    } else { None }
+}
+
+resolve_global_alias_body(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    shell_id: ShellId,
+    token: usize,
+    depth: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    if(depth >= super::scanner::shell_count(declarations)) {
+        Result::Err(ResolutionError::UnknownFunction(token))
+    } else {
+        let shell = handle super::scanner::shell_at(declarations, shell_id) {
+            Result::Err(_) => @resolve_global_alias_body(Result::Err(
+                ResolutionError::MissingDeclarationShell(token, shell_id)
+            )),
+            Result::Ok(found) => found
+        };
+        let body = handle super::scanner::shell_body_span(shell) {
+            None => @resolve_global_alias_body(Result::Err(
+                ResolutionError::UnknownFunction(token)
+            )),
+            Option::Some(found) => found
+        };
+        let start = super::syntax::token_start(&body);
+        let end = super::syntax::token_end(&body);
+        let name = handle super::lexer::token_kind_at(
+            super::headers::parsed_source(headers), start
+        ) {
+            TokenKind::Ident(found) => Id::to_u32(found),
+            _ => @resolve_global_alias_body(Result::Err(
+                ResolutionError::UnknownFunction(token)
+            ))
+        };
+        let module = *super::scanner::shell_parent(shell);
+        if(start + 2 < end and {
+            super::lexer::token_kind_at(
+                super::headers::parsed_source(headers), start + 1
+            ) is TokenKind::DoubleColon
+        }) {
+            let member = handle super::lexer::token_kind_at(
+                super::headers::parsed_source(headers), start + 2
+            ) {
+                TokenKind::Ident(found) => Id::to_u32(found),
+                _ => @resolve_global_alias_body(Result::Err(
+                    ResolutionError::UnknownFunction(token)
+                ))
+            };
+            resolve_variant_name(
+                super::headers::nominal_index(headers),
+                declarations,
+                name,
+                member,
+                module,
+                start,
+                start + 2
+            )
+        } else {
+            handle find_global_alias(
+                super::headers::parsed_source(headers),
+                declarations,
+                name,
+                None,
+                module,
+                0
+            ) {
+                Option::Some(alias) => resolve_global_alias_body(
+                    headers,
+                    index,
+                    declarations,
+                    alias,
+                    token,
+                    depth + 1
+                ),
+                None => resolve_function_name(
+                    index, declarations, name, module, start
+                )
+            }
+        }
+    }
+}
+
+resolve_global_alias(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    first: u32,
+    second: Option<u32>,
+    module: Option<ShellId>,
+    token: usize
+) -> Option<ResolvedTarget> {
+    let local = find_global_alias(
+        super::headers::parsed_source(headers),
+        declarations,
+        first,
+        second,
+        module,
+        0
+    );
+    let alias = handle local {
+        Option::Some(found) => Option::Some(found),
+        None => if(Option::is_some(&module)) {
+            find_global_alias(
+                super::headers::parsed_source(headers),
+                declarations,
+                first,
+                second,
+                None,
+                0
+            )
+        } else { None }
+    };
+    handle alias {
+        None => None,
+        Option::Some(found) => handle resolve_global_alias_body(
+            headers, index, declarations, found, token, 0
+        ) {
+            Result::Err(_) => None,
+            Result::Ok(target) => Option::Some(handle target {
+                ResolvedTarget::Function(function) =>
+                    ResolvedTarget::FunctionAlias(function),
+                other => other
+            })
+        }
+    }
+}
+
+function_pattern_variant(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    function: ShellId,
+    token: usize
+) -> Result<super::headers::VariantHeaderId, ResolutionError> {
+    let shell = handle super::scanner::shell_at(declarations, function) {
+        Result::Err(_) => @function_pattern_variant(Result::Err(
+            ResolutionError::MissingDeclarationShell(token, function)
+        )),
+        Result::Ok(found) => found
+    };
+    let body = handle super::scanner::shell_body_span(shell) {
+        None => @function_pattern_variant(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(token, token)
+        )),
+        Option::Some(found) => found
+    };
+    let start = super::syntax::token_start(&body);
+    let source = super::headers::parsed_source(headers);
+    let owner = handle super::lexer::token_kind_at(source, start) {
+        TokenKind::Ident(found) => Id::to_u32(found),
+        _ => @function_pattern_variant(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(token, token)
+        ))
+    };
+    let member = handle super::lexer::token_kind_at(source, start + 2) {
+        TokenKind::Ident(found) => Id::to_u32(found),
+        _ => @function_pattern_variant(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(token, token)
+        ))
+    };
+    handle resolve_variant_name(
+        super::headers::nominal_index(headers),
+        declarations,
+        owner,
+        member,
+        *super::scanner::shell_parent(shell),
+        start,
+        start + 2
+    ) {
+        Result::Ok(ResolvedTarget::Variant(found)) => Result::Ok(found),
+        _ => Result::Err(ResolutionError::UnexpectedHandleTarget(token, token))
+    }
+}
+
 resolve_identifier(
     headers: &super::headers::ParsedHeaders,
     index: &ResolutionIndex,
@@ -664,13 +973,24 @@ resolve_identifier(
                     Result::Ok(())
                 },
                 Result::Err(_) => {
-                    let found = try(resolve_function_name(
+                    let found = handle resolve_global_alias(
+                        headers,
                         index,
                         declarations,
                         raw,
+                        None,
                         module,
                         token
-                    ), @resolve_identifier);
+                    ) {
+                        Option::Some(found) => found,
+                        None => try(resolve_function_name(
+                            index,
+                            declarations,
+                            raw,
+                            module,
+                            token
+                        ), @resolve_identifier)
+                    };
                         push_resolution(
                             output,
                             Id::from_u32(expression),
@@ -683,15 +1003,32 @@ resolve_identifier(
         2 => {
             let variant_token =
                 super::bodies::expression_name_token_at(body, expression, 1);
-            let found = try(resolve_variant_name(
-                super::headers::nominal_index(headers),
+            let owner = super::bodies::expression_name_value_at(
+                body, expression, 0
+            );
+            let member = super::bodies::expression_name_value_at(
+                body, expression, 1
+            );
+            let found = handle resolve_global_alias(
+                headers,
+                index,
                 declarations,
-                super::bodies::expression_name_value_at(body, expression, 0),
-                super::bodies::expression_name_value_at(body, expression, 1),
+                owner,
+                Option::Some(member),
                 module,
-                token,
-                variant_token
-            ), @resolve_identifier);
+                token
+            ) {
+                Option::Some(found) => found,
+                None => try(resolve_variant_name(
+                    super::headers::nominal_index(headers),
+                    declarations,
+                    owner,
+                    member,
+                    module,
+                    token,
+                    variant_token
+                ), @resolve_identifier)
+            };
             push_resolution(
                 output,
                 Id::from_u32(expression),
@@ -873,27 +1210,18 @@ resolve_block<'a>(
     children: Slice<'a, super::bodies::ExprEdge>,
     module: Option<ShellId>
 ) -> Result<(), ResolutionError> {
-    let mark = scope_mark(bindings);
-    handle resolve_block_children(
+    let frame = scope_frame(move bindings);
+    resolve_block_children(
         headers,
         index,
         declarations,
         body,
-        bindings,
+        &mut *frame.scope,
         output,
         expression,
         children,
         module
-    ) {
-        Result::Err(error) => {
-            scope_restore(bindings, mark);
-            Result::Err(error)
-        },
-        Result::Ok(_) => {
-            scope_restore(bindings, mark);
-            Result::Ok(())
-        }
-    }
+    )
 }
 
 resolve_pattern_binders<'a>(
@@ -913,6 +1241,11 @@ resolve_pattern_binders<'a>(
                 Vec::push(
                     &mut output.pattern_binders,
                     ResolvedPatternBinder::Wildcard
+                ),
+            PatternBinder::Integer(token) =>
+                Vec::push(
+                    &mut output.pattern_binders,
+                    ResolvedPatternBinder::Integer(token)
                 ),
             PatternBinder::Binding(name, token) => {
                 let local = try(
@@ -944,6 +1277,16 @@ resolve_pattern_binders<'a>(
     }})
 }
 
+push_resolved_wildcards(
+    output: &mut Vec<ResolvedPatternBinder>,
+    count: usize,
+    ordinal: usize
+) {
+    for_range(Range::new(ordinal, count), { _ =>
+        Vec::push(&mut *output, ResolvedPatternBinder::Wildcard)
+    })
+}
+
 resolve_handle_arm(
     headers: &super::headers::ParsedHeaders,
     index: &ResolutionIndex,
@@ -956,61 +1299,116 @@ resolve_handle_arm(
     arm: &super::bodies::HandleArm,
     module: Option<ShellId>
 ) -> Result<(), ResolutionError> {
-    let target = try(resolve_variant_name(
-        super::headers::nominal_index(headers),
-        declarations,
-        Id::to_u32(super::bodies::handle_arm_enum_name(arm)),
-        Id::to_u32(super::bodies::handle_arm_variant_name(arm)),
-        module,
-        super::bodies::handle_arm_enum_token(arm),
-        super::bodies::handle_arm_variant_token(arm)
-    ), @resolve_handle_arm);
+    let enum_token = super::bodies::handle_arm_enum_token(arm);
+    let variant_token = super::bodies::handle_arm_variant_token(arm);
+    let bare_alias = enum_token == variant_token;
+    let target = if(bare_alias) {
+        handle resolve_global_alias(
+            headers,
+            index,
+            declarations,
+            Id::to_u32(super::bodies::handle_arm_enum_name(arm)),
+            None,
+            module,
+            enum_token
+        ) {
+            None => @resolve_handle_arm(Result::Err(
+                ResolutionError::UnexpectedHandleTarget(
+                    variant_token, enum_token
+                )
+            )),
+            Option::Some(found) => found
+        }
+    } else {
+        handle resolve_global_alias(
+            headers,
+            index,
+            declarations,
+            Id::to_u32(super::bodies::handle_arm_enum_name(arm)),
+            Option::Some(Id::to_u32(
+                super::bodies::handle_arm_variant_name(arm)
+            )),
+            module,
+            enum_token
+        ) {
+            Option::Some(found) => found,
+            None => try(resolve_variant_name(
+                super::headers::nominal_index(headers),
+                declarations,
+                Id::to_u32(super::bodies::handle_arm_enum_name(arm)),
+                Id::to_u32(super::bodies::handle_arm_variant_name(arm)),
+                module,
+                enum_token,
+                variant_token
+            ), @resolve_handle_arm)
+        }
+    };
     let variant = handle target {
         ResolvedTarget::Variant(found) => found,
+        ResolvedTarget::FunctionAlias(function) => if(bare_alias) {
+            try(function_pattern_variant(
+                headers, declarations, function, enum_token
+            ), @resolve_handle_arm)
+        } else { @resolve_handle_arm(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(variant_token, enum_token)
+        )) },
         _ => @resolve_handle_arm(Result::Err(
-            ResolutionError::UnexpectedHandleTarget(
-                super::bodies::handle_arm_variant_token(arm),
-                super::bodies::handle_arm_enum_token(arm)
-            )
+            ResolutionError::UnexpectedHandleTarget(variant_token, enum_token)
         ))
     };
-    let mark = scope_mark(bindings);
+    let frame = scope_frame(move bindings);
     let binder_start = super::syntax::range_mark(&output.pattern_binders);
     let source_binders = super::bodies::handle_arm_binders(body, arm);
     try(resolve_pattern_binders(
-        bindings,
+        &mut *frame.scope,
         output,
         Id::from_u32(expression),
         source_binders,
         0
     ), @resolve_handle_arm);
-    handle resolve_expression(
+    if(bare_alias) {
+        let header = handle super::headers::variant_at(
+            super::headers::nominal_index(headers),
+            Id::to_usize(variant)
+        ) {
+            Result::Err(_) => @resolve_handle_arm(Result::Err(
+                ResolutionError::UnexpectedHandleTarget(
+                    variant_token, enum_token
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        let payload_count = Slice::len(super::headers::variant_payloads(
+            super::headers::parsed_index(headers),
+            header
+        ));
+        push_resolved_wildcards(
+            &mut output.pattern_binders,
+            payload_count,
+            Slice::len(source_binders)
+        )
+    } else { () };
+    // Seal the parent arm's contiguous binder range before resolving its
+    // body. Nested handles append their own binders to the same flat arena
+    // and must not become part of this arm's payload pattern.
+    let binder_end = Vec::len(&output.pattern_binders);
+    let resolved_binders = resolved_binder_range(binder_start, binder_end);
+    *IndexVec::index_mut(&mut output.handle_arms, arm_id) =
+        Option::Some(ResolvedHandleArm {
+            variant: variant,
+            binders: resolved_binders
+        });
+    try(resolve_expression(
         headers,
         index,
         declarations,
         body,
-        bindings,
+        &mut *frame.scope,
         output,
         Id::to_u32(super::bodies::handle_arm_body(arm)),
         module
-    ) {
-        Result::Err(error) => {
-            scope_restore(bindings, mark);
-            Result::Err(error)
-        },
-        Result::Ok(_) => {
-            scope_restore(bindings, mark);
-            let binder_end = Vec::len(&output.pattern_binders);
-            let resolved_binders =
-                resolved_binder_range(binder_start, binder_end);
-            *IndexVec::index_mut(&mut output.handle_arms, arm_id) =
-                Option::Some(ResolvedHandleArm {
-                    variant: variant,
-                    binders: resolved_binders
-                });
-            Result::Ok(())
-        }
-    }
+    ), @resolve_handle_arm);
+    Result::Ok(())
 }
 
 resolve_handle_arms<'a>(
@@ -1121,6 +1519,17 @@ resolve_expression(
         super::bodies::BodyExpressionView::Number(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Unit(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Grouping(child) =>
+            resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(child),
+                module
+            ),
+        super::bodies::BodyExpressionView::Move(child) =>
             resolve_expression(
                 headers,
                 index,

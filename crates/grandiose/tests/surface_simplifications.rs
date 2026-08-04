@@ -66,12 +66,12 @@ fn owned_values_move_implicitly_without_surface_move_noise() {
 }
 
 #[test]
-fn generic_case_inspects_an_instantiated_nominal_payload() {
+fn generic_match_inspects_an_instantiated_nominal_payload() {
     let source = r#"
         make() -> Result<i64, ()> { Result::Ok(42) }
         answer() -> i64 {
             let value = make();
-            handle perform Case<Result<i64, ()>>::inspect(move value) {
+            match(move value) {
                 Result::Ok(answer) => answer,
                 Result::Err(_) => 0
             }
@@ -162,14 +162,14 @@ fn owned_refinement_consumes_the_scrutinee_across_the_join() {
 }
 
 #[test]
-fn generic_case_resolves_module_local_nominals_in_its_payload() {
+fn generic_match_resolves_module_local_nominals_in_its_payload() {
     let source = r#"
         mod app {
             enum Error { Failed }
             make() -> Result<i64, Error> { Result::Ok(42) }
             answer() -> i64 {
                 let value = make();
-                handle perform Case<Result<i64, Error>>::inspect(move value) {
+                match(move value) {
                     Result::Ok(answer) => answer,
                     Result::Err(_) => 0
                 }
@@ -207,11 +207,11 @@ fn constructor_and_nullary_value_aliases_are_patterns() {
 fn source_defined_loop_combinators_handle_break_and_continue() {
     let source = r#"
         answer() -> i64 {
-            while { false } { () };
-            until { true } { () };
-            loop @outer: { break() };
-            times(3) { continue() };
-            times(10) { break() };
+            while({ => 0 });
+            until({ => 0 });
+            @outer: { loop({ => { break() } }) };
+            times(3, { => { continue() } });
+            times(10, { => { break() } });
             42
         }
         main() -> { () }
@@ -230,10 +230,10 @@ fn vector_iterator_for_each_and_fold_are_source_combinators() {
             values
         }
         answer() -> i64 {
-            fold(Vec::into_iter(values()), 0) { (sum, item) => add(sum, item) }
+            fold(Vec::into_iter(values()), 0, { sum, item => add(sum, item) })
         }
         exercise_for_each() -> () {
-            for_each(Vec::into_iter(values())) { item => { item; continue() } }
+            for_each(Vec::into_iter(values()), { item => { item; continue() } })
         }
         main() -> { () }
     "#;
