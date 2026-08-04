@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fmt,
     ops::Range,
+    sync::Arc,
 };
 
 pub type TypeId = u32;
@@ -1076,6 +1077,13 @@ impl PackedCode {
         (0..self.len())
             .map(|index| self.instruction(index).expect("packed instruction exists"))
             .collect()
+    }
+
+    pub(crate) fn materialize_range(&self, range: Range<usize>) -> Arc<[Instruction]> {
+        range
+            .map(|index| self.instruction(index).expect("packed instruction exists"))
+            .collect::<Vec<_>>()
+            .into()
     }
 
     #[cfg(test)]

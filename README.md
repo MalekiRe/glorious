@@ -434,6 +434,12 @@ sample reports total interpreted instructions, elapsed time, instruction rate,
 current function and PC, and active call depth. This distinguishes a slow but
 advancing phase from a stalled loop and identifies the function to inspect
 without enabling the much larger per-instruction function trace.
+For low-overhead cumulative attribution, set
+`G1_VM_HOT_FUNCTION_SAMPLE_STEPS=<instructions>` (1,024 is a useful starting
+point). `G1_VM_HOT_FUNCTION_REPORT_STEPS` controls the reporting interval and
+defaults to 100 million instructions. Reports rank sampled function IDs by
+their share of execution; map IDs with `grvm functions <artifact.grbc>` or the
+compiler-emitted function map below.
 Set `G1_VM_FUNCTION_MAP=<path>` while compiling the artifact to write a compact
 TSV mapping from those runtime function IDs to MIR declaration IDs, semantic
 function names, and bytecode ranges. The map is diagnostic-only and does not

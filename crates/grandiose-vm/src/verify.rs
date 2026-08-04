@@ -128,6 +128,7 @@ pub(crate) struct VerifiedFunction<'a> {
     descriptor: &'a Function,
     code: &'a PackedCode,
     code_range: Range<u32>,
+    decoded: &'a OnceLock<Arc<[Instruction]>>,
     cleanups: &'a [crate::bytecode::CleanupPlan],
     captures: &'a [CapturePlan],
 }
@@ -149,9 +150,15 @@ impl<'a> VerifiedFunction<'a> {
             pc.function, self.function,
             "verified PC used with wrong function"
         );
-        self.code
-            .instruction((self.code_range.start + pc.offset) as usize)
-            .expect("verified PC has a packed instruction")
+        self.decoded
+            .get_or_init(|| {
+                self.code.materialize_range(
+                    self.code_range.start as usize..self.code_range.end as usize,
+                )
+            })
+            .get(pc.offset as usize)
+            .expect("verified PC has a decoded instruction")
+            .clone()
     }
 
     pub(crate) fn cleanup_registers(&self, pc: VerifiedPc) -> &'a [u32] {
@@ -205,6 +212,7 @@ impl<'a> VerifiedFunction<'a> {
 pub struct VerifiedArtifact {
     image: Arc<ExecutionImage>,
     layout: Arc<RuntimeLayout>,
+    decoded_functions: Arc<[OnceLock<Arc<[Instruction]>>]>,
     compatibility_artifact: Arc<OnceLock<Arc<Artifact>>>,
 }
 
@@ -238,6 +246,14 @@ impl VerifiedArtifact {
         self.compatibility_artifact.get().is_some()
     }
 
+    #[cfg(test)]
+    fn decoded_function_count(&self) -> usize {
+        self.decoded_functions
+            .iter()
+            .filter(|function| function.get().is_some())
+            .count()
+    }
+
     pub(crate) fn function(&self, function: u32) -> Option<VerifiedFunction<'_>> {
         let index = usize::try_from(function).ok()?;
         let descriptor = self.image.functions.get(index)?;
@@ -247,6 +263,7 @@ impl VerifiedArtifact {
             descriptor,
             code: &self.image.code,
             code_range: layout.code.clone(),
+            decoded: self.decoded_functions.get(index)?,
             cleanups: &self.image.cleanups
                 [layout.cleanups.start as usize..layout.cleanups.end as usize],
             captures: &self.layout.captures
@@ -927,6 +944,10 @@ pub fn load_verified(bytes: &[u8]) -> Result<VerifiedArtifact, LoadError> {
     let artifact = decoded.tables.as_artifact();
     verify_artifact(artifact, true, false).map_err(LoadError::Verify)?;
     let layout = Arc::new(RuntimeLayout::from_verified(artifact));
+    let decoded_functions = (0..layout.functions.len())
+        .map(|_| OnceLock::new())
+        .collect::<Vec<_>>()
+        .into();
     Ok(VerifiedArtifact {
         image: Arc::new(ExecutionImage::from_decoded(
             decoded.tables,
@@ -936,6 +957,7 @@ pub fn load_verified(bytes: &[u8]) -> Result<VerifiedArtifact, LoadError> {
             encoded,
         )),
         layout,
+        decoded_functions,
         compatibility_artifact: Arc::new(OnceLock::new()),
     })
 }
@@ -956,9 +978,14 @@ pub fn verify(mut artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
     artifact.functions.shrink_to_fit();
     artifact.code.shrink_to_fit();
     let layout = Arc::new(RuntimeLayout::from_verified(&artifact));
+    let decoded_functions = (0..layout.functions.len())
+        .map(|_| OnceLock::new())
+        .collect::<Vec<_>>()
+        .into();
     Ok(VerifiedArtifact {
         image: Arc::new(ExecutionImage::from_artifact(artifact)),
         layout,
+        decoded_functions,
         compatibility_artifact: Arc::new(OnceLock::new()),
     })
 }
@@ -18742,12 +18769,19 @@ mod tests {
         assert!(artifact.code.capacity() > artifact.code.len());
         let verified = verify(artifact).unwrap();
         assert!(!verified.compatibility_artifact_is_materialized());
+        assert_eq!(verified.decoded_function_count(), 0);
         assert_eq!(verified.image.code.len(), 1);
         assert_eq!(verified.image.functions.len(), 1);
         assert!(
             verified.image.code.storage_bytes() < std::mem::size_of::<Instruction>(),
             "one packed zero-operand instruction must be smaller than the public enum"
         );
+
+        let function = verified.function(0).unwrap();
+        let pc = function.checked_pc(0).unwrap();
+        assert!(matches!(function.instruction(pc), Instruction::Unreachable));
+        assert_eq!(verified.decoded_function_count(), 1);
+        assert!(!verified.compatibility_artifact_is_materialized());
 
         let compatibility = verified.artifact();
         assert!(verified.compatibility_artifact_is_materialized());

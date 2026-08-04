@@ -11828,10 +11828,10 @@ let SourceDiagnostic::annotate = __g1_source_diagnostic_label;
 let SourceDiagnostic::note = __g1_source_diagnostic_note;
 let SourceDiagnostic::render = __g1_source_diagnostic_render;
 // Generic interners keep each canonical T exactly once. A deterministic hash
-// selects one of 64 ID buckets; equality is checked only within that bucket,
+// selects one of 4,096 ID buckets; equality is checked only within that bucket,
 // so collisions cannot change canonical identity and no T must be cloned into
-// a secondary map key. This is hash-backed rather than the former full linear
-// scan, while retaining insertion-order IDs and private representation.
+// a secondary map key. The larger direct table avoids both long collision
+// chains and the cost of hashing an already-computed hash through HashMap.
 struct Interner<T> { private values: Vec<T>, private buckets: Vec<Vec<Id<T>>> }
 
 enum __InternerProbe < T > { Found(Id<T>), Missing }
@@ -11856,7 +11856,7 @@ __g1_interner_fill_buckets<T>(buckets: &mut Vec<Vec<Id<T>>>, capacity: usize) {
 __g1_interner_new<T>() -> Interner<T> { Interner { values: Vec::new(), buckets: Vec::new() } }
 
 __g1_interner_prepare<T>(value: &mut Interner<T>) {
-    __g1_interner_fill_buckets(&mut value.buckets, 64)
+    __g1_interner_fill_buckets(&mut value.buckets, 4096)
 }
 
 __g1_interner_len<T>(value: &Interner<T>) -> usize { Vec::len(&value.values) }

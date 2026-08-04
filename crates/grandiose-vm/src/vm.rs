@@ -229,6 +229,79 @@ struct VmProgressTrace {
     started: Instant,
 }
 
+/// Low-overhead sampled attribution for long-running bytecode workloads.
+///
+/// Sampling avoids materially perturbing the interpreter while still making
+/// billion-instruction compiler runs attributable to concrete bytecode
+/// functions. Reports use stable function indices because verified execution
+/// deliberately discards descriptor names after loading.
+struct VmHotFunctions {
+    sample_interval: u64,
+    sample_countdown: u64,
+    report_interval: u64,
+    report_countdown: u64,
+    steps: u64,
+    samples: Vec<u64>,
+}
+
+impl VmHotFunctions {
+    fn from_env(function_count: usize) -> Option<Self> {
+        let sample_interval = std::env::var("G1_VM_HOT_FUNCTION_SAMPLE_STEPS")
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .filter(|steps| *steps > 0)?;
+        let report_interval = std::env::var("G1_VM_HOT_FUNCTION_REPORT_STEPS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|steps| *steps > 0)
+            .unwrap_or(100_000_000);
+        Some(Self {
+            sample_interval,
+            sample_countdown: 0,
+            report_interval,
+            report_countdown: report_interval,
+            steps: 0,
+            samples: vec![0; function_count],
+        })
+    }
+
+    fn observe(&mut self, function: u32) {
+        self.steps = self.steps.saturating_add(1);
+        if self.sample_countdown == 0 {
+            self.sample_countdown = self.sample_interval.saturating_sub(1);
+            if let Some(count) = self.samples.get_mut(function as usize) {
+                *count = count.saturating_add(1);
+            }
+        } else {
+            self.sample_countdown -= 1;
+        }
+        if self.report_countdown > 1 {
+            self.report_countdown -= 1;
+            return;
+        }
+        self.report_countdown = self.report_interval;
+        let mut ranked = self
+            .samples
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, count)| *count != 0)
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by_key(|(function, count)| (std::cmp::Reverse(*count), *function));
+        let total = ranked.iter().map(|(_, count)| *count).sum::<u64>().max(1);
+        let hot = ranked
+            .into_iter()
+            .take(16)
+            .map(|(function, count)| {
+                format!("f{function}={:.2}%", count as f64 * 100.0 / total as f64)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!("g1-vm-hot-functions steps={} samples={} hot=[{}]", self.steps, total, hot);
+    }
+}
+
 impl VmProgressTrace {
     fn from_env() -> Option<Self> {
         let interval = std::env::var("G1_VM_PROGRESS_STEPS")
@@ -593,6 +666,7 @@ impl Vm {
         let mut stack = vec![make_frame(a, function, args, Value::Unit, None)?];
         let mut memory_profile = VmMemoryProfile::from_env();
         let mut progress_trace = VmProgressTrace::from_env();
+        let mut hot_functions = VmHotFunctions::from_env(a.functions.len());
         let breakpoint = VmBreakpoint::from_env();
         let traced_function = std::env::var("G1_VM_FUNCTION").ok();
         let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
@@ -609,6 +683,9 @@ impl Vm {
                 breakpoint.as_ref().unwrap().report(&stack, a);
             }
             let frame = stack.last_mut().expect("execution stack cannot be empty");
+            if let Some(profile) = &mut hot_functions {
+                profile.observe(frame.function);
+            }
             let verified_fun = self
                 .artifact
                 .function(frame.function)
