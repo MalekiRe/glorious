@@ -6,15 +6,15 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
     ast::{
-        Associativity, EffectRowSyntax, EnumDecl, FieldVisibility, FixityDecl, FixityKind,
-        Function, GenericParamKind, GenericParams, StructDecl, TypeAliasDecl, TypeSyntax,
-        TypeSyntaxKind, Visibility,
+        Associativity, EffectDecl, EffectRowSyntax, EnumDecl, FieldVisibility, FixityDecl,
+        FixityKind, Function, GenericParamKind, GenericParams, StructDecl, TypeAliasDecl,
+        TypeSyntax, TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
+    CompileOptions, LlvmOptions, OptimizationLevel,
 };
-use grandiose_vm::{SystemHost, Value, Vm, verify};
+use grandiose_vm::{verify, SystemHost, Value, Vm};
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -58,6 +58,10 @@ fn self_host_bundle() -> SourceBundle {
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend(value.to_le_bytes());
+}
+
+fn push_u64(output: &mut Vec<u8>, value: u64) {
     output.extend(value.to_le_bytes());
 }
 
@@ -299,11 +303,56 @@ fn encode_fixity(
     push_string(output, &declaration.name);
 }
 
+fn encode_effect(
+    output: &mut Vec<u8>,
+    program: &grandiose::ast::Program,
+    declaration: &EffectDecl,
+) -> Result<(), ()> {
+    encode_common(
+        output,
+        program,
+        declaration.span,
+        &declaration.name,
+        declaration.generics.as_ref(),
+    )?;
+    output.push(u8::from(declaration.where_clause.is_some()));
+    push_u32(output, declaration.operations.len().try_into().unwrap());
+    for operation in &declaration.operations {
+        push_string(output, &operation.name);
+        encode_generics(output, operation.generics.as_ref())?;
+        push_u32(output, operation.params.len().try_into().unwrap());
+        for parameter in &operation.params {
+            push_string(output, &parameter.name);
+            encode_type(output, program, &parameter.ty)?;
+        }
+        match &operation.return_type {
+            Some(result) => {
+                output.push(1);
+                encode_type(output, program, result)?;
+            }
+            None => output.push(0),
+        }
+        output.push(u8::from(operation.terminal));
+        push_u64(output, operation.resumption_lower.try_into().unwrap());
+        match operation.resumption_upper {
+            Some(upper) => {
+                output.push(1);
+                push_u64(output, upper.try_into().unwrap());
+            }
+            None => output.push(0),
+        }
+        output.push(u8::from(operation.has_resumption_quantity));
+        output.push(u8::from(operation.where_clause.is_some()));
+    }
+    Ok(())
+}
+
 enum Interface<'a> {
     Alias(&'a TypeAliasDecl),
     Fixity(&'a FixityDecl),
     Struct(&'a StructDecl),
     Enum(&'a EnumDecl),
+    Effect(&'a EffectDecl),
     Function(&'a Function),
 }
 
@@ -314,6 +363,7 @@ impl Interface<'_> {
             Self::Fixity(declaration) => declaration.span.start,
             Self::Struct(declaration) => declaration.span.start,
             Self::Enum(declaration) => declaration.span.start,
+            Self::Effect(declaration) => declaration.span.start,
             Self::Function(declaration) => declaration.span.start,
         }
     }
@@ -336,6 +386,10 @@ impl Interface<'_> {
             Self::Enum(declaration) => {
                 output.push(9);
                 encode_enum(output, program, declaration)
+            }
+            Self::Effect(declaration) => {
+                output.push(7);
+                encode_effect(output, program, declaration)
             }
             Self::Function(declaration) => {
                 output.push(12);
@@ -361,6 +415,7 @@ fn encode_rust_interfaces(output: &mut Vec<u8>, source: &str) {
         .chain(program.fixities.iter().map(Interface::Fixity))
         .chain(program.structs.iter().map(Interface::Struct))
         .chain(program.enums.iter().map(Interface::Enum))
+        .chain(program.effects.iter().map(Interface::Effect))
         .chain(program.functions.iter().map(Interface::Function))
         .collect::<Vec<_>>();
     declarations.sort_by_key(Interface::start);
@@ -394,6 +449,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "type Borrowed<'a, T, E: EffectRow> = &'a T; type Double = ((u8)); enum GroupedPayload { V((u8), ((u16))) }",
         "type View<'a, T> = core::View<'a, T>; borrow<'a, T>(value: &'a T) -> View<'a, T> { unreachable() }",
         "type First = u8; effect Ignored { ping() -> !; } struct Middle { value: First } enum Last { Done }",
+        "pub effect Control<'a, T, E: EffectRow> where T: Marker { [0, infinity] choose<U>(input: &'a T, fallback: U) -> Result<T, U> where U: Marker; [2, 4] repeat(value: T) -> T; stop(reason: String) -> !; unit() ->; implicit() }",
         "infixl 30 +; infixr 1 else; infix 50 ==; prefix 90 !;",
         "prefix 0 not; infixl 0xFF <*>; infixr 0b1_000 cons; infix 2_5_5 &=;",
         "infixl 35 <*>=; prefix 99 !!; infix 17 &=;",
@@ -420,6 +476,12 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "infixr 30 ->;",
         "prefix 30 .;",
         "infix 30 where;",
+        "effect MissingName { [0, 1] (value: u8) -> u8; }",
+        "effect BadQuantity { [0 1] choose() -> u8; }",
+        "effect BadUpper { [0, nope] choose() -> u8; }",
+        "effect BadParameter { choose(value u8) -> u8; }",
+        "effect BadWhere where { choose() -> u8; }",
+        "effect BadOperationWhere { choose() -> u8 where; }",
     ];
     let mut paths = Vec::new();
     for (index, source) in valid.into_iter().enumerate() {

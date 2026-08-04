@@ -124,6 +124,30 @@ pub struct EnumHeader {
     tokens: HeaderTokenRange
 }
 
+pub struct EffectOperationHeader {
+    name: Id<String>,
+    name_token: usize,
+    generics: HeaderRange,
+    parameters: HeaderRange,
+    result: Option<TypeId>,
+    terminal: Bool,
+    resumption_lower: usize,
+    resumption_upper: Option<usize>,
+    has_resumption_quantity: Bool,
+    where_tokens: HeaderTokenRange,
+    tokens: HeaderTokenRange
+}
+
+pub struct EffectHeader {
+    shell: ShellId,
+    name: Id<String>,
+    public: Bool,
+    generics: HeaderRange,
+    where_tokens: HeaderTokenRange,
+    operations: HeaderRange,
+    tokens: HeaderTokenRange
+}
+
 pub struct FixityHeader {
     shell: ShellId,
     public: Bool,
@@ -138,6 +162,8 @@ struct StructArena { values: Vec<StructHeader> }
 struct FieldArena { values: Vec<FieldHeader> }
 struct EnumArena { values: Vec<EnumHeader> }
 struct VariantArena { values: Vec<VariantHeader> }
+struct EffectArena { values: Vec<EffectHeader> }
+struct EffectOperationArena { values: Vec<EffectOperationHeader> }
 struct FixityArena { values: Vec<FixityHeader> }
 
 pub struct CallableHeaderTag {}
@@ -152,13 +178,18 @@ pub struct EnumHeaderTag {}
 pub type EnumHeaderId = Id<EnumHeaderTag>;
 pub struct VariantHeaderTag {}
 pub type VariantHeaderId = Id<VariantHeaderTag>;
+pub struct EffectHeaderTag {}
+pub type EffectHeaderId = Id<EffectHeaderTag>;
+pub struct EffectOperationHeaderTag {}
+pub type EffectOperationHeaderId = Id<EffectOperationHeaderTag>;
 
 pub enum HeaderOrder {
     Callable(CallableHeaderId),
     Alias(AliasHeaderId),
     Fixity(FixityHeaderId),
     Struct(StructHeaderId),
-    Enum(EnumHeaderId)
+    Enum(EnumHeaderId),
+    Effect(EffectHeaderId)
 }
 
 impl Use<[0, *]> for HeaderOrder {}
@@ -206,6 +237,8 @@ pub struct NominalIndex {
     fields: FieldArena,
     enums: EnumArena,
     variants: VariantArena,
+    effects: EffectArena,
+    effect_operations: EffectOperationArena,
     fixities: FixityArena
 }
 
@@ -232,6 +265,12 @@ pub enum HeaderError {
     PrecedenceOutOfRange(usize, usize),
     ExpectedOperator(usize, usize),
     InvalidFixityForm(usize, usize),
+    ExpectedEffectBody(usize, usize),
+    ExpectedResumptionComma(usize, usize),
+    ExpectedResumptionUpper(usize, usize),
+    ExpectedResumptionRightBracket(usize, usize),
+    InvalidResumptionBound(usize, usize),
+    EmptyWhereClause(usize, usize),
     TypeArenaExhausted(usize, usize)
 }
 
@@ -263,7 +302,8 @@ pub header_kind(value: &NominalIndex, index: usize) -> u8 {
         HeaderOrder::Alias(_) => 3,
         HeaderOrder::Fixity(_) => 6,
         HeaderOrder::Struct(_) => 8,
-        HeaderOrder::Enum(_) => 9
+        HeaderOrder::Enum(_) => 9,
+        HeaderOrder::Effect(_) => 7
     }
 }
 
@@ -273,7 +313,8 @@ pub header_index(value: &NominalIndex, index: usize) -> u32 {
         HeaderOrder::Alias(found) => Id::to_u32(found),
         HeaderOrder::Fixity(found) => Id::to_u32(found),
         HeaderOrder::Struct(found) => Id::to_u32(found),
-        HeaderOrder::Enum(found) => Id::to_u32(found)
+        HeaderOrder::Enum(found) => Id::to_u32(found),
+        HeaderOrder::Effect(found) => Id::to_u32(found)
     }
 }
 
@@ -298,6 +339,12 @@ pub struct_count(value: &NominalIndex) -> usize { Vec::len(&value.structs.values
 pub field_count(value: &NominalIndex) -> usize { Vec::len(&value.fields.values) }
 
 pub enum_count(value: &NominalIndex) -> usize { Vec::len(&value.enums.values) }
+
+pub effect_count(value: &NominalIndex) -> usize { Vec::len(&value.effects.values) }
+
+pub effect_operation_count(value: &NominalIndex) -> usize {
+    Vec::len(&value.effect_operations.values)
+}
 
 pub variant_count(value: &NominalIndex) -> usize { Vec::len(&value.variants.values) }
 
@@ -353,6 +400,36 @@ pub variant_at<'a>(
     index: usize
 ) -> Option<&'a VariantHeader> {
     Vec::get(&value.variants.values, index)
+}
+
+pub effect_at<'a>(
+    value: &'a NominalIndex,
+    index: usize
+) -> Option<&'a EffectHeader> {
+    Vec::get(&value.effects.values, index)
+}
+
+pub effect_operation_at<'a>(
+    value: &'a NominalIndex,
+    index: usize
+) -> Option<&'a EffectOperationHeader> {
+    Vec::get(&value.effect_operations.values, index)
+}
+
+pub effect_operation_id_at(
+    owner: &EffectHeader,
+    ordinal: usize
+) -> EffectOperationHeaderId {
+    typed_header_id(
+        wrapping_convert_to_usize(owner.operations.start) + ordinal
+    )
+}
+
+pub effect_operation_by_id<'a>(
+    value: &'a NominalIndex,
+    id: EffectOperationHeaderId
+) -> Option<&'a EffectOperationHeader> {
+    Vec::get(&value.effect_operations.values, Id::to_usize(id))
 }
 
 pub variant_for_enum(
@@ -696,6 +773,80 @@ pub variant_name(value: &VariantHeader) -> Id<String> { value.name }
 pub variant_fields(value: &VariantHeader) -> &HeaderRange { &value.fields }
 
 pub variant_name_token(value: &VariantHeader) -> usize { value.name_token }
+
+pub effect_shell(value: &EffectHeader) -> ShellId { value.shell }
+
+pub effect_name(value: &EffectHeader) -> Id<String> { value.name }
+
+pub effect_is_public(value: &EffectHeader) -> Bool { value.public }
+
+pub effect_generics(value: &EffectHeader) -> &HeaderRange { &value.generics }
+
+pub effect_where_tokens(value: &EffectHeader) -> &HeaderTokenRange {
+    &value.where_tokens
+}
+
+pub effect_operations(value: &EffectHeader) -> &HeaderRange { &value.operations }
+
+pub effect_tokens(value: &EffectHeader) -> &HeaderTokenRange { &value.tokens }
+
+pub effect_operation_name(value: &EffectOperationHeader) -> Id<String> {
+    value.name
+}
+
+pub effect_operation_name_token(value: &EffectOperationHeader) -> usize {
+    value.name_token
+}
+
+pub effect_operation_generics(
+    value: &EffectOperationHeader
+) -> &HeaderRange {
+    &value.generics
+}
+
+pub effect_operation_parameters(
+    value: &EffectOperationHeader
+) -> &HeaderRange {
+    &value.parameters
+}
+
+pub effect_operation_result(
+    value: &EffectOperationHeader
+) -> Option<TypeId> {
+    value.result
+}
+
+pub effect_operation_is_terminal(value: &EffectOperationHeader) -> Bool {
+    value.terminal
+}
+
+pub effect_operation_resumption_lower(value: &EffectOperationHeader) -> usize {
+    value.resumption_lower
+}
+
+pub effect_operation_resumption_upper(
+    value: &EffectOperationHeader
+) -> Option<usize> {
+    value.resumption_upper
+}
+
+pub effect_operation_has_resumption_quantity(
+    value: &EffectOperationHeader
+) -> Bool {
+    value.has_resumption_quantity
+}
+
+pub effect_operation_where_tokens(
+    value: &EffectOperationHeader
+) -> &HeaderTokenRange {
+    &value.where_tokens
+}
+
+pub effect_operation_tokens(
+    value: &EffectOperationHeader
+) -> &HeaderTokenRange {
+    &value.tokens
+}
 
 header_range(start: usize, end: usize) -> HeaderRange {
     super::syntax::id_range(start, end)
@@ -2157,6 +2308,274 @@ finish_enum(
     )
 }
 
+parse_resumption_bound(
+    original: &String,
+    value: &mut Parser,
+    related: usize
+) -> Result<usize, HeaderError> {
+    let token = value.tokens.position;
+    handle super::lexer::token_kind_at(&value.source, token) {
+        TokenKind::Number(number) => if(integer_number(&number)) {
+            let spelling = super::lexer::number_spelling(&number);
+            let text = source_text(
+                original,
+                super::lexer::span_start(&spelling),
+                super::lexer::span_end(&spelling)
+            );
+            handle parse_u64(&text) {
+                Result::Err(_) => Result::Err(
+                    HeaderError::InvalidResumptionBound(token, related)
+                ),
+                Result::Ok(found) => {
+                    value.tokens.position = token + 1;
+                    Result::Ok(wrapping_convert_to_usize(found))
+                }
+            }
+        } else { Result::Err(
+            HeaderError::InvalidResumptionBound(token, related)
+        ) },
+        _ => Result::Err(HeaderError::InvalidResumptionBound(token, related))
+    }
+}
+
+parse_resumption_quantity(
+    original: &String,
+    value: &mut Parser,
+    related: usize
+) -> Result<(usize, Option<usize>, Bool), HeaderError> {
+    let cursor = value.tokens.position;
+    handle super::lexer::token_kind_at(&value.source, cursor) {
+        TokenKind::LBracket => {
+            value.tokens.position = cursor + 1;
+            let lower = try(
+                parse_resumption_bound(original, value, related),
+                @parse_resumption_quantity
+            );
+            try(expect_resumption_comma(value, related), @parse_resumption_quantity);
+            let upper = try(
+                parse_resumption_upper(original, value, related),
+                @parse_resumption_quantity
+            );
+            try(
+                expect_resumption_right_bracket(value, related),
+                @parse_resumption_quantity
+            );
+            Result::Ok((lower, upper, true))
+        },
+        _ => Result::Ok((1, Option::Some(1), false))
+    }
+}
+
+expect_resumption_comma(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.tokens.position;
+    handle super::lexer::token_kind_at(&value.source, token) {
+        TokenKind::Comma => {
+            value.tokens.position = token + 1;
+            Result::Ok(())
+        },
+        _ => Result::Err(HeaderError::ExpectedResumptionComma(token, related))
+    }
+}
+
+parse_resumption_upper(
+    original: &String,
+    value: &mut Parser,
+    related: usize
+) -> Result<Option<usize>, HeaderError> {
+    let token = value.tokens.position;
+    handle super::lexer::token_kind_at(&value.source, token) {
+        TokenKind::Star => {
+            value.tokens.position = token + 1;
+            Result::Ok(None)
+        },
+        TokenKind::Ident(_) => if(at_ident(&*value, &"infinity")) {
+                value.tokens.position = token + 1;
+                Result::Ok(None)
+            } else { Result::Err(
+                HeaderError::ExpectedResumptionUpper(token, related)
+            ) },
+        TokenKind::Number(_) => Result::Ok(Option::Some(try(
+            parse_resumption_bound(original, value, related),
+            @parse_resumption_upper
+        ))),
+        _ => Result::Err(HeaderError::ExpectedResumptionUpper(token, related))
+    }
+}
+
+expect_resumption_right_bracket(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.tokens.position;
+    handle super::lexer::token_kind_at(&value.source, token) {
+        TokenKind::RBracket => {
+            value.tokens.position = token + 1;
+            Result::Ok(())
+        },
+        _ => Result::Err(
+            HeaderError::ExpectedResumptionRightBracket(token, related)
+        )
+    }
+}
+
+parse_bounded_where_clause(
+    value: &mut Parser,
+    related: usize,
+    end: usize
+) -> Result<HeaderTokenRange, HeaderError> {
+    let start = value.tokens.position;
+    if(start < end) {
+        handle super::lexer::token_kind_at(&value.source, start) {
+            TokenKind::Keyword(super::lexer::Keyword::Where) => {
+                if(start + 1 == end) {
+                    Result::Err(HeaderError::EmptyWhereClause(start, related))
+                } else {
+                    value.tokens.position = end;
+                    Result::Ok(token_range(start, end))
+                }
+            },
+            _ => Result::Err(
+                HeaderError::UnexpectedTrailingHeaderToken(start, related)
+            )
+        }
+    } else { Result::Ok(token_range(start, start)) }
+}
+
+operation_end(value: &Parser) -> usize {
+    operation_end_from(value, value.tokens.position)
+}
+
+operation_end_from(value: &Parser, cursor: usize) -> usize {
+    if(cursor < value.tokens.limit) {
+        handle super::lexer::token_kind_at(&value.source, cursor) {
+            TokenKind::Semicolon => cursor,
+            _ => operation_end_from(value, cursor + 1)
+        }
+    } else { value.tokens.limit }
+}
+
+parse_effect_operations(
+    original: &String,
+    value: &mut Parser,
+    operations: &mut EffectOperationArena,
+    related: usize
+) -> Result<(), HeaderError> {
+    if(value.tokens.position < value.tokens.limit) {
+        let start = value.tokens.position;
+        let quantity = try(
+            parse_resumption_quantity(original, value, related),
+            @parse_effect_operations
+        );
+        let name = try(ident(value, related), @parse_effect_operations);
+        let generics = try(parse_generics(value, related), @parse_effect_operations);
+        try(expect_left_parenthesis(value, related), @parse_effect_operations);
+        let parameters = try(
+            parse_parameters(value, related),
+            @parse_effect_operations
+        );
+        try(expect_right_parenthesis(value, related), @parse_effect_operations);
+        let has_arrow = eat_token(value, TokenPattern::Arrow);
+        let terminal = has_arrow and {
+            at_token(&*value, TokenPattern::Bang)
+        };
+        let result = if(has_arrow) {
+            if(value.tokens.position == value.tokens.limit) { None } else {
+                if(at_token(&*value, TokenPattern::Semicolon)) { None } else {
+                    Option::Some(try(
+                        parse_type(value, related),
+                        @parse_effect_operations
+                    ))
+                }
+            }
+        } else { None };
+        let where_end = operation_end(&*value);
+        let where_tokens = try(
+            parse_bounded_where_clause(value, related, where_end),
+            @parse_effect_operations
+        );
+        if(value.tokens.position < value.tokens.limit) {
+            value.tokens.position = value.tokens.position + 1;
+        } else { () };
+        let end = value.tokens.position;
+        Vec::push(
+            &mut operations.values,
+            EffectOperationHeader {
+                name: name.name,
+                name_token: name.token,
+                generics: generics,
+                parameters: parameters,
+                result: result,
+                terminal: terminal,
+                resumption_lower: quantity.0,
+                resumption_upper: quantity.1,
+                has_resumption_quantity: quantity.2,
+                where_tokens: where_tokens,
+                tokens: token_range(start, end)
+            }
+        );
+        parse_effect_operations(original, value, operations, related)
+    } else { Result::Ok(()) }
+}
+
+parse_effect_header(
+    original: &String,
+    value: &mut Parser,
+    effects: &mut EffectArena,
+    operations: &mut EffectOperationArena,
+    order: &mut ParsedDefTable,
+    shell: ShellId,
+    public: Bool,
+    start: usize,
+    header_end: usize,
+    whole_end: usize
+) -> Result<(), HeaderError> {
+    value.tokens.position = start;
+    if(public) {
+        value.tokens.position = value.tokens.position + 1;
+    } else { () };
+    value.tokens.position = value.tokens.position + 1;
+    let name = try(ident(value, start), @parse_effect_header);
+    let generics = try(parse_generics(value, start), @parse_effect_header);
+    let where_tokens = try(
+        parse_bounded_where_clause(value, start, header_end),
+        @parse_effect_header
+    );
+    if(value.tokens.position == header_end) {
+        value.tokens.position = next_index(header_end);
+        value.tokens.limit = previous_index(whole_end);
+        let operation_start = Vec::len(&operations.values);
+        try(
+            parse_effect_operations(original, value, operations, start),
+            @parse_effect_header
+        );
+        let operation_end = Vec::len(&operations.values);
+        Vec::push(
+            &mut effects.values,
+            EffectHeader {
+                shell: shell,
+                name: name.name,
+                public: public,
+                generics: generics,
+                where_tokens: where_tokens,
+                operations: header_range(operation_start, operation_end),
+                tokens: token_range(start, whole_end)
+            }
+        );
+        let effect_index = Vec::len(&effects.values) - 1;
+        record_header(
+            order,
+            shell,
+            HeaderOrder::Effect(typed_header_id(effect_index))
+        );
+        Result::Ok(())
+    } else { Result::Err(
+        HeaderError::ExpectedEffectBody(value.tokens.position, start)
+    ) }
+}
+
 parse_shells(
     original: &String,
     declarations: &super::scanner::DeclarationIndex,
@@ -2247,6 +2666,18 @@ parse_shells(
                         limit,
                         whole_end
                     ),
+                    super::scanner::DeclarationKind::Effect => parse_effect_header(
+                        original,
+                        &mut next,
+                        &mut nominal.effects,
+                        &mut nominal.effect_operations,
+                        &mut nominal.definitions,
+                        shell_id,
+                        super::scanner::shell_is_public(shell),
+                        start,
+                        limit,
+                        whole_end
+                    ),
                     _ => Result::Ok(())
                 };
                 try(parsed, @parse_shells);
@@ -2309,6 +2740,8 @@ pub parse(
                 fields: FieldArena { values: Vec::new() },
                 enums: EnumArena { values: Vec::new() },
                 variants: VariantArena { values: Vec::new() },
+                effects: EffectArena { values: Vec::new() },
+                effect_operations: EffectOperationArena { values: Vec::new() },
                 fixities: FixityArena { values: Vec::new() }
         }
     )

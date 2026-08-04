@@ -1,5 +1,7 @@
 use super::super::frontend::headers::{
     CallableHeader,
+    EffectHeader,
+    EffectOperationHeader,
     EffectRow,
     EnumHeader,
     FixityHeader,
@@ -437,6 +439,81 @@ write_enum(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EnumHeader) {
     }})
 }
 
+write_effect_operation(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &EffectOperationHeader
+) {
+    write_name(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::effect_operation_name(value)
+    );
+    let generics = super::super::frontend::headers::effect_operation_generics(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(generics));
+    write_generics(output, parsed, generics);
+    let parameters = super::super::frontend::headers::effect_operation_parameters(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(parameters));
+    write_parameters(output, parsed, parameters);
+    handle super::super::frontend::headers::effect_operation_result(value) {
+        None => ByteBuf::push(output, 0),
+        Option::Some(result) => {
+            ByteBuf::push(output, 1);
+            write_type(output, parsed, result)
+        }
+    };
+    ByteBuf::push(output, bool_code(
+        super::super::frontend::headers::effect_operation_is_terminal(value)
+    ));
+    ByteBuf::write_u64_le(output, wrapping_convert_to_u64(
+        super::super::frontend::headers::effect_operation_resumption_lower(value)
+    ));
+    handle super::super::frontend::headers::effect_operation_resumption_upper(value) {
+        None => ByteBuf::push(output, 0),
+        Option::Some(upper) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u64_le(output, wrapping_convert_to_u64(upper))
+        }
+    };
+    ByteBuf::push(output, bool_code(
+        super::super::frontend::headers::effect_operation_has_resumption_quantity(value)
+    ));
+    ByteBuf::push(output, bool_code(
+        not(super::super::frontend::syntax::token_is_empty(
+            super::super::frontend::headers::effect_operation_where_tokens(value)
+        ))
+    ))
+}
+
+write_effect(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EffectHeader) {
+    write_common(
+        output,
+        parsed,
+        super::super::frontend::headers::effect_is_public(value),
+        super::super::frontend::headers::effect_name(value),
+        super::super::frontend::headers::effect_generics(value)
+    );
+    ByteBuf::push(output, bool_code(not(super::super::frontend::syntax::token_is_empty(
+        super::super::frontend::headers::effect_where_tokens(value)
+    ))));
+    let operations = super::super::frontend::headers::effect_operations(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(operations));
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    for_range(Range::new(0, wrapping_convert_to_usize(
+        super::super::frontend::headers::range_count(operations)
+    )), { ordinal => {
+        let id = super::super::frontend::headers::effect_operation_id_at(value, ordinal);
+        let operation = handle super::super::frontend::headers::effect_operation_by_id(
+            nominal,
+            id
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_effect_operation(output, parsed, operation)
+    }})
+}
+
 write_fixity(
     output: &mut ByteBuf,
     original: &String,
@@ -498,6 +575,11 @@ write_interfaces(output: &mut ByteBuf, original: &String, parsed: &ParsedHeaders
                 Result::Err(_) => unreachable(),
                 Result::Ok(found) => found
             }),
+            7 => write_effect(output, parsed, handle
+                super::super::frontend::headers::effect_at(nominal, declaration) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }),
             8 => write_struct(output, parsed, handle
                 super::super::frontend::headers::struct_at(nominal, declaration) {
                 Result::Err(_) => unreachable(),
@@ -556,7 +638,34 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                                 )
                             )
                         );
-                        write_callables(output, &parsed)
+                        write_callables(output, &parsed);
+                        ByteBuf::write_u32_le(
+                            output,
+                            wrapping_convert_to_u32(
+                                super::super::frontend::headers::effect_count(
+                                    super::super::frontend::headers::nominal_index(
+                                        &parsed
+                                    )
+                                )
+                            )
+                        );
+                        let nominal = super::super::frontend::headers::nominal_index(
+                            &parsed
+                        );
+                        for_range(Range::new(
+                            0,
+                            super::super::frontend::headers::effect_count(nominal)
+                        ), { current => {
+                            let found = handle
+                                super::super::frontend::headers::effect_at(
+                                    nominal,
+                                    current
+                                ) {
+                                Result::Err(_) => unreachable(),
+                                Result::Ok(value) => value
+                            };
+                            write_effect(output, &parsed, found)
+                        }})
                     }
                 }
             }

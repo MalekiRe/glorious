@@ -6,14 +6,14 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
     ast::{
-        EffectRowSyntax, Function, GenericParamKind, GenericParams, TypeSyntax, TypeSyntaxKind,
-        Visibility,
+        EffectDecl, EffectRowSyntax, Function, GenericParamKind, GenericParams, TypeSyntax,
+        TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
+    CompileOptions, LlvmOptions, OptimizationLevel,
 };
-use grandiose_vm::{SystemHost, Value, Vm, verify};
+use grandiose_vm::{verify, SystemHost, Value, Vm};
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -57,6 +57,10 @@ fn self_host_bundle() -> SourceBundle {
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend(value.to_le_bytes());
+}
+
+fn push_u64(output: &mut Vec<u8>, value: u64) {
     output.extend(value.to_le_bytes());
 }
 
@@ -193,6 +197,48 @@ fn encode_callable(
     Ok(())
 }
 
+fn encode_effect(
+    output: &mut Vec<u8>,
+    program: &grandiose::ast::Program,
+    declaration: &EffectDecl,
+) -> Result<(), ()> {
+    output.push(u8::from(
+        program.visibility(declaration.span) == Visibility::Public,
+    ));
+    push_string(output, &declaration.name);
+    encode_generics(output, declaration.generics.as_ref())?;
+    output.push(u8::from(declaration.where_clause.is_some()));
+    push_u32(output, declaration.operations.len().try_into().unwrap());
+    for operation in &declaration.operations {
+        push_string(output, &operation.name);
+        encode_generics(output, operation.generics.as_ref())?;
+        push_u32(output, operation.params.len().try_into().unwrap());
+        for parameter in &operation.params {
+            push_string(output, &parameter.name);
+            encode_type(output, &parameter.ty)?;
+        }
+        match &operation.return_type {
+            Some(result) => {
+                output.push(1);
+                encode_type(output, result)?;
+            }
+            None => output.push(0),
+        }
+        output.push(u8::from(operation.terminal));
+        push_u64(output, operation.resumption_lower.try_into().unwrap());
+        match operation.resumption_upper {
+            Some(upper) => {
+                output.push(1);
+                push_u64(output, upper.try_into().unwrap());
+            }
+            None => output.push(0),
+        }
+        output.push(u8::from(operation.has_resumption_quantity));
+        output.push(u8::from(operation.where_clause.is_some()));
+    }
+    Ok(())
+}
+
 fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     let Ok(tokens) = grandiose::lexer::lex(source) else {
         output.push(1);
@@ -209,6 +255,15 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     push_u32(&mut encoded, callables.len().try_into().unwrap());
     for callable in callables {
         if encode_callable(&mut encoded, &program, callable).is_err() {
+            output.push(3);
+            return;
+        }
+    }
+    let mut effects = program.effects.iter().collect::<Vec<_>>();
+    effects.sort_by_key(|declaration| declaration.span.start);
+    push_u32(&mut encoded, effects.len().try_into().unwrap());
+    for effect in effects {
+        if encode_effect(&mut encoded, &program, effect).is_err() {
             output.push(3);
             return;
         }
@@ -237,6 +292,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "bad(value: Vec<>) { () }",
         "bad(value: T) trailing { () }",
         "bad<T>(value: T) -> T where { value }",
+        "pub effect Control<'a, T, E: EffectRow> where T: Marker { [0, infinity] choose<U>(input: &'a T, fallback: U) -> Result<T, U> where U: Marker; [2, 4] repeat(value: T) -> T; stop(reason: String) -> !; unit() ->; implicit() }",
+        "effect BadQuantity { [0 1] choose() -> u8; }",
+        "effect BadOperationWhere { choose() -> u8 where; }",
     ];
     let mut paths = Vec::new();
     for (index, source) in focused.into_iter().enumerate() {
