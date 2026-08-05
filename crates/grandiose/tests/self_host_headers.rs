@@ -82,6 +82,26 @@ fn push_span(output: &mut Vec<u8>, span: grandiose::span::Span) {
     push_u64(output, span.end as u64);
 }
 
+fn assert_wire_eq(actual: &[u8], expected: &[u8], context: &str) {
+    if actual == expected {
+        return;
+    }
+    let first = actual
+        .iter()
+        .zip(expected)
+        .position(|(left, right)| left != right)
+        .unwrap_or(actual.len().min(expected.len()));
+    let actual_end = (first + 24).min(actual.len());
+    let expected_end = (first + 24).min(expected.len());
+    panic!(
+        "{context} at byte {first}; lengths {} != {}; actual {:?}; expected {:?}",
+        actual.len(),
+        expected.len(),
+        &actual[first..actual_end],
+        &expected[first..expected_end],
+    );
+}
+
 fn encode_optional_lifetime(output: &mut Vec<u8>, lifetime: Option<&str>) {
     match lifetime {
         Some(lifetime) => {
@@ -173,45 +193,6 @@ fn encode_generics(output: &mut Vec<u8>, generics: Option<&GenericParams>) -> Re
         if parameter.const_default.is_some() {
             return Err(());
         }
-    }
-    Ok(())
-}
-
-fn encode_where_clause(
-    output: &mut Vec<u8>,
-    where_clause: Option<&grandiose::ast::WhereClause>,
-) -> Result<(), ()> {
-    let Some(where_clause) = where_clause else {
-        output.push(0);
-        return Ok(());
-    };
-    output.push(1);
-    push_u32(output, where_clause.span.start as u32);
-    push_u32(output, where_clause.span.end as u32);
-    push_u32(output, where_clause.goals.len().try_into().unwrap());
-    push_u32(
-        output,
-        where_clause.lifetime_outlives.len().try_into().unwrap(),
-    );
-    for constraint in &where_clause.lifetime_outlives {
-        push_u32(
-            output,
-            constraint.higher_ranked_lifetimes.len().try_into().unwrap(),
-        );
-        for parameter in &constraint.higher_ranked_lifetimes {
-            let kind = match parameter.kind {
-                GenericParamKind::Type => 1,
-                GenericParamKind::Lifetime => 2,
-                GenericParamKind::EffectRow => 3,
-                GenericParamKind::Const(_) => return Err(()),
-            };
-            output.push(kind);
-            push_string(output, &parameter.name);
-        }
-        push_string(output, &constraint.longer.name);
-        push_string(output, &constraint.shorter.name);
-        push_u32(output, constraint.span.start as u32);
-        push_u32(output, constraint.span.end as u32);
     }
     Ok(())
 }
@@ -426,14 +407,53 @@ fn encode_struct(
     Ok(())
 }
 
+fn bootstrap_header_error_code(source: &str, error: &grandiose::diagnostic::Diagnostic) -> u32 {
+    let span = error.span.unwrap();
+    let prefix = source[..span.start.min(source.len())].trim_end();
+    match (error.title.as_str(), error.message.as_str()) {
+        ("empty generic application", _) => 5,
+        (_, "expected `>` after generic type arguments") => 4,
+        (_, "expected `)` to close the tuple type") => 3,
+        (_, "expected `:` and a parameter type") => 7,
+        (_, "expected `,` between quantity bounds") => 19,
+        (_, "expected `]` after quantity bounds") => 21,
+        ("invalid resumption quantity", message)
+            if message.contains("lower bound") => 22,
+        ("invalid resumption quantity", message)
+            if message.contains("upper bound") => 20,
+        ("duplicate associated binding", _) => 26,
+        (_, _) if prefix.ends_with("where") => 23,
+        (_, message) if message.contains("expected `{`") || message == "expected a block" => 9,
+        ("expected a name", _) => 1,
+        (title, message) => panic!(
+            "unmapped bootstrap header diagnostic `{title}` / `{message}` at {span:?}"
+        ),
+    }
+}
+
+fn encode_bootstrap_header_error(
+    output: &mut Vec<u8>,
+    source: &str,
+    error: &grandiose::diagnostic::Diagnostic,
+) {
+    output.push(3);
+    push_u32(output, bootstrap_header_error_code(source, error));
+    let span = error.span.unwrap();
+    push_u64(output, span.start as u64);
+    push_u64(output, span.end as u64);
+}
+
 fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     let Ok(tokens) = grandiose::lexer::lex(source) else {
         output.push(1);
         return;
     };
-    let Ok(program) = grandiose::parser::parse(tokens) else {
-        output.push(3);
-        return;
+    let program = match grandiose::parser::parse(tokens) {
+        Ok(program) => program,
+        Err(error) => {
+            encode_bootstrap_header_error(output, source, &error);
+            return;
+        }
     };
     let mut callables = program.functions.iter().collect::<Vec<_>>();
     callables.sort_by_key(|declaration| declaration.span.start);
@@ -471,24 +491,7 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
 fn encode_rust_malformed_nested_type(output: &mut Vec<u8>, source: &str) {
     let tokens = grandiose::lexer::lex(source).unwrap();
     let error = grandiose::parser::parse(tokens).unwrap_err();
-    let code = match error.title.as_str() {
-        "empty generic application" => 5,
-        "expected a name" => 1,
-        "unexpected syntax" => {
-            match error.message.as_str() {
-                "expected `>` after generic type arguments" => 4,
-                "expected `)` to close the tuple type" => 3,
-                "expected a name" => 1,
-                message => panic!("unexpected bootstrap diagnostic payload: {message}"),
-            }
-        }
-        title => panic!("unexpected bootstrap diagnostic identity: {title}"),
-    };
-    output.push(3);
-    push_u32(output, code);
-    let span = error.span.unwrap();
-    push_u64(output, span.start as u64);
-    push_u64(output, span.end as u64);
+    encode_bootstrap_header_error(output, source, &error);
 }
 
 #[test]
@@ -513,7 +516,7 @@ fn self_host_header_malformed_nested_types_match_bootstrap() {
     }
 
     let phases = grandiose::compile_bundle_to_phases_with_options(
-        &self_host_bundle(),
+        &self_host_bundle("probe::headers::application"),
         CompileOptions { optimization_level: OptimizationLevel::O2 },
     )
     .unwrap();
@@ -649,7 +652,34 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
             )
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM headers diverged");
+            let vm_actual = fs::read(&vm_path).unwrap();
+            if vm_actual != expected {
+                for (index, path) in corpus.iter().enumerate() {
+                    let focused_path = directory.path().join(format!("vm-{index}.bin"));
+                    let focused = Vm::with_host(
+                        verify(phases.artifact.clone()).unwrap(),
+                        ["process.args", "fs.read", "fs.write", "diagnostic"],
+                        SystemHost::new(vec![
+                            focused_path.clone().into_os_string(),
+                            path.clone().into_os_string(),
+                        ]),
+                    )
+                    .unwrap();
+                    assert_eq!(focused.run(entry, vec![]).unwrap(), Value::Unit);
+                    let mut expected_one = Vec::new();
+                    push_u32(&mut expected_one, 1);
+                    encode_rust_headers(
+                        &mut expected_one,
+                        &fs::read_to_string(path).unwrap(),
+                    );
+                    assert_wire_eq(
+                        &fs::read(&focused_path).unwrap(),
+                        &expected_one,
+                        &format!("VM headers diverged for input {index} ({})", path.display()),
+                    );
+                }
+                assert_wire_eq(&vm_actual, &expected, "VM aggregate headers diverged");
+            }
 
             let asan = std::env::var_os("G1_SELF_HOST_HEADERS_ASAN").is_some();
             let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
@@ -704,10 +734,10 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
                 native_all.status,
                 String::from_utf8_lossy(&native_all.stderr)
             );
-            assert_eq!(
-                fs::read(&native_all_path).unwrap(),
-                expected,
-                "native whole-corpus headers diverged"
+            assert_wire_eq(
+                &fs::read(&native_all_path).unwrap(),
+                &expected,
+                "native whole-corpus headers diverged",
             );
             for (index, path) in corpus.iter().enumerate() {
                 let native_path = directory.path().join(format!("native-{index}.bin"));

@@ -2102,6 +2102,7 @@ parse_callable_suffix(
                 start,
                 name,
                 generics,
+                generic_tokens,
                 parameters,
                 Result::Err(())
             )
@@ -2203,7 +2204,11 @@ finish_callable(
                 if(where_start + 1 < value.tokens.limit) {
                     value.tokens.position = value.tokens.limit;
                     token_range(where_start, value.tokens.limit)
-                } else { token_range(where_start, where_start) }
+                } else {
+                    @finish_callable(Result::Err(
+                        HeaderError::EmptyWhereClause(value.tokens.limit, start)
+                    ))
+                }
             },
             _ => token_range(where_start, where_start)
         }
@@ -2876,7 +2881,7 @@ parse_bounded_where_clause(
         handle super::lexer::token_kind_at(&value.source, start) {
             TokenKind::Keyword(super::lexer::Keyword::Where) => {
                 if(start + 1 == end) {
-                    Result::Err(HeaderError::EmptyWhereClause(start, related))
+                    Result::Err(HeaderError::EmptyWhereClause(end, related))
                 } else {
                     value.tokens.position = end;
                     Result::Ok(token_range(start, end))
