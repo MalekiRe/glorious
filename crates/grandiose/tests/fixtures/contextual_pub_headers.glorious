@@ -1,0 +1,7 @@
+pub type Count = i64;
+pub struct Pair { left: i64, right: i64 }
+pub enum Choice { One, Two }
+pub effect Signal { ping() -> i64; }
+pub trait Marker {}
+pub value() -> i64 { 1 }
+main() -> { () }

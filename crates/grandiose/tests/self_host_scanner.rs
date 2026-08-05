@@ -3,6 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use grandiose::{
@@ -12,6 +13,8 @@ use grandiose::{
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
+
+static CONTEXTUAL_PUB_ONLY: AtomicBool = AtomicBool::new(false);
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -464,6 +467,10 @@ fn encode_rust_scan(output: &mut Vec<u8>, source: &str) {
 }
 
 fn corpus(directory: &Path) -> Vec<PathBuf> {
+    if CONTEXTUAL_PUB_ONLY.load(Ordering::Relaxed) {
+        return vec![repository_root()
+            .join("crates/grandiose/tests/fixtures/contextual_pub_headers.glorious")];
+    }
     let focused = [
         "",
         "}",
@@ -495,6 +502,15 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         root.join("frontend/scanner/scanner.glorious"),
     ]);
     paths
+}
+
+#[test]
+fn self_host_scanner_contextual_pub_headers_match_bootstrap() {
+    // Keep this oracle comparison on the same corpus path as the broad scanner
+    // parity test so the expected wire format is always produced by the Rust
+    // scanner, rather than by a hand-maintained fixture.
+    CONTEXTUAL_PUB_ONLY.store(true, Ordering::Relaxed);
+    self_hosted_scanner_matches_rust_in_vm_and_native_execution();
 }
 
 #[test]

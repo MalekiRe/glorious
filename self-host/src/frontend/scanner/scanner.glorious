@@ -743,7 +743,7 @@ scan_one(
     limit: usize,
     parent: Option<ShellId>
 ) -> Result<ScanStep, ScanError> {
-    let public = ident_is(value, start, &"pub");
+    let public = contextual_public_modifier(value, start);
     let cursor = if(public) { start + 1 } else { start };
     let classification = try(classify(value, cursor, start), @scan_one);
     let style = handle classification.style {
@@ -788,6 +788,16 @@ scan_one(
         ),
         DeclarationStyle::Module => unreachable()
     }
+}
+
+// `pub` is intentionally lexed as an identifier: it is a contextual item
+// header modifier, not a reserved word. Keep that rule in one scanner-level
+// predicate so every supported declaration style receives the same treatment.
+contextual_public_modifier(
+    value: &super::lexer::LexedSource,
+    cursor: usize
+) -> Bool {
+    ident_is(value, cursor, &"pub")
 }
 
 declaration_namespace(kind: DeclarationKind) -> Option<Namespace> {
@@ -983,7 +993,7 @@ recovery_declaration_start(
     value: &super::lexer::LexedSource,
     cursor: usize
 ) -> Bool {
-    if(ident_is(value, cursor, &"pub")) {
+    if(contextual_public_modifier(value, cursor)) {
         true
     } else if(ident_is(value, cursor, &"mod")) {
         true
