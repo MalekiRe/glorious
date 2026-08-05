@@ -491,6 +491,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "effect Console { write(String) (); }",
         "struct Pair<T> { left: T, right: T } enum Maybe<T> { None, Some(T) }",
         "trait Show<T> { show(T) String; } impl<T> Show<T> for T { show(x: T) { x } }",
+        "pub type Alias<T> = Vec<T>; cases Effects = { Console }; struct Data<T> { value: T } enum Choice<T> { Empty, Full(T) } effect Console { write(value: String) -> !; } trait Marker<T> { mark(value: T) -> (); } impl Marker<Data<u32>> for Data<u32> { mark(value: Data<u32>) { () } } impl !Marker<Choice<u32>> for Choice<u32> {} callable<T>(value: T) T { value }",
         "pub apply<T>(value: T, f: (T) U) U where { U: Use } { f(value) }",
         "apply<F, e: EffectRow>(f: F) -> () where F: Fn<(), Output=(), Effects={| e}> { f() }",
         "broken() { ([)] }",
@@ -524,6 +525,11 @@ fn self_host_scanner_contextual_pub_headers_match_bootstrap() {
 
 #[test]
 fn self_host_scanner_fixity_declarations_match_bootstrap() {
+    self_hosted_scanner_matches_rust_in_vm_and_native_execution();
+}
+
+#[test]
+fn self_host_scanner_trait_impl_effect_shells_match_bootstrap() {
     self_hosted_scanner_matches_rust_in_vm_and_native_execution();
 }
 
