@@ -1112,6 +1112,11 @@ struct PendingHandleArm {
     body: ExprId
 }
 
+struct DirectHandleMetadata {
+    effect_type: Option<BodyTypeId>,
+    direct: Bool
+}
+
 impl Use<[0, *]> for OperatorUse {}
 impl Use<[0, *]> for PendingField {}
 impl Use<[0, *]> for PendingStatement {}
@@ -3229,6 +3234,34 @@ parse_body_type_arguments(
     } else { Result::Ok(()) }
 }
 
+operation_head_is_upper(
+    source: &super::lexer::LexedSource,
+    token: usize
+) -> Bool {
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
+            Result::Err(_) => false,
+            Result::Ok(text) => handle Bytes::get(&String::as_bytes(text), 0) {
+                Result::Err(_) => false,
+                Result::Ok(byte) => byte >= 65 and { byte <= 90 }
+            }
+        },
+        _ => false
+    }
+}
+
+direct_handle_metadata(
+    nodes: &Arena<ExprTag, ExprNode>,
+    subject: ExprId
+) -> DirectHandleMetadata {
+    handle Arena::index(nodes, subject).kind {
+        ExprKind::Perform(path, _) => DirectHandleMetadata {
+            effect_type: Option::Some(path.effect_type), direct: true
+        },
+        _ => DirectHandleMetadata { effect_type: None, direct: false }
+    }
+}
+
 parse_handle_arm(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3236,7 +3269,9 @@ parse_handle_arm(
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
     owner: Option<ShellId>,
-    depth: u16
+    depth: u16,
+    elided: Option<BodyTypeId>,
+    direct: Bool
 ) -> Result<PendingHandleArm, BodyError> {
     let enum_token = value.tokens.position;
     let owner_type = try(parse_body_type(
@@ -3247,6 +3282,10 @@ parse_handle_arm(
         declarations, enum_name, owner
     )) { Option::Some(owner_type) } else { None };
     let separator = value.tokens.position;
+    let selected_effect_type = if(direct
+        and { operation_head_is_upper(source, separator + 1) }) {
+        elided
+    } else { effect_type };
     if(separator < value.tokens.limit
         and {
             super::lexer::token_matches_at(
@@ -3305,7 +3344,7 @@ parse_handle_arm(
                     enum_token: enum_token,
                     variant_name: variant_name,
                     variant_token: variant_token,
-                    effect_type: effect_type,
+                    effect_type: selected_effect_type,
                     binders: binders,
                     body: body
                 })
@@ -3367,7 +3406,9 @@ parse_handle_arms(
     owner: Option<ShellId>,
     depth: u16,
     open: usize,
-    output: &mut Vec<PendingHandleArm>
+    output: &mut Vec<PendingHandleArm>,
+    elided: Option<BodyTypeId>,
+    direct: Bool
 ) -> Result<(), BodyError> {
     if(value.tokens.position < value.tokens.limit) {
         if(eat_token(value, source, TokenPattern::RBrace)) {
@@ -3380,7 +3421,9 @@ parse_handle_arms(
                 nominal,
                 value,
                 owner,
-                depth
+                depth,
+                elided,
+                direct
             ), @parse_handle_arms);
             Vec::push(&mut *output, arm);
             if(value.tokens.position < value.tokens.limit) {
@@ -3402,7 +3445,9 @@ parse_handle_arms(
                     owner,
                     depth,
                     open,
-                    output
+                    output,
+                    elided,
+                    direct
                 )
             } else {
                 Result::Err(BodyError::ExpectedBlockClose(
@@ -3509,6 +3554,9 @@ parse_handle(
         0,
         depth + 1
     ), @parse_handle);
+    let metadata = direct_handle_metadata(&value.nodes, subject);
+    let elided = metadata.effect_type;
+    let direct = metadata.direct;
     let open = value.tokens.position;
     if(open < value.tokens.limit
         and {
@@ -3529,7 +3577,9 @@ parse_handle(
             owner,
             depth + 1,
             open,
-            &mut arms
+            &mut arms,
+            elided,
+            direct
         ), @parse_handle);
         Result::Ok(push_handle(
             value,

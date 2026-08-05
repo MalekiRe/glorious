@@ -784,6 +784,13 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
                  Signal::inspect(found) => found \
              } \
          }",
+        "effect Case<T> { inspect(value: T) -> ! } \
+         enum Result<T, E> { Ok(T), Err(E) } \
+         pick(value: Result<i64, ()>) -> i64 { \
+             handle perform Case<Result<i64, ()>>::inspect(value) { \
+                 Result::Ok(answer) => answer, Result::Err(_) => 0 \
+             } \
+         }",
         "effect Fail<E> { fail(error: E) -> ! } \
          probe_generic_effect_path() -> i64 { \
              handle perform Fail<i64>::fail(42) { \
@@ -969,6 +976,12 @@ fn self_host_body_new_literal_nodes_and_spans_match_bootstrap_ast() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_body_direct_perform_handlers_match_bootstrap_ast() {
+    // The corpus entry is encoded independently by the Rust parser oracle.
+    self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_execution();
 }
 
 #[test]
