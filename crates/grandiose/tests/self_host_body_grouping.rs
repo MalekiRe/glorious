@@ -438,7 +438,7 @@ fn encode_expression(
                     .join("::"),
             );
         }
-        ExprKind::Int(_) | ExprKind::Float(_) => {
+        ExprKind::Int(_) => {
             let literal = program
                 .numeric_literal(expression.span)
                 .or_else(|| {
