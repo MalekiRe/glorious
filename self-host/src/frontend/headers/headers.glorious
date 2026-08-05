@@ -1991,7 +1991,18 @@ parse_callable_suffix(
                 generics,
                 parameters,
                 Result::Err(())
-            ) } else {
+            ) } else if(value.tokens.position == value.tokens.limit) {
+            parse_callable_effects(
+                original, value,
+                shell,
+                public,
+                start,
+                name,
+                generics,
+                parameters,
+                Result::Err(())
+            )
+        } else {
             let parsed_result = try(
                 parse_type(value, start),
                 @parse_callable_suffix

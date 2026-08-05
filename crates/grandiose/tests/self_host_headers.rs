@@ -569,6 +569,7 @@ fn self_host_header_reference_lifetimes_match_bootstrap() {
             let input = directory.path().join("reference-lifetimes.glorious");
             fs::write(&input, source).unwrap();
             let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
             encode_rust_headers(&mut expected, source);
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
