@@ -658,6 +658,47 @@ fn raw_source_bundle(source: &str) -> SourceBundle {
     )
 }
 
+fn body_validation_errors(source: &str) -> Vec<grandiose::diagnostic::Diagnostic> {
+    let tokens = grandiose::lexer::lex(source).unwrap();
+    let (program, parse_errors) = grandiose::parser::parse_recovering(tokens);
+    assert!(parse_errors.is_empty(), "unexpected parse errors: {parse_errors:#?}");
+    grandiose::validate::validate(&program).expect_err("invalid label program validated")
+}
+
+fn self_host_body_output(sources: &[&str]) -> Vec<u8> {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("self-host.bin");
+    let inputs = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let path = directory.path().join(format!("input-{index}.glorious"));
+            fs::write(&path, source).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(
+            std::iter::once(output.clone().into_os_string())
+                .chain(inputs.into_iter().map(|path| path.into_os_string()))
+                .collect::<Vec<_>>(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    fs::read(output).unwrap()
+}
+
 fn encode_rust_grouping(output: &mut Vec<u8>, source: &str) {
     let bundle = raw_source_bundle(source);
     let Ok(program) = grandiose::modules::parse_bundle(&bundle) else {
@@ -1611,6 +1652,51 @@ fn self_host_unit_spans_are_exact_for_new_syntax_nodes() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_unit_unknown_and_out_of_scope_labels_are_rejected() {
+    let sources = [
+        "answer() -> { @missing }\nmain() -> { () }",
+        "answer() -> {\n    @done: { () };\n    @done()\n}\nmain() -> { () }",
+    ];
+
+    let mut expected = Vec::new();
+    push_u32(&mut expected, sources.len() as u32);
+    for source in sources {
+        encode_rust_grouping(&mut expected, source);
+    }
+    assert_eq!(
+        self_host_body_output(&sources),
+        expected,
+        "self-host body grouping changed the label AST, spans, or lexical distinction"
+    );
+
+    let expected_diagnostics = [
+        ("not active", "@missing"),
+        ("no active lexical destination", "@done"),
+    ];
+    for (source, (message, label)) in sources.into_iter().zip(expected_diagnostics) {
+        let errors = body_validation_errors(source);
+        let label_start = source.rfind(label).unwrap();
+        let label_end = label_start + label.len();
+        assert!(
+            errors.iter().any(|error| {
+                error.code.as_deref() == Some("G0132")
+                    && error.message.contains(message)
+                    && error
+                        .span
+                        .is_some_and(|span| span.start == label_start && span.end == label_end)
+            }),
+            "expected G0132 containing {message:?} at {label:?}, got {errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.code.as_deref() != Some("G0124")),
+            "label scope rejection acquired an unrelated G0124 diagnostic: {errors:#?}"
+        );
+    }
 }
 
 #[test]
