@@ -521,6 +521,32 @@ fn encode_expression(
                 encode_expression(output, program, source, argument)?;
             }
         }
+        ExprKind::Resume { resumption, value } => {
+            output.push(19);
+            encode_expression(output, program, source, resumption)?;
+            match value {
+                None => output.push(0),
+                Some(value) => {
+                    output.push(1);
+                    encode_expression(output, program, source, value)?;
+                }
+            }
+        }
+        ExprKind::Cancel { resumption } => {
+            output.push(20);
+            encode_expression(output, program, source, resumption)?;
+        }
+        ExprKind::TailResume { resumption, value } => {
+            output.push(21);
+            encode_expression(output, program, source, resumption)?;
+            match value {
+                None => output.push(0),
+                Some(value) => {
+                    output.push(1);
+                    encode_expression(output, program, source, value)?;
+                }
+            }
+        }
         ExprKind::Perform {
             effect,
             operation,
@@ -1434,6 +1460,41 @@ fn self_host_body_labels_match_bootstrap_ast() {
                 .unwrap();
             assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
             assert_eq!(fs::read(native_output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_body_resumption_nodes_match_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("resumption-nodes.glorious");
+            let output = directory.path().join("resumption-nodes.bin");
+            let source = "resume_node() { resume(k, 1) } cancel_node() { cancel(k) } tail_node() { tail(k, 1) }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected, "resumption AST diverged");
         })
         .unwrap()
         .join()

@@ -189,6 +189,9 @@ enum ExprKind {
     Prefix(BodyTokenRange, ExprId),
     Infix(BodyTokenRange, ExprId, ExprId),
     Call(ExprId, ExprEdgeRange),
+    Resume(ExprId, Option<ExprId>),
+    Cancel(ExprId),
+    TailResume(ExprId, Option<ExprId>),
     Perform(EffectOperationSyntax, ExprEdgeRange),
     Block(ExprEdgeRange),
     ContextBlock(ExprEdgeRange),
@@ -237,6 +240,9 @@ pub enum BodyExpressionView<'a> {
     Prefix(BodyTokenRange, ExprId),
     Infix(BodyTokenRange, ExprId, ExprId),
     Call(ExprId, Slice<'a, ExprEdge>),
+    Resume(ExprId, Option<ExprId>),
+    Cancel(ExprId),
+    TailResume(ExprId, Option<ExprId>),
     Perform(EffectOperationSyntax, Slice<'a, ExprEdge>),
     Block(Slice<'a, ExprEdge>),
     ContextBlock(Slice<'a, ExprEdge>),
@@ -1529,6 +1535,9 @@ pub expression_child_count_at(
         BodyExpressionView::Infix(_, _, _) => 2,
         BodyExpressionView::Call(_, arguments) =>
             u32_from_usize(Slice::len(arguments)) + 1,
+        BodyExpressionView::Resume(_, value) => if(Option::is_some(&value)) { 2 } else { 1 },
+        BodyExpressionView::Cancel(_) => 1,
+        BodyExpressionView::TailResume(_, value) => if(Option::is_some(&value)) { 2 } else { 1 },
         BodyExpressionView::Perform(_, arguments) =>
             u32_from_usize(Slice::len(arguments)),
         BodyExpressionView::Block(children) =>
@@ -1568,6 +1577,23 @@ pub expression_child_at(
                 arguments,
                 usize_from_u32(child - 1)
             )))
+        },
+        BodyExpressionView::Resume(resumption, value) => if(child == 0) {
+            Id::to_u32(resumption)
+        } else {
+            handle value {
+                Option::Some(found) => Id::to_u32(found),
+                None => unreachable()
+            }
+        },
+        BodyExpressionView::Cancel(resumption) => Id::to_u32(resumption),
+        BodyExpressionView::TailResume(resumption, value) => if(child == 0) {
+            Id::to_u32(resumption)
+        } else {
+            handle value {
+                Option::Some(found) => Id::to_u32(found),
+                None => unreachable()
+            }
         },
         BodyExpressionView::Perform(_, arguments) =>
             Id::to_u32(expression_edge_value(edge_in_slice(
@@ -1687,6 +1713,13 @@ pub expression_view<'a>(
         ExprKind::Call(callee, arguments) => BodyExpressionView::Call(
             callee,
             expression_edges(value, arguments)
+        ),
+        ExprKind::Resume(resumption, value) => BodyExpressionView::Resume(
+            resumption, value
+        ),
+        ExprKind::Cancel(resumption) => BodyExpressionView::Cancel(resumption),
+        ExprKind::TailResume(resumption, value) => BodyExpressionView::TailResume(
+            resumption, value
         ),
         ExprKind::Perform(path, arguments) => BodyExpressionView::Perform(
             path,
@@ -3861,6 +3894,73 @@ parse_closure(
     ))
 }
 
+parse_resumption_operation(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize,
+    keyword: Keyword
+) -> Result<ExprId, BodyError> {
+    let open = start + 1;
+    if(open >= value.tokens.limit or {
+        not(super::lexer::token_matches_at(source, open, TokenPattern::LParen))
+    }) {
+        Result::Err(BodyError::ExpectedCallClose(open, start))
+    } else {
+        value.tokens.position = open + 1;
+        let arguments = Vec::new();
+        try(parse_call_arguments(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            depth + 1,
+            &mut arguments,
+            open
+        ), @parse_resumption_operation);
+        let count = Vec::len(&arguments);
+        let end = value.tokens.position;
+        handle keyword {
+            Keyword::Resume => if(count == 1 or { count == 2 }) {
+                let resumption = *Vec::index(&arguments, 0);
+                let result = if(count == 2) {
+                    Option::Some(*Vec::index(&arguments, 1))
+                } else { None };
+                Result::Ok(push_node(
+                    value,
+                    ExprKind::Resume(resumption, result),
+                    token_range(start, end)
+                ))
+            } else { Result::Err(BodyError::ExpectedExpression(start, end)) },
+            Keyword::Cancel => if(count == 1) {
+                Result::Ok(push_node(
+                    value,
+                    ExprKind::Cancel(*Vec::index(&arguments, 0)),
+                    token_range(start, end)
+                ))
+            } else { Result::Err(BodyError::ExpectedExpression(start, end)) },
+            Keyword::Tail => if(count == 1 or { count == 2 }) {
+                let resumption = *Vec::index(&arguments, 0);
+                let result = if(count == 2) {
+                    Option::Some(*Vec::index(&arguments, 1))
+                } else { None };
+                Result::Ok(push_node(
+                    value,
+                    ExprKind::TailResume(resumption, result),
+                    token_range(start, end)
+                ))
+            } else { Result::Err(BodyError::ExpectedExpression(start, end)) },
+            _ => unreachable()
+        }
+    }
+}
+
 parse_atom(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3873,6 +3973,18 @@ parse_atom(
     let start = value.tokens.position;
     if(start < value.tokens.limit) {
         handle super::lexer::token_kind_at(source, start) {
+            TokenKind::Keyword(Keyword::Resume) => parse_resumption_operation(
+                original, source, declarations, nominal, value,
+                owner, depth, start, Keyword::Resume
+            ),
+            TokenKind::Keyword(Keyword::Cancel) => parse_resumption_operation(
+                original, source, declarations, nominal, value,
+                owner, depth, start, Keyword::Cancel
+            ),
+            TokenKind::Keyword(Keyword::Tail) => parse_resumption_operation(
+                original, source, declarations, nominal, value,
+                owner, depth, start, Keyword::Tail
+            ),
             TokenKind::Keyword(Keyword::Handle) => parse_handle(
                 original,
                 source,

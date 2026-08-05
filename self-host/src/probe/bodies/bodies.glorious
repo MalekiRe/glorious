@@ -945,6 +945,44 @@ write_expression_kind(
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
             write_children(output, original, source, value, arguments)
         },
+        BodyExpressionView::Resume(resumption, result) => {
+            ByteBuf::push(output, 19);
+            try(write_expression(
+                output, original, source, value, Id::to_u32(resumption)
+            ), @write_expression_kind);
+            handle result {
+                None => ByteBuf::push(output, 0),
+                Option::Some(found) => {
+                    ByteBuf::push(output, 1);
+                    try(write_expression(
+                        output, original, source, value, Id::to_u32(found)
+                    ), @write_expression_kind)
+                }
+            };
+            Result::Ok(())
+        },
+        BodyExpressionView::Cancel(resumption) => {
+            ByteBuf::push(output, 20);
+            write_expression(
+                output, original, source, value, Id::to_u32(resumption)
+            )
+        },
+        BodyExpressionView::TailResume(resumption, result) => {
+            ByteBuf::push(output, 21);
+            try(write_expression(
+                output, original, source, value, Id::to_u32(resumption)
+            ), @write_expression_kind);
+            handle result {
+                None => ByteBuf::push(output, 0),
+                Option::Some(found) => {
+                    ByteBuf::push(output, 1);
+                    try(write_expression(
+                        output, original, source, value, Id::to_u32(found)
+                    ), @write_expression_kind)
+                }
+            };
+            Result::Ok(())
+        },
         BodyExpressionView::Perform(path, arguments) => {
             ByteBuf::push(output, 14);
             try(write_name(
