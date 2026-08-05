@@ -24,11 +24,11 @@ fn repository_root() -> PathBuf {
         .to_owned()
 }
 
-fn self_host_bundle() -> SourceBundle {
+fn self_host_bundle(application: &str) -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary = Segment::new(
         root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::bodies::application) }\n",
+        format!("mod frontend;\nmod probe;\n\nmain() {{ run_compiler_host({application}) }}\n"),
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
@@ -37,6 +37,7 @@ fn self_host_bundle() -> SourceBundle {
         root.join("frontend/headers/headers.glorious"),
         root.join("frontend/bodies/bodies.glorious"),
         root.join("probe/probe.glorious"),
+        root.join("probe/headers/headers.glorious"),
         root.join("probe/bodies/bodies.glorious"),
     ];
     SourceBundle::distributed(
@@ -50,8 +51,7 @@ fn self_host_bundle() -> SourceBundle {
             if path.ends_with("probe/probe.glorious") {
                 source = source
                     .replace("pub mod lexer;\n", "")
-                    .replace("pub mod scanner;\n", "")
-                    .replace("pub mod headers;\n", "");
+                    .replace("pub mod scanner;\n", "");
             }
             Segment::new(path.to_string_lossy(), source)
         }),
@@ -700,7 +700,7 @@ fn self_host_body_parser_arbitrary_sources_terminate() {
             push_u32(&mut expected, 1);
             encode_rust_grouping(&mut expected, &source);
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions { optimization_level: OptimizationLevel::O2 },
             )
             .unwrap();
@@ -949,7 +949,7 @@ fn self_host_body_new_literal_nodes_and_spans_match_bootstrap_ast() {
             fs::write(&expected_path, &expected).unwrap();
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions { optimization_level: OptimizationLevel::O2 },
             )
             .unwrap();
@@ -998,7 +998,7 @@ fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
             fs::write(&expected_path, &expected).unwrap();
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1081,7 +1081,7 @@ fn self_host_body_numeric_source_payloads_match_bootstrap_ast() {
             encode_rust_grouping(&mut expected, &source);
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1123,7 +1123,7 @@ fn self_host_body_contextual_blocks_match_bootstrap_ast() {
             assert_eq!(expected.first().copied(), Some(0));
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1196,7 +1196,7 @@ fn self_host_body_library_loop_trailing_blocks_match_bootstrap_ast() {
             assert_eq!(expected.first().copied(), Some(0));
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1230,7 +1230,7 @@ fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_
         .spawn(|| {
             if std::env::var_os("G1_SELF_HOST_BODY_GROUPING_CHECK_ONLY").is_some() {
                 grandiose::compile_bundle_to_phases_with_options(
-                    &self_host_bundle(),
+                    &self_host_bundle("probe::bodies::application"),
                     CompileOptions {
                         optimization_level: OptimizationLevel::O0,
                     },
@@ -1251,7 +1251,7 @@ fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_
             fs::write(&expected_path, &expected).unwrap();
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1418,7 +1418,7 @@ fn self_host_body_dereference_adjacency_matches_bootstrap_ast() {
 
             let output = directory.path().join("self-host.bin");
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1458,7 +1458,7 @@ fn self_host_body_whitespace_calls_match_bootstrap_ast() {
                  main() -> { let callable = $sum-three; sum-three 1, 2, nested(3) }";
             fs::write(&input, source).unwrap();
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1517,7 +1517,7 @@ fn self_host_body_labels_match_bootstrap_ast() {
             }
             let output_path = directory.path().join("vm.bin");
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1581,7 +1581,7 @@ fn self_host_body_resumption_nodes_match_bootstrap_ast() {
             encode_rust_grouping(&mut expected, source);
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions { optimization_level: OptimizationLevel::O2 },
             )
             .unwrap();
@@ -1616,7 +1616,7 @@ fn self_host_body_is_patterns_match_bootstrap_ast() {
             encode_rust_grouping(&mut expected, source);
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1681,7 +1681,7 @@ fn self_host_body_typed_closures_match_bootstrap_ast() {
     fs::write(&input, source).unwrap();
     let mut expected = Vec::new();
     encode_rust_grouping(&mut expected, source);
-    let bundle = self_host_bundle();
+    let bundle = self_host_bundle("probe::bodies::application");
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &bundle,
         CompileOptions {
@@ -1718,4 +1718,110 @@ fn self_host_body_typed_closures_match_bootstrap_ast() {
     push_u32(&mut expected_output, 1);
     expected_output.extend(expected);
     assert_eq!(fs::read(output).unwrap(), expected_output);
+}
+
+#[test]
+fn self_host_unit_declaration_only_programs_parse() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let sources = ["struct Point { x: i64, y: i64 }", ""];
+            let mut inputs = Vec::new();
+            let mut expected = Vec::new();
+            push_u32(&mut expected, sources.len() as u32);
+            for (index, source) in sources.iter().enumerate() {
+                let path = directory.path().join(format!("declaration-{index}.glorious"));
+                fs::write(&path, source).unwrap();
+                inputs.push(path);
+                let program = grandiose::parser::parse(
+                    grandiose::lexer::lex(source).unwrap(),
+                )
+                .unwrap();
+                push_u32(&mut expected, program.structs.len() as u32);
+                push_u32(&mut expected, program.functions.len() as u32);
+            }
+
+            let output = directory.path().join("declarations.bin");
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::headers::interface_application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let args = std::iter::once(output.clone().into_os_string())
+                .chain(inputs.into_iter().map(|path| path.into_os_string()))
+                .collect::<Vec<_>>();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(args),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+
+            let actual = fs::read(output).unwrap();
+            let mut cursor = 0;
+            let read_u32 = |bytes: &[u8], cursor: &mut usize| {
+                let end = *cursor + 4;
+                let value = u32::from_le_bytes(bytes[*cursor..end].try_into().unwrap());
+                *cursor = end;
+                value
+            };
+            let skip_string = |bytes: &[u8], cursor: &mut usize| {
+                let length = read_u32(bytes, cursor) as usize;
+                *cursor += length;
+            };
+            assert_eq!(read_u32(&actual, &mut cursor), sources.len() as u32);
+            let mut observed = Vec::new();
+            for _ in sources {
+                assert_eq!(actual[cursor], 0, "self-host rejected a valid declaration-only program");
+                cursor += 1;
+                let headers = read_u32(&actual, &mut cursor);
+                let mut structs = 0;
+                for _ in 0..headers {
+                    match actual[cursor] {
+                        8 => {
+                            structs += 1;
+                            cursor += 1;
+                            cursor += 1;
+                            skip_string(&actual, &mut cursor);
+                            assert_eq!(read_u32(&actual, &mut cursor), 0);
+                            let fields = read_u32(&actual, &mut cursor);
+                            for _ in 0..fields {
+                                cursor += 1;
+                                skip_string(&actual, &mut cursor);
+                                assert_eq!(actual[cursor], 1);
+                                cursor += 1;
+                                read_u32(&actual, &mut cursor);
+                                read_u32(&actual, &mut cursor);
+                                assert_eq!(read_u32(&actual, &mut cursor), 1);
+                                skip_string(&actual, &mut cursor);
+                                read_u32(&actual, &mut cursor);
+                                read_u32(&actual, &mut cursor);
+                            }
+                            continue;
+                        }
+                        12 => panic!("unexpected function in declaration-only oracle"),
+                        _ => panic!("unexpected declaration kind in declaration-only oracle"),
+                    }
+                }
+                observed.push((structs, 0));
+            }
+            assert_eq!(cursor, actual.len());
+            let mut expected_cursor = 4;
+            let mut expected_pairs = Vec::new();
+            for _ in 0..sources.len() {
+                expected_pairs.push((
+                    read_u32(&expected, &mut expected_cursor),
+                    read_u32(&expected, &mut expected_cursor),
+                ));
+            }
+            assert_eq!(observed, expected_pairs);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
