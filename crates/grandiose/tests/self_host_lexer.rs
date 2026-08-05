@@ -253,7 +253,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     let focused = [
         "",
         "cancel effect enum handle impl is let perform resume struct tail trait type where",
-        "alpha beta-name _hidden @done $value :: : .. . -> => == != <= >=",
+        "alpha beta-name _hidden @done $value :: : .. . -> => == != <= >= sum-three $sum-three value - other left-right left - right",
         "0 1_000 0b_1010 0o755 0x_ff 12.50 6.02e+23 pair.0.1",
         r#""plain\n\u{1f642}\x41" 'x' '\n' 'λ' 'life b"bytes\xff" b'x'"#,
         "/* outer /* nested */ done */ value // tail\nnext",
@@ -376,6 +376,11 @@ fn self_host_lexer_string_escapes_match_bootstrap() {
 }
 
 #[test]
+fn self_host_lexer_hyphenated_names_and_callable_sigils_match_bootstrap() {
+    run_self_host_lexer_oracle();
+}
+
+#[test]
 fn self_hosted_lexer_matches_rust_in_vm_and_native_execution() {
     run_self_host_lexer_oracle();
 }
@@ -383,7 +388,7 @@ fn self_hosted_lexer_matches_rust_in_vm_and_native_execution() {
 fn run_self_host_lexer_oracle() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             let directory = tempfile::tempdir().unwrap();
             let corpus = corpus(directory.path());
             run_lexer_oracle(directory.path(), &corpus);
