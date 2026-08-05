@@ -516,6 +516,29 @@ write_outlives(
     )
 }
 
+write_trait(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &super::super::frontend::headers::TraitHeader) {
+    let source = super::super::frontend::headers::parsed_source(parsed);
+    ByteBuf::push(output, bool_code(super::super::frontend::headers::trait_public(value)));
+    write_name(output, source, super::super::frontend::headers::trait_name(value));
+    write_generics(output, parsed, super::super::frontend::headers::trait_generics(value));
+    write_token_span(output, source, super::super::frontend::headers::trait_tokens(value));
+}
+
+write_impl(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &super::super::frontend::headers::ImplHeader) {
+    let source = super::super::frontend::headers::parsed_source(parsed);
+    write_generics(output, parsed, super::super::frontend::headers::impl_generics(value));
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    let path_count = super::super::frontend::headers::impl_trait_path_count(value);
+    ByteBuf::write_u32_le(output, path_count);
+    for_range(Range::new(0, wrapping_convert_to_usize(path_count)), { current => {
+        write_name(output, source, super::super::frontend::headers::impl_trait_path_name(index, value, current));
+    }});
+    write_wide_type_span(output, parsed, super::super::frontend::headers::impl_self_type(value));
+    write_type(output, parsed, super::super::frontend::headers::impl_self_type(value));
+    write_where_contract(output, parsed, super::super::frontend::headers::impl_where_clause(value));
+    write_token_span(output, source, super::super::frontend::headers::impl_tokens(value));
+}
+
 write_callable_where(
     output: &mut ByteBuf,
     parsed: &ParsedHeaders,
@@ -1038,6 +1061,14 @@ write_interfaces(
             }),
             14 => write_use(output, parsed, handle
                 super::super::frontend::headers::use_at(nominal, declaration) {
+                Result::Err(_) => unreachable(), Result::Ok(found) => found
+            }),
+            15 => write_trait(output, parsed, handle
+                super::super::frontend::headers::trait_at(nominal, declaration) {
+                Result::Err(_) => unreachable(), Result::Ok(found) => found
+            }),
+            16 => write_impl(output, parsed, handle
+                super::super::frontend::headers::impl_at(nominal, declaration) {
                 Result::Err(_) => unreachable(), Result::Ok(found) => found
             }),
             _ => unreachable()

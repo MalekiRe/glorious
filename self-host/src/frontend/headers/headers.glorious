@@ -240,6 +240,24 @@ pub struct UseHeader {
     tokens: HeaderTokenRange
 }
 
+pub struct TraitHeader {
+    shell: ShellId,
+    name: Id<String>,
+    public: Bool,
+    generics: HeaderRange,
+    tokens: HeaderTokenRange
+}
+
+pub struct ImplHeader {
+    shell: ShellId,
+    generics: HeaderRange,
+    trait_path: HeaderRange,
+    self_ty: TypeId,
+    where_tokens: HeaderTokenRange,
+    where_clause: Option<WhereClause>,
+    tokens: HeaderTokenRange
+}
+
 pub struct FixityHeader {
     shell: ShellId,
     public: Bool,
@@ -260,6 +278,8 @@ struct EffectOperationArena { values: Vec<EffectOperationHeader> }
 struct FixityArena { values: Vec<FixityHeader> }
 struct DropArena { values: Vec<DropHeader> }
 struct UseArena { values: Vec<UseHeader> }
+struct TraitArena { values: Vec<TraitHeader> }
+struct ImplArena { values: Vec<ImplHeader> }
 
 pub struct CallableHeaderTag {}
 pub type CallableHeaderId = Id<CallableHeaderTag>;
@@ -283,6 +303,10 @@ pub struct DropHeaderTag {}
 pub type DropHeaderId = Id<DropHeaderTag>;
 pub struct UseHeaderTag {}
 pub type UseHeaderId = Id<UseHeaderTag>;
+pub struct TraitHeaderTag {}
+pub type TraitHeaderId = Id<TraitHeaderTag>;
+pub struct ImplHeaderTag {}
+pub type ImplHeaderId = Id<ImplHeaderTag>;
 
 pub enum HeaderOrder {
     Callable(CallableHeaderId),
@@ -293,7 +317,9 @@ pub enum HeaderOrder {
     Enum(EnumHeaderId),
     Effect(EffectHeaderId),
     Drop(DropHeaderId),
-    Use(UseHeaderId)
+    Use(UseHeaderId),
+    Trait(TraitHeaderId),
+    Impl(ImplHeaderId)
 }
 
 impl Use<[0, *]> for HeaderOrder {}
@@ -351,7 +377,9 @@ pub struct NominalIndex {
     effect_operations: EffectOperationArena,
     fixities: FixityArena,
     drops: DropArena,
-    uses: UseArena
+    uses: UseArena,
+    traits: TraitArena,
+    impls: ImplArena
 }
 
 pub struct ParsedHeaders {
@@ -485,7 +513,9 @@ pub header_kind(value: &NominalIndex, index: usize) -> u8 {
         HeaderOrder::Enum(_) => 9,
         HeaderOrder::Effect(_) => 7,
         HeaderOrder::Drop(_) => 13,
-        HeaderOrder::Use(_) => 14
+        HeaderOrder::Use(_) => 14,
+        HeaderOrder::Trait(_) => 15,
+        HeaderOrder::Impl(_) => 16
     }
 }
 
@@ -499,7 +529,9 @@ pub header_index(value: &NominalIndex, index: usize) -> u32 {
         HeaderOrder::Enum(found) => Id::to_u32(found),
         HeaderOrder::Effect(found) => Id::to_u32(found),
         HeaderOrder::Drop(found) => Id::to_u32(found),
-        HeaderOrder::Use(found) => Id::to_u32(found)
+        HeaderOrder::Use(found) => Id::to_u32(found),
+        HeaderOrder::Trait(found) => Id::to_u32(found),
+        HeaderOrder::Impl(found) => Id::to_u32(found)
     }
 }
 
@@ -612,6 +644,29 @@ pub drop_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a DropHeader>
 pub use_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a UseHeader> {
     Vec::get(&value.uses.values, index)
 }
+
+pub trait_count(value: &NominalIndex) -> usize { Vec::len(&value.traits.values) }
+pub impl_count(value: &NominalIndex) -> usize { Vec::len(&value.impls.values) }
+pub trait_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a TraitHeader> {
+    Vec::get(&value.traits.values, index)
+}
+pub impl_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a ImplHeader> {
+    Vec::get(&value.impls.values, index)
+}
+pub trait_name(value: &TraitHeader) -> Id<String> { value.name }
+pub trait_public(value: &TraitHeader) -> Bool { value.public }
+pub trait_generics(value: &TraitHeader) -> &HeaderRange { &value.generics }
+pub trait_tokens(value: &TraitHeader) -> &HeaderTokenRange { &value.tokens }
+pub impl_generics(value: &ImplHeader) -> &HeaderRange { &value.generics }
+pub impl_trait_path(value: &ImplHeader) -> &HeaderRange { &value.trait_path }
+pub impl_trait_path_count(value: &ImplHeader) -> u32 { value.trait_path.count }
+pub impl_trait_path_name(value: &HeaderIndex, value_impl: &ImplHeader, index: usize) -> Id<String> {
+    let ordinal = wrapping_convert_to_usize(value_impl.trait_path.start) + index;
+    name_use_name(Vec::index(&value.names, ordinal))
+}
+pub impl_self_type(value: &ImplHeader) -> TypeId { value.self_ty }
+pub impl_where_clause(value: &ImplHeader) -> &Option<WhereClause> { &value.where_clause }
+pub impl_tokens(value: &ImplHeader) -> &HeaderTokenRange { &value.tokens }
 
 pub drop_generics(value: &DropHeader) -> &HeaderRange { &value.generics }
 pub drop_tokens(value: &DropHeader) -> &HeaderTokenRange { &value.tokens }
@@ -4108,6 +4163,66 @@ parse_impl_header(
     } else { Result::Err(HeaderError::UnexpectedTrailingHeaderToken(value.tokens.position, start)) }
 }
 
+parse_trait_header(
+    value: &mut Parser,
+    traits: &mut TraitArena,
+    order: &mut ParsedDefTable,
+    shell: ShellId,
+    public: Bool,
+    start: usize,
+    header_end: usize,
+    whole_end: usize
+) -> Result<(), HeaderError> {
+    value.tokens.position = start;
+    if(public) { value.tokens.position = value.tokens.position + 1; } else { () };
+    value.tokens.position = value.tokens.position + 1;
+    let name = try(ident(value, start), @parse_trait_header);
+    let generics = try(parse_generics(value, start), @parse_trait_header);
+    if(value.tokens.position == header_end) {
+        Vec::push(&mut traits.values, TraitHeader {
+            shell: shell, name: name.name, public: public, generics: generics,
+            tokens: token_range(start, whole_end)
+        });
+        record_header(order, shell, HeaderOrder::Trait(typed_header_id(Vec::len(&traits.values) - 1)));
+        Result::Ok(())
+    } else { Result::Err(HeaderError::UnexpectedTrailingHeaderToken(value.tokens.position, start)) }
+}
+
+parse_trait_impl_header(
+    original: &String,
+    value: &mut Parser,
+    impls: &mut ImplArena,
+    order: &mut ParsedDefTable,
+    shell: ShellId,
+    start: usize,
+    header_end: usize,
+    whole_end: usize
+) -> Result<(), HeaderError> {
+    value.tokens.position = start + 1;
+    value.tokens.limit = header_end;
+    let generics = try(parse_generics(value, start), @parse_trait_impl_header);
+    let path_start = Vec::len(&value.output.names);
+    let first = try(ident(value, start), @parse_trait_impl_header);
+    Vec::push(&mut value.output.names, first);
+    try(parse_relation_path_tail(value, start), @parse_trait_impl_header);
+    let trait_path = header_range(path_start, Vec::len(&value.output.names));
+    if(not(at_ident(&*value, &"for"))) {
+        Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, start))
+    } else {
+        value.tokens.position = value.tokens.position + 1;
+        let self_ty = try(parse_type(value, start), @parse_trait_impl_header);
+        let where_tokens = try(parse_bounded_where_clause(value, start, header_end), @parse_trait_impl_header);
+        let where_clause = try(parse_structured_where_clause(original, value, start, where_tokens), @parse_trait_impl_header);
+        Vec::push(&mut impls.values, ImplHeader {
+            shell: shell, generics: generics, trait_path: trait_path, self_ty: self_ty,
+            where_tokens: where_tokens, where_clause: where_clause,
+            tokens: token_range(start, whole_end)
+        });
+        record_header(order, shell, HeaderOrder::Impl(typed_header_id(Vec::len(&impls.values) - 1)));
+        Result::Ok(())
+    }
+}
+
 parse_shells(
     original: &String,
     declarations: &super::scanner::DeclarationIndex,
@@ -4220,9 +4335,20 @@ parse_shells(
                         limit,
                         whole_end
                     ),
-                    super::scanner::DeclarationKind::Impl => parse_impl_header(
+                    super::scanner::DeclarationKind::Trait => parse_trait_header(
+                        &mut next,
+                        &mut nominal.traits,
+                        &mut nominal.definitions,
+                        shell_id,
+                        super::scanner::shell_is_public(shell),
+                        start,
+                        limit,
+                        whole_end
+                    ),
+                    super::scanner::DeclarationKind::Impl => parse_impl_dispatch(
                         original,
                         &mut next,
+                        &mut nominal.impls,
                         &mut nominal.drops,
                         &mut nominal.uses,
                         &mut nominal.definitions,
@@ -4244,6 +4370,30 @@ parse_shells(
             }
         }
     } else { Result::Ok(finish_parser( parser,  nominal)) }
+}
+
+parse_impl_dispatch(
+    original: &String,
+    value: &mut Parser,
+    impls: &mut ImplArena,
+    drops: &mut DropArena,
+    uses: &mut UseArena,
+    order: &mut ParsedDefTable,
+    shell: ShellId,
+    start: usize,
+    header_end: usize,
+    whole_end: usize
+) -> Result<(), HeaderError> {
+    value.tokens.position = start + 1;
+    value.tokens.limit = header_end;
+    if(at_ident(&*value, &"Drop") or {
+        at_ident(&*value, &"Use")
+    }) {
+        parse_impl_header(original, value, drops, uses, order, shell, start, header_end, whole_end)
+    } else {
+        value.tokens.position = start + 1;
+        parse_trait_impl_header(original, value, impls, order, shell, start, header_end, whole_end)
+    }
 }
 
 finish_parser(value: Parser, nominal: NominalIndex) -> ParsedHeaders {
@@ -4303,7 +4453,9 @@ pub parse(
                 effect_operations: EffectOperationArena { values: Vec::new() },
                 fixities: FixityArena { values: Vec::new() },
                 drops: DropArena { values: Vec::new() },
-                uses: UseArena { values: Vec::new() }
+                uses: UseArena { values: Vec::new() },
+                traits: TraitArena { values: Vec::new() },
+                impls: ImplArena { values: Vec::new() }
         }
     )
 }

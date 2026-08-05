@@ -557,6 +557,78 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     output.extend(encoded);
 }
 
+fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
+    let program = grandiose::parser::parse(grandiose::lexer::lex(source).unwrap()).unwrap();
+    enum Item { Trait(usize), Struct(usize), Impl(usize), Function(usize) }
+    let mut items = Vec::new();
+    items.extend(program.traits.iter().enumerate().map(|(i, d)| (d.span.start, Item::Trait(i))));
+    items.extend(program.structs.iter().enumerate().map(|(i, d)| (d.span.start, Item::Struct(i))));
+    items.extend(program.impls.iter().enumerate().map(|(i, d)| (d.span.start, Item::Impl(i))));
+    items.extend(program.functions.iter().enumerate().map(|(i, d)| (d.span.start, Item::Function(i))));
+    items.sort_by_key(|(start, _)| *start);
+    push_u32(output, items.len().try_into().unwrap());
+    for (_, item) in items {
+        match item {
+            Item::Trait(index) => {
+                output.push(15);
+                let declaration = &program.traits[index];
+                output.push(u8::from(program.visibility(declaration.span) == Visibility::Public));
+                push_string(output, &declaration.name);
+                if let Some(generics) = declaration.generics.as_ref() {
+                    for parameter in &generics.params {
+                        output.push(match parameter.kind {
+                            GenericParamKind::Type => 1,
+                            GenericParamKind::Lifetime => 2,
+                            GenericParamKind::EffectRow => 3,
+                            GenericParamKind::Const(_) => 0,
+                        });
+                        push_string(output, &parameter.name);
+                    }
+                }
+                push_span(output, declaration.span);
+            }
+            Item::Struct(index) => {
+                output.push(8);
+                let declaration = &program.structs[index];
+                output.push(u8::from(program.visibility(declaration.span) == Visibility::Public));
+                push_string(output, &declaration.name);
+                encode_generics(output, declaration.generics.as_ref()).unwrap();
+                push_u32(output, declaration.fields.len().try_into().unwrap());
+                for field in &declaration.fields {
+                    output.push(u8::from(field.visibility == FieldVisibility::Public));
+                    push_string(output, &field.name);
+                    encode_type(output, source, &field.ty).unwrap();
+                }
+            }
+            Item::Impl(index) => {
+                output.push(16);
+                let declaration = &program.impls[index];
+                if let Some(generics) = declaration.generics.as_ref() {
+                    for parameter in &generics.params {
+                        output.push(match parameter.kind {
+                            GenericParamKind::Type => 1,
+                            GenericParamKind::Lifetime => 2,
+                            GenericParamKind::EffectRow => 3,
+                            GenericParamKind::Const(_) => 0,
+                        });
+                        push_string(output, &parameter.name);
+                    }
+                }
+                push_u32(output, declaration.trait_ref.path.len().try_into().unwrap());
+                for segment in &declaration.trait_ref.path { push_string(output, &segment.name); }
+                push_span(output, declaration.self_ty.span);
+                encode_type(output, source, &declaration.self_ty).unwrap();
+                encode_where_contract(output, source, declaration.where_clause.as_ref());
+                push_span(output, declaration.span);
+            }
+            Item::Function(index) => {
+                output.push(12);
+                encode_callable(output, source, &program, &program.functions[index]).unwrap();
+            }
+        }
+    }
+}
+
 fn encode_rust_malformed_nested_type(output: &mut Vec<u8>, source: &str) {
     let tokens = grandiose::lexer::lex(source).unwrap();
     let error = grandiose::parser::parse(tokens).unwrap_err();
@@ -739,6 +811,32 @@ fn self_host_unit_unit_and_never_results_are_retained() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_unit_empty_marker_traits_and_positive_impls() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = "trait Marker {} struct Box<T> { value: T } impl Marker for i64 {} impl<T> Marker for Box<T> where T: Marker {} main() -> { () }";
+    let input = directory.path().join("marker.glorious");
+    let output = directory.path().join("headers.bin");
+    fs::write(&input, source).unwrap();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    expected.push(0);
+    encode_rust_trait_impl_interfaces(&mut expected, source);
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle("probe::headers::interface_application"),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    ).unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    ).unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_wire_eq(&fs::read(&output).unwrap(), &expected, "marker trait interfaces diverged");
 }
 
 #[test]
