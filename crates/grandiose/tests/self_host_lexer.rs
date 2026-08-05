@@ -423,3 +423,8 @@ fn self_host_lexer_keywords_match_bootstrap() {
     let corpus = vec![input.path().to_owned()];
     run_lexer_oracle(directory.path(), &corpus);
 }
+
+#[test]
+fn self_host_lexer_character_lifetime_and_byte_literals_match_bootstrap() {
+    self_hosted_lexer_matches_rust_in_vm_and_native_execution();
+}
