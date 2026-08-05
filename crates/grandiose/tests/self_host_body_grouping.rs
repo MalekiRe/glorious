@@ -1114,3 +1114,48 @@ fn self_host_body_fixity_grouping_matches_bootstrap_ast() {
     // Keep the acceptance name tied to the bootstrap assertion it covers.
     self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_execution();
 }
+
+#[test]
+fn self_host_body_whitespace_calls_match_bootstrap_ast() {
+    // The probe is deliberately limited to the frontend body contract.
+    // It exercises both spelling normalization and grouping in one source.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("input.glorious");
+            let output = directory.path().join("output.bin");
+            let source =
+                "sum-three(a: i64, b: i64, c: i64) -> i64 { a } \
+                 main() -> { let callable = $sum-three; sum-three 1, 2, nested(3) }";
+            fs::write(&input, source).unwrap();
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.clone().into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

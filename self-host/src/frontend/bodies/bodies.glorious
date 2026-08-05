@@ -568,6 +568,7 @@ struct BodyParser {
     closure_parameters: Vec<ClosureParameter>,
     handle_arms: Vec<HandleArm>,
     pattern_binders: Vec<PatternBinder>,
+    in_whitespace_argument: Bool,
     patterns: Arena<PatternTag, PatternNode>
 }
 
@@ -2553,6 +2554,36 @@ parse_identifier(
     parse_identifier_tail(source, value, start, name_start)
 }
 
+parse_callable_reference(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    start: usize
+) -> Result<ExprId, BodyError> {
+    let name = start + 1;
+    if(name >= value.tokens.limit) {
+        Result::Err(BodyError::ExpectedIdentifier(name, start))
+    } else {
+        let dollar = token_span(source, start);
+        let name_span = token_span(source, name);
+        if(not(super::lexer::token_matches_at(
+            source, name, TokenPattern::Ident
+        )) or {
+            super::lexer::span_start(&name_span)
+                != super::lexer::span_end(&dollar)
+        }) {
+            Result::Err(BodyError::ExpectedIdentifier(name, start))
+        } else {
+            let name_start = super::syntax::range_mark(&value.names);
+            try(
+                push_identifier_name(source, value, name, start),
+                @parse_callable_reference
+            );
+            value.tokens.position = name + 1;
+            parse_identifier_tail(source, value, start, name_start)
+        }
+    }
+}
+
 parse_tuple_tail(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3333,6 +3364,7 @@ parse_atom(
                 start
             ),
             TokenKind::Ident(_) => parse_identifier(source, value, start),
+            TokenKind::Dollar => parse_callable_reference(source, value, start),
             TokenKind::Number(_) => {
                 value.tokens.position = start + 1;
                 Result::Ok(push_leaf(
@@ -3562,6 +3594,66 @@ parse_call_arguments(
     }
 }
 
+parse_whitespace_call_arguments(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    arguments: &mut Vec<ExprId>
+) -> Result<(), BodyError> {
+    let previous = value.in_whitespace_argument;
+    value.in_whitespace_argument = true;
+    let parsed = parse_expression(
+        original,
+        source,
+        declarations,
+        nominal,
+        value,
+        owner,
+        0,
+        depth
+    );
+    value.in_whitespace_argument = previous;
+    let argument = try(parsed, @parse_whitespace_call_arguments);
+    Vec::push(&mut *arguments, argument);
+    if(eat_token(value, source, TokenPattern::Comma)) {
+        let following = value.tokens.position;
+        if(following >= value.tokens.limit) {
+            Result::Err(BodyError::ExpectedExpression(following, following))
+        } else {
+            let starts = handle super::lexer::token_kind_at(source, following) {
+                TokenKind::Ident(_) => true,
+                TokenKind::Keyword(Keyword::Handle) => true,
+                TokenKind::Keyword(Keyword::Perform) => true,
+                TokenKind::Number(_) => true,
+                TokenKind::LParen => true,
+                TokenKind::Minus => true,
+                TokenKind::Amp => true,
+                TokenKind::Star => true,
+                TokenKind::Dollar => true,
+                _ => false
+            };
+            if(starts) {
+                parse_whitespace_call_arguments(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth,
+                    arguments
+                )
+            } else {
+                Result::Err(BodyError::ExpectedExpression(following, following))
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
 parse_struct_fields(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3744,6 +3836,52 @@ parse_projection_name(
         }
     } else {
         Result::Err(BodyError::ExpectedProjectionName(token, dot))
+    }
+}
+
+whitespace_call_ahead(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    nominal: &super::headers::NominalIndex,
+    value: &BodyParser,
+    owner: Option<ShellId>,
+    callee: ExprId
+) -> Result<Bool, BodyError> {
+    let next = value.tokens.position;
+    if(next >= value.tokens.limit) {
+        Result::Ok(false)
+    } else {
+        let callee_end = node_tokens(&*value, callee).end;
+        let gap = if(callee_end > 0) {
+            let previous = token_span(source, callee_end - 1);
+            let following = token_span(source, next);
+            super::lexer::span_end(&previous)
+                < super::lexer::span_start(&following)
+        } else { false };
+        if(not(gap)) {
+            Result::Ok(false)
+        } else {
+            let starts = handle super::lexer::token_kind_at(source, next) {
+                TokenKind::Ident(_) => true,
+                TokenKind::Keyword(Keyword::Handle) => true,
+                TokenKind::Keyword(Keyword::Perform) => true,
+                TokenKind::Number(_) => true,
+                TokenKind::LParen => true,
+                TokenKind::Minus => true,
+                TokenKind::Amp => true,
+                TokenKind::Star => true,
+                TokenKind::Dollar => true,
+                _ => false
+            };
+            let infix = try(
+                peek_operator(original, source, nominal, &*value, false, owner),
+                @whitespace_call_ahead
+            );
+            handle infix {
+                Result::Ok(_) => Result::Ok(false),
+                Result::Err(_) => Result::Ok(starts)
+            }
+        }
     }
 }
 
@@ -3971,7 +4109,59 @@ parse_postfix(
                         found
                     )
                 },
-                _ => Result::Ok(callee)
+                _ => {
+                    if(not(value.in_whitespace_argument)
+                        and { try(
+                            whitespace_call_ahead(
+                                original,
+                                source,
+                                nominal,
+                                &*value,
+                                owner,
+                                callee
+                            ),
+                            @parse_postfix
+                        ) }) {
+                        let arguments = Vec::new();
+                        try(
+                            parse_whitespace_call_arguments(
+                                original,
+                                source,
+                                declarations,
+                                nominal,
+                                value,
+                                owner,
+                                depth + 1,
+                                &mut arguments
+                            ),
+                            @parse_postfix
+                        );
+                        let end = node_tokens(
+                            &*value,
+                            *Vec::index(&arguments, Vec::len(&arguments) - 1)
+                        ).end;
+                        let call_start = node_tokens(&*value, callee).start;
+                        let call = push_call_or_perform(
+                            declarations,
+                            value,
+                            owner,
+                            callee,
+                            &arguments,
+                            call_start,
+                            end
+                        );
+                        parse_postfix(
+                            original,
+                            source,
+                            declarations,
+                            nominal,
+                            value,
+                            owner,
+                            depth + 1,
+                            call
+                        )
+                    } else { Result::Ok(callee) }
+                }
             }
         } else {
             Result::Err(
@@ -4570,6 +4760,7 @@ pub parse_function_body(
                         closure_parameters: Vec::new(),
                         handle_arms: Vec::new(),
                         pattern_binders: Vec::new(),
+                        in_whitespace_argument: false,
                         patterns: Arena::new()
                     };
                     let source = super::headers::parsed_source(headers);
@@ -4600,6 +4791,7 @@ pub parse_function_body(
                         closure_parameters,
                         handle_arms,
                         pattern_binders,
+                        in_whitespace_argument: _,
                         patterns
                     } = parser;
                     let output = ParsedBody {

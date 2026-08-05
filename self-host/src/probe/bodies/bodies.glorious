@@ -423,7 +423,17 @@ write_expression_kind(
     handle super::super::frontend::bodies::expression_view(value, expression) {
         BodyExpressionView::Identifier(tokens) => {
             ByteBuf::push(output, 1);
-            let spelling = range_text(original, source, &tokens);
+            let start = super::super::frontend::syntax::token_start(&tokens);
+            let name_range = if(super::super::frontend::lexer::token_kind_at(
+                source,
+                start
+            ) is super::super::frontend::lexer::TokenKind::Dollar) {
+                super::super::frontend::syntax::token_span(
+                    start + 1,
+                    super::super::frontend::syntax::token_end(&tokens)
+                )
+            } else { tokens };
+            let spelling = range_text(original, source, &name_range);
             write_string(output, &spelling);
             Result::Ok(())
         },
