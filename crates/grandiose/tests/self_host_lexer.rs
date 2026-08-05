@@ -255,6 +255,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "cancel effect enum handle impl is let perform resume struct tail trait type where",
         "alpha beta-name _hidden @done $value :: : .. . -> => == != <= >= sum-three $sum-three value - other left-right left - right",
         "@outer: @done(42)",
+        "type A=&i64; Vec<Vec<T>> a ?? b x ~> y",
         "0 1_000 0b_1010 0o755 0x_ff 12.50 6.02e+23 pair.0.1",
         r#""plain\n\u{1f642}\x41" 'x' '\n' 'λ' 'life b"bytes\xff" b'x'"#,
         "/* outer /* nested */ done */ value // tail\nnext",
@@ -383,6 +384,11 @@ fn self_host_lexer_hyphenated_names_and_callable_sigils_match_bootstrap() {
 
 #[test]
 fn self_host_lexer_label_tokens_match_bootstrap() {
+    run_self_host_lexer_oracle();
+}
+
+#[test]
+fn self_host_lexer_structural_operator_priority_matches_bootstrap() {
     run_self_host_lexer_oracle();
 }
 
