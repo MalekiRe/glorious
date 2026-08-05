@@ -220,6 +220,26 @@ pub struct EffectHeader {
     tokens: HeaderTokenRange
 }
 
+pub struct DropHeader {
+    shell: ShellId,
+    generics: HeaderRange,
+    target: TypeId,
+    where_tokens: HeaderTokenRange,
+    where_clause: Option<WhereClause>,
+    tokens: HeaderTokenRange
+}
+
+pub struct UseHeader {
+    shell: ShellId,
+    generics: HeaderRange,
+    lower: usize,
+    upper: Option<usize>,
+    target: TypeId,
+    where_tokens: HeaderTokenRange,
+    where_clause: Option<WhereClause>,
+    tokens: HeaderTokenRange
+}
+
 pub struct FixityHeader {
     shell: ShellId,
     public: Bool,
@@ -238,6 +258,8 @@ struct VariantArena { values: Vec<VariantHeader> }
 struct EffectArena { values: Vec<EffectHeader> }
 struct EffectOperationArena { values: Vec<EffectOperationHeader> }
 struct FixityArena { values: Vec<FixityHeader> }
+struct DropArena { values: Vec<DropHeader> }
+struct UseArena { values: Vec<UseHeader> }
 
 pub struct CallableHeaderTag {}
 pub type CallableHeaderId = Id<CallableHeaderTag>;
@@ -257,6 +279,10 @@ pub struct EffectHeaderTag {}
 pub type EffectHeaderId = Id<EffectHeaderTag>;
 pub struct EffectOperationHeaderTag {}
 pub type EffectOperationHeaderId = Id<EffectOperationHeaderTag>;
+pub struct DropHeaderTag {}
+pub type DropHeaderId = Id<DropHeaderTag>;
+pub struct UseHeaderTag {}
+pub type UseHeaderId = Id<UseHeaderTag>;
 
 pub enum HeaderOrder {
     Callable(CallableHeaderId),
@@ -265,7 +291,9 @@ pub enum HeaderOrder {
     Fixity(FixityHeaderId),
     Struct(StructHeaderId),
     Enum(EnumHeaderId),
-    Effect(EffectHeaderId)
+    Effect(EffectHeaderId),
+    Drop(DropHeaderId),
+    Use(UseHeaderId)
 }
 
 impl Use<[0, *]> for HeaderOrder {}
@@ -321,7 +349,9 @@ pub struct NominalIndex {
     variants: VariantArena,
     effects: EffectArena,
     effect_operations: EffectOperationArena,
-    fixities: FixityArena
+    fixities: FixityArena,
+    drops: DropArena,
+    uses: UseArena
 }
 
 pub struct ParsedHeaders {
@@ -453,7 +483,9 @@ pub header_kind(value: &NominalIndex, index: usize) -> u8 {
         HeaderOrder::Fixity(_) => 6,
         HeaderOrder::Struct(_) => 8,
         HeaderOrder::Enum(_) => 9,
-        HeaderOrder::Effect(_) => 7
+        HeaderOrder::Effect(_) => 7,
+        HeaderOrder::Drop(_) => 13,
+        HeaderOrder::Use(_) => 14
     }
 }
 
@@ -465,7 +497,9 @@ pub header_index(value: &NominalIndex, index: usize) -> u32 {
         HeaderOrder::Fixity(found) => Id::to_u32(found),
         HeaderOrder::Struct(found) => Id::to_u32(found),
         HeaderOrder::Enum(found) => Id::to_u32(found),
-        HeaderOrder::Effect(found) => Id::to_u32(found)
+        HeaderOrder::Effect(found) => Id::to_u32(found),
+        HeaderOrder::Drop(found) => Id::to_u32(found),
+        HeaderOrder::Use(found) => Id::to_u32(found)
     }
 }
 
@@ -570,6 +604,30 @@ pub effect_at<'a>(
 ) -> Option<&'a EffectHeader> {
     Vec::get(&value.effects.values, index)
 }
+
+pub drop_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a DropHeader> {
+    Vec::get(&value.drops.values, index)
+}
+
+pub use_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a UseHeader> {
+    Vec::get(&value.uses.values, index)
+}
+
+pub drop_generics(value: &DropHeader) -> &HeaderRange { &value.generics }
+pub drop_tokens(value: &DropHeader) -> &HeaderTokenRange { &value.tokens }
+pub drop_target(value: &DropHeader) -> TypeId { value.target }
+pub drop_where_clause(value: &DropHeader) -> &Option<WhereClause> { &value.where_clause }
+pub drop_where_tokens(value: &DropHeader) -> &HeaderTokenRange { &value.where_tokens }
+
+pub use_generics(value: &UseHeader) -> &HeaderRange { &value.generics }
+pub use_tokens(value: &UseHeader) -> &HeaderTokenRange { &value.tokens }
+pub use_lower(value: &UseHeader) -> usize { value.lower }
+pub use_upper(value: &UseHeader) -> Option<usize> { value.upper }
+pub use_target(value: &UseHeader) -> TypeId { value.target }
+pub use_where_clause(value: &UseHeader) -> &Option<WhereClause> { &value.where_clause }
+pub use_where_tokens(value: &UseHeader) -> &HeaderTokenRange { &value.where_tokens }
+pub drop_count(value: &NominalIndex) -> usize { Vec::len(&value.drops.values) }
+pub use_count(value: &NominalIndex) -> usize { Vec::len(&value.uses.values) }
 
 pub effect_operation_at<'a>(
     value: &'a NominalIndex,
@@ -3975,6 +4033,81 @@ parse_effect_header(
     ) }
 }
 
+parse_impl_header(
+    original: &String,
+    value: &mut Parser,
+    drops: &mut DropArena,
+    uses: &mut UseArena,
+    order: &mut ParsedDefTable,
+    shell: ShellId,
+    start: usize,
+    header_end: usize,
+    whole_end: usize
+) -> Result<(), HeaderError> {
+    value.tokens.position = start + 1;
+    value.tokens.limit = header_end;
+    let generics = try(parse_generics(value, start), @parse_impl_header);
+    if(at_ident(&*value, &"Drop")) {
+        value.tokens.position = value.tokens.position + 1;
+        if(not(at_ident(&*value, &"for"))) {
+            Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, start))
+        } else {
+            value.tokens.position = value.tokens.position + 1;
+            let target = try(parse_type(value, start), @parse_impl_header);
+            let where_tokens = try(
+                parse_bounded_where_clause(value, start, header_end),
+                @parse_impl_header
+            );
+            let where_clause = try(parse_structured_where_clause(
+                original, value, start, where_tokens
+            ), @parse_impl_header);
+            Vec::push(&mut drops.values, DropHeader {
+                shell: shell,
+                generics: generics,
+                target: target,
+                where_tokens: where_tokens,
+                where_clause: where_clause,
+                tokens: token_range(start, whole_end)
+            });
+            record_header(order, shell, HeaderOrder::Drop(typed_header_id(Vec::len(&drops.values) - 1)));
+            Result::Ok(())
+        }
+    } else if(at_ident(&*value, &"Use")) {
+        value.tokens.position = value.tokens.position + 1;
+        if(not(eat_token(value, TokenPattern::Lt))) {
+            Result::Err(HeaderError::ExpectedRightAngle(value.tokens.position, start))
+        } else {
+        let quantity = try(parse_resumption_quantity(original, value, start), @parse_impl_header);
+        try(expect_right_angle(value, start), @parse_impl_header);
+        if(not(at_ident(&*value, &"for"))) {
+            Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, start))
+        } else {
+            value.tokens.position = value.tokens.position + 1;
+            let target = try(parse_type(value, start), @parse_impl_header);
+            let where_tokens = try(
+                parse_bounded_where_clause(value, start, header_end),
+                @parse_impl_header
+            );
+            let where_clause = try(parse_structured_where_clause(
+                original, value, start, where_tokens
+            ), @parse_impl_header);
+            Vec::push(&mut uses.values, UseHeader {
+                shell: shell,
+                generics: generics,
+                lower: quantity.0,
+                upper: quantity.1,
+                target: target,
+                where_tokens: where_tokens,
+                where_clause: where_clause,
+                tokens: token_range(start, whole_end)
+            });
+            record_header(order, shell, HeaderOrder::Use(typed_header_id(Vec::len(&uses.values) - 1)));
+            Result::Ok(())
+        }
+        }
+    } else { Result::Err(HeaderError::UnexpectedTrailingHeaderToken(value.tokens.position, start)) }
+}
+
 parse_shells(
     original: &String,
     declarations: &super::scanner::DeclarationIndex,
@@ -4087,6 +4220,17 @@ parse_shells(
                         limit,
                         whole_end
                     ),
+                    super::scanner::DeclarationKind::Impl => parse_impl_header(
+                        original,
+                        &mut next,
+                        &mut nominal.drops,
+                        &mut nominal.uses,
+                        &mut nominal.definitions,
+                        shell_id,
+                        start,
+                        limit,
+                        whole_end
+                    ),
                     _ => Result::Ok(())
                 };
                 try(parsed, @parse_shells);
@@ -4157,7 +4301,9 @@ pub parse(
                 variants: VariantArena { values: Vec::new() },
                 effects: EffectArena { values: Vec::new() },
                 effect_operations: EffectOperationArena { values: Vec::new() },
-                fixities: FixityArena { values: Vec::new() }
+                fixities: FixityArena { values: Vec::new() },
+                drops: DropArena { values: Vec::new() },
+                uses: UseArena { values: Vec::new() }
         }
     )
 }

@@ -11,6 +11,8 @@ use super::super::frontend::headers::{
     NominalIndex,
     ParsedHeaders,
     StructHeader,
+    DropHeader,
+    UseHeader,
     TypeAliasHeader,
     EffectRowAliasHeader,
     TypeId
@@ -794,6 +796,29 @@ write_struct(
     }})
 }
 
+write_drop(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &DropHeader) {
+    write_token_span(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::drop_tokens(value));
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(super::super::frontend::headers::drop_generics(value)));
+    write_generics(output, parsed, super::super::frontend::headers::drop_generics(value));
+    write_wide_type_span(output, parsed, super::super::frontend::headers::drop_target(value));
+    write_type(output, parsed, super::super::frontend::headers::drop_target(value));
+    write_where_contract(output, parsed, super::super::frontend::headers::drop_where_clause(value));
+}
+
+write_use(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &UseHeader) {
+    write_token_span(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::use_tokens(value));
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(super::super::frontend::headers::use_generics(value)));
+    write_generics(output, parsed, super::super::frontend::headers::use_generics(value));
+    ByteBuf::write_u64_le(output, wrapping_convert_to_u64(super::super::frontend::headers::use_lower(value)));
+    handle super::super::frontend::headers::use_upper(value) {
+        None => ByteBuf::push(output, 0),
+        Option::Some(upper) => { ByteBuf::push(output, 1); ByteBuf::write_u64_le(output, wrapping_convert_to_u64(upper)) }
+    };
+    write_wide_type_span(output, parsed, super::super::frontend::headers::use_target(value));
+    write_type(output, parsed, super::super::frontend::headers::use_target(value));
+    write_where_contract(output, parsed, super::super::frontend::headers::use_where_clause(value));
+}
+
 write_enum(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EnumHeader) {
     write_common(
         output,
@@ -1007,6 +1032,14 @@ write_interfaces(
                 Result::Err(_) => unreachable(),
                 Result::Ok(found) => found
             }),
+            13 => write_drop(output, parsed, handle
+                super::super::frontend::headers::drop_at(nominal, declaration) {
+                Result::Err(_) => unreachable(), Result::Ok(found) => found
+            }),
+            14 => write_use(output, parsed, handle
+                super::super::frontend::headers::use_at(nominal, declaration) {
+                Result::Err(_) => unreachable(), Result::Ok(found) => found
+            }),
             _ => unreachable()
         }
     }})
@@ -1130,6 +1163,16 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                                 Result::Ok(value) => value
                             };
                             write_struct(output, &parsed, found, true)
+                        }});
+                        ByteBuf::write_u32_le(output, wrapping_convert_to_u32(super::super::frontend::headers::drop_count(nominal)));
+                        for_range(Range::new(0, super::super::frontend::headers::drop_count(nominal)), { current => {
+                            let found = handle super::super::frontend::headers::drop_at(nominal, current) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
+                            write_drop(output, &parsed, found)
+                        }});
+                        ByteBuf::write_u32_le(output, wrapping_convert_to_u32(super::super::frontend::headers::use_count(nominal)));
+                        for_range(Range::new(0, super::super::frontend::headers::use_count(nominal)), { current => {
+                            let found = handle super::super::frontend::headers::use_at(nominal, current) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
+                            write_use(output, &parsed, found)
                         }})
                     }
                 }

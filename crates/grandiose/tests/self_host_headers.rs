@@ -434,6 +434,27 @@ fn encode_struct(
     Ok(())
 }
 
+fn encode_drop(output: &mut Vec<u8>, source: &str, declaration: &ast::DropDecl) {
+    push_span(output, declaration.span);
+    encode_generics(output, declaration.generics.as_ref()).unwrap();
+    push_span(output, declaration.target_type.span);
+    encode_type(output, source, &declaration.target_type).unwrap();
+    encode_where_contract(output, source, declaration.where_clause.as_ref());
+}
+
+fn encode_use(output: &mut Vec<u8>, source: &str, declaration: &ast::UseDecl) {
+    push_span(output, declaration.span);
+    encode_generics(output, declaration.generics.as_ref()).unwrap();
+    push_u64(output, declaration.quantity.lower as u64);
+    match declaration.quantity.upper {
+        Some(upper) => { output.push(1); push_u64(output, upper as u64); }
+        None => output.push(0),
+    }
+    push_span(output, declaration.target.span);
+    encode_type(output, source, &declaration.target).unwrap();
+    encode_where_contract(output, source, declaration.where_clause.as_ref());
+}
+
 fn bootstrap_header_error_code(source: &str, error: &grandiose::diagnostic::Diagnostic) -> u32 {
     let span = error.span.unwrap();
     let prefix = source[..span.start.min(source.len())].trim_end();
@@ -520,6 +541,18 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
             return;
         }
     }
+    let mut drops = program.drops.iter().collect::<Vec<_>>();
+    drops.sort_by_key(|declaration| declaration.span.start);
+    push_u32(&mut encoded, drops.len().try_into().unwrap());
+    for declaration in drops {
+        encode_drop(&mut encoded, source, declaration);
+    }
+    let mut uses = program.uses.iter().collect::<Vec<_>>();
+    uses.sort_by_key(|declaration| declaration.span.start);
+    push_u32(&mut encoded, uses.len().try_into().unwrap());
+    for declaration in uses {
+        encode_use(&mut encoded, source, declaration);
+    }
     output.push(0);
     output.extend(encoded);
 }
@@ -587,6 +620,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "spaced<T,>(value: Vec< /* element */ T, >) -> Vec<T> { value }",
         "read<T, E: EffectRow>(value: T) -> pkg::Result<T, !> / {Console, Io<T> | E} { value }",
         "bounded<T>(value: T) -> T where T: Use<[0, *]> { value }",
+        "trait Marker {} struct Box<T> { value: T } impl<U> Drop for Box<U> where U: Marker { drop(&mut self) -> { () } } impl<T> Use<[1, 2]> for Box<T> where T: Marker, T: Use<[0, 2]> {} main() -> { () }",
         "call<F, T>(function: F, value: T) -> T where F: Fn<(T), Output=T> { function(value) }",
         "write(value: String) / Console { () }",
         "bad(value u32) { () }",
@@ -624,6 +658,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn self_host_header_struct_visibility_matches_bootstrap() {
+    self_hosted_headers_match_rust_in_vm_and_native_execution();
+}
+
+#[test]
+fn self_host_header_drop_and_use_declarations_match_bootstrap() {
     self_hosted_headers_match_rust_in_vm_and_native_execution();
 }
 
