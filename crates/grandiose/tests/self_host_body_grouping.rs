@@ -678,7 +678,7 @@ fn self_host_body_output(sources: &[&str]) -> Vec<u8> {
         })
         .collect::<Vec<_>>();
     let phases = grandiose::compile_bundle_to_phases_with_options(
-        &self_host_bundle(),
+        &self_host_bundle("probe::bodies::application"),
         CompileOptions {
             optimization_level: OptimizationLevel::O2,
         },
@@ -1628,7 +1628,7 @@ fn self_host_unit_spans_are_exact_for_new_syntax_nodes() {
 
             let output = directory.path().join("vm.bin");
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::bodies::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -1825,7 +1825,7 @@ fn self_host_unit_pattern_binders_and_remainders_are_validated() {
 
     let output = directory.path().join("pattern-validation.bin");
     let phases = grandiose::compile_bundle_to_phases_with_options(
-        &self_host_bundle(),
+        &self_host_bundle("probe::bodies::application"),
         CompileOptions { optimization_level: OptimizationLevel::O2 },
     )
     .unwrap();
