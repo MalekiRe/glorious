@@ -268,6 +268,14 @@ impl Resolver<'_> {
                 }
                 Ok(())
             }
+            ExprKind::Closure { params, body } => {
+                let mut nested = locals.clone();
+                for parameter in params.iter() {
+                    let id = self.define(2, parameter)?;
+                    nested.insert(parameter.to_string(), id);
+                }
+                self.expression(body, &nested)
+            }
             ExprKind::Handle {
                 computation,
                 clauses,
@@ -553,6 +561,24 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
                  Signal::inspect(found) => found \
              } \
          }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_generic_effect_path() -> i64 { \
+             handle perform Fail<i64>::fail(42) { \
+                 Fail<Text>::fail(error) => 0 \
+             } \
+         }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_generic_effect_row<E>() -> / {Fail<E>} { () }",
+        "effect Stop { stop() -> ! } \
+         probe_simple_effect_path() -> i64 { \
+             handle perform Stop::stop() { Stop::stop() => 42 } \
+         }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         invoke<E, F>(error: E, body: F) -> ! / {Fail<E>} \
+             where F: Fn<(E), Output=!, Effects={Fail<E>}> { body(error) } \
+         probe_effect_path_closure() -> ! / {Fail<i64>} { \
+             invoke(42, { error => perform Fail<i64>::fail(error) }) \
+         }",
         "effect Outer { inspect(value: u64) -> u64 } \
          effect Inner { inspect(value: u64) -> u64 } \
          probe_nested_effect_binders(value: u64) -> u64 { \
@@ -598,6 +624,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
                  probe_no_parent_effect() -> u64 { perform Signal::raise() } \
              } \
          }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_empty_effect_arguments() -> ! { perform Fail<>::fail(1) }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_unclosed_effect_arguments() -> ! { perform Fail<i64::fail(1) }",
+        "probe_bad_closure() { consume({ value, 42 => value }) }",
     ];
 
     let mut paths = Vec::new();
@@ -641,7 +672,7 @@ fn rust_name_resolution_oracle_classifies_the_focused_corpus() {
 }
 
 #[test]
-fn self_hosted_name_resolution_matches_rust_in_vm_and_native_execution() {
+fn self_hosted_effect_path_syntax_and_name_resolution_match_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {

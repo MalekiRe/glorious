@@ -1481,6 +1481,50 @@ resolve_block<'a>(
     )
 }
 
+resolve_closure<'a>(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut ScopeMap,
+    output: &mut ResolvedBody,
+    expression: u32,
+    parameters: Slice<'a, super::bodies::ClosureParameter>,
+    closure_body: super::bodies::ExprId,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    let frame = scope_frame(move bindings);
+    try(Slice::try_for_each(parameters, { parameter => {
+        let token = super::bodies::closure_parameter_token(parameter);
+        let local = handle local_id_from_usize(Vec::len(&output.locals)) {
+            Result::Err(_) => @resolve_closure(Result::Err(
+                ResolutionError::LocalIdExhausted(token, Vec::len(&output.locals))
+            )),
+            Result::Ok(found) => found
+        };
+        Vec::push(&mut output.locals, LocalBinding {
+            name_token: token,
+            block_expression: Id::from_u32(expression)
+        });
+        scope_push(
+            &mut *frame.scope,
+            super::bodies::closure_parameter_name(parameter),
+            ResolvedTarget::Local(local)
+        );
+        Result::Ok(())
+    }}), @resolve_closure);
+    resolve_expression(
+        headers,
+        index,
+        declarations,
+        body,
+        &mut *frame.scope,
+        output,
+        Id::to_u32(closure_body),
+        module
+    )
+}
+
 resolve_pattern_binders<'a>(
     bindings: &mut ScopeMap,
     output: &mut ResolvedBody,
@@ -1933,6 +1977,19 @@ resolve_expression(
                 bindings,
                 output,
                 Id::to_u32(child),
+                module
+            ),
+        super::bodies::BodyExpressionView::Closure(parameters, closure_body) =>
+            resolve_closure(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                expression,
+                parameters,
+                closure_body,
                 module
             ),
         super::bodies::BodyExpressionView::Handle(target, arms) => resolve_handle(

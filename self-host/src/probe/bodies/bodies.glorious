@@ -2,6 +2,7 @@ use super::super::frontend::bodies::{
     BlockStatementView,
     BodyError,
     BodyExpressionView,
+    BodyTypeView,
     BodyTokenRange,
     ExprEdge,
     ExpressionNameView,
@@ -17,6 +18,37 @@ write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);
     ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
     ByteBuf::append_bytes(output, &bytes)
+}
+
+write_body_type(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    ty: super::super::frontend::bodies::BodyTypeId
+) -> Result<(), BodyError> {
+    let type_range = super::super::frontend::syntax::token_span(
+        super::super::frontend::bodies::body_type_token_start(value, ty),
+        super::super::frontend::bodies::body_type_token_end(value, ty)
+    );
+    let type_text = range_text(original, source, &type_range);
+    write_string(output, &type_text);
+    handle super::super::frontend::bodies::body_type_view(value, ty) {
+        BodyTypeView::Path(name, token) => {
+            ByteBuf::push(output, 1);
+            write_name(output, source, name, token)
+        },
+        BodyTypeView::Application(constructor, arguments) => {
+            ByteBuf::push(output, 2);
+            try(write_body_type(
+                output, original, source, value, constructor
+            ), @write_body_type);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
+            Slice::try_for_each(arguments, { argument =>
+                write_body_type(output, original, source, value, *argument)
+            })
+        }
+    }
 }
 
 write_name(
@@ -180,6 +212,15 @@ write_handle_arms<'a>(
             super::super::frontend::bodies::handle_arm_enum_name(arm),
             super::super::frontend::bodies::handle_arm_enum_token(arm)
         ), @write_handle_arms);
+        handle super::super::frontend::bodies::handle_arm_effect_type(arm) {
+            None => ByteBuf::push(output, 0),
+            Option::Some(effect_type) => {
+                ByteBuf::push(output, 1);
+                try(write_body_type(
+                    output, original, source, value, effect_type
+                ), @write_handle_arms)
+            }
+        };
         try(write_name(
             output,
             source,
@@ -314,6 +355,13 @@ write_expression(
                 super::super::frontend::bodies::effect_operation_effect_name(&path),
                 super::super::frontend::bodies::effect_operation_effect_token(&path)
             ), @write_expression);
+            try(write_body_type(
+                output,
+                original,
+                source,
+                value,
+                super::super::frontend::bodies::effect_operation_effect_type(&path)
+            ), @write_expression);
             try(write_name(
                 output,
                 source,
@@ -361,6 +409,19 @@ write_expression(
                 Id::to_u32(subject)
             ), @write_expression);
             write_expression_name(output, original, source, field)
+        },
+        BodyExpressionView::Closure(parameters, body) => {
+            ByteBuf::push(output, 15);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(parameters)));
+            try(Slice::try_for_each(parameters, { parameter =>
+                write_name(
+                    output,
+                    source,
+                    super::super::frontend::bodies::closure_parameter_name(parameter),
+                    super::super::frontend::bodies::closure_parameter_token(parameter)
+                )
+            }), @write_expression);
+            write_expression(output, original, source, value, Id::to_u32(body))
         },
         BodyExpressionView::Handle(subject, arms) => {
             ByteBuf::push(output, 12);

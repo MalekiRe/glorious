@@ -7,7 +7,10 @@ use std::{
 
 use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
-    ast::{BinaryOp, Expr, ExprKind, FixityKind, Pattern, PatternKind, Program, Stmt, UnaryOp},
+    ast::{
+        BinaryOp, Expr, ExprKind, FixityKind, Pattern, PatternKind, Program, Stmt, TypeSyntax,
+        TypeSyntaxKind, UnaryOp,
+    },
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
@@ -65,6 +68,30 @@ fn push_u64(output: &mut Vec<u8>, value: u64) {
 fn push_string(output: &mut Vec<u8>, value: &str) {
     push_u32(output, value.len().try_into().unwrap());
     output.extend(value.as_bytes());
+}
+
+fn encode_effect_type(output: &mut Vec<u8>, source: &str, ty: &TypeSyntax) -> Result<(), ()> {
+    push_string(output, &source[ty.span.range()]);
+    match &ty.kind {
+        TypeSyntaxKind::Path(segments) if segments.len() == 1 => {
+            output.push(1);
+            push_string(output, &segments[0].name);
+        }
+        TypeSyntaxKind::Application {
+            constructor,
+            arguments,
+            lifetime_arguments,
+        } if lifetime_arguments.is_empty() => {
+            output.push(2);
+            encode_effect_type(output, source, constructor)?;
+            push_u32(output, arguments.len().try_into().map_err(|_| ())?);
+            for argument in arguments {
+                encode_effect_type(output, source, argument)?;
+            }
+        }
+        _ => return Err(()),
+    }
+    Ok(())
 }
 
 fn binary_spelling(operator: BinaryOp) -> &'static str {
@@ -245,6 +272,7 @@ fn encode_enum_arm(
         return Err(());
     };
     push_string(output, enum_name);
+    output.push(0);
     push_string(output, variant_name);
     push_u32(output, fields.len().try_into().map_err(|_| ())?);
     for field in fields {
@@ -288,6 +316,8 @@ fn encode_effect_handle(
     push_u32(output, clauses.len().try_into().map_err(|_| ())?);
     for clause in clauses {
         push_string(output, &clause.effect);
+        output.push(1);
+        encode_effect_type(output, source, program.effect_path(clause.span).ok_or(())?)?;
         push_string(output, &clause.operation);
         push_u32(output, clause.patterns.len().try_into().map_err(|_| ())?);
         for pattern in &clause.patterns {
@@ -404,6 +434,11 @@ fn encode_expression(
         } => {
             output.push(14);
             push_string(output, effect);
+            encode_effect_type(
+                output,
+                source,
+                program.effect_path(expression.span).ok_or(())?,
+            )?;
             push_string(output, operation);
             push_u32(output, args.len().try_into().map_err(|_| ())?);
             for argument in args.iter() {
@@ -416,6 +451,14 @@ fn encode_expression(
             for statement in statements.iter() {
                 encode_statement(output, program, source, statement)?;
             }
+        }
+        ExprKind::Closure { params, body } => {
+            output.push(15);
+            push_u32(output, params.len().try_into().map_err(|_| ())?);
+            for parameter in params.iter() {
+                push_string(output, parameter);
+            }
+            encode_expression(output, program, source, body)?;
         }
         ExprKind::Tuple(elements) => {
             output.push(9);
@@ -452,22 +495,19 @@ fn raw_source_bundle(source: &str) -> SourceBundle {
 }
 
 fn encode_rust_grouping(output: &mut Vec<u8>, source: &str) {
-    let Ok(program) = grandiose::modules::parse_bundle(&raw_source_bundle(source)) else {
+    let bundle = raw_source_bundle(source);
+    let Ok(program) = grandiose::modules::parse_bundle(&bundle) else {
         output.push(3);
         return;
     };
-    let mut functions = program
-        .functions
-        .iter()
-        .filter(|function| function.name.starts_with("probe_"))
-        .collect::<Vec<_>>();
+    let mut functions = program.functions.iter().collect::<Vec<_>>();
     functions.sort_by_key(|function| function.span.start);
 
     let mut encoded = Vec::new();
     push_u32(&mut encoded, functions.len().try_into().unwrap());
     for function in functions {
         push_string(&mut encoded, &function.name);
-        if encode_expression(&mut encoded, &program, source, &function.body).is_err() {
+        if encode_expression(&mut encoded, &program, bundle.source(), &function.body).is_err() {
             output.push(3);
             return;
         }
@@ -512,6 +552,24 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
                  Signal::inspect(found) => found \
              } \
          }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_generic_effect_path() -> i64 { \
+             handle perform Fail<i64>::fail(42) { \
+                 Fail<Text>::fail(error) => 0 \
+             } \
+         }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_generic_effect_row<E>() -> / {Fail<E>} { () }",
+        "effect Stop { stop() -> ! } \
+         probe_simple_effect_path() -> i64 { \
+             handle perform Stop::stop() { Stop::stop() => 42 } \
+         }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         invoke<E, F>(error: E, body: F) -> ! / {Fail<E>} \
+             where F: Fn<(E), Output=!, Effects={Fail<E>}> { body(error) } \
+         probe_effect_path_closure() -> ! / {Fail<i64>} { \
+             invoke(42, { error => perform Fail<i64>::fail(error) }) \
+         }",
         "infixl 10 op; probe_operator_arg() { combine(a op b, c) }",
         "infixl 10 op; probe_postfix_binds() { left() op right(2) }",
         "probe_let() { let x = 1; x }",
@@ -550,6 +608,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_bad_path() { Choice::(value) }",
         "effect Signal { raise() -> u64 } \
          probe_bad_perform() -> u64 / {Signal} { perform Signal::() }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_empty_effect_arguments() -> ! { perform Fail<>::fail(1) }",
+        "effect Fail<E> { fail(error: E) -> ! } \
+         probe_unclosed_effect_arguments() -> ! { perform Fail<i64::fail(1) }",
+        "probe_bad_closure() { consume({ value, 42 => value }) }",
     ];
 
     let mut paths = Vec::new();
@@ -594,7 +657,7 @@ fn rust_body_grouping_oracle_classifies_and_encodes_the_focused_corpus() {
 }
 
 #[test]
-fn self_hosted_body_grouping_matches_rust_in_vm_and_native_execution() {
+fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
