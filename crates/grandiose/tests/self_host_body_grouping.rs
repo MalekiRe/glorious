@@ -443,7 +443,19 @@ fn encode_expression(
             );
         }
         ExprKind::Int(_) => {
-            let literal = program.numeric_literal(expression.span).ok_or(())?;
+            let literal = program
+                .numeric_literal(expression.span)
+                .or_else(|| {
+                    program
+                        .numeric_literals
+                        .iter()
+                        .find(|entry| {
+                            expression.span.start <= entry.span.start
+                                && entry.span.end <= expression.span.end
+                        })
+                        .map(|entry| &entry.literal)
+                })
+                .ok_or(())?;
             let value = literal.as_u64(expression.span).map_err(|_| ())?;
             output.push(2);
             push_u64(output, value);
@@ -527,6 +539,41 @@ fn encode_expression(
             push_u32(output, params.len().try_into().map_err(|_| ())?);
             for parameter in params.iter() {
                 push_string(output, parameter);
+            }
+            encode_expression(output, program, source, body)?;
+        }
+        ExprKind::TypedClosure {
+            params,
+            return_type,
+            effectful,
+            outward_effects,
+            body,
+        } => {
+            output.push(16);
+            push_u32(output, expression.span.start.try_into().map_err(|_| ())?);
+            push_u32(output, expression.span.end.try_into().map_err(|_| ())?);
+            push_u32(output, params.len().try_into().map_err(|_| ())?);
+            for parameter in params.iter() {
+                output.push(1);
+                encode_effect_type(output, source, &parameter.ty)?;
+                push_string(output, &parameter.name);
+            }
+            match return_type {
+                None => output.push(0),
+                Some(ty) => {
+                    output.push(1);
+                    encode_effect_type(output, source, ty)?;
+                }
+            }
+            output.push(u8::from(*effectful));
+            match outward_effects {
+                None => push_u32(output, 0),
+                Some(row) => {
+                    push_u32(output, row.effects.len().try_into().map_err(|_| ())?);
+                    for effect in &row.effects {
+                        encode_effect_type(output, source, effect)?;
+                    }
+                }
             }
             encode_expression(output, program, source, body)?;
         }
@@ -1331,4 +1378,56 @@ fn self_host_body_is_patterns_match_bootstrap_ast() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_body_typed_closures_match_bootstrap_ast() {
+    // The focused contract includes typed, grouped, and tuple body identities, spans, and effects.
+    let source = "infixl 30 +; typed() { (x: i64, y: i64) -> i64 { x + y } } \
+        effects_body() { (x: i64) -> / {Console} { x } } \
+        grouped() { (1) } tupled() { (1, 2) }";
+    assert!(source.contains("-> / {Console}"));
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("typed-closures.glorious");
+    let output = directory.path().join("typed-closures.bin");
+    fs::write(&input, source).unwrap();
+    let mut expected = Vec::new();
+    encode_rust_grouping(&mut expected, source);
+    let bundle = self_host_bundle();
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &bundle,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap_or_else(|errors| {
+        for error in &errors {
+            if let Some(span) = error.span
+                && let Some(segment) = bundle.segment_at(span.start)
+            {
+                let base = segment.global_range().start;
+                eprintln!(
+                    "{}:{}..{}: {}",
+                    segment.name(),
+                    span.start - base,
+                    span.end - base,
+                    error.message
+                );
+            }
+        }
+        panic!("{errors:#?}")
+    });
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let mut expected_output = Vec::new();
+    push_u32(&mut expected_output, 1);
+    expected_output.extend(expected);
+    assert_eq!(fs::read(output).unwrap(), expected_output);
 }

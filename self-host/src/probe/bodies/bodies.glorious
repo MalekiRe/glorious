@@ -106,6 +106,27 @@ write_scalar_pattern(
     }
 }
 
+write_body_type_arguments<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    arguments: Slice<'a, super::super::frontend::bodies::BodyTypeId>,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index == Slice::len(arguments)) {
+        Result::Ok(())
+    } else {
+        let argument = Slice::index(arguments, index);
+        try(write_body_type(
+            output, original, source, value, argument
+        ), @write_body_type_arguments);
+        write_body_type_arguments(
+            output, original, source, value, arguments, index + 1
+        )
+    }
+}
+
 write_body_type(
     output: &mut ByteBuf,
     original: &String,
@@ -130,9 +151,7 @@ write_body_type(
                 output, original, source, value, constructor
             ), @write_body_type);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
-            Slice::try_for_each(arguments, { argument =>
-                write_body_type(output, original, source, value, *argument)
-            })
+            write_body_type_arguments(output, original, source, value, arguments, 0)
         }
     }
 }
@@ -199,6 +218,195 @@ write_label(
         }
     }
 }
+write_typed_closure_parameter(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32,
+    index: usize
+) -> Result<(), BodyError> {
+    let parameter_type = super::super::frontend::bodies::typed_closure_parameter_type_at(
+        value, expression, index
+    );
+    let parameter_name = super::super::frontend::bodies::typed_closure_parameter_name_at(
+        value, expression, index
+    );
+    let parameter_token = super::super::frontend::bodies::typed_closure_parameter_token_at(
+        value, expression, index
+    );
+    handle parameter_type {
+        None => {
+            ByteBuf::push(output, 0);
+            write_name(output, source, parameter_name, parameter_token)
+        },
+        Option::Some(ty) => {
+            ByteBuf::push(output, 1);
+            write_body_type(output, original, source, value, ty) and {
+                write_name(output, source, parameter_name, parameter_token)
+            }
+        }
+    }
+}
+
+write_typed_closure_effect(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    ty: super::super::frontend::bodies::BodyTypeId
+) -> Result<(), BodyError> {
+    write_body_type(output, original, source, value, ty)
+}
+
+write_typed_closure_parameters(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32,
+    count: usize,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index == count) {
+        Result::Ok(())
+    } else {
+        try(write_typed_closure_parameter(
+            output, original, source, value, expression, index
+        ), @write_typed_closure_parameters);
+        write_typed_closure_parameters(
+            output, original, source, value, expression, count, index + 1
+        )
+    }
+}
+
+write_typed_closure_effects(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32,
+    count: usize,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index == count) {
+        Result::Ok(())
+    } else {
+        try(write_typed_closure_effect(
+            output, original, source, value,
+            super::super::frontend::bodies::typed_closure_effect_at(
+                value, expression, index
+            )
+        ), @write_typed_closure_effects);
+        write_typed_closure_effects(
+            output, original, source, value, expression, count, index + 1
+        )
+    }
+}
+
+write_typed_closure_effect_row(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    has_effects: Bool,
+    expression: u32,
+    body: u32
+) -> Result<(), BodyError> {
+    if(has_effects) {
+        ByteBuf::push(output, 1);
+        let count = super::super::frontend::bodies::typed_closure_effect_count(
+            value, expression
+        );
+        ByteBuf::write_u32_le(output, count);
+        try(write_typed_closure_effects(
+            output, original, source, value, expression, usize_from_u32(count), 0
+        ), @write_typed_closure_effect_row);
+        write_expression(output, original, source, value, body)
+    } else {
+        ByteBuf::push(output, 0);
+        ByteBuf::write_u32_le(output, 0);
+        write_expression(output, original, source, value, body)
+    }
+}
+
+write_typed_closure_tail(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    return_type: Option<super::super::frontend::bodies::BodyTypeId>,
+    has_effects: Bool,
+    expression: u32,
+    body: u32
+) -> Result<(), BodyError> {
+    handle return_type {
+        None => {
+            ByteBuf::push(output, 0);
+            write_typed_closure_effect_row(
+                output, original, source, value, has_effects, expression, body
+            )
+        },
+        Option::Some(ty) => {
+            ByteBuf::push(output, 1);
+            try(write_body_type(output, original, source, value, ty), @write_typed_closure_tail);
+            write_typed_closure_effect_row(
+                output, original, source, value, has_effects, expression, body
+            )
+        }
+    }
+}
+
+write_typed_closure(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32
+) -> Result<(), BodyError> {
+    ByteBuf::push(output, 16);
+    let start_token = super::super::frontend::bodies::expression_token_start_at(
+        value, expression
+    );
+    let end_token = super::super::frontend::bodies::expression_token_end_at(
+        value, expression
+    );
+    let start_span = handle super::super::frontend::lexer::token_at(source, start_token) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    let end_span = handle super::super::frontend::lexer::token_at(source, end_token - 1) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::lexer::span_start(&start_span) + 1)
+    );
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::lexer::span_end(&end_span) + 1)
+    );
+    let parameter_count = super::super::frontend::bodies::typed_closure_parameter_count(
+        value, expression
+    );
+    ByteBuf::write_u32_le(output, parameter_count);
+    try(write_typed_closure_parameters(
+        output, original, source, value, expression,
+        usize_from_u32(parameter_count), 0
+    ), @write_typed_closure);
+    let return_type = super::super::frontend::bodies::typed_closure_return_type(
+        value, expression
+    );
+    let has_effects = super::super::frontend::bodies::typed_closure_has_effects(
+        value, expression
+    );
+    write_typed_closure_tail(
+        output, original, source, value, return_type,
+        has_effects, expression,
+        super::super::frontend::bodies::expression_child_at(value, expression, 0)
+    )
+}
 
 range_text(
     original: &String,
@@ -243,6 +451,29 @@ write_expression_name(
     }
 }
 
+write_children_at<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    children: Slice<'a, ExprEdge>,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index == Slice::len(children)) {
+        Result::Ok(())
+    } else {
+        let edge = Slice::index(children, index);
+        try(write_expression(
+            output,
+            original,
+            source,
+            value,
+            Id::to_u32(super::super::frontend::bodies::expression_edge_value(&edge))
+        ), @write_children_at);
+        write_children_at(output, original, source, value, children, index + 1)
+    }
+}
+
 write_children<'a>(
     output: &mut ByteBuf,
     original: &String,
@@ -250,17 +481,41 @@ write_children<'a>(
     value: &ParsedBody,
     children: Slice<'a, ExprEdge>
 ) -> Result<(), BodyError> {
-    Slice::try_for_each(children, { edge =>
-        write_expression(
+    write_children_at(output, original, source, value, children, 0)
+}
+
+write_struct_fields_at<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32,
+    fields: Slice<'a, ExprEdge>,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index == Slice::len(fields)) {
+        Result::Ok(())
+    } else {
+        let edge = Slice::index(fields, index);
+        try(write_expression_name(
+            output,
+            original,
+            source,
+            super::super::frontend::bodies::expression_name_view_at(
+                value,
+                expression,
+                super::super::frontend::bodies::expression_edge_metadata(&edge)
+            )
+        ), @write_struct_fields_at);
+        try(write_expression(
             output,
             original,
             source,
             value,
-            Id::to_u32(
-                super::super::frontend::bodies::expression_edge_value(edge)
-            )
-        )
-    })
+            Id::to_u32(super::super::frontend::bodies::expression_edge_value(&edge))
+        ), @write_struct_fields_at);
+        write_struct_fields_at(output, original, source, value, expression, fields, index + 1)
+    }
 }
 
 write_struct_fields<'a>(
@@ -271,28 +526,7 @@ write_struct_fields<'a>(
     expression: u32,
     fields: Slice<'a, ExprEdge>
 ) -> Result<(), BodyError> {
-    Slice::try_for_each(fields, { edge =>
-        write_expression_name(
-            output,
-            original,
-            source,
-            super::super::frontend::bodies::expression_name_view_at(
-                value,
-                expression,
-                super::super::frontend::bodies::expression_edge_metadata(edge)
-            )
-        ) and {
-            write_expression(
-                output,
-                original,
-                source,
-                value,
-                Id::to_u32(
-                    super::super::frontend::bodies::expression_edge_value(edge)
-                )
-            )
-        }
-    })
+    write_struct_fields_at(output, original, source, value, expression, fields, 0)
 }
 
 write_pattern_binders<'a>(
@@ -319,27 +553,26 @@ write_pattern_binders<'a>(
     })
 }
 
-write_handle_arms<'a>(
+write_handle_arm(
     output: &mut ByteBuf,
     original: &String,
     source: &LexedSource,
     value: &ParsedBody,
-    arms: Slice<'a, HandleArm>
+    arm: &HandleArm
 ) -> Result<(), BodyError> {
-    Slice::try_for_each(arms, { arm => {
         try(write_name(
             output,
             source,
             super::super::frontend::bodies::handle_arm_enum_name(arm),
             super::super::frontend::bodies::handle_arm_enum_token(arm)
-        ), @write_handle_arms);
+        ), @write_handle_arm);
         handle super::super::frontend::bodies::handle_arm_effect_type(arm) {
             None => ByteBuf::push(output, 0),
             Option::Some(effect_type) => {
                 ByteBuf::push(output, 1);
                 try(write_body_type(
                     output, original, source, value, effect_type
-                ), @write_handle_arms)
+                ), @write_handle_arm)
             }
         };
         try(write_name(
@@ -347,11 +580,11 @@ write_handle_arms<'a>(
             source,
             super::super::frontend::bodies::handle_arm_variant_name(arm),
             super::super::frontend::bodies::handle_arm_variant_token(arm)
-        ), @write_handle_arms);
+        ), @write_handle_arm);
         let binders =
             super::super::frontend::bodies::handle_arm_binders(value, arm);
         ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(binders)));
-        try(write_pattern_binders(output, source, binders), @write_handle_arms);
+        try(write_pattern_binders(output, source, binders), @write_handle_arm);
         write_expression(
             output,
             original,
@@ -359,7 +592,64 @@ write_handle_arms<'a>(
             value,
             Id::to_u32(super::super::frontend::bodies::handle_arm_body(arm))
         )
-    }})
+}
+
+write_handle_arms_at<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    arms: Slice<'a, HandleArm>,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index == Slice::len(arms)) {
+        Result::Ok(())
+    } else {
+        let arm = Slice::index(arms, index);
+        try(write_handle_arm(output, original, source, value, &arm), @write_handle_arms_at);
+        write_handle_arms_at(output, original, source, value, arms, index + 1)
+    }
+}
+
+write_handle_arms<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    arms: Slice<'a, HandleArm>
+) -> Result<(), BodyError> {
+    write_handle_arms_at(output, original, source, value, arms, 0)
+}
+
+write_block_statements_at<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    statements: Slice<'a, ExprEdge>,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index == Slice::len(statements)) {
+        Result::Ok(())
+    } else {
+        let statement = Slice::index(statements, index);
+        handle super::super::frontend::bodies::block_statement_view(&statement) {
+            BlockStatementView::Let(expression, token) => {
+                ByteBuf::push(output, 1);
+                try(write_name_token(output, source, token), @write_block_statements_at);
+                try(write_expression(
+                    output, original, source, value, Id::to_u32(expression)
+                ), @write_block_statements_at)
+            },
+            BlockStatementView::Expression(expression) => {
+                ByteBuf::push(output, 2);
+                try(write_expression(
+                    output, original, source, value, Id::to_u32(expression)
+                ), @write_block_statements_at)
+            }
+        };
+        write_block_statements_at(output, original, source, value, statements, index + 1)
+    }
 }
 
 write_pattern_fields(
@@ -485,32 +775,7 @@ write_block_statements<'a>(
     value: &ParsedBody,
     statements: Slice<'a, ExprEdge>
 ) -> Result<(), BodyError> {
-    Slice::try_for_each(statements, { statement =>
-        handle super::super::frontend::bodies::block_statement_view(statement) {
-            BlockStatementView::Let(expression, token) => {
-                ByteBuf::push(output, 1);
-                write_name_token(output, source, token) and {
-                    write_expression(
-                        output,
-                        original,
-                        source,
-                        value,
-                        Id::to_u32(expression)
-                    )
-                }
-            },
-            BlockStatementView::Expression(expression) => {
-                ByteBuf::push(output, 2);
-                write_expression(
-                    output,
-                    original,
-                    source,
-                    value,
-                    Id::to_u32(expression)
-                )
-            }
-        }
-    })
+    write_block_statements_at(output, original, source, value, statements, 0)
 }
 
 write_expression_span(
@@ -553,16 +818,21 @@ write_expression(
         value,
         expression
     );
-    handle super::super::frontend::bodies::expression_view(value, expression) {
-        BodyExpressionView::Grouping(child) => {
-            write_expression_span(output, source, tokens);
-            write_expression_kind(
-                output, original, source, value, Id::to_u32(child)
-            )
-        },
-        _ => {
-            write_expression_span(output, source, tokens);
-            write_expression_kind(output, original, source, value, expression)
+    if(super::super::frontend::bodies::expression_is_typed_closure(value, expression)) {
+        write_expression_span(output, source, tokens);
+        write_typed_closure(output, original, source, value, expression)
+    } else {
+        handle super::super::frontend::bodies::expression_view(value, expression) {
+            BodyExpressionView::Grouping(child) => {
+                write_expression_span(output, source, tokens);
+                write_expression_kind(
+                    output, original, source, value, Id::to_u32(child)
+                )
+            },
+            _ => {
+                write_expression_span(output, source, tokens);
+                write_expression_kind(output, original, source, value, expression)
+            }
         }
     }
 }
@@ -574,6 +844,9 @@ write_expression_kind(
     value: &ParsedBody,
     expression: u32
 ) -> Result<(), BodyError> {
+    if(super::super::frontend::bodies::expression_is_typed_closure(value, expression)) {
+        write_typed_closure(output, original, source, value, expression)
+    } else {
     handle super::super::frontend::bodies::expression_view(value, expression) {
         BodyExpressionView::Identifier(tokens) => {
             ByteBuf::push(output, 1);
@@ -728,6 +1001,7 @@ write_expression_kind(
             }), @write_expression_kind);
             write_expression(output, original, source, value, Id::to_u32(body))
         },
+        BodyExpressionView::TypedClosure(_, _, _, _, _) => unreachable(),
         BodyExpressionView::Handle(subject, arms) => {
             ByteBuf::push(output, 12);
             try(write_expression(
@@ -768,6 +1042,7 @@ write_expression_kind(
             write_pattern_node(output, original, source, value, pattern)
         }
     }
+}
 }
 
 function_count(

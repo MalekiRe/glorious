@@ -3617,6 +3617,13 @@ __g1_slice_get<'a, T>(value: Slice<'a, T>, index: usize) -> Option<& 'a T> {
     }
 }
 
+__g1_slice_index<'a, T>(value: Slice<'a, T>, index: usize) -> T
+where T: Use<[0, *]>
+{
+    let Slice { base, start, length: _ } = value;
+    __g1_array_get_copy(base, start + index)
+}
+
 __g1_slice_first<'a, T>(value: Slice<'a, T>) -> Option<& 'a T> { __g1_slice_get(value, 0) }
 
 __g1_slice_subslice_length<'a, T>(
@@ -4789,6 +4796,7 @@ slot_into_option<T>(value: Slot<T>) -> Option<T> {
 let Slice::len = __g1_slice_len;
 let Slice::is_empty = __g1_slice_is_empty;
 let Slice::get = __g1_slice_get;
+let Slice::index = __g1_slice_index;
 let Slice::first = __g1_slice_first;
 let Slice::subslice = __g1_slice_subslice;
 let Slice::iter = __g1_slice_iter;

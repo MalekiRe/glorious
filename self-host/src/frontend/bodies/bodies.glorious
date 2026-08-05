@@ -127,7 +127,11 @@ pub struct HandleArm {
     body: ExprId
 }
 
-pub struct ClosureParameter { name: Id<String>, token: usize }
+pub struct ClosureParameter {
+    name: Id<String>,
+    token: usize,
+    ty: Option<BodyTypeId>
+}
 
 enum BodyTypeKind {
     Path(Id<String>, usize),
@@ -189,6 +193,7 @@ enum ExprKind {
     Closure(ClosureParameterRange, ExprId),
     Handle(ExprId, HandleArmRange),
     LabelReference(LabelSyntax),
+    TypedClosure(ClosureParameterRange, Option<BodyTypeId>, Bool, BodyTypeRange, ExprId),
     LabelDestination(LabelSyntax, Option<BodyTypeId>, ExprId)
 }
 
@@ -231,7 +236,14 @@ pub enum BodyExpressionView<'a> {
     Closure(Slice<'a, ClosureParameter>, ExprId),
     Handle(ExprId, Slice<'a, HandleArm>),
     LabelReference(LabelSyntax),
-    LabelDestination(LabelSyntax, Option<BodyTypeId>, ExprId)
+    LabelDestination(LabelSyntax, Option<BodyTypeId>, ExprId),
+    TypedClosure(
+        ClosureParameterRange,
+        Option<BodyTypeId>,
+        Bool,
+        BodyTypeRange,
+        ExprId
+    )
 }
 
 impl<'a> Use<[0, *]> for BodyExpressionView<'a> {}
@@ -445,6 +457,8 @@ expression_child_set(
         ExprKind::Projection(_, names) => ExprKind::Projection(replacement, names),
         ExprKind::Closure(parameters, _) =>
             ExprKind::Closure(parameters, replacement),
+        ExprKind::TypedClosure(parameters, return_type, has_effects, effects, _) =>
+            ExprKind::TypedClosure(parameters, return_type, has_effects, effects, replacement),
         ExprKind::Handle(subject, arms) => if(child == 0) {
             ExprKind::Handle(replacement, arms)
         } else {
@@ -1155,7 +1169,7 @@ pub body_type_token_end(value: &ParsedBody, ty: BodyTypeId) -> usize {
     Arena::index(&value.types, ty).tokens.end
 }
 
-body_type_arguments<'a>(
+pub body_type_arguments<'a>(
     value: &'a ParsedBody,
     range: BodyTypeRange
 ) -> Slice<'a, BodyTypeId> {
@@ -1186,6 +1200,107 @@ pub body_type_view<'a>(
 
 pub closure_parameter_name(value: &ClosureParameter) -> Id<String> { value.name }
 pub closure_parameter_token(value: &ClosureParameter) -> usize { value.token }
+pub closure_parameter_type(value: &ClosureParameter) -> Option<BodyTypeId> { value.ty }
+
+typed_closure_parameter_range(
+    value: &ParsedBody,
+    expression: u32
+) -> ClosureParameterRange {
+    let node = arena_node_at_raw(&value.nodes, expression);
+    handle node.kind {
+        ExprKind::TypedClosure(parameters, _, _, _, _) => parameters,
+        _ => closure_parameter_range(0, 0)
+    }
+}
+
+pub typed_closure_return_type(value: &ParsedBody, expression: u32) -> Option<BodyTypeId> {
+    handle Arena::index(&value.nodes, expr_id_from_u32(expression)).kind {
+        ExprKind::TypedClosure(_, return_type, _, _, _) => return_type,
+        _ => None
+    }
+}
+
+pub expression_is_typed_closure(value: &ParsedBody, expression: u32) -> Bool {
+    handle Arena::index(&value.nodes, expr_id_from_u32(expression)).kind {
+        ExprKind::TypedClosure(_, _, _, _, _) => true,
+        _ => false
+    }
+}
+
+pub typed_closure_has_effects(value: &ParsedBody, expression: u32) -> Bool {
+    handle Arena::index(&value.nodes, expr_id_from_u32(expression)).kind {
+        ExprKind::TypedClosure(_, _, has_effects, _, _) => has_effects,
+        _ => false
+    }
+}
+
+pub typed_closure_effects(value: &ParsedBody, expression: u32) -> BodyTypeRange {
+    handle Arena::index(&value.nodes, expr_id_from_u32(expression)).kind {
+        ExprKind::TypedClosure(_, _, _, effects, _) => effects,
+        _ => body_type_range(0, 0)
+    }
+}
+
+pub typed_closure_parameter_count(value: &ParsedBody, expression: u32) -> u32 {
+    let parameters = typed_closure_parameter_range(value, expression);
+    parameters.count
+}
+
+pub typed_closure_parameter_type_at(
+    value: &ParsedBody,
+    expression: u32,
+    index: usize
+) -> Option<BodyTypeId> {
+    let parameters = typed_closure_parameter_range(value, expression);
+    let parameter = Vec::index(
+        &value.closure_parameters,
+        usize_from_u32(parameters.start) + index
+    );
+    closure_parameter_type(parameter)
+}
+
+pub typed_closure_parameter_name_at(
+    value: &ParsedBody,
+    expression: u32,
+    index: usize
+) -> Id<String> {
+    let parameters = typed_closure_parameter_range(value, expression);
+    let parameter = Vec::index(
+        &value.closure_parameters,
+        usize_from_u32(parameters.start) + index
+    );
+    closure_parameter_name(parameter)
+}
+
+pub typed_closure_parameter_token_at(
+    value: &ParsedBody,
+    expression: u32,
+    index: usize
+) -> usize {
+    let parameters = typed_closure_parameter_range(value, expression);
+    let parameter = Vec::index(
+        &value.closure_parameters,
+        usize_from_u32(parameters.start) + index
+    );
+    closure_parameter_token(parameter)
+}
+
+pub typed_closure_effect_count(value: &ParsedBody, expression: u32) -> u32 {
+    let effects = typed_closure_effects(value, expression);
+    effects.count
+}
+
+pub typed_closure_effect_at(
+    value: &ParsedBody,
+    expression: u32,
+    index: usize
+) -> BodyTypeId {
+    let effects = typed_closure_effects(value, expression);
+    *Vec::index(
+        &value.type_arguments,
+        usize_from_u32(effects.start) + index
+    )
+}
 
 pub effect_operation_name(value: &EffectOperationSyntax) -> Id<String> {
     value.operation_name
@@ -1411,6 +1526,7 @@ pub expression_child_count_at(
             u32_from_usize(Slice::len(children)),
         BodyExpressionView::Projection(_, _) => 1,
         BodyExpressionView::Closure(_, _) => 1,
+        BodyExpressionView::TypedClosure(_, _, _, _, _) => 1,
         BodyExpressionView::Handle(_, arms) =>
             u32_from_usize(Slice::len(arms)) + 1,
         BodyExpressionView::LabelReference(_) => 0,
@@ -1465,6 +1581,7 @@ pub expression_child_at(
             ))),
         BodyExpressionView::Projection(subject, _) => Id::to_u32(subject),
         BodyExpressionView::Closure(_, body) => Id::to_u32(body),
+        BodyExpressionView::TypedClosure(_, _, _, _, body) => Id::to_u32(body),
         BodyExpressionView::Handle(subject, arms) => if(child == 0) {
             Id::to_u32(subject)
         } else {
@@ -1573,6 +1690,14 @@ pub expression_view<'a>(
             closure_parameters(value, parameters),
             body
         ),
+        ExprKind::TypedClosure(parameters, return_type, has_effects, effects, body) =>
+            BodyExpressionView::TypedClosure(
+                parameters,
+                return_type,
+                has_effects,
+                effects,
+                body
+            ),
         ExprKind::Handle(subject, arms) => BodyExpressionView::Handle(
             subject,
             slice_handle_arms(value, arms)
@@ -1600,6 +1725,10 @@ binder_range(start: usize, end: usize) -> PatternBinderRange {
 }
 
 handle_arm_range(start: usize, end: usize) -> HandleArmRange {
+    super::syntax::id_range(start, end)
+}
+
+closure_parameter_range(start: usize, end: usize) -> ClosureParameterRange {
     super::syntax::id_range(start, end)
 }
 
@@ -3480,7 +3609,7 @@ parse_closure_parameters(
         let name = try(identifier_name(source, token, related), @parse_closure_parameters);
         value.tokens.position = token + 1;
         Vec::push(&mut value.closure_parameters, ClosureParameter {
-            name: name, token: token
+            name: name, token: token, ty: None
         });
         if(eat_token(value, source, TokenPattern::Comma)) {
             parse_closure_parameters(source, value, related)
@@ -3494,6 +3623,156 @@ parse_closure_parameters(
             }
         }
     }
+}
+
+typed_closure_ahead_scan(
+    source: &super::lexer::LexedSource,
+    cursor: usize,
+    depth: u16,
+    limit: usize
+) -> Bool {
+    if(cursor < limit) {
+        handle super::lexer::token_kind_at(source, cursor) {
+            TokenKind::LParen => typed_closure_ahead_scan(
+                source, cursor + 1, depth + 1, limit
+            ),
+            TokenKind::RParen => {
+                let next_depth = depth - 1;
+                let next_cursor = cursor + 1;
+                if(next_depth == 0) {
+                    super::lexer::token_matches_at(
+                        source, next_cursor, TokenPattern::Arrow
+                    )
+                } else {
+                    typed_closure_ahead_scan(
+                        source, next_cursor, next_depth, limit
+                    )
+                }
+            },
+            _ => typed_closure_ahead_scan(source, cursor + 1, depth, limit)
+        }
+    } else {
+        false
+    }
+}
+
+typed_closure_ahead(
+    source: &super::lexer::LexedSource,
+    start: usize,
+    limit: usize
+) -> Bool {
+    typed_closure_ahead_scan(source, start + 1, 1, limit)
+}
+
+parse_typed_closure_parameters(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize
+) -> Result<(), BodyError> {
+    if(eat_token(value, source, TokenPattern::RParen)) {
+        Result::Ok(())
+    } else {
+        let token = value.tokens.position;
+        let name = try(identifier_name(source, token, related), @parse_typed_closure_parameters);
+        value.tokens.position = token + 1;
+        if(not(eat_token(value, source, TokenPattern::Colon))) {
+            @parse_typed_closure_parameters(Result::Err(
+                BodyError::ExpectedIdentifier(value.tokens.position, token)
+            ))
+        } else { () };
+        let ty = try(parse_body_type(source, value, token), @parse_typed_closure_parameters);
+        Vec::push(&mut value.closure_parameters, ClosureParameter {
+            name: name, token: token, ty: Option::Some(ty)
+        });
+        if(eat_token(value, source, TokenPattern::Comma)) {
+            parse_typed_closure_parameters(source, value, related)
+        } else if(eat_token(value, source, TokenPattern::RParen)) {
+            Result::Ok(())
+        } else {
+            Result::Err(BodyError::ExpectedGroupingClose(
+                value.tokens.position, related
+            ))
+        }
+    }
+}
+
+parse_typed_closure_effects(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize
+) -> Result<(), BodyError> {
+    if(super::lexer::token_matches_at(
+        source, value.tokens.position, TokenPattern::RBrace
+    )) {
+        Result::Ok(())
+    } else {
+        let effect_type = try(parse_body_type(source, value, related), @parse_typed_closure_effects);
+        Vec::push(&mut value.type_arguments, effect_type);
+        if(eat_token(value, source, TokenPattern::Comma)) {
+            parse_typed_closure_effects(source, value, related)
+        } else { Result::Ok(()) }
+    }
+}
+
+parse_typed_closure(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize
+) -> Result<ExprId, BodyError> {
+    value.tokens.position = start + 1;
+    let parameter_start = super::syntax::range_mark(&value.closure_parameters);
+    try(parse_typed_closure_parameters(source, value, start), @parse_typed_closure);
+    let parameter_end = Vec::len(&value.closure_parameters);
+    let arrow_token = value.tokens.position;
+    try(expect(value, source, TokenPattern::Arrow,
+        BodyError::ExpectedIdentifier(arrow_token, start)), @parse_typed_closure);
+    let return_token = value.tokens.position;
+    let return_is_block = super::lexer::token_matches_at(
+        source, return_token, TokenPattern::LBrace
+    );
+    let return_is_effects = super::lexer::token_matches_at(
+        source, return_token, TokenPattern::Slash
+    );
+    let return_type = if(return_is_block) { None } else if(return_is_effects) { None } else {
+        Option::Some(try(parse_body_type(source, value, start), @parse_typed_closure))
+    };
+    let has_effects = eat_token(value, source, TokenPattern::Slash);
+    let effects = if(has_effects) {
+        let range_start = super::syntax::range_mark(&value.type_arguments);
+        if(eat_token(value, source, TokenPattern::LBrace)) {
+            try(parse_typed_closure_effects(source, value, start), @parse_typed_closure);
+            let effect_close = value.tokens.position;
+            try(expect(value, source, TokenPattern::RBrace,
+                BodyError::ExpectedGroupingClose(effect_close, start)), @parse_typed_closure);
+            ()
+        } else {
+            let effect_type = try(
+                parse_body_type(source, value, start),
+                @parse_typed_closure
+            );
+            Vec::push(&mut value.type_arguments, effect_type);
+            ()
+        };
+        body_type_range(range_start, Vec::len(&value.type_arguments))
+    } else { body_type_range(0, 0) };
+    let body_start = value.tokens.position;
+    try(expect(value, source, TokenPattern::LBrace,
+        BodyError::ExpectedBlockClose(body_start, start)), @parse_typed_closure);
+    let statements = Vec::new();
+    let body = try(parse_block_contents(
+        original, source, declarations, nominal, value, owner, depth + 1,
+        body_start, true, &mut statements
+    ), @parse_typed_closure);
+    let end = value.tokens.position;
+    Result::Ok(push_node(value, ExprKind::TypedClosure(
+        closure_parameter_range(parameter_start, parameter_end),
+        return_type, has_effects, effects, body
+    ), token_range(start, end)))
 }
 
 parse_closure(
@@ -3521,7 +3800,7 @@ parse_closure(
     Result::Ok(push_node(
         value,
         ExprKind::Closure(
-            super::syntax::id_range(parameter_start, parameter_end),
+            closure_parameter_range(parameter_start, parameter_end),
             body
         ),
         token_range(start, value.tokens.position)
@@ -3603,7 +3882,12 @@ parse_atom(
                     value.tokens.position
                 ))
             },
-            TokenKind::LParen => if(start + 1 < value.tokens.limit) {
+            TokenKind::LParen => if(typed_closure_ahead(source, start, value.tokens.limit)) {
+                parse_typed_closure(
+                    original, source, declarations, nominal, value,
+                    owner, depth, start
+                )
+            } else if(start + 1 < value.tokens.limit) {
                 if(super::lexer::token_matches_at(
                     source,
                     start + 1,

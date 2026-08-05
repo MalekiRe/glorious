@@ -989,3 +989,37 @@ fn distributed_range_helpers_execute_with_o0_o3_boundary_parity() {
         }
     }
 }
+
+#[test]
+fn distributed_slice_index_returns_a_copy_without_reference_specialization() {
+    let source = r#"
+        values() -> Vec<usize> {
+            let output = Vec::new();
+            Vec::push(&mut output, 2);
+            Vec::push(&mut output, 3);
+            Vec::push(&mut output, 5);
+            output
+        }
+        slice_index_value() -> usize {
+            let source = values();
+            Slice::index(Vec::as_slice(&source), 2)
+        }
+        main() -> () { () }
+    "#;
+    let phases = compile_source_to_phases_with_options(
+        "slice-index.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "slice_index_value")
+        .unwrap() as u32;
+    let verified = verify(phases.artifact).unwrap();
+    assert_eq!(Vm::new(verified).run(function, vec![]).unwrap(), Value::U64(5));
+}
