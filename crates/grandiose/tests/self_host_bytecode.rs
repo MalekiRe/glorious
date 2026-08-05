@@ -550,7 +550,7 @@ const EFFECT_BACKEND_PROBES: &str = r#"
         }
     }
 
-    effect_backend_nonterminal_boundary_reason() -> u32 {
+    effect_backend_nonterminal_artifact() -> Bytes {
         let protocols = backend::lowering::mir_protocols();
         let operations = Vec::new();
         Vec::push(&mut operations, backend::lowering::mir_operation(
@@ -560,8 +560,8 @@ const EFFECT_BACKEND_PROBES: &str = r#"
                 backend::lowering::artifact_type_id(0),
                 Vec::new()
             ),
-            backend::lowering::artifact_type_id(0),
-            0,
+            backend::lowering::artifact_type_id(4),
+            1,
             Option::Some(1),
             false
         ));
@@ -572,27 +572,59 @@ const EFFECT_BACKEND_PROBES: &str = r#"
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
+        let type_names = Vec::new();
+        Vec::push(&mut type_names, "probe one-shot resumption");
+        Vec::push(&mut type_names, "probe unbounded resumption");
+        let types = backend::lowering::mir_types();
+        let resumption_mir = backend::lowering::push_resumption_type(
+            &mut types,
+            0,
+            backend::lowering::artifact_type_id(4),
+            backend::lowering::artifact_type_id(4),
+            backend::lowering::mir_signature(
+                Vec::new(),
+                backend::lowering::artifact_type_id(4),
+                Vec::new()
+            ),
+            1,
+            Option::Some(1),
+            0
+        );
+        let resumption = backend::lowering::mir_type_artifact_id(
+            resumption_mir
+        );
+        backend::lowering::push_resumption_type(
+            &mut types,
+            1,
+            backend::lowering::artifact_type_id(0),
+            backend::lowering::artifact_type_id(0),
+            backend::lowering::mir_signature(
+                Vec::new(),
+                backend::lowering::artifact_type_id(0),
+                Vec::new()
+            ),
+            0,
+            None,
+            1
+        );
         let clauses = Vec::new();
         let parameters = Vec::new();
-        Vec::push(
-            &mut parameters,
-            backend::lowering::artifact_type_id(4)
-        );
+        Vec::push(&mut parameters, resumption);
         Vec::push(&mut clauses, backend::lowering::mir_handler_clause(
             protocol,
             0,
             backend::lowering::mir_signature(
                 parameters,
-                backend::lowering::artifact_type_id(0),
+                backend::lowering::artifact_type_id(4),
                 Vec::new()
             ),
-            Option::Some(backend::lowering::artifact_type_id(4))
+            Option::Some(resumption)
         ));
         let definitions = backend::lowering::mir_handler_definitions();
         handle Arena::alloc(
             &mut definitions,
             backend::lowering::mir_handler_definition(
-                backend::lowering::artifact_type_id(0),
+                backend::lowering::artifact_type_id(4),
                 clauses,
                 false
             )
@@ -602,23 +634,162 @@ const EFFECT_BACKEND_PROBES: &str = r#"
         };
         let program = backend::lowering::finish_effect_program(
             Arena::new(),
-            backend::lowering::mir_types(),
-            Vec::new(),
+            types,
+            type_names,
             protocols,
             definitions
+        );
+        handle backend::emission::encode(&program, None) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(bytes) => bytes
+        }
+    }
+
+    effect_backend_invalid_resumption_reason(kind: u32) -> u32 {
+        let type_names = Vec::new();
+        Vec::push(&mut type_names, "malformed resumption");
+        let input = if(kind == 0) {
+            backend::lowering::artifact_type_id(4294967295)
+        } else { backend::lowering::artifact_type_id(4) };
+        let output = if(kind == 1) {
+            backend::lowering::artifact_type_id(4294967295)
+        } else { backend::lowering::artifact_type_id(4) };
+        let outward = Vec::new();
+        if(kind == 2) { Vec::push(&mut outward, 0) } else { () };
+        let lower = if(kind == 3) { 2 } else { 1 };
+        let upper = Option::Some(1);
+        let copy_flag = if(kind == 4) { 1 } else { 0 };
+        let types = backend::lowering::mir_types();
+        backend::lowering::push_resumption_type(
+            &mut types,
+            0,
+            input,
+            output,
+            backend::lowering::mir_signature(
+                Vec::new(),
+                backend::lowering::artifact_type_id(4),
+                outward
+            ),
+            lower,
+            upper,
+            copy_flag
+        );
+        let program = backend::lowering::finish_effect_program(
+            Arena::new(),
+            types,
+            type_names,
+            backend::lowering::mir_protocols(),
+            backend::lowering::mir_handler_definitions()
+        );
+        handle backend::emission::encode(&program, None) {
+            Result::Err(error) => handle error {
+                backend::emission::EmissionError::InvalidResumptionType(
+                    _, reason
+                ) => handle reason {
+                    backend::emission::ResumptionTypeValidationError::InputType => 1,
+                    backend::emission::ResumptionTypeValidationError::OutputType => 2,
+                    backend::emission::ResumptionTypeValidationError::EffectSignature => 3,
+                    backend::emission::ResumptionTypeValidationError::Quantity => 4,
+                    backend::emission::ResumptionTypeValidationError::CopyContract => 5
+                },
+                _ => 999
+            },
+            Result::Ok(_) => 997
+        }
+    }
+
+    effect_backend_invalid_handler_resumption_reason() -> u32 {
+        let protocols = backend::lowering::mir_protocols();
+        let operations = Vec::new();
+        Vec::push(&mut operations, backend::lowering::mir_operation(
+            "ask",
+            backend::lowering::mir_signature(
+                Vec::new(),
+                backend::lowering::artifact_type_id(0),
+                Vec::new()
+            ),
+            backend::lowering::artifact_type_id(4),
+            1,
+            Option::Some(1),
+            false
+        ));
+        let protocol = handle Arena::alloc(
+            &mut protocols,
+            backend::lowering::mir_protocol(
+                "Mismatch", Vec::new(), operations
+            )
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let type_names = Vec::new();
+        Vec::push(&mut type_names, "mismatched resumption");
+        let types = backend::lowering::mir_types();
+        let resumption = backend::lowering::mir_type_artifact_id(
+            backend::lowering::push_resumption_type(
+                &mut types,
+                0,
+                backend::lowering::artifact_type_id(5),
+                backend::lowering::artifact_type_id(4),
+                backend::lowering::mir_signature(
+                    Vec::new(),
+                    backend::lowering::artifact_type_id(4),
+                    Vec::new()
+                ),
+                1,
+                Option::Some(1),
+                0
+            )
+        );
+        let parameters = Vec::new();
+        Vec::push(&mut parameters, resumption);
+        let clauses = Vec::new();
+        Vec::push(&mut clauses, backend::lowering::mir_handler_clause(
+            protocol,
+            0,
+            backend::lowering::mir_signature(
+                parameters,
+                backend::lowering::artifact_type_id(4),
+                Vec::new()
+            ),
+            Option::Some(resumption)
+        ));
+        let definitions = backend::lowering::mir_handler_definitions();
+        handle Arena::alloc(
+            &mut definitions,
+            backend::lowering::mir_handler_definition(
+                backend::lowering::artifact_type_id(4),
+                clauses,
+                false
+            )
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        };
+        let program = backend::lowering::finish_effect_program(
+            Arena::new(), types, type_names, protocols, definitions
         );
         handle backend::emission::encode(&program, None) {
             Result::Err(error) => handle error {
                 backend::emission::EmissionError::InvalidHandlerDefinition(
                     _, reason
                 ) => handle reason {
-                    backend::emission::HandlerValidationError::ResumptionTypeUnavailable => 7,
+                    backend::emission::HandlerValidationError::ResumptionDescriptor => 6,
                     _ => 998
                 },
                 _ => 999
             },
             Result::Ok(_) => 997
         }
+    }
+
+    effect_backend_invalid_resumption_reasons() -> u32 {
+        effect_backend_invalid_resumption_reason(0)
+            + effect_backend_invalid_resumption_reason(1) * 10
+            + effect_backend_invalid_resumption_reason(2) * 100
+            + effect_backend_invalid_resumption_reason(3) * 1000
+            + effect_backend_invalid_resumption_reason(4) * 10000
+            + effect_backend_invalid_handler_resumption_reason() * 100000
     }
 "#;
 
@@ -1004,13 +1175,30 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
+            let bundle = self_host_effect_backend_bundle();
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_effect_backend_bundle(),
+                &bundle,
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
             )
-            .unwrap();
+            .unwrap_or_else(|errors| {
+                for error in &errors {
+                    if let Some(span) = error.span
+                        && let Some(segment) = bundle.segment_at(span.start)
+                    {
+                        let base = segment.global_range().start;
+                        eprintln!(
+                            "{}:{}..{}: {}",
+                            segment.name(),
+                            span.start - base,
+                            span.end - base,
+                            error.message
+                        );
+                    }
+                }
+                panic!("{errors:#?}")
+            });
             let compiler = load_verified(&phases.artifact.encode()).unwrap();
             let run = |name: &str| {
                 Vm::new(compiler.clone())
@@ -1034,7 +1222,11 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
             assert_eq!(decoded.protocols[0].operations.len(), 1);
             let operation = &decoded.protocols[0].operations[0];
             assert_eq!(operation.name, "stop");
+            assert!(operation.payload_signature.params.is_empty());
+            assert_eq!(operation.payload_signature.result, grandiose_vm::UNIT);
+            assert!(operation.payload_signature.outward_protocols.is_empty());
             assert!(operation.terminal);
+            assert_eq!(operation.result_type, grandiose_vm::bytecode::NEVER);
             assert_eq!(
                 (operation.resumption_lower, operation.resumption_upper),
                 (0, Some(0))
@@ -1050,15 +1242,110 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
             ));
             load_verified(bytes.as_ref()).expect("terminal effect artifact must verify");
 
+            let Value::Bytes(bytes) = run("effect_backend_nonterminal_artifact") else {
+                panic!("nonterminal backend probe did not return artifact bytes")
+            };
+            let decoded =
+                Artifact::decode(bytes.as_ref()).expect("nonterminal effect artifact must decode");
+            assert_eq!(
+                decoded.encode(),
+                bytes.as_ref(),
+                "bootstrap and self-host resumption encoders must agree"
+            );
+            assert_eq!(decoded.required_features, 1 | (1 << 3) | (1 << 4));
+            assert_eq!(decoded.protocols.len(), 1);
+            assert_eq!(decoded.protocols[0].display_name, "Ask");
+            assert_eq!(decoded.protocols[0].operations.len(), 1);
+            let operation = &decoded.protocols[0].operations[0];
+            assert_eq!(operation.name, "ask");
+            assert!(operation.payload_signature.params.is_empty());
+            assert_eq!(operation.payload_signature.result, grandiose_vm::UNIT);
+            assert!(operation.payload_signature.outward_protocols.is_empty());
+            assert_eq!(operation.result_type, grandiose_vm::U32);
+            assert_eq!(
+                (operation.resumption_lower, operation.resumption_upper),
+                (1, Some(1))
+            );
+            assert!(!operation.terminal);
+            assert_eq!(decoded.handler_defs.len(), 1);
+            assert_eq!(decoded.handler_defs[0].result_type, grandiose_vm::U32);
+            assert!(!decoded.handler_defs[0].partial);
+            assert_eq!(decoded.handler_defs[0].clauses.len(), 1);
+            assert_eq!(decoded.handler_defs[0].clauses[0].protocol, 0);
+            assert_eq!(decoded.handler_defs[0].clauses[0].operation, 0);
+            let resumption = decoded.handler_defs[0].clauses[0]
+                .resumption_type
+                .expect("nonterminal clause must name its resumption type");
+            assert!(matches!(
+                decoded.types[resumption as usize].representation(),
+                grandiose_vm::Type::Resumption {
+                    input_type: grandiose_vm::U32,
+                    output_type: grandiose_vm::U32,
+                    effect_signature,
+                    lower_uses: 1,
+                    upper_uses: Some(1),
+                    identity_name,
+                    copy: false,
+                } if effect_signature.params.is_empty()
+                    && effect_signature.result == grandiose_vm::U32
+                    && effect_signature.outward_protocols.is_empty()
+                    && identity_name == "probe one-shot resumption"
+            ));
+            assert!(!decoded.types[resumption as usize].claimed_duplicable());
+            assert!(!decoded.types[resumption as usize].claimed_zero_use_allowed());
+            let unbounded = decoded
+                .types
+                .iter()
+                .find(|ty| {
+                    matches!(
+                        ty.representation(),
+                        grandiose_vm::Type::Resumption { identity_name, .. }
+                            if identity_name == "probe unbounded resumption"
+                    )
+                })
+                .expect("unbounded resumption type must be present");
+            assert!(matches!(
+                unbounded.representation(),
+                grandiose_vm::Type::Resumption {
+                    input_type: grandiose_vm::UNIT,
+                    output_type: grandiose_vm::UNIT,
+                    effect_signature,
+                    lower_uses: 0,
+                    upper_uses: None,
+                    identity_name,
+                    copy: true,
+                } if effect_signature.params.is_empty()
+                    && effect_signature.result == grandiose_vm::UNIT
+                    && effect_signature.outward_protocols.is_empty()
+                    && identity_name == "probe unbounded resumption"
+            ));
+            assert!(unbounded.claimed_duplicable());
+            assert!(unbounded.claimed_zero_use_allowed());
+            assert_eq!(
+                decoded.handler_defs[0].clauses[0].callable_signature.params,
+                [resumption]
+            );
+            assert_eq!(
+                decoded.handler_defs[0].clauses[0].callable_signature.result,
+                grandiose_vm::U32
+            );
+            assert!(
+                decoded.handler_defs[0].clauses[0]
+                    .callable_signature
+                    .outward_protocols
+                    .is_empty()
+            );
+            load_verified(bytes.as_ref()).expect("nonterminal effect artifact must verify");
+
             assert_eq!(
                 run("effect_backend_invalid_terminal_reason"),
                 Value::U64(4),
                 "terminal metadata must require NEVER and [0,0]"
             );
             assert_eq!(
-                run("effect_backend_nonterminal_boundary_reason"),
-                Value::U64(7),
-                "nonterminal handlers must fail explicitly until Resumption is representable"
+                run("effect_backend_invalid_resumption_reasons"),
+                Value::U64(654_321),
+                "malformed resumption descriptors must preserve typed reasons"
             );
         })
         .unwrap()

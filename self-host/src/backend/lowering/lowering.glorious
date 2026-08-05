@@ -163,7 +163,8 @@ pub enum MirTypeKind {
     SharedReference,
     UniqueReference,
     Struct,
-    Enum
+    Enum,
+    Resumption
 }
 
 impl Use<[0, *]> for MirTypeKind {}
@@ -174,7 +175,10 @@ pub struct MirType {
     field_names: Vec<u32>,
     fields: Vec<ArtifactTypeId>,
     variants: Vec<MirVariant>,
-    copy_flag: u32
+    copy_flag: u32,
+    effect_signature: MirSignature,
+    resumption_lower: u32,
+    resumption_upper: Option<u32>
 }
 
 struct MirTypeFacts {
@@ -1113,7 +1117,12 @@ pub reserve_mir_type(value: &mut MirTypes) -> MirTypeId {
         field_names: Vec::new(),
         fields: Vec::new(),
         variants: Vec::new(),
-        copy_flag: 0
+        copy_flag: 0,
+        effect_signature: mir_signature(
+            Vec::new(), artifact_type_id(0), Vec::new()
+        ),
+        resumption_lower: 0,
+        resumption_upper: Option::Some(0)
     })
 }
 
@@ -1134,6 +1143,38 @@ set_mir_type(
     (*slot).fields = fields;
     (*slot).variants = variants;
     (*slot).copy_flag = copy_flag;
+    (*slot).effect_signature = mir_signature(
+        Vec::new(), artifact_type_id(0), Vec::new()
+    );
+    (*slot).resumption_lower = 0;
+    (*slot).resumption_upper = Option::Some(0);
+    ()
+}
+
+pub set_resumption_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    identity_name_index: u32,
+    input: ArtifactTypeId,
+    output: ArtifactTypeId,
+    effect_signature: MirSignature,
+    lower_uses: u32,
+    upper_uses: Option<u32>,
+    copy_flag: u32
+) {
+    let fields = Vec::new();
+    Vec::push(&mut fields, input);
+    Vec::push(&mut fields, output);
+    let slot = Arena::index_mut(&mut *value, id);
+    (*slot).kind = MirTypeKind::Resumption;
+    (*slot).name_index = identity_name_index;
+    (*slot).field_names = Vec::new();
+    (*slot).fields = fields;
+    (*slot).variants = Vec::new();
+    (*slot).copy_flag = copy_flag;
+    (*slot).effect_signature = effect_signature;
+    (*slot).resumption_lower = lower_uses;
+    (*slot).resumption_upper = upper_uses;
     ()
 }
 
@@ -1262,6 +1303,31 @@ pub push_enum_type(
     id
 }
 
+pub push_resumption_type(
+    value: &mut MirTypes,
+    identity_name_index: u32,
+    input: ArtifactTypeId,
+    output: ArtifactTypeId,
+    effect_signature: MirSignature,
+    lower_uses: u32,
+    upper_uses: Option<u32>,
+    copy_flag: u32
+) -> MirTypeId {
+    let id = reserve_mir_type(value);
+    set_resumption_type(
+        value,
+        id,
+        identity_name_index,
+        input,
+        output,
+        effect_signature,
+        lower_uses,
+        upper_uses,
+        copy_flag
+    );
+    id
+}
+
 pub mir_program_tuple_fields<'a>(
     value: &'a MirProgram,
     id: MirTypeId
@@ -1308,6 +1374,48 @@ pub mir_program_enum_variants<'a>(
 ) -> Slice<'a, MirVariant> {
     let found = Arena::index(&value.types, id);
     Vec::as_slice(&found.variants)
+}
+
+pub mir_program_resumption_identity_name(
+    value: &MirProgram,
+    id: MirTypeId
+) -> u32 {
+    Arena::index(&value.types, id).name_index
+}
+
+pub mir_program_resumption_input(
+    value: &MirProgram,
+    id: MirTypeId
+) -> ArtifactTypeId {
+    let found = Arena::index(&value.types, id);
+    *Vec::index(&found.fields, 0)
+}
+
+pub mir_program_resumption_output(
+    value: &MirProgram,
+    id: MirTypeId
+) -> ArtifactTypeId {
+    let found = Arena::index(&value.types, id);
+    *Vec::index(&found.fields, 1)
+}
+
+pub mir_program_resumption_effect_signature<'a>(
+    value: &'a MirProgram,
+    id: MirTypeId
+) -> &'a MirSignature {
+    let found = Arena::index(&value.types, id);
+    &found.effect_signature
+}
+
+pub mir_program_resumption_lower(value: &MirProgram, id: MirTypeId) -> u32 {
+    Arena::index(&value.types, id).resumption_lower
+}
+
+pub mir_program_resumption_upper(
+    value: &MirProgram,
+    id: MirTypeId
+) -> Option<u32> {
+    Arena::index(&value.types, id).resumption_upper
 }
 
 pub mir_program_type_copy_flag(value: &MirProgram, id: MirTypeId) -> u32 {
@@ -4253,6 +4361,10 @@ derive_type_facts(
                 facts,
                 0
             )
+        },
+        MirTypeKind::Resumption => MirTypeFacts {
+            zero_sized: false,
+            permits_zero_use: mir_type.resumption_lower == 0
         }
     }
 }

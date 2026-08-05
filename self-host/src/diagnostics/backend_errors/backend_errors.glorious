@@ -10,6 +10,7 @@ use super::super::backend::emission;
 use super::super::backend::emission::EmissionError;
 use super::super::backend::lowering::LoweringError;
 use super::super::backend::lowering::MirFunctionId;
+use super::super::backend::lowering::MirTypeId;
 use super::super::frontend::scanner::ShellId;
 
 pub lowering_diagnostic(
@@ -459,12 +460,53 @@ handler_validation_diagnostic(
             "self-host compiler: terminal handler clause must not carry a resumption type",
             site, None, None, 0, 0
         ),
-        emission::HandlerValidationError::ResumptionTypeUnavailable => model::make_diagnostic(
+        emission::HandlerValidationError::ResumptionDescriptor => model::make_diagnostic(
             DiagnosticPhase::Emission, DiagnosticClass::Emission, 27,
-            "self-host compiler: nonterminal handler requires a structural Resumption MIR type that is not yet representable",
+            "self-host compiler: nonterminal handler resumption descriptor does not match its operation and handler result",
+            site, None, None, 0, 0
+        ),
+        emission::HandlerValidationError::DuplicateResumption => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 37,
+            "self-host compiler: handler clauses must use distinct resumption type identities",
             site, None, None, 0, 0
         )
     }
+}
+
+resumption_type_validation_diagnostic(
+    ty: MirTypeId,
+    reason: &emission::ResumptionTypeValidationError
+) -> CompilerDiagnostic {
+    let message = handle *reason {
+        emission::ResumptionTypeValidationError::InputType =>
+            "self-host compiler: resumption input type is not present in the artifact type table",
+        emission::ResumptionTypeValidationError::OutputType =>
+            "self-host compiler: resumption output type is not present in the artifact type table",
+        emission::ResumptionTypeValidationError::EffectSignature =>
+            "self-host compiler: resumption effect signature has an invalid type or outward-effect row",
+        emission::ResumptionTypeValidationError::Quantity =>
+            "self-host compiler: resumption lower-use bound exceeds its upper bound",
+        emission::ResumptionTypeValidationError::CopyContract =>
+            "self-host compiler: resumption copy capability does not match its upper-use bound"
+    };
+    let code = handle *reason {
+        emission::ResumptionTypeValidationError::InputType => 38,
+        emission::ResumptionTypeValidationError::OutputType => 39,
+        emission::ResumptionTypeValidationError::EffectSignature => 40,
+        emission::ResumptionTypeValidationError::Quantity => 41,
+        emission::ResumptionTypeValidationError::CopyContract => 42
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Emission,
+        DiagnosticClass::Emission,
+        code,
+        message,
+        model::site(DiagnosticSpace::MirType, Id::to_usize(ty)),
+        None,
+        None,
+        0,
+        0
+    )
 }
 
 effect_instruction_validation_diagnostic(
@@ -599,6 +641,8 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             0,
             wrapping_convert_to_u32(tag)
         ),
+        EmissionError::InvalidResumptionType(ty, reason) =>
+            resumption_type_validation_diagnostic(ty, &reason),
         EmissionError::InvalidProtocol(protocol, reason) =>
             protocol_validation_diagnostic(protocol, &reason),
         EmissionError::InvalidHandlerDefinition(definition, reason) =>

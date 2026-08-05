@@ -199,6 +199,10 @@ pub enum EmissionError {
     // are remapped across dead-function elimination. MirType construction
     // itself cannot produce an unsupported semantic kind.
     UnsupportedType(super::lowering::MirTypeId, u8),
+    InvalidResumptionType(
+        super::lowering::MirTypeId,
+        ResumptionTypeValidationError
+    ),
     InvalidProtocol(u32, ProtocolValidationError),
     InvalidHandlerDefinition(u32, HandlerValidationError),
     InvalidEffectInstruction(
@@ -225,7 +229,16 @@ pub enum HandlerValidationError {
     DuplicateClause,
     CallableSignature,
     TerminalResumption,
-    ResumptionTypeUnavailable
+    ResumptionDescriptor,
+    DuplicateResumption
+}
+
+pub enum ResumptionTypeValidationError {
+    InputType,
+    OutputType,
+    EffectSignature,
+    Quantity,
+    CopyContract
 }
 
 pub enum EffectInstructionValidationError {
@@ -488,6 +501,19 @@ collect_type_names(
             MirTypeKind::Array => (),
             MirTypeKind::SharedReference => (),
             MirTypeKind::UniqueReference => (),
+            MirTypeKind::Resumption => {
+                let name_index =
+                    super::lowering::mir_program_resumption_identity_name(
+                        program, type_id
+                    );
+                Vec::push(
+                    &mut *output,
+                    *super::lowering::mir_program_type_name_at(
+                        program,
+                        usize_from_u32(name_index)
+                    )
+                )
+            },
             MirTypeKind::Struct => {
                 let name_index =
                     super::lowering::mir_program_struct_name(program, type_id);
@@ -817,9 +843,87 @@ enum_type_record<'a>(
     ))
 }
 
+resumption_type_record(
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
+    index: usize,
+    mir_type: super::lowering::MirTypeId,
+    copy_flag: u32
+) -> Result<super::artifact::Record, EmissionError> {
+    let identity = try(require_program_name(
+        program,
+        names,
+        super::lowering::mir_program_resumption_identity_name(
+            program, mir_type
+        ),
+        EmissionName::Type(mir_type)
+    ), @resumption_type_record);
+    let signature_key = mir_signature_key(
+        super::lowering::mir_program_resumption_effect_signature(
+            program, mir_type
+        )
+    );
+    handle canonical_id(signatures, &signature_key) {
+        Result::Err(_) => Result::Err(
+            EmissionError::InvalidResumptionType(
+                mir_type,
+                ResumptionTypeValidationError::EffectSignature
+            )
+        ),
+        Result::Ok(signature) => {
+            let payload = ByteBuf::new();
+            ByteBuf::write_u32_le(
+                &mut payload,
+                super::lowering::artifact_type_raw(
+                    super::lowering::mir_program_resumption_input(
+                        program, mir_type
+                    )
+                )
+            );
+            ByteBuf::write_u32_le(
+                &mut payload,
+                super::lowering::artifact_type_raw(
+                    super::lowering::mir_program_resumption_output(
+                        program, mir_type
+                    )
+                )
+            );
+            ByteBuf::write_u32_le(&mut payload, signature);
+            ByteBuf::write_u32_le(
+                &mut payload,
+                super::lowering::mir_program_resumption_lower(
+                    program, mir_type
+                )
+            );
+            handle super::lowering::mir_program_resumption_upper(
+                program, mir_type
+            ) {
+                None => {
+                    ByteBuf::write_u32_le(&mut payload, 1);
+                    ByteBuf::write_u32_le(&mut payload, 0)
+                },
+                Option::Some(upper) => {
+                    ByteBuf::write_u32_le(&mut payload, 0);
+                    ByteBuf::write_u32_le(&mut payload, upper)
+                }
+            };
+            ByteBuf::write_u32_le(&mut payload, identity);
+            Result::Ok(super::artifact::record(
+                40,
+                wrapping_convert_to_u8(
+                    4 + custom_type_flags(program, index, copy_flag)
+                ),
+                ByteBuf::finish(payload)
+            ))
+        }
+    }
+}
+
 custom_type_record(
     program: &super::lowering::MirProgram,
     names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
     index: usize
 ) -> Result<super::artifact::Record, EmissionError> {
     let mir_type = super::lowering::mir_type_id_from_usize(index);
@@ -883,6 +987,9 @@ custom_type_record(
             super::lowering::mir_program_enum_name(program, mir_type),
             super::lowering::mir_program_enum_variants(program, mir_type),
             copy_flag
+        ),
+        MirTypeKind::Resumption => resumption_type_record(
+            program, names, signatures, index, mir_type, copy_flag
         )
     }
 }
@@ -890,6 +997,7 @@ custom_type_record(
 custom_type_records(
     program: &super::lowering::MirProgram,
     names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
     index: usize,
     output: &mut Vec<super::artifact::Record>
 ) -> Result<(), EmissionError> {
@@ -898,6 +1006,7 @@ custom_type_records(
         let record = try(custom_type_record(
             program,
             names,
+            signatures,
             current
         ), @custom_type_records);
         Vec::push(&mut *output, record);
@@ -907,13 +1016,15 @@ custom_type_records(
 
 type_section(
     program: &super::lowering::MirProgram,
-    names: &CanonicalPool<String>
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>
 ) -> Result<super::artifact::Section, EmissionError> {
     let records = Vec::new();
     super::artifact::append_predefined_scalar_records(&mut records);
     try(custom_type_records(
         program,
         names,
+        signatures,
         0,
         &mut records
     ), @type_section);
@@ -1083,6 +1194,30 @@ collect_handler_signatures(
     } })
 }
 
+collect_type_signatures(
+    program: &super::lowering::MirProgram,
+    index: usize,
+    output: &mut Vec<Bytes>
+) {
+    for_range(Range::new(
+        index,
+        super::lowering::mir_program_type_count(program)
+    ), { current => {
+        let type_id = super::lowering::mir_type_id_from_usize(current);
+        handle super::lowering::mir_program_type_kind(program, type_id) {
+            MirTypeKind::Resumption => Vec::push(
+                &mut *output,
+                mir_signature_key(
+                    super::lowering::mir_program_resumption_effect_signature(
+                        program, type_id
+                    )
+                )
+            ),
+            _ => ()
+        }
+    } })
+}
+
 append_parameter_types(
     function: &super::lowering::MirFunction,
     index: usize,
@@ -1146,6 +1281,10 @@ collect_signatures(
         );
         Vec::push(&mut *output, key)
     } });
+    // The frozen ABI interns type-carried signatures before protocol and
+    // handler metadata. Keep this structural order so bootstrap re-encoding
+    // remains byte-identical as new opaque type kinds become representable.
+    collect_type_signatures(program, 0, output);
     collect_protocol_signatures(program, 0, output);
     collect_handler_signatures(program, 0, output)
 }
@@ -2318,6 +2457,54 @@ program_has_effect_instruction(
     } else { false }
 }
 
+program_has_handler_resumption_type(
+    program: &super::lowering::MirProgram,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_program_type_count(program)) {
+        let type_id = super::lowering::mir_type_id_from_usize(index);
+        if(super::lowering::mir_program_type_kind(program, type_id)
+            is MirTypeKind::Resumption) {
+            let handler_feature = handle
+                super::lowering::mir_program_resumption_upper(
+                    program, type_id
+                ) {
+                    None => false,
+                    Option::Some(upper) => upper <= 1
+                };
+            if(handler_feature) { true } else {
+                program_has_handler_resumption_type(program, index + 1)
+            }
+        } else {
+            program_has_handler_resumption_type(program, index + 1)
+        }
+    } else { false }
+}
+
+program_has_multishot_resumption_type(
+    program: &super::lowering::MirProgram,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_program_type_count(program)) {
+        let type_id = super::lowering::mir_type_id_from_usize(index);
+        if(super::lowering::mir_program_type_kind(program, type_id)
+            is MirTypeKind::Resumption) {
+            let multishot = handle
+                super::lowering::mir_program_resumption_upper(
+                    program, type_id
+                ) {
+                    None => true,
+                    Option::Some(upper) => upper > 1
+                };
+            if(multishot) { true } else {
+                program_has_multishot_resumption_type(program, index + 1)
+            }
+        } else {
+            program_has_multishot_resumption_type(program, index + 1)
+        }
+    } else { false }
+}
+
 valid_artifact_type(
     program: &super::lowering::MirProgram,
     value: super::lowering::ArtifactTypeId
@@ -2372,6 +2559,86 @@ valid_signature_types(
             program, super::lowering::mir_signature_result(signature)
         ) and { valid_signature_row(program, signature, 0, None) }
     }
+}
+
+valid_resumption_copy_contract(
+    copy_flag: u32,
+    upper: Option<u32>
+) -> Bool {
+    if(copy_flag > 1) { false } else {
+        handle upper {
+            None => copy_flag == 1,
+            Option::Some(found) => if(found > 1) {
+                copy_flag == 1
+            } else { copy_flag == 0 }
+        }
+    }
+}
+
+validate_resumption_type(
+    program: &super::lowering::MirProgram,
+    type_id: super::lowering::MirTypeId
+) -> Result<(), EmissionError> {
+    let input = super::lowering::mir_program_resumption_input(
+        program, type_id
+    );
+    let output = super::lowering::mir_program_resumption_output(
+        program, type_id
+    );
+    let signature =
+        super::lowering::mir_program_resumption_effect_signature(
+            program, type_id
+        );
+    let lower = super::lowering::mir_program_resumption_lower(
+        program, type_id
+    );
+    let upper = super::lowering::mir_program_resumption_upper(
+        program, type_id
+    );
+    let copy_flag = super::lowering::mir_program_type_copy_flag(
+        program, type_id
+    );
+    if(not(valid_artifact_type(program, input))) {
+        Result::Err(EmissionError::InvalidResumptionType(
+            type_id, ResumptionTypeValidationError::InputType
+        ))
+    } else if(not(valid_artifact_type(program, output))) {
+        Result::Err(EmissionError::InvalidResumptionType(
+            type_id, ResumptionTypeValidationError::OutputType
+        ))
+    } else if(not(valid_signature_types(program, signature, 0))) {
+        Result::Err(EmissionError::InvalidResumptionType(
+            type_id, ResumptionTypeValidationError::EffectSignature
+        ))
+    } else if(handle upper {
+        None => false,
+        Option::Some(found) => lower > found
+    }) {
+        Result::Err(EmissionError::InvalidResumptionType(
+            type_id, ResumptionTypeValidationError::Quantity
+        ))
+    } else if(not(valid_resumption_copy_contract(copy_flag, upper))) {
+        Result::Err(EmissionError::InvalidResumptionType(
+            type_id, ResumptionTypeValidationError::CopyContract
+        ))
+    } else { Result::Ok(()) }
+}
+
+validate_resumption_types(
+    program: &super::lowering::MirProgram,
+    index: usize
+) -> Result<(), EmissionError> {
+    try_for_range(Range::new(
+        index,
+        super::lowering::mir_program_type_count(program)
+    ), { current => {
+        let type_id = super::lowering::mir_type_id_from_usize(current);
+        handle super::lowering::mir_program_type_kind(program, type_id) {
+            MirTypeKind::Resumption =>
+                validate_resumption_type(program, type_id),
+            _ => Result::Ok(())
+        }
+    } })
 }
 
 type_arguments_less(
@@ -2569,6 +2836,162 @@ handler_has_prior_target(
     } else { false }
 }
 
+handler_definition_uses_resumption(
+    definition: &super::lowering::MirHandlerDefinition,
+    resumption: super::lowering::ArtifactTypeId,
+    index: usize,
+    end: usize
+) -> Bool {
+    if(index < end) {
+        let clause = super::lowering::mir_handler_definition_clause_at(
+            definition, index
+        );
+        handle super::lowering::mir_handler_clause_resumption_type(clause) {
+            Option::Some(found) => if(same_artifact_type(
+                found, resumption
+            )) { true } else {
+                handler_definition_uses_resumption(
+                    definition, resumption, index + 1, end
+                )
+            },
+            None => handler_definition_uses_resumption(
+                definition, resumption, index + 1, end
+            )
+        }
+    } else { false }
+}
+
+prior_handler_uses_resumption(
+    program: &super::lowering::MirProgram,
+    definition_id: u32,
+    clause_index: usize,
+    resumption: super::lowering::ArtifactTypeId,
+    prior_definition: usize
+) -> Bool {
+    if(prior_definition < usize_from_u32(definition_id)) {
+        let definition = super::lowering::mir_program_handler_definition_at(
+            program,
+            Id::from_u32(checked_u32(prior_definition))
+        );
+        if(handler_definition_uses_resumption(
+            definition,
+            resumption,
+            0,
+            super::lowering::mir_handler_definition_clause_count(definition)
+        )) { true } else {
+            prior_handler_uses_resumption(
+                program,
+                definition_id,
+                clause_index,
+                resumption,
+                prior_definition + 1
+            )
+        }
+    } else {
+        handler_definition_uses_resumption(
+            super::lowering::mir_program_handler_definition_at(
+                program, Id::from_u32(definition_id)
+            ),
+            resumption,
+            0,
+            clause_index
+        )
+    }
+}
+
+same_u32(left: u32, right: u32) -> Bool { left == right }
+
+same_artifact_type(
+    left: super::lowering::ArtifactTypeId,
+    right: super::lowering::ArtifactTypeId
+) -> Bool {
+    same_u32(
+        super::lowering::artifact_type_raw(left),
+        super::lowering::artifact_type_raw(right)
+    )
+}
+
+same_optional_u32(left: Option<u32>, right: Option<u32>) -> Bool {
+    handle left {
+        None => right is None,
+        Option::Some(left_value) => handle right {
+            None => false,
+            Option::Some(right_value) => same_u32(left_value, right_value)
+        }
+    }
+}
+
+resumption_descriptor_matches(
+    program: &super::lowering::MirProgram,
+    resumption: super::lowering::ArtifactTypeId,
+    operation: &super::lowering::MirOperation,
+    definition: &super::lowering::MirHandlerDefinition
+) -> Bool {
+    let raw = super::lowering::artifact_type_raw(resumption);
+    if(raw < 19 or {
+        usize_from_u32(raw - 19)
+            >= super::lowering::mir_program_type_count(program)
+    }) { false } else {
+        let type_id = super::lowering::mir_type_id_from_usize(
+            usize_from_u32(raw - 19)
+        );
+        if(not(super::lowering::mir_program_type_kind(program, type_id)
+            is MirTypeKind::Resumption)) {
+            false
+        } else {
+            let signature =
+                super::lowering::mir_program_resumption_effect_signature(
+                    program, type_id
+                );
+            same_artifact_type(
+                super::lowering::mir_program_resumption_input(
+                    program, type_id
+                ),
+                super::lowering::mir_operation_result(operation)
+            )
+                and {
+                    same_artifact_type(
+                        super::lowering::mir_program_resumption_output(
+                            program, type_id
+                        ),
+                        super::lowering::mir_handler_definition_result(
+                            definition
+                        )
+                    )
+                }
+                and {
+                    super::lowering::mir_signature_parameter_count(signature)
+                        == 0
+                }
+                and {
+                    same_artifact_type(
+                        super::lowering::mir_signature_result(signature),
+                        super::lowering::mir_handler_definition_result(
+                            definition
+                        )
+                    )
+                }
+                and {
+                    super::lowering::mir_program_resumption_lower(
+                        program, type_id
+                    ) == super::lowering::mir_operation_resumption_lower(
+                        operation
+                    )
+                }
+                and {
+                    same_optional_u32(
+                        super::lowering::mir_program_resumption_upper(
+                            program, type_id
+                        ),
+                        super::lowering::mir_operation_resumption_upper(
+                            operation
+                        )
+                    )
+                }
+        }
+    }
+}
+
 validate_handler_clause(
     program: &super::lowering::MirProgram,
     definition_id: u32,
@@ -2643,12 +3066,49 @@ validate_handler_clause(
                     )
                 }
             } else {
-                // Resumption descriptors require the Resumption MirTypeKind.
-                // Reject explicitly until that structural type is available;
-                // emitting an arbitrary aggregate type would violate the VM ABI.
-                Result::Err(
-                    EmissionError::InvalidHandlerDefinition(definition_id, HandlerValidationError::ResumptionTypeUnavailable)
-                )
+                handle super::lowering::mir_handler_clause_resumption_type(
+                    clause
+                ) {
+                    None => Result::Err(
+                        EmissionError::InvalidHandlerDefinition(
+                            definition_id,
+                            HandlerValidationError::ResumptionDescriptor
+                        )
+                    ),
+                    Option::Some(resumption) => {
+                        let last_parameter =
+                            super::lowering::mir_signature_parameter_at(
+                                callable, expected_count - 1
+                            );
+                        if(not(same_artifact_type(
+                            last_parameter, resumption
+                        )) or {
+                            not(resumption_descriptor_matches(
+                                program, resumption, operation, definition
+                            ))
+                        }) {
+                            Result::Err(
+                                EmissionError::InvalidHandlerDefinition(
+                                    definition_id,
+                                    HandlerValidationError::ResumptionDescriptor
+                                )
+                            )
+                        } else if(prior_handler_uses_resumption(
+                            program,
+                            definition_id,
+                            clause_index,
+                            resumption,
+                            0
+                        )) {
+                            Result::Err(
+                                EmissionError::InvalidHandlerDefinition(
+                                    definition_id,
+                                    HandlerValidationError::DuplicateResumption
+                                )
+                            )
+                        } else { Result::Ok(()) }
+                    }
+                }
             }
         }
     }
@@ -2912,6 +3372,7 @@ pub encode(
 ) -> Result<Bytes, EmissionError> {
     let context = new_emission_context(program);
     try(validate_protocols(program, 0), @encode);
+    try(validate_resumption_types(program, 0), @encode);
     try(validate_handler_definitions(program, 0), @encode);
     try(validate_effect_instructions(program, 0), @encode);
     let signature_table_records = Vec::new();
@@ -2966,7 +3427,8 @@ pub encode(
     let cleanup_bytes = ByteBuf::finish(cleanups);
     let types = try(type_section(
         context.program,
-        &context.names
+        &context.names,
+        &context.signatures
     ), @encode);
 
     super::artifact::set_section(
@@ -3053,6 +3515,7 @@ pub encode(
                 context.program
             ) == 0
         }
+        and { not(program_has_handler_resumption_type(context.program, 0)) }
         and { not(program_has_effect_instruction(context.program, 0)) }
     ) {
             0
@@ -3060,8 +3523,12 @@ pub encode(
     let host_features = if(host_import_count(context.program) == 0) {
         0
     } else { 32 };
+    let multishot_features = if(program_has_multishot_resumption_type(
+        context.program, 0
+    )) { 16 } else { 0 };
     let required_features = 1
         + wrapping_convert_to_u64(handler_features)
+        + wrapping_convert_to_u64(multishot_features)
         + wrapping_convert_to_u64(host_features);
     handle super::artifact::encode_writer(
         &context.writer,
