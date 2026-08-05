@@ -442,3 +442,66 @@ fn self_host_lexer_keywords_match_bootstrap() {
 fn self_host_lexer_character_lifetime_and_byte_literals_match_bootstrap() {
     self_hosted_lexer_matches_rust_in_vm_and_native_execution();
 }
+
+#[test]
+fn self_host_lexer_numeric_forms_and_spans_match_bootstrap() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let sources = [
+                "0b1010_1111",
+                "0o7_55",
+                "1_000_000",
+                "0xDead_Beef",
+                "0x_ff",
+                "1.5",
+                "0.25",
+                "1e9",
+                "2.5e-3",
+                "7E+2",
+                "1_0.2_5e1_0",
+                "pair.0.1",
+                "0b102",
+                "0o9",
+                "12ab",
+                "1__2_ ",
+                "1.5_",
+                "0x",
+                "1e_",
+            ];
+            let mut paths = Vec::new();
+            let mut expected = Vec::new();
+            push_u32(&mut expected, sources.len().try_into().unwrap());
+            for (index, source) in sources.into_iter().enumerate() {
+                let path = directory.path().join(format!("numeric-{index}.glorious"));
+                fs::write(&path, source).unwrap();
+                encode_rust_lex(&mut expected, source);
+                paths.push(path);
+            }
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let output_path = directory.path().join("numeric.bin");
+            let args = std::iter::once(output_path.clone().into_os_string())
+                .chain(paths.iter().map(|path| path.clone().into_os_string()))
+                .collect::<Vec<OsString>>();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(args),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output_path).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
