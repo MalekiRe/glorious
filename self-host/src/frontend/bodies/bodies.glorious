@@ -34,6 +34,9 @@ type ExprEdgeRange = super::syntax::IdRange<ExprEdgeRangeTag>;
 struct PatternBinderRangeTag {}
 type PatternBinderRange = super::syntax::IdRange<PatternBinderRangeTag>;
 
+pub struct PatternTag {}
+pub type PatternId = Id<PatternTag>;
+
 type HandleArmRange = super::syntax::IdRange<HandleArmTag>;
 
 enum ExprEdgeKind {
@@ -124,6 +127,7 @@ impl Use<[0, *]> for ExpressionName {}
 enum ExprKind {
     Identifier(ExpressionNameRange),
     Number,
+    Is(ExprId, PatternId),
     Unit,
     Grouping(ExprId),
     Move(ExprId),
@@ -141,6 +145,30 @@ enum ExprKind {
 
 impl Use<[0, *]> for ExprKind {}
 
+enum PatternKind {
+    Integer(usize),
+    Float(usize),
+    Text(Id<String>, usize),
+    Character(char, usize),
+    Byte(u8, usize),
+    Unit(usize)
+}
+
+impl Use<[0, *]> for PatternKind {}
+
+struct PatternNode { kind: PatternKind, tokens: BodyTokenRange }
+
+pub enum PatternView {
+    Integer(usize),
+    Float(usize),
+    Text(Id<String>, usize),
+    Character(char, usize),
+    Byte(u8, usize),
+    Unit(usize)
+}
+
+impl Use<[0, *]> for PatternView {}
+
 pub struct ExprNode { kind: ExprKind, tokens: BodyTokenRange }
 
 pub struct ParsedBody {
@@ -153,12 +181,14 @@ pub struct ParsedBody {
     type_arguments: Vec<BodyTypeId>,
     closure_parameters: Vec<ClosureParameter>,
     handle_arms: Vec<HandleArm>,
-    pattern_binders: Vec<PatternBinder>
+    pattern_binders: Vec<PatternBinder>,
+    patterns: Arena<PatternTag, PatternNode>
 }
 
 pub enum BodyExpressionView<'a> {
     Identifier(BodyTokenRange),
     Number(BodyTokenRange),
+    Is(ExprId, PatternId),
     Unit(BodyTokenRange),
     Grouping(ExprId),
     Move(ExprId),
@@ -394,6 +424,9 @@ expression_child_set(
             ), replacement);
             ExprKind::Handle(subject, arms)
         },
+        ExprKind::Is(subject, pattern) => if(child == 0) {
+            ExprKind::Is(replacement, pattern)
+        } else { ExprKind::Is(subject, pattern) },
         other => { replacement; other }
     };
     expr_node_set_kind(
@@ -519,7 +552,8 @@ pub enum BodyError {
     ExpectedTupleDelimiter(usize, usize),
     InvalidHandleArm(usize, usize),
     InvalidStructField(usize, usize),
-    ExpectedProjectionName(usize, usize)
+    ExpectedProjectionName(usize, usize),
+    ExpectedPattern(usize, usize)
 }
 
 struct BodyParser {
@@ -531,7 +565,8 @@ struct BodyParser {
     type_arguments: Vec<BodyTypeId>,
     closure_parameters: Vec<ClosureParameter>,
     handle_arms: Vec<HandleArm>,
-    pattern_binders: Vec<PatternBinder>
+    pattern_binders: Vec<PatternBinder>,
+    patterns: Arena<PatternTag, PatternNode>
 }
 
 // A speculative parse owns one transaction over every mutable component of a
@@ -553,6 +588,7 @@ pub struct CursorCheckpoint<'a> {
     closure_parameter_length: usize,
     arm_length: usize,
     binder_length: usize,
+    pattern_mark: usize,
     armed: Bool
 }
 
@@ -568,6 +604,7 @@ impl<'a> Drop for CursorCheckpoint<'a> {
                 &mut (*value).pattern_binders,
                 self.binder_length
             );
+            Arena::truncate(&mut (*value).patterns, self.pattern_mark);
             Vec::truncate(&mut (*value).handle_arms, self.arm_length);
             Vec::truncate(&mut (*value).names, self.name_length);
             Vec::truncate(
@@ -601,6 +638,7 @@ body_parser_checkpoint<'a>(
     let closure_parameter_length = Vec::len(&value.closure_parameters);
     let arm_length = Vec::len(&value.handle_arms);
     let binder_length = Vec::len(&value.pattern_binders);
+    let pattern_mark = Arena::mark(&value.patterns);
     CursorCheckpoint {
         token_position: move token_position,
         node_mark: move node_mark,
@@ -611,6 +649,7 @@ body_parser_checkpoint<'a>(
         closure_parameter_length: move closure_parameter_length,
         arm_length: move arm_length,
         binder_length: move binder_length,
+        pattern_mark: move pattern_mark,
         value: move value,
         armed: true
     }
@@ -1299,6 +1338,7 @@ pub expression_child_count_at(
     handle expression_view(value, expression) {
         BodyExpressionView::Identifier(_) => 0,
         BodyExpressionView::Number(_) => 0,
+        BodyExpressionView::Is(_, _) => 1,
         BodyExpressionView::Unit(_) => 0,
         BodyExpressionView::Grouping(_) => 1,
         BodyExpressionView::Move(_) => 1,
@@ -1327,6 +1367,7 @@ pub expression_child_at(
     child: u32
 ) -> u32 {
     handle expression_view(value, expression) {
+        BodyExpressionView::Is(subject, _) => Id::to_u32(subject),
         BodyExpressionView::Grouping(found) => Id::to_u32(found),
         BodyExpressionView::Move(found) => Id::to_u32(found),
         BodyExpressionView::Prefix(_, found) => Id::to_u32(found),
@@ -1413,6 +1454,34 @@ pub expression_name_view_at(
     )
 }
 
+pattern_alloc(value: &mut BodyParser, node: PatternNode) -> PatternId {
+    handle Arena::alloc(&mut value.patterns, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+pub pattern_token_start(value: &ParsedBody, pattern: PatternId) -> usize {
+    Arena::index(&value.patterns, pattern).tokens.start
+}
+
+pub pattern_token_end(value: &ParsedBody, pattern: PatternId) -> usize {
+    Arena::index(&value.patterns, pattern).tokens.end
+}
+
+pub pattern_view(value: &ParsedBody, pattern: PatternId) -> PatternView {
+    let node = Arena::index(&value.patterns, pattern);
+    handle node.kind {
+        PatternKind::Integer(token) => PatternView::Integer(token),
+        PatternKind::Float(token) => PatternView::Float(token),
+        PatternKind::Text(name, token) => PatternView::Text(name, token),
+        PatternKind::Character(found, token) =>
+            PatternView::Character(found, token),
+        PatternKind::Byte(found, token) => PatternView::Byte(found, token),
+        PatternKind::Unit(token) => PatternView::Unit(token)
+    }
+}
+
 pub expression_view<'a>(
     value: &'a ParsedBody,
     expression: u32
@@ -1421,6 +1490,10 @@ pub expression_view<'a>(
     handle node.kind {
         ExprKind::Identifier(_) => BodyExpressionView::Identifier(node.tokens),
         ExprKind::Number => BodyExpressionView::Number(node.tokens),
+        ExprKind::Is(subject, pattern) => BodyExpressionView::Is(
+            subject,
+            pattern
+        ),
         ExprKind::Unit => BodyExpressionView::Unit(node.tokens),
         ExprKind::Grouping(child) => BodyExpressionView::Grouping(child),
         ExprKind::Move(child) => BodyExpressionView::Move(child),
@@ -1596,6 +1669,74 @@ push_leaf(
     end: usize
 ) -> ExprId {
     push_node(value, kind, token_range(start, end))
+}
+
+parse_scalar_pattern(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize
+) -> Result<PatternId, BodyError> {
+    let start = value.tokens.position;
+    if(start >= value.tokens.limit) {
+        Result::Err(BodyError::ExpectedPattern(start, related))
+    } else {
+        handle super::lexer::token_kind_at(source, start) {
+            TokenKind::Number(number) => {
+                value.tokens.position = start + 1;
+                let kind = if(super::lexer::number_is_float(&number)) {
+                    PatternKind::Float(start)
+                } else { PatternKind::Integer(start) };
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: kind,
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::String(name) => {
+                value.tokens.position = start + 1;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Text(name, start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::Char(found) => {
+                value.tokens.position = start + 1;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Character(found, start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::Byte(found) => {
+                value.tokens.position = start + 1;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Byte(found, start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::LParen => if(start + 1 < value.tokens.limit
+                and { super::lexer::token_matches_at(
+                    source, start + 1, TokenPattern::RParen
+                ) }) {
+                value.tokens.position = start + 2;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Unit(start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            } else {
+                Result::Err(BodyError::ExpectedPattern(start, related))
+            },
+            _ => Result::Err(BodyError::ExpectedPattern(start, related))
+        }
+    }
+}
+
+push_pattern_test(
+    value: &mut BodyParser,
+    subject: ExprId,
+    pattern: PatternId,
+    start: usize,
+    end: usize
+) -> ExprId {
+    push_node(value, ExprKind::Is(subject, pattern), token_range(start, end))
 }
 
 push_identifier(
@@ -3896,7 +4037,7 @@ parse_expression(
     let output = Vec::new();
     let pending = Vec::new();
     Vec::push(&mut output, first);
-    parse_chain(
+    let grouped = try(parse_chain(
         original,
         source,
         declarations,
@@ -3907,7 +4048,25 @@ parse_expression(
         depth,
         &mut output,
         &mut pending
-    )
+    ), @parse_expression);
+    if(value.tokens.position < value.tokens.limit
+        and { super::lexer::token_kind_at(
+            source, value.tokens.position
+        ) is TokenKind::Keyword(Keyword::Is) }) {
+        let is_token = value.tokens.position;
+        value.tokens.position = is_token + 1;
+        let pattern = try(
+            parse_scalar_pattern(source, value, is_token),
+            @parse_expression
+        );
+        Result::Ok(push_pattern_test(
+            value,
+            grouped,
+            pattern,
+            node_tokens(&*value, grouped).start,
+            value.tokens.position
+        ))
+    } else { Result::Ok(grouped) }
 }
 
 parse_let_statement_alternative<L>(
@@ -4227,7 +4386,8 @@ pub parse_function_body(
                         type_arguments: Vec::new(),
                         closure_parameters: Vec::new(),
                         handle_arms: Vec::new(),
-                        pattern_binders: Vec::new()
+                        pattern_binders: Vec::new(),
+                        patterns: Arena::new()
                     };
                     let source = super::headers::parsed_source(headers);
                     let nominal = super::headers::nominal_index(headers);
@@ -4256,7 +4416,8 @@ pub parse_function_body(
                         type_arguments,
                         closure_parameters,
                         handle_arms,
-                        pattern_binders
+                        pattern_binders,
+                        patterns
                     } = parser;
                     let output = ParsedBody {
                         shell: shell,
@@ -4268,7 +4429,8 @@ pub parse_function_body(
                         type_arguments: type_arguments,
                         closure_parameters: closure_parameters,
                         handle_arms: handle_arms,
-                        pattern_binders: pattern_binders
+                        pattern_binders: pattern_binders,
+                        patterns: patterns
                     };
                     Result::Ok(__g1_identity_rewrite_expr(
                         move output,

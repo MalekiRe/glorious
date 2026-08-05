@@ -2,6 +2,7 @@ use super::super::frontend::bodies::{
     BlockStatementView,
     BodyError,
     BodyExpressionView,
+    PatternView,
     BodyTypeView,
     BodyTokenRange,
     ExprEdge,
@@ -18,6 +19,86 @@ write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);
     ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
     ByteBuf::append_bytes(output, &bytes)
+}
+
+write_token_span(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    range: &BodyTokenRange
+) {
+    let start = super::super::frontend::syntax::token_start(range);
+    let end = super::super::frontend::syntax::token_end(range);
+    let first = handle super::super::frontend::lexer::token_at(source, start) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+    };
+    let last = handle super::super::frontend::lexer::token_at(source, end - 1) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+    };
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::lexer::span_start(&first))
+    );
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::lexer::span_end(&last))
+    );
+    original;
+}
+
+write_pattern(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    pattern: PatternView
+) -> Result<(), BodyError> {
+    handle pattern {
+        PatternView::Integer(token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 1);
+            write_string(output, &range_text(original, source, &tokens));
+            write_token_span(output, original, source, &tokens);
+            Result::Ok(())
+        },
+        PatternView::Float(token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 2);
+            write_string(output, &range_text(original, source, &tokens));
+            write_token_span(output, original, source, &tokens);
+            Result::Ok(())
+        },
+        PatternView::Text(name, token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 3);
+            try(write_name(output, source, name,
+                token),
+                @write_pattern);
+            write_token_span(output, original, source, &tokens);
+            Result::Ok(())
+        },
+        PatternView::Character(found, token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 4);
+            ByteBuf::write_u32_le(output, char_to_u32(found));
+            write_token_span(output, original, source, &tokens);
+            Result::Ok(())
+        },
+        PatternView::Byte(found, token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 5);
+            ByteBuf::push(output, found);
+            write_token_span(output, original, source, &tokens);
+            Result::Ok(())
+        },
+        PatternView::Unit(token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 2);
+            ByteBuf::push(output, 6);
+            write_token_span(output, original, source, &tokens);
+            Result::Ok(())
+        }
+    }
 }
 
 write_body_type(
@@ -305,6 +386,17 @@ write_expression(
                     Result::Ok(())
                 }
             }
+        },
+        BodyExpressionView::Is(subject, pattern) => {
+            ByteBuf::push(output, 16);
+            try(write_expression(output, original, source, value,
+                Id::to_u32(subject)), @write_expression);
+            write_pattern(
+                output,
+                original,
+                source,
+                super::super::frontend::bodies::pattern_view(value, pattern)
+            )
         },
         BodyExpressionView::Unit(_) => {
             ByteBuf::push(output, 3);

@@ -354,6 +354,36 @@ fn encode_effect_handle(
     Ok(())
 }
 
+fn encode_pattern(output: &mut Vec<u8>, source: &str, pattern: &Pattern) -> Result<(), ()> {
+    match &pattern.kind {
+        PatternKind::Int(_) | PatternKind::Float(_) => {
+            output.push(if matches!(&pattern.kind, PatternKind::Int(_)) {
+                1
+            } else {
+                2
+            });
+            push_string(output, &source[pattern.span.range()]);
+        }
+        PatternKind::String(value) => {
+            output.push(3);
+            push_string(output, value);
+        }
+        PatternKind::Char(value) => {
+            output.push(4);
+            push_u32(output, *value as u32);
+        }
+        PatternKind::Byte(value) => {
+            output.push(5);
+            output.push(*value);
+        }
+        PatternKind::Unit => output.push(6),
+        _ => return Err(()),
+    }
+    push_u32(output, pattern.span.start.try_into().map_err(|_| ())?);
+    push_u32(output, pattern.span.end.try_into().map_err(|_| ())?);
+    Ok(())
+}
+
 fn encode_expression(
     output: &mut Vec<u8>,
     program: &Program,
@@ -387,6 +417,11 @@ fn encode_expression(
             let value = literal.as_u64(expression.span).map_err(|_| ())?;
             output.push(2);
             push_u64(output, value);
+        }
+        ExprKind::Is { subject, pattern } => {
+            output.push(16);
+            encode_expression(output, program, source, subject)?;
+            encode_pattern(output, source, pattern)?;
         }
         ExprKind::Unit => output.push(3),
         ExprKind::Call(callee, arguments)
@@ -630,6 +665,26 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
+fn scalar_literal_pattern_corpus(directory: &Path) -> Vec<PathBuf> {
+    [
+        "probe_integer() { value is 42 }",
+        "probe_character() { value is 'a' }",
+        "probe_text() { value is \"hello\" }",
+        "probe_byte() { value is b'A' }",
+        "probe_float() { value is 2.5 }",
+        "probe_unit() { value is () }",
+        "probe_bad_pattern() { value is }",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, source)| {
+        let path = directory.path().join(format!("scalar-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        path
+    })
+    .collect()
+}
+
 #[test]
 fn rust_body_grouping_oracle_classifies_and_encodes_the_focused_corpus() {
     let directory = tempfile::tempdir().unwrap();
@@ -655,6 +710,85 @@ fn rust_body_grouping_oracle_classifies_and_encodes_the_focused_corpus() {
             path.display()
         );
     }
+}
+
+#[test]
+fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
+    // The component probe carries the complete scalar-pattern wire contract.
+    // Keep VM and native outputs byte-for-byte identical.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let corpus = scalar_literal_pattern_corpus(directory.path());
+            let expected_path = directory.path().join("expected.bin");
+            let vm_path = directory.path().join("vm.bin");
+            let mut expected = Vec::new();
+            push_u32(&mut expected, corpus.len().try_into().unwrap());
+            for path in &corpus {
+                encode_rust_grouping(&mut expected, &fs::read_to_string(path).unwrap());
+            }
+            fs::write(&expected_path, &expected).unwrap();
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(
+                    std::iter::once(vm_path.clone().into_os_string())
+                        .chain(corpus.iter().map(|path| path.clone().into_os_string()))
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&vm_path).unwrap(), expected);
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("scalar-patterns.ll");
+            let executable = directory.path().join("scalar-patterns");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "{}",
+                String::from_utf8_lossy(&clang.stderr)
+            );
+            let native = Command::new(&executable)
+                .arg(&directory.path().join("native.bin"))
+                .args(&corpus)
+                .output()
+                .unwrap();
+            assert!(
+                native.status.success(),
+                "native status: {:?}\n{}",
+                native.status,
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_eq!(
+                fs::read(directory.path().join("native.bin")).unwrap(),
+                expected
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
