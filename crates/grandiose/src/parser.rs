@@ -953,13 +953,6 @@ impl Parser {
         let (name, _) = self.ident("expected an effect-row alias name")?;
         self.expect(TokenKind::Eq, "expected `=` in the effect-row alias")?;
         let row = self.effect_row()?;
-        if let Some(tail) = &row.tail {
-            return Err(Diagnostic::error(
-                "unsupported open effect-row alias",
-                "effect-row aliases are closed in this compiler slice",
-                tail.span,
-            ));
-        }
         let end = self
             .expect(
                 TokenKind::Semicolon,

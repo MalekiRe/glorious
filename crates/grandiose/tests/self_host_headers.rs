@@ -385,6 +385,19 @@ fn encode_effect(
     Ok(())
 }
 
+fn encode_effect_row_alias(
+    output: &mut Vec<u8>,
+    source: &str,
+    program: &grandiose::ast::Program,
+    declaration: &grandiose::ast::EffectRowAliasDecl,
+) -> Result<(), ()> {
+    output.push(u8::from(program.visibility(declaration.span) == Visibility::Public));
+    push_string(output, &declaration.name);
+    encode_effect_row(output, source, &declaration.row)?;
+    push_span(output, declaration.span);
+    Ok(())
+}
+
 fn encode_struct(
     output: &mut Vec<u8>,
     source: &str,
@@ -462,6 +475,15 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     push_u32(&mut encoded, callables.len().try_into().unwrap());
     for callable in callables {
         if encode_callable(&mut encoded, source, &program, callable).is_err() {
+            output.push(3);
+            return;
+        }
+    }
+    let mut effect_row_aliases = program.effect_row_aliases.iter().collect::<Vec<_>>();
+    effect_row_aliases.sort_by_key(|declaration| declaration.span.start);
+    push_u32(&mut encoded, effect_row_aliases.len().try_into().unwrap());
+    for declaration in effect_row_aliases {
+        if encode_effect_row_alias(&mut encoded, source, &program, declaration).is_err() {
             output.push(3);
             return;
         }
@@ -912,6 +934,34 @@ fn self_host_header_generic_where_effect_rows_match_bootstrap() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_header_effect_row_aliases_match_bootstrap() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = "cases Common = {Primary, Trace<i32> | Tail}; run<E: EffectRow>(value: i64) -> () / {Common | E} { () } main() -> { () }";
+    let input = directory.path().join("effect-row-alias.glorious");
+    let output = directory.path().join("headers.bin");
+    fs::write(&input, source).unwrap();
+
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_headers(&mut expected, source);
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle("probe::headers::application"),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap(), expected);
 }
 
 #[test]

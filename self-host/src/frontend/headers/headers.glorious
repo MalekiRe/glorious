@@ -154,6 +154,14 @@ pub struct TypeAliasHeader {
     tokens: HeaderTokenRange
 }
 
+pub struct EffectRowAliasHeader {
+    shell: ShellId,
+    name: Id<String>,
+    public: Bool,
+    row: EffectRow,
+    tokens: HeaderTokenRange
+}
+
 pub struct FieldHeader {
     name: Id<String>,
     name_token: usize,
@@ -222,6 +230,7 @@ pub struct FixityHeader {
 }
 
 struct AliasArena { values: Vec<TypeAliasHeader> }
+struct EffectRowAliasArena { values: Vec<EffectRowAliasHeader> }
 struct StructArena { values: Vec<StructHeader> }
 struct FieldArena { values: Vec<FieldHeader> }
 struct EnumArena { values: Vec<EnumHeader> }
@@ -234,6 +243,8 @@ pub struct CallableHeaderTag {}
 pub type CallableHeaderId = Id<CallableHeaderTag>;
 pub struct AliasHeaderTag {}
 pub type AliasHeaderId = Id<AliasHeaderTag>;
+pub struct EffectRowAliasHeaderTag {}
+pub type EffectRowAliasHeaderId = Id<EffectRowAliasHeaderTag>;
 pub struct FixityHeaderTag {}
 pub type FixityHeaderId = Id<FixityHeaderTag>;
 pub struct StructHeaderTag {}
@@ -250,6 +261,7 @@ pub type EffectOperationHeaderId = Id<EffectOperationHeaderTag>;
 pub enum HeaderOrder {
     Callable(CallableHeaderId),
     Alias(AliasHeaderId),
+    EffectRowAlias(EffectRowAliasHeaderId),
     Fixity(FixityHeaderId),
     Struct(StructHeaderId),
     Enum(EnumHeaderId),
@@ -302,6 +314,7 @@ pub struct HeaderIndex {
 pub struct NominalIndex {
     definitions: ParsedDefTable,
     aliases: AliasArena,
+    effect_row_aliases: EffectRowAliasArena,
     structs: StructArena,
     fields: FieldArena,
     enums: EnumArena,
@@ -436,6 +449,7 @@ pub header_kind(value: &NominalIndex, index: usize) -> u8 {
     handle Vec::index(&value.definitions.order, index).kind {
         HeaderOrder::Callable(_) => 12,
         HeaderOrder::Alias(_) => 3,
+        HeaderOrder::EffectRowAlias(_) => 4,
         HeaderOrder::Fixity(_) => 6,
         HeaderOrder::Struct(_) => 8,
         HeaderOrder::Enum(_) => 9,
@@ -447,6 +461,7 @@ pub header_index(value: &NominalIndex, index: usize) -> u32 {
     handle Vec::index(&value.definitions.order, index).kind {
         HeaderOrder::Callable(found) => Id::to_u32(found),
         HeaderOrder::Alias(found) => Id::to_u32(found),
+        HeaderOrder::EffectRowAlias(found) => Id::to_u32(found),
         HeaderOrder::Fixity(found) => Id::to_u32(found),
         HeaderOrder::Struct(found) => Id::to_u32(found),
         HeaderOrder::Enum(found) => Id::to_u32(found),
@@ -508,6 +523,17 @@ pub alias_at<'a>(
     index: usize
 ) -> Option<&'a TypeAliasHeader> {
     Vec::get(&value.aliases.values, index)
+}
+
+pub effect_row_alias_count(value: &NominalIndex) -> usize {
+    Vec::len(&value.effect_row_aliases.values)
+}
+
+pub effect_row_alias_at<'a>(
+    value: &'a NominalIndex,
+    index: usize
+) -> Option<&'a EffectRowAliasHeader> {
+    Vec::get(&value.effect_row_aliases.values, index)
 }
 
 pub struct_at<'a>(
@@ -918,6 +944,11 @@ pub alias_name(value: &TypeAliasHeader) -> Id<String> { value.name }
 pub alias_is_public(value: &TypeAliasHeader) -> Bool { value.public }
 
 pub alias_target(value: &TypeAliasHeader) -> &TypeId { &value.target }
+
+pub effect_row_alias_name(value: &EffectRowAliasHeader) -> Id<String> { value.name }
+pub effect_row_alias_is_public(value: &EffectRowAliasHeader) -> Bool { value.public }
+pub effect_row_alias_row(value: &EffectRowAliasHeader) -> &EffectRow { &value.row }
+pub effect_row_alias_tokens(value: &EffectRowAliasHeader) -> &HeaderTokenRange { &value.tokens }
 
 pub struct_shell(value: &StructHeader) -> ShellId {
     value.shell
@@ -2453,6 +2484,40 @@ parse_alias_name(
         ) }
 }
 
+parse_effect_row_alias(
+    value: &mut Parser,
+    aliases: &mut EffectRowAliasArena,
+    order: &mut ParsedDefTable,
+    shell: ShellId,
+    public: Bool,
+    start: usize,
+    whole_end: usize
+) -> Result<(), HeaderError> {
+    value.tokens.position = start;
+    if(public) {
+        value.tokens.position = value.tokens.position + 1;
+    } else { () };
+    value.tokens.position = value.tokens.position + 1;
+    let name = try(ident(value, start), @parse_effect_row_alias);
+    try(expect_equals(value, start), @parse_effect_row_alias);
+    value.tokens.limit = whole_end - 1;
+    let row = try(parse_effect_row(value, start), @parse_effect_row_alias);
+    if(value.tokens.position == value.tokens.limit) {
+        Vec::push(&mut aliases.values, EffectRowAliasHeader {
+            shell: shell,
+            name: name.name,
+            public: public,
+            row: row,
+            tokens: token_range(start, whole_end)
+        });
+        let index = Vec::len(&aliases.values) - 1;
+        record_header(order, shell, HeaderOrder::EffectRowAlias(typed_header_id(index)));
+        Result::Ok(())
+    } else { Result::Err(
+        HeaderError::UnexpectedTrailingHeaderToken(value.tokens.position, start)
+    ) }
+}
+
 finish_alias(
     aliases: &mut AliasArena,
     order: &mut ParsedDefTable,
@@ -3937,6 +4002,15 @@ parse_shells(
                         start,
                         whole_end
                     ),
+                    super::scanner::DeclarationKind::EffectRowAlias => parse_effect_row_alias(
+                        &mut next,
+                        &mut nominal.effect_row_aliases,
+                        &mut nominal.definitions,
+                        shell_id,
+                        super::scanner::shell_is_public(shell),
+                        start,
+                        whole_end
+                    ),
                     super::scanner::DeclarationKind::Struct => parse_struct(
                         &mut next,
                         &mut nominal.structs,
@@ -4034,6 +4108,7 @@ pub parse(
                     fixities: HashMap::new()
                 },
                 aliases: AliasArena { values: Vec::new() },
+                effect_row_aliases: EffectRowAliasArena { values: Vec::new() },
                 structs: StructArena { values: Vec::new() },
                 fields: FieldArena { values: Vec::new() },
                 enums: EnumArena { values: Vec::new() },

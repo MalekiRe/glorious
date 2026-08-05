@@ -12,6 +12,7 @@ use super::super::frontend::headers::{
     ParsedHeaders,
     StructHeader,
     TypeAliasHeader,
+    EffectRowAliasHeader,
     TypeId
 };
 use super::super::frontend::lexer::{LexedSource, TokenKind};
@@ -681,6 +682,31 @@ write_alias(
     )
 }
 
+write_effect_row_alias(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &EffectRowAliasHeader
+) {
+    ByteBuf::push(output, bool_code(
+        super::super::frontend::headers::effect_row_alias_is_public(value)
+    ));
+    write_name(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::effect_row_alias_name(value)
+    );
+    write_effect_row(
+        output,
+        parsed,
+        super::super::frontend::headers::effect_row_alias_row(value)
+    );
+    write_token_span(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::effect_row_alias_tokens(value)
+    )
+}
+
 write_struct(
     output: &mut ByteBuf,
     parsed: &ParsedHeaders,
@@ -945,6 +971,11 @@ write_interfaces(
                 Result::Err(_) => unreachable(),
                 Result::Ok(found) => found
             }),
+            4 => write_effect_row_alias(output, parsed, handle
+                super::super::frontend::headers::effect_row_alias_at(nominal, declaration) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }),
             6 => write_fixity(output, original, parsed, handle
                 super::super::frontend::headers::fixity_at(nominal, declaration) {
                 Result::Err(_) => unreachable(),
@@ -1025,6 +1056,28 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                             )
                         );
                         write_callables(output, &parsed);
+                        ByteBuf::write_u32_le(
+                            output,
+                            wrapping_convert_to_u32(
+                                super::super::frontend::headers::effect_row_alias_count(
+                                    super::super::frontend::headers::nominal_index(&parsed)
+                                )
+                            )
+                        );
+                        for_range(Range::new(
+                            0,
+                            super::super::frontend::headers::effect_row_alias_count(
+                                super::super::frontend::headers::nominal_index(&parsed)
+                            )
+                        ), { current => {
+                            let found = handle super::super::frontend::headers::effect_row_alias_at(
+                                super::super::frontend::headers::nominal_index(&parsed), current
+                            ) {
+                                Result::Err(_) => unreachable(),
+                                Result::Ok(value) => value
+                            };
+                            write_effect_row_alias(output, &parsed, found)
+                        }});
                         ByteBuf::write_u32_le(
                             output,
                             wrapping_convert_to_u32(
