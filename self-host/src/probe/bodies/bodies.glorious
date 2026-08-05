@@ -399,14 +399,27 @@ write_expression(
         value,
         expression
     );
-    ByteBuf::write_u32_le(
-        output,
-        u32_from_usize(super::super::frontend::syntax::token_start(&tokens))
-    );
-    ByteBuf::write_u32_le(
-        output,
-        u32_from_usize(super::super::frontend::syntax::token_end(&tokens))
-    );
+    handle super::super::frontend::bodies::expression_view(value, expression) {
+        BodyExpressionView::Grouping(child) => {
+            write_expression_span(output, source, tokens);
+            write_expression_kind(
+                output, original, source, value, Id::to_u32(child)
+            )
+        },
+        _ => {
+            write_expression_span(output, source, tokens);
+            write_expression_kind(output, original, source, value, expression)
+        }
+    }
+}
+
+write_expression_kind(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32
+) -> Result<(), BodyError> {
     handle super::super::frontend::bodies::expression_view(value, expression) {
         BodyExpressionView::Identifier(tokens) => {
             ByteBuf::push(output, 1);
@@ -445,8 +458,6 @@ write_expression(
             ByteBuf::push(output, 3);
             Result::Ok(())
         },
-        BodyExpressionView::Grouping(child) =>
-            write_expression(output, original, source, value, Id::to_u32(child)),
         BodyExpressionView::Move(child) => {
             ByteBuf::push(output, 13);
             write_expression(output, original, source, value, Id::to_u32(child))
@@ -467,7 +478,7 @@ write_expression(
                 source,
                 value,
                 Id::to_u32(left)
-            ), @write_expression);
+            ), @write_expression_kind);
             write_expression(output, original, source, value, Id::to_u32(right))
         },
         BodyExpressionView::Call(callee, arguments) => {
@@ -478,7 +489,7 @@ write_expression(
                 source,
                 value,
                 Id::to_u32(callee)
-            ), @write_expression);
+            ), @write_expression_kind);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
             write_children(output, original, source, value, arguments)
         },
@@ -489,20 +500,20 @@ write_expression(
                 source,
                 super::super::frontend::bodies::effect_operation_effect_name(&path),
                 super::super::frontend::bodies::effect_operation_effect_token(&path)
-            ), @write_expression);
+            ), @write_expression_kind);
             try(write_body_type(
                 output,
                 original,
                 source,
                 value,
                 super::super::frontend::bodies::effect_operation_effect_type(&path)
-            ), @write_expression);
+            ), @write_expression_kind);
             try(write_name(
                 output,
                 source,
                 super::super::frontend::bodies::effect_operation_name(&path),
                 super::super::frontend::bodies::effect_operation_token(&path)
-            ), @write_expression);
+            ), @write_expression_kind);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
             write_children(output, original, source, value, arguments)
         },
@@ -529,7 +540,7 @@ write_expression(
                 original,
                 source,
                 constructor
-            ), @write_expression);
+            ), @write_expression_kind);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(fields)));
             write_struct_fields(
                 output,
@@ -548,7 +559,7 @@ write_expression(
                 source,
                 value,
                 Id::to_u32(subject)
-            ), @write_expression);
+            ), @write_expression_kind);
             write_expression_name(output, original, source, field)
         },
         BodyExpressionView::Closure(parameters, body) => {
@@ -561,7 +572,7 @@ write_expression(
                     super::super::frontend::bodies::closure_parameter_name(parameter),
                     super::super::frontend::bodies::closure_parameter_token(parameter)
                 )
-            }), @write_expression);
+            }), @write_expression_kind);
             write_expression(output, original, source, value, Id::to_u32(body))
         },
         BodyExpressionView::Handle(subject, arms) => {
@@ -572,12 +583,12 @@ write_expression(
                 source,
                 value,
                 Id::to_u32(subject)
-            ), @write_expression);
+            ), @write_expression_kind);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arms)));
             write_handle_arms(output, original, source, value, arms)
+            }
         }
     }
-}
 
 function_count(
     declarations: &super::super::frontend::scanner::DeclarationIndex

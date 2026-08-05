@@ -4559,10 +4559,10 @@ pub parse_function_body(
                 Result::Err(_) =>
                     Result::Err(BodyError::MissingBodyShell(shell)),
                 Result::Ok(body) => {
-                    let start = super::scanner::range_start(&body);
-                    let end = super::scanner::range_end(&body);
+                    let body_start = super::scanner::range_start(&body);
+                    let body_end = super::scanner::range_end(&body);
                     let parser = BodyParser {
-                        tokens: super::syntax::cursor(start, end),
+                        tokens: super::syntax::cursor(body_start, body_end + 1),
                         nodes: Arena::new(),
                         edges: Vec::new(),
                         names: Vec::new(),
@@ -4585,8 +4585,8 @@ pub parse_function_body(
                             &mut parser,
                             shell_owner(declarations, shell),
                             0,
-                            start,
-                            false,
+                            body_start - 1,
+                            true,
                             &mut statements
                         ),
                         @parse_function_body
