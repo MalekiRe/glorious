@@ -5050,6 +5050,108 @@ impl<'a> Emitter<'a> {
         self.line(&format!("effect.unit.done{done_label}:"));
     }
 
+    fn emit_edge_reference_relocations(
+        &mut self,
+        function: &mir::Function,
+        edge: &mir::Edge,
+        parameters: &[&mir::BlockParam],
+    ) -> Result<Vec<(u32, u32, String)>, Vec<Diagnostic>> {
+        if !edge.args.iter().try_fold(false, |found, operand| {
+            Ok::<_, Vec<Diagnostic>>(
+                found
+                    || matches!(
+                        self.runtime_type(self.register_runtime_type(function, operand.register)?)?,
+                        Type::RefShared { .. } | Type::RefUnique { .. }
+                    ),
+            )
+        })? {
+            return Ok(Vec::new());
+        }
+        // PlaceFlow identifies the register where each loan is issued, but
+        // optimized block parameters forward references under fresh register
+        // identities without adding new LoanFacts. Consequently it cannot map
+        // a parameter reference back to a simultaneously moved owner here.
+        // Derive that final alias relation from the actual frame addresses;
+        // validated loan discipline guarantees those references are either
+        // into live function storage or valid external storage.
+        edge.args
+            .iter()
+            .zip(parameters)
+            .filter(|(operand, parameter)| {
+                operand.mode == mir::UseMode::Move && operand.register != parameter.register
+            })
+            .map(|(operand, parameter)| {
+                let ty = self.register_type(function, operand.register)?;
+                let size = self.emit_array_element_size(&ty);
+                Ok((operand.register, parameter.register, size))
+            })
+            .collect()
+    }
+
+    fn emit_relocated_edge_reference(
+        &mut self,
+        function: &mir::Function,
+        source: u32,
+        value: &str,
+        relocations: &[(u32, u32, String)],
+    ) -> Result<String, Vec<Diagnostic>> {
+        if relocations.is_empty()
+            || !matches!(
+                self.runtime_type(self.register_runtime_type(function, source)?)?,
+                Type::RefShared { .. } | Type::RefUnique { .. }
+            )
+        {
+            return Ok(value.to_owned());
+        }
+        // Registers are addressable storage, so forwarding an owner and an
+        // interior reference to distinct block-parameter registers cannot copy
+        // the reference verbatim. Preserve its byte offset when it points into
+        // an owner moved by this edge. Heap, caller, and other external
+        // references match no source register and remain unchanged.
+        let usize_ty = format!("i{}", self.pointer_width());
+        let reference_integer = self.temp();
+        self.line(&format!(
+            "  %{reference_integer} = ptrtoint ptr {value} to {usize_ty}"
+        ));
+        let mut relocated = value.to_owned();
+        for (owner_source, owner_target, owner_size) in relocations {
+            let source_integer = self.temp();
+            let source_end = self.temp();
+            let after_start = self.temp();
+            let before_end = self.temp();
+            let inside = self.temp();
+            let offset = self.temp();
+            let rebased = self.temp();
+            let selected = self.temp();
+            self.line(&format!(
+                "  %{source_integer} = ptrtoint ptr %r{owner_source} to {usize_ty}"
+            ));
+            self.line(&format!(
+                "  %{source_end} = add {usize_ty} %{source_integer}, {owner_size}"
+            ));
+            self.line(&format!(
+                "  %{after_start} = icmp uge {usize_ty} %{reference_integer}, %{source_integer}"
+            ));
+            self.line(&format!(
+                "  %{before_end} = icmp ult {usize_ty} %{reference_integer}, %{source_end}"
+            ));
+            self.line(&format!(
+                "  %{inside} = and i1 %{after_start}, %{before_end}"
+            ));
+            self.line(&format!(
+                "  %{offset} = sub {usize_ty} %{reference_integer}, %{source_integer}"
+            ));
+            self.line(&format!(
+                "  %{rebased} = getelementptr i8, ptr %r{owner_target}, {usize_ty} %{offset}"
+            ));
+            self.line(&format!(
+                "  %{selected} = select i1 %{inside}, ptr %{rebased}, ptr {relocated}"
+            ));
+            relocated = format!("%{selected}");
+        }
+        Ok(relocated)
+    }
+
     fn emit_edge_arguments(
         &mut self,
         function: &mir::Function,
@@ -5069,7 +5171,8 @@ impl<'a> Emitter<'a> {
         if parameters.len() != edge.args.len() {
             return Err(vec![unsupported(function, "malformed block argument edge")]);
         }
-        let values = edge
+        let relocations = self.emit_edge_reference_relocations(function, edge, &parameters)?;
+        let mut values = edge
             .args
             .iter()
             .map(|operand| {
@@ -5119,6 +5222,9 @@ impl<'a> Emitter<'a> {
                 ))
             })
             .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
+        for (_, value, source, _, _, _) in &mut values {
+            *value = self.emit_relocated_edge_reference(function, *source, value, &relocations)?;
+        }
         for (parameter, (ty, value, source, mode, state, field_flags)) in
             parameters.into_iter().zip(values)
         {
@@ -9204,7 +9310,8 @@ impl<'a> Emitter<'a> {
         if parameters.len() != edge.args.len() {
             return Err(vec![unsupported(function, "malformed block argument edge")]);
         }
-        let values = edge
+        let relocations = self.emit_edge_reference_relocations(function, edge, &parameters)?;
+        let mut values = edge
             .args
             .iter()
             .map(|operand| {
@@ -9240,6 +9347,9 @@ impl<'a> Emitter<'a> {
                 Ok((ty, value, operand.register, operand.mode, field_flags))
             })
             .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
+        for (_, value, source, _, _) in &mut values {
+            *value = self.emit_relocated_edge_reference(function, *source, value, &relocations)?;
+        }
         let destination_registers = parameters
             .iter()
             .map(|parameter| parameter.register)

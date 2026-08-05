@@ -9,7 +9,238 @@ use grandiose_vm::{Host, HostFault, Type, Value, Vm, verify};
 fn clang_with_native_runtime() -> Command {
     let mut command = Command::new("clang");
     command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/native_runtime.c"));
+    // ASAN reserves roughly 15 TiB of virtual shadow space before `main`, so
+    // it cannot start when the test process and its children inherit the
+    // mandatory 8 GiB RLIMIT_AS. Preserve sanitizer coverage for normal runs;
+    // capped runs retain every semantic assertion with instrumentation off.
+    if std::env::var("G1_TEST_MEMORY_CAPPED").as_deref() != Ok("1") {
+        command.arg("-fsanitize=address");
+    }
     command
+}
+
+#[test]
+fn native_block_edge_rebases_projected_reference_with_moved_owner() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-block-edge-project-reference.glorious",
+        r#"
+            struct Owner { prefix: i64, value: i64 }
+            unit_option() -> Option<()> { Option::Some(()) }
+            write(value: &mut i64) { *value = 42; () }
+
+            selected() -> i64 {
+                let owner = Owner { prefix: 7, value: 11 };
+                let projected = &mut owner.value;
+                let crossed = handle unit_option() {
+                    Result::Ok(_) => (),
+                    Result::Err(_) => ()
+                };
+                crossed;
+                write(projected);
+                owner.value
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        42,
+        "llvm-block-edge-project-reference",
+    );
+}
+
+#[test]
+fn native_effect_edge_rebases_projected_reference_with_moved_owner() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-edge-project-reference.glorious",
+        r#"
+            struct Owner { prefix: i64, value: i64 }
+            unit_option() -> Option<()> { Option::Some(()) }
+            write(value: &mut i64) { *value = 42; () }
+            effect Ask { [1,1] ask() -> i64 }
+
+            framed() -> i64 / {Ask} {
+                let ignored = perform Ask::ask();
+                ignored;
+                let owner = Owner { prefix: 7, value: 11 };
+                let projected = &mut owner.value;
+                let crossed = handle unit_option() {
+                    Result::Ok(_) => (),
+                    Result::Err(_) => ()
+                };
+                crossed;
+                write(projected);
+                owner.value
+            }
+
+            selected() -> i64 {
+                handle framed() {
+                    Ask::ask() with continuation => resume(continuation, 0)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        42,
+        "llvm-effect-edge-project-reference",
+    );
+}
+
+#[test]
+fn native_hash_map_remove_then_insert_preserves_aggregate_value_fields() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-hash-map-aggregate-reinsert.glorious",
+        r#"
+            enum Namespace { Value }
+            impl Use<[0, *]> for Namespace {}
+            impl Eq for Namespace {
+                eq(self: &Namespace, other: &Namespace) -> Bool { true }
+            }
+            impl Hash for Namespace {
+                hash(self: &Namespace, state: &mut Hasher) {
+                    self;
+                    Hasher::write_u64(state, 1)
+                }
+            }
+            struct ShellTag {}
+            type ShellId = Id<ShellTag>;
+            struct Search { first: Option<ShellId>, count: usize }
+            search_map() -> HashMap<(Option<ShellId>, Id<String>, Namespace), Search> {
+                HashMap::new()
+            }
+
+            index_names(
+                names: &mut HashMap<
+                    (Option<ShellId>, Id<String>, Namespace),
+                    Search
+                >,
+                ordinal: usize
+            ) {
+                if(ordinal < 2) {
+                    let shell_tag = ShellTag {};
+                    let shell = Id::with_tag(
+                        wrapping_convert_to_u32(ordinal),
+                        &shell_tag
+                    );
+                    let text = "duplicate";
+                    let name = Id::with_tag(11, &text);
+                    let key = (None, name, Namespace::Value);
+                    let previous = handle HashMap::remove(names, &key) {
+                        Result::Err(_) => Search {
+                            first: None,
+                            count: wrapping_convert_to_usize(0)
+                        },
+                        Result::Ok(found) => found
+                    };
+                    let first = handle previous.first {
+                        Result::Err(_) => Option::Some(shell),
+                        Result::Ok(found) => Option::Some(found)
+                    };
+                    HashMap::insert(names, key, Search {
+                        first: first,
+                        count: previous.count + 1
+                    });
+                    index_names(names, ordinal + 1)
+                } else { () }
+            }
+
+            selected() -> i64 {
+                let names = search_map();
+                index_names(&mut names, wrapping_convert_to_usize(0));
+                let text = "duplicate";
+                let name = Id::with_tag(11, &text);
+                let lookup = (None, name, Namespace::Value);
+                let found = handle HashMap::get(&names, &lookup) {
+                    Result::Err(_) => wrapping_convert_to_usize(99),
+                    Result::Ok(value) => value.count
+                };
+                wrapping_convert_to_i64(found)
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(2)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        2,
+        "llvm-hash-map-aggregate-reinsert",
+    );
 }
 
 const SYNC_OWNED_INDIRECT_EFFECT_SOURCE: &str = r#"
@@ -41,7 +272,6 @@ fn run_native_i64(module: grandiose::LlvmModule, function: usize, expected: i64,
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -517,7 +747,6 @@ fn custom_drop_hooks_run_before_native_structural_cleanup() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -994,7 +1223,6 @@ fn outward_effects_propagate_through_indirect_callables() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -1252,7 +1480,6 @@ fn host_calls_execute_and_consume_arguments_inside_effect_frames() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -1792,7 +2019,6 @@ fn owned_captured_outward_callable_returns_directly_from_wrapper() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -1925,7 +2151,6 @@ fn text_and_bytes_use_the_native_reference_counted_runtime() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2027,7 +2252,6 @@ int main(void) {{
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2157,7 +2381,6 @@ fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2246,7 +2469,6 @@ fn llvm_handler_values_own_and_destroy_their_clause_callables() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2326,7 +2548,6 @@ fn llvm_and_vm_backends_execute_the_same_terminal_handler() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2403,7 +2624,6 @@ fn llvm_terminal_clause_keeps_reference_payload_origin_live_until_dereference() 
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2496,7 +2716,6 @@ fn llvm_effectful_terminal_clause_keeps_reference_payload_origin_live_across_rou
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2579,7 +2798,6 @@ fn llvm_terminal_clause_routes_outward_effect_to_outer_handler() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2670,7 +2888,6 @@ fn llvm_nested_same_protocol_handler_keeps_inner_activation_on_replay() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -2903,7 +3120,6 @@ fn llvm_effectful_terminal_clause_drops_abandoned_body_and_keeps_capture() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -3308,7 +3524,6 @@ fn llvm_and_vm_backends_execute_the_same_one_shot_resumption() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -3397,7 +3612,6 @@ fn llvm_one_shot_tail_resume_and_cancel_match_the_vm() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -3465,7 +3679,6 @@ fn llvm_two_shot_resumption_clones_each_native_frame_snapshot() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -3628,7 +3841,6 @@ fn llvm_two_shot_clones_and_drops_only_live_residual_fields() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4046,7 +4258,6 @@ fn llvm_two_shot_deep_clones_vec_snapshots_with_vm_parity() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4156,7 +4367,6 @@ fn llvm_two_shot_preserves_internal_and_projected_shared_aliases() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4249,7 +4459,6 @@ fn llvm_two_shot_retains_nested_aggregate_and_callable_captures() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4332,7 +4541,6 @@ fn llvm_borrowed_replays_do_not_consume_shared_terminal_clause_callable() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4580,7 +4788,6 @@ fn llvm_replayed_terminal_clause_keeps_borrowed_payload_origin_live() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4666,7 +4873,6 @@ fn llvm_multishot_cancel_drops_owned_suspended_graph() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4725,7 +4931,6 @@ fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
@@ -4797,7 +5002,6 @@ fn llvm_and_vm_backends_execute_the_same_vec_program() {
     )
     .unwrap();
     let output = clang_with_native_runtime()
-        .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
         .arg("-o")
