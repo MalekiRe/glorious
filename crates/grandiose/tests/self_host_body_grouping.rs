@@ -62,10 +62,6 @@ fn push_u32(output: &mut Vec<u8>, value: u32) {
     output.extend(value.to_le_bytes());
 }
 
-fn push_u64(output: &mut Vec<u8>, value: u64) {
-    output.extend(value.to_le_bytes());
-}
-
 fn push_string(output: &mut Vec<u8>, value: &str) {
     push_u32(output, value.len().try_into().unwrap());
     output.extend(value.as_bytes());
@@ -442,7 +438,7 @@ fn encode_expression(
                     .join("::"),
             );
         }
-        ExprKind::Int(_) => {
+        ExprKind::Int(_) | ExprKind::Float(_) => {
             let literal = program
                 .numeric_literal(expression.span)
                 .or_else(|| {
@@ -456,9 +452,8 @@ fn encode_expression(
                         .map(|entry| &entry.literal)
                 })
                 .ok_or(())?;
-            let value = literal.as_u64(expression.span).map_err(|_| ())?;
             output.push(2);
-            push_u64(output, value);
+            push_string(output, &literal.spelling);
         }
         ExprKind::Float(_) => {
             output.push(4);
@@ -1057,6 +1052,54 @@ fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
                 fs::read(directory.path().join("native.bin")).unwrap(),
                 expected
             );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_body_numeric_source_payloads_match_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("numeric-source-payloads.glorious");
+            let output = directory.path().join("vm.bin");
+            let integer = "0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff";
+            let oversized = "340282366920938463463374607431768211456";
+            let float =
+                "1.00000005960464477539062582718061255302767487140869206996285356581211090087890625";
+            let source = format!(
+                "wide() -> u128 {{ {integer} }} oversized() -> u128 {{ {oversized} }} \
+                 direct() -> f32 {{ {float} }} main() -> {{ () }}"
+            );
+            fs::write(&input, &source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, &source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
         })
         .unwrap()
         .join()

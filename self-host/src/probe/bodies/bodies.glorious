@@ -866,19 +866,9 @@ write_expression_kind(
         },
         BodyExpressionView::Number(tokens) => {
             let text = range_text(original, source, &tokens);
-            handle parse_u64(&text) {
-                Result::Err(_) => Result::Err(
-                    BodyError::InvalidEncodedExpression(
-                        super::super::frontend::syntax::token_start(&tokens),
-                        super::super::frontend::syntax::token_start(&tokens)
-                    )
-                ),
-                Result::Ok(number) => {
-                    ByteBuf::push(output, 2);
-                    ByteBuf::write_u64_le(output, number);
-                    Result::Ok(())
-                }
-            }
+            ByteBuf::push(output, 2);
+            write_string(output, &text);
+            Result::Ok(())
         },
         BodyExpressionView::Float(tokens) => {
             ByteBuf::push(output, 4);
