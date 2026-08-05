@@ -65,7 +65,7 @@ manifest.rs	modules_cli_sessions	unported	-
 mir_continuation_captures.rs	mir_lowering	unported	-
 mir_generator_differential.rs	mir_lowering	unported	-
 mixed_lifetime_nominals.rs	types_traits_generics	unported	-
-module_frontend_conformance.rs	modules_cli_sessions	partial	self_host_scanner.rs#self_host_unit_external_and_inline_modules_are_structural
+module_frontend_conformance.rs	modules_cli_sessions	partial	self_host_scanner.rs#self_host_unit_external_and_inline_modules_are_structural,self_host_scanner.rs#self_host_unit_malformed_module_and_use_items_recover
 module_namespaces.rs	modules_cli_sessions	unported	-
 module_resolution.rs	modules_cli_sessions	unported	-
 multi_origin_aggregates.rs	compiler_pipeline	unported	-

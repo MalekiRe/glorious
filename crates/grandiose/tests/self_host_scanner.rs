@@ -1022,6 +1022,123 @@ fn self_host_scanner_recovery_matches_bootstrap() {
 }
 
 #[test]
+fn self_host_unit_malformed_module_and_use_items_recover() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/malformed-modules-and-uses.glorious"),
+            )
+            .unwrap();
+            let tokens = grandiose::lexer::lex(&source).unwrap();
+            let (program, diagnostics) = parser::parse_recovering(tokens.clone());
+            assert!(diagnostics.len() >= 2, "{diagnostics:#?}");
+            assert!(
+                program
+                    .functions
+                    .iter()
+                    .any(|function| function.name == "main")
+            );
+            let main_start = tokens
+                .iter()
+                .position(|token| matches!(&token.kind, grandiose::lexer::TokenKind::Ident(name) if name == "main"))
+                .unwrap();
+            let expected_body_start = tokens
+                .iter()
+                .enumerate()
+                .skip(main_start)
+                .find_map(|(index, token)| {
+                    matches!(token.kind, grandiose::lexer::TokenKind::LBrace).then_some(index)
+                })
+                .unwrap();
+            let expected_body_end = tokens
+                .iter()
+                .enumerate()
+                .skip(expected_body_start + 1)
+                .find_map(|(index, token)| {
+                    matches!(token.kind, grandiose::lexer::TokenKind::RBrace).then_some(index)
+                })
+                .unwrap();
+
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("malformed.glorious");
+            let output = directory.path().join("recovery.bin");
+            fs::write(&input, source).unwrap();
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_recovery_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+
+            let bytes = fs::read(output).unwrap();
+            let mut cursor = 0;
+            assert_eq!(read_u32(&bytes, &mut cursor), 1);
+            assert_eq!(bytes[cursor], 0);
+            cursor += 1;
+            let shell_count = read_u32(&bytes, &mut cursor);
+            assert_eq!(shell_count, 1);
+            assert_eq!(bytes[cursor], ShellKind::Function as u8);
+            cursor += 2; // kind and private visibility
+            assert_eq!(bytes[cursor], 1);
+            cursor += 1;
+            let name = read_u32(&bytes, &mut cursor) as usize;
+            assert_eq!(&bytes[cursor..cursor + name], b"main");
+            cursor += name;
+            let header_start = read_u32(&bytes, &mut cursor);
+            let header_end = read_u32(&bytes, &mut cursor);
+            assert!(header_start < header_end);
+            assert_eq!(bytes[cursor], 1);
+            cursor += 1;
+            let body_start = read_u32(&bytes, &mut cursor);
+            let body_end = read_u32(&bytes, &mut cursor);
+            assert!(body_start < body_end);
+            let whole_start = read_u32(&bytes, &mut cursor);
+            let whole_end = read_u32(&bytes, &mut cursor);
+            assert_eq!(
+                (header_start, header_end, body_start, body_end, whole_start, whole_end),
+                (
+                    main_start as u32,
+                    expected_body_start as u32,
+                    (expected_body_start + 1) as u32,
+                    expected_body_end as u32,
+                    main_start as u32,
+                    (expected_body_end + 1) as u32
+                )
+            );
+            assert_eq!(bytes[cursor], 0);
+            cursor += 1;
+            let error_count = read_u32(&bytes, &mut cursor);
+            assert_eq!(error_count, diagnostics.len() as u32);
+            let mut error_codes = Vec::new();
+            for _ in 0..error_count {
+                error_codes.push(bytes[cursor]);
+                cursor += 1;
+                let token = read_u32(&bytes, &mut cursor);
+                let related = read_u32(&bytes, &mut cursor);
+                assert!((token as usize) < tokens.len());
+                assert!((related as usize) <= tokens.len());
+            }
+            assert_eq!(error_codes, [5, 5, 4]);
+            assert_eq!(cursor, bytes.len());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_scanner_use_trees_match_bootstrap() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
