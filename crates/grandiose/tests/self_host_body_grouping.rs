@@ -390,6 +390,8 @@ fn encode_expression(
     source: &str,
     expression: &Expr,
 ) -> Result<(), ()> {
+    push_u32(output, expression.span.start.try_into().map_err(|_| ())?);
+    push_u32(output, expression.span.end.try_into().map_err(|_| ())?);
     if let Some((computation, arms)) = normalized_direct_enum_handle(expression) {
         return encode_direct_enum_handle(output, program, source, computation, &arms);
     }
@@ -1042,4 +1044,10 @@ fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_body_fixity_grouping_matches_bootstrap_ast() {
+    // Keep the acceptance name tied to the bootstrap assertion it covers.
+    self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_execution();
 }

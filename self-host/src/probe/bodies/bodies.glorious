@@ -395,6 +395,18 @@ write_expression(
     value: &ParsedBody,
     expression: u32
 ) -> Result<(), BodyError> {
+    let tokens = super::super::frontend::bodies::expression_tokens(
+        value,
+        expression
+    );
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::syntax::token_start(&tokens))
+    );
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::syntax::token_end(&tokens))
+    );
     handle super::super::frontend::bodies::expression_view(value, expression) {
         BodyExpressionView::Identifier(tokens) => {
             ByteBuf::push(output, 1);
