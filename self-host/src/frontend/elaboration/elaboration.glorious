@@ -11,6 +11,19 @@ use super::bodies::{Visit, FoldVisit};
 pub struct TypeTag {}
 pub type TypeId = Id<TypeTag>;
 
+pub struct InterfaceEffectTag {}
+pub type InterfaceEffectId = Id<InterfaceEffectTag>;
+
+pub struct InterfaceEffectOperationTag {}
+pub type InterfaceEffectOperationId = Id<InterfaceEffectOperationTag>;
+
+enum TypeParameterOwner {
+    Declaration(ShellId),
+    EffectOperation(InterfaceEffectOperationId)
+}
+
+impl Use<[0, *]> for TypeParameterOwner {}
+
 pub struct InterfaceNominalTag {}
 pub type InterfaceNominalId = Id<InterfaceNominalTag>;
 
@@ -21,7 +34,7 @@ enum TypeKind {
     Unit,
     Never,
     Scalar(u8),
-    TypeParameter(ShellId, u32),
+    TypeParameter(TypeParameterOwner, u32),
     Tuple(TypeElementRange),
     Text,
     Bytes,
@@ -65,6 +78,47 @@ type CallableParameterRange =
 struct CallableSubstitutionRangeTag {}
 type CallableSubstitutionRange =
     super::syntax::IdRange<CallableSubstitutionRangeTag>;
+
+struct InterfaceEffectOperationRangeTag {}
+type InterfaceEffectOperationRange =
+    super::syntax::IdRange<InterfaceEffectOperationRangeTag>;
+
+struct EffectPayloadRangeTag {}
+type EffectPayloadRange = super::syntax::IdRange<EffectPayloadRangeTag>;
+
+struct ConstraintTokenRange { start: usize, end: usize }
+
+impl Use<[0, *]> for ConstraintTokenRange {}
+
+pub struct ResumptionInterval {
+    lower: u32,
+    upper: Option<u32>
+}
+
+impl Use<[0, *]> for ResumptionInterval {}
+
+struct InterfaceEffect {
+    shell: ShellId,
+    generics: SignatureScope,
+    constraints: ConstraintTokenRange,
+    operations: InterfaceEffectOperationRange
+}
+
+impl Use<[0, *]> for InterfaceEffect {}
+
+struct InterfaceEffectOperation {
+    owner: InterfaceEffectId,
+    ordinal: u32,
+    name: u32,
+    generics: SignatureScope,
+    constraints: ConstraintTokenRange,
+    payloads: EffectPayloadRange,
+    result: TypeId,
+    terminal: Bool,
+    resumption: ResumptionInterval
+}
+
+impl Use<[0, *]> for InterfaceEffectOperation {}
 
 enum InterfaceNominalKind {
     Struct(InterfaceFieldRange),
@@ -143,6 +197,17 @@ struct SignatureScope {
 
 impl Use<[0, *]> for SignatureScope {}
 
+enum SignatureTypeScope {
+    Declaration(SignatureScope),
+    EffectOperation(
+        SignatureScope,
+        SignatureScope,
+        InterfaceEffectOperationId
+    )
+}
+
+impl Use<[0, *]> for SignatureTypeScope {}
+
 struct ResolvedModule { shell: Option<ShellId> }
 
 impl Use<[0, *]> for ResolvedModule {}
@@ -160,6 +225,10 @@ pub struct TypedInterfaces {
     instance_parameters: Vec<TypeId>,
     instance_substitutions: Vec<Option<TypeId>>,
     callable_effects: Vec<TypeId>,
+    effects: Arena<InterfaceEffectTag, InterfaceEffect>,
+    effect_operations:
+        Arena<InterfaceEffectOperationTag, InterfaceEffectOperation>,
+    effect_payloads: Vec<TypeId>,
     // Indexed by declaration shell.
     shell_to_callable:
         IndexVec<ShellTag, Option<InterfaceCallableId>>,
@@ -167,6 +236,7 @@ pub struct TypedInterfaces {
     shell_to_nominal:
         IndexVec<ShellTag, Option<InterfaceNominalId>>,
     shell_to_type: IndexVec<ShellTag, Option<TypeId>>,
+    shell_to_effect: IndexVec<ShellTag, Option<InterfaceEffectId>>,
     // Collection-only memo state retained for deterministic diagnostics.
     alias_states: Vec<AliasResolutionState>
 }
@@ -286,6 +356,15 @@ pub enum ElaborationError {
     MissingCallableHeader(usize),
     UnsupportedCallableSignature(ShellId),
     MissingCallableType(ShellId),
+    MissingEffectHeader(usize),
+    MissingEffectOperationHeader(usize),
+    MissingEffectType(ShellId),
+    DuplicateEffectGeneric(usize, usize),
+    DuplicateEffectOperation(usize, usize),
+    DuplicateEffectOperationGeneric(usize, usize),
+    TerminalOperationResumptionQuantity(usize),
+    InvalidResumptionInterval(usize),
+    ResumptionQuantityOverflow(usize),
     MissingNominalDeclaration(usize),
     MissingFieldHeader(usize),
     MissingVariantHeader(usize),
@@ -331,7 +410,7 @@ pub enum InterfaceTypeView<'a> {
     Unit,
     Never,
     Scalar(u8),
-    TypeParameter(u32, u32),
+    TypeParameter(u8, u32, u32),
     Tuple(Slice<'a, TypeId>),
     Text,
     Bytes,
@@ -1166,6 +1245,15 @@ interface_variant_id_from_usize(value: usize) -> InterfaceVariantId {
     }
 }
 
+interface_effect_operation_id_from_usize(
+    value: usize
+) -> InterfaceEffectOperationId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
 interface_nominal_at<'a>(
     value: &'a TypedInterfaces,
     id: InterfaceNominalId
@@ -1192,6 +1280,182 @@ interface_callable_at<'a>(
     id: InterfaceCallableId
 ) -> &'a InterfaceCallable {
     Arena::index(&value.callables, id)
+}
+
+interface_effect_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceEffectId
+) -> &'a InterfaceEffect {
+    Arena::index(&value.effects, id)
+}
+
+interface_effect_operation_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> &'a InterfaceEffectOperation {
+    Arena::index(&value.effect_operations, id)
+}
+
+pub interface_effect_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.effects)
+}
+
+pub interface_effect_id_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> Option<InterfaceEffectId> {
+    let id = try(Id::from_usize(index), @interface_effect_id_at);
+    handle Arena::get(&value.effects, id) {
+        Result::Err(_) => None,
+        Result::Ok(_) => Option::Some(id)
+    }
+}
+
+pub interface_effect_for_shell(
+    value: &TypedInterfaces,
+    shell: ShellId
+) -> Option<InterfaceEffectId> {
+    handle IndexVec::get(&value.shell_to_effect, shell) {
+        Result::Err(_) => None,
+        Result::Ok(found) => *found
+    }
+}
+
+pub interface_effect_shell(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId
+) -> ShellId {
+    interface_effect_at(value, id).shell
+}
+
+pub interface_effect_generic_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId
+) -> u32 {
+    interface_effect_at(value, id).generics.count
+}
+
+pub interface_effect_constraint_start(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId
+) -> usize {
+    interface_effect_at(value, id).constraints.start
+}
+
+pub interface_effect_constraint_end(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId
+) -> usize {
+    interface_effect_at(value, id).constraints.end
+}
+
+pub interface_effect_operation_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId
+) -> u32 {
+    interface_effect_at(value, id).operations.count
+}
+
+pub interface_effect_operation_id(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId,
+    ordinal: u32
+) -> Option<InterfaceEffectOperationId> {
+    let range = interface_effect_at(value, id).operations;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub interface_effect_operation_owner(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> InterfaceEffectId {
+    interface_effect_operation_at(value, id).owner
+}
+
+pub interface_effect_operation_ordinal(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> u32 {
+    interface_effect_operation_at(value, id).ordinal
+}
+
+pub interface_effect_operation_name(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> u32 {
+    interface_effect_operation_at(value, id).name
+}
+
+pub interface_effect_operation_generic_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> u32 {
+    interface_effect_operation_at(value, id).generics.count
+}
+
+pub interface_effect_operation_constraint_start(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> usize {
+    interface_effect_operation_at(value, id).constraints.start
+}
+
+pub interface_effect_operation_constraint_end(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> usize {
+    interface_effect_operation_at(value, id).constraints.end
+}
+
+pub interface_effect_operation_payload_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> u32 {
+    interface_effect_operation_at(value, id).payloads.count
+}
+
+pub interface_effect_operation_payload_at(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId,
+    ordinal: u32
+) -> Option<TypeId> {
+    let range = interface_effect_operation_at(value, id).payloads;
+    if(ordinal < range.count) {
+        Option::Some(*Vec::index(
+            &value.effect_payloads,
+            usize_from_u32(range.start + ordinal)
+        ))
+    } else { None }
+}
+
+pub interface_effect_operation_result(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> TypeId {
+    interface_effect_operation_at(value, id).result
+}
+
+pub interface_effect_operation_is_terminal(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> Bool {
+    interface_effect_operation_at(value, id).terminal
+}
+
+pub interface_effect_operation_resumption_lower(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> u32 {
+    interface_effect_operation_at(value, id).resumption.lower
+}
+
+pub interface_effect_operation_resumption_upper(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> Option<u32> {
+    interface_effect_operation_at(value, id).resumption.upper
 }
 
 pub interface_callable_result(
@@ -1401,6 +1665,26 @@ alloc_interface_callable(
     }
 }
 
+alloc_interface_effect(
+    value: &mut TypedInterfaces,
+    declaration: InterfaceEffect
+) -> InterfaceEffectId {
+    handle Arena::alloc(&mut value.effects, declaration) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+alloc_interface_effect_operation(
+    value: &mut TypedInterfaces,
+    operation: InterfaceEffectOperation
+) -> InterfaceEffectOperationId {
+    handle Arena::alloc(&mut value.effect_operations, operation) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
 set_interface_nominal_kind(
     value: &mut TypedInterfaces,
     id: InterfaceNominalId,
@@ -1546,8 +1830,12 @@ pub interface_type_at<'a>(
         TypeKind::Unit => InterfaceTypeView::Unit,
         TypeKind::Never => InterfaceTypeView::Never,
         TypeKind::Scalar(kind) => InterfaceTypeView::Scalar(kind),
-        TypeKind::TypeParameter(owner, ordinal) =>
-            InterfaceTypeView::TypeParameter(Id::to_u32(owner), ordinal),
+        TypeKind::TypeParameter(owner, ordinal) => handle owner {
+            TypeParameterOwner::Declaration(id) =>
+                InterfaceTypeView::TypeParameter(0, Id::to_u32(id), ordinal),
+            TypeParameterOwner::EffectOperation(id) =>
+                InterfaceTypeView::TypeParameter(1, Id::to_u32(id), ordinal)
+        },
         TypeKind::Tuple(range) => InterfaceTypeView::Tuple(
             handle Slice::subslice(
                 Vec::as_slice(&value.type_elements),
@@ -1606,7 +1894,10 @@ pub interface_type_tag_at(value: &TypedInterfaces, index: usize) -> u8 {
 pub interface_type_a_at(value: &TypedInterfaces, index: usize) -> u32 {
     handle type_kind_at(value, type_id_from_usize(index)) {
         TypeKind::Scalar(kind) => u32_from_u8(kind),
-        TypeKind::TypeParameter(owner, _) => Id::to_u32(owner),
+        TypeKind::TypeParameter(owner, _) => handle owner {
+            TypeParameterOwner::Declaration(id) => Id::to_u32(id),
+            TypeParameterOwner::EffectOperation(id) => Id::to_u32(id)
+        },
         TypeKind::Tuple(range) => range.start,
         TypeKind::Array(element) => Id::to_u32(element),
         TypeKind::Application(constructor, _) => Id::to_u32(constructor),
@@ -1630,6 +1921,10 @@ pub interface_type_b_at(value: &TypedInterfaces, index: usize) -> u32 {
 pub interface_type_c_at(value: &TypedInterfaces, index: usize) -> u32 {
     handle type_kind_at(value, type_id_from_usize(index)) {
         TypeKind::Application(_, range) => range.count,
+        TypeKind::TypeParameter(owner, _) => handle owner {
+            TypeParameterOwner::Declaration(_) => 0,
+            TypeParameterOwner::EffectOperation(_) => 1
+        },
         _ => 0
     }
 }
@@ -2159,6 +2454,18 @@ push_missing_callable_ids(
 
 push_missing_type_ids(
     value: &mut IndexVec<ShellTag, Option<TypeId>>,
+    remaining: usize
+) {
+    for_range(Range::new(0, remaining), { _ =>
+        handle IndexVec::push(&mut *value, None) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        }
+    })
+}
+
+push_missing_effect_ids(
+    value: &mut IndexVec<ShellTag, Option<InterfaceEffectId>>,
     remaining: usize
 ) {
     for_range(Range::new(0, remaining), { _ =>
@@ -2807,6 +3114,23 @@ push_interface_type(
     }))
 }
 
+type_parameter_owners_equal(
+    left: TypeParameterOwner,
+    right: TypeParameterOwner
+) -> Bool {
+    handle left {
+        TypeParameterOwner::Declaration(left_id) => handle right {
+            TypeParameterOwner::Declaration(right_id) => left_id == right_id,
+            TypeParameterOwner::EffectOperation(_) => false
+        },
+        TypeParameterOwner::EffectOperation(left_id) => handle right {
+            TypeParameterOwner::Declaration(_) => false,
+            TypeParameterOwner::EffectOperation(right_id) =>
+                left_id == right_id
+        }
+    }
+}
+
 type_kinds_equal(left: TypeKind, right: TypeKind) -> Bool {
     handle left {
         TypeKind::Unit => handle right {
@@ -2823,7 +3147,7 @@ type_kinds_equal(left: TypeKind, right: TypeKind) -> Bool {
         },
         TypeKind::TypeParameter(left_owner, left_ordinal) => handle right {
             TypeKind::TypeParameter(right_owner, right_ordinal) =>
-                left_owner == right_owner
+                type_parameter_owners_equal(left_owner, right_owner)
                     and { left_ordinal == right_ordinal },
             _ => false
         },
@@ -3093,10 +3417,11 @@ resolve_alias_type(
                                     output,
                                     *super::headers::alias_target(alias),
                                     shell_parent_module(owner),
-                                    Option::Some(signature_scope(
-                                        shell,
-                                        generics
-                                    ))
+                                    Option::Some(
+                                        SignatureTypeScope::Declaration(
+                                            signature_scope(shell, generics)
+                                        )
+                                    )
                                 ), @resolve_alias_type);
                                 *Vec::index_mut(
                                     &mut output.alias_states,
@@ -3409,9 +3734,58 @@ generic_lifetime_parameter(
     } else { false }
 }
 
+signature_type_parameter(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureTypeScope,
+    name: u32
+) -> Option<(TypeParameterOwner, u32)> {
+    handle scope {
+        SignatureTypeScope::Declaration(declaration) => handle
+            generic_type_parameter(headers, declaration, name, 0) {
+            Result::Err(_) => None,
+            Result::Ok(ordinal) => Option::Some((
+                TypeParameterOwner::Declaration(declaration.owner),
+                ordinal
+            ))
+        },
+        SignatureTypeScope::EffectOperation(declaration, operation, owner) =>
+            handle generic_type_parameter(headers, operation, name, 0) {
+            Result::Ok(ordinal) => Option::Some((
+                TypeParameterOwner::EffectOperation(owner),
+                ordinal
+            )),
+            Result::Err(_) => handle generic_type_parameter(
+                headers, declaration, name, 0
+            ) {
+                Result::Err(_) => None,
+                Result::Ok(ordinal) => Option::Some((
+                    TypeParameterOwner::Declaration(declaration.owner),
+                    ordinal
+                ))
+            }
+        }
+    }
+}
+
+signature_lifetime_parameter(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureTypeScope,
+    name: u32
+) -> Bool {
+    handle scope {
+        SignatureTypeScope::Declaration(declaration) =>
+            generic_lifetime_parameter(headers, declaration, name, 0),
+        SignatureTypeScope::EffectOperation(declaration, operation, _) =>
+            generic_lifetime_parameter(headers, operation, name, 0)
+                or { generic_lifetime_parameter(
+                    headers, declaration, name, 0
+                ) }
+    }
+}
+
 reference_lifetime_valid(
     headers: &super::headers::ParsedHeaders,
-    scope: Option<SignatureScope>,
+    scope: Option<SignatureTypeScope>,
     lifetime: Option<usize>
 ) -> Bool {
     handle lifetime {
@@ -3422,8 +3796,8 @@ reference_lifetime_valid(
                 super::headers::parsed_source(headers),
                 token
             ) {
-                TokenKind::Lifetime(name) => generic_lifetime_parameter(
-                    headers, scope, Id::to_u32(name), 0
+                TokenKind::Lifetime(name) => signature_lifetime_parameter(
+                    headers, scope, Id::to_u32(name)
                 ),
                 _ => false
             }
@@ -3437,7 +3811,7 @@ resolve_signature_arguments<'a>(
     output: &mut TypedInterfaces,
     arguments: Slice<'a, super::headers::TypeEdge>,
     module: Option<ShellId>,
-    scope: Option<SignatureScope>,
+    scope: Option<SignatureTypeScope>,
     ordinal: usize,
     resolved: &mut Vec<u32>
 ) -> Result<(), ElaborationError> {
@@ -3617,7 +3991,7 @@ resolve_signature_type(
     output: &mut TypedInterfaces,
     type_id: super::headers::TypeId,
     module: Option<ShellId>,
-    scope: Option<SignatureScope>
+    scope: Option<SignatureTypeScope>
 ) -> Result<u32, ElaborationError> {
     let index = super::headers::parsed_index(headers);
     handle super::headers::header_type_view(index, type_id) {
@@ -3631,22 +4005,15 @@ resolve_signature_type(
             let raw = Id::to_u32(super::headers::name_use_name(name));
             let parameter = handle scope {
                 Result::Err(_) => None,
-                Result::Ok(scope) => generic_type_parameter(
-                    headers,
-                    scope,
-                    raw,
-                    0
+                Result::Ok(scope) => signature_type_parameter(
+                    headers, scope, raw
                 )
             };
             handle parameter {
-                Result::Ok(ordinal) => {
-                    let owner = handle scope {
-                        Result::Err(_) => unreachable(),
-                        Result::Ok(found) => found.owner
-                    };
+                Result::Ok(found) => {
                     Result::Ok(intern_record_type(
                         output,
-                        TypeKind::TypeParameter(owner, ordinal),
+                        TypeKind::TypeParameter(found.0, found.1),
                         false
                     ))
                 },
@@ -3865,7 +4232,7 @@ collect_parameter_types(
                     output,
                     super::headers::parameter_type(parameter),
                     module,
-                    Option::Some(scope)
+                    Option::Some(SignatureTypeScope::Declaration(scope))
                 ), @collect_parameter_types);
                 Vec::push(
                     &mut output.callable_parameters,
@@ -3909,7 +4276,7 @@ collect_callable_effects(
                     &mut *output,
                     super::headers::type_edge_type(edge),
                     module,
-                    Option::Some(scope)
+                    Option::Some(SignatureTypeScope::Declaration(scope))
                 ), @collect_callable_effects);
                 Vec::push(
                     &mut output.callable_effects,
@@ -3929,6 +4296,462 @@ collect_callable_effects(
         super::syntax::id_range(start, Vec::len(&output.callable_effects)),
         row_tail
     ))
+}
+
+constraint_token_range(
+    value: &super::headers::HeaderTokenRange
+) -> ConstraintTokenRange {
+    ConstraintTokenRange {
+        start: super::syntax::token_start(value),
+        end: super::syntax::token_end(value)
+    }
+}
+
+generic_parameter_at<'a>(
+    headers: &'a super::headers::ParsedHeaders,
+    range: &super::headers::HeaderRange,
+    ordinal: u32
+) -> Option<&'a super::headers::GenericParam> {
+    if(ordinal < super::headers::range_count(range)) {
+        super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(super::headers::range_start(range) + ordinal)
+        )
+    } else { None }
+}
+
+find_generic_name_before(
+    headers: &super::headers::ParsedHeaders,
+    range: &super::headers::HeaderRange,
+    name: u32,
+    ordinal: u32,
+    cursor: u32
+) -> Option<usize> {
+    if(cursor < ordinal) {
+        let parameter = handle generic_parameter_at(
+            headers, range, cursor
+        ) {
+            Result::Err(_) => @find_generic_name_before(None),
+            Result::Ok(found) => found
+        };
+        if(Id::to_u32(super::headers::generic_param_name(parameter)) == name) {
+            Option::Some(super::headers::generic_param_token(parameter))
+        } else {
+            find_generic_name_before(
+                headers, range, name, ordinal, cursor + 1
+            )
+        }
+    } else { None }
+}
+
+validate_effect_generics(
+    headers: &super::headers::ParsedHeaders,
+    range: &super::headers::HeaderRange,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::range_count(range)) {
+        let parameter = handle generic_parameter_at(
+            headers, range, ordinal
+        ) {
+            Result::Err(_) => @validate_effect_generics(Result::Err(
+                ElaborationError::InvalidSignatureType(
+                    usize_from_u32(super::headers::range_start(range) + ordinal)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        let name = Id::to_u32(super::headers::generic_param_name(parameter));
+        handle find_generic_name_before(
+            headers, range, name, ordinal, 0
+        ) {
+            Result::Ok(previous) => Result::Err(
+                ElaborationError::DuplicateEffectGeneric(
+                    super::headers::generic_param_token(parameter), previous
+                )
+            ),
+            Result::Err(_) => validate_effect_generics(
+                headers, range, ordinal + 1
+            )
+        }
+    } else { Result::Ok(()) }
+}
+
+validate_operation_generics(
+    headers: &super::headers::ParsedHeaders,
+    declaration: &super::headers::HeaderRange,
+    operation: &super::headers::HeaderRange,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::range_count(operation)) {
+        let parameter = handle generic_parameter_at(
+            headers, operation, ordinal
+        ) {
+            Result::Err(_) => @validate_operation_generics(Result::Err(
+                ElaborationError::InvalidSignatureType(
+                    usize_from_u32(
+                        super::headers::range_start(operation) + ordinal
+                    )
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        let name = Id::to_u32(super::headers::generic_param_name(parameter));
+        let previous = handle find_generic_name_before(
+            headers,
+            declaration,
+            name,
+            super::headers::range_count(declaration),
+            0
+        ) {
+            Result::Ok(found) => Option::Some(found),
+            Result::Err(_) => find_generic_name_before(
+                headers, operation, name, ordinal, 0
+            )
+        };
+        handle previous {
+            Result::Ok(found) => Result::Err(
+                ElaborationError::DuplicateEffectOperationGeneric(
+                    super::headers::generic_param_token(parameter), found
+                )
+            ),
+            Result::Err(_) => validate_operation_generics(
+                headers, declaration, operation, ordinal + 1
+            )
+        }
+    } else { Result::Ok(()) }
+}
+
+effect_operation_header<'a>(
+    headers: &'a super::headers::ParsedHeaders,
+    declaration: &super::headers::EffectHeader,
+    ordinal: u32
+) -> Option<&'a super::headers::EffectOperationHeader> {
+    if(ordinal < super::headers::range_count(
+        super::headers::effect_operations(declaration)
+    )) {
+        let id = super::headers::effect_operation_id_at(
+            declaration, usize_from_u32(ordinal)
+        );
+        super::headers::effect_operation_by_id(
+            super::headers::nominal_index(headers), id
+        )
+    } else { None }
+}
+
+find_operation_name_before(
+    headers: &super::headers::ParsedHeaders,
+    declaration: &super::headers::EffectHeader,
+    name: u32,
+    ordinal: u32,
+    cursor: u32
+) -> Option<usize> {
+    if(cursor < ordinal) {
+        let operation = handle effect_operation_header(
+            headers, declaration, cursor
+        ) {
+            Result::Err(_) => @find_operation_name_before(None),
+            Result::Ok(found) => found
+        };
+        if(Id::to_u32(super::headers::effect_operation_name(operation)) == name) {
+            Option::Some(
+                super::headers::effect_operation_name_token(operation)
+            )
+        } else {
+            find_operation_name_before(
+                headers, declaration, name, ordinal, cursor + 1
+            )
+        }
+    } else { None }
+}
+
+resumption_failure(
+    value: ElaborationError
+) -> Result<ResumptionInterval, ElaborationError> {
+    Result::Err(value)
+}
+
+resumption_success(
+    value: ResumptionInterval
+) -> Result<ResumptionInterval, ElaborationError> {
+    Result::Ok(value)
+}
+
+some_resumption_bound(value: u32) -> Option<u32> {
+    Option::Some(value)
+}
+
+no_resumption_bound() -> Option<u32> { None }
+
+resumption_interval(
+    operation: &super::headers::EffectOperationHeader
+) -> Result<ResumptionInterval, ElaborationError> {
+    let token = super::headers::effect_operation_name_token(operation);
+    if(super::headers::effect_operation_is_terminal(operation)) {
+        if(super::headers::effect_operation_has_resumption_quantity(operation)) {
+            resumption_failure(
+                ElaborationError::TerminalOperationResumptionQuantity(token)
+            )
+        } else { resumption_success(ResumptionInterval {
+            lower: 0,
+            upper: some_resumption_bound(0)
+        }) }
+    } else {
+        let lower = handle checked_usize_to_u32(
+            super::headers::effect_operation_resumption_lower(operation)
+        ) {
+            Result::Err(_) => @resumption_interval(resumption_failure(
+                ElaborationError::ResumptionQuantityOverflow(token)
+            )),
+            Result::Ok(found) => found
+        };
+        let upper = handle
+            super::headers::effect_operation_resumption_upper(operation) {
+            Result::Err(_) => no_resumption_bound(),
+            Result::Ok(found) => some_resumption_bound(handle
+                checked_usize_to_u32(found) {
+                Result::Err(_) => @resumption_interval(resumption_failure(
+                    ElaborationError::ResumptionQuantityOverflow(token)
+                )),
+                Result::Ok(converted) => converted
+            })
+        };
+        handle upper {
+            Result::Ok(found) => if(found < lower) {
+                resumption_failure(
+                    ElaborationError::InvalidResumptionInterval(token)
+                )
+            } else { resumption_success(ResumptionInterval {
+                lower: lower,
+                upper: upper
+            }) },
+            Result::Err(_) => resumption_success(ResumptionInterval {
+                lower: lower,
+                upper: no_resumption_bound()
+            })
+        }
+    }
+}
+
+collect_effect_payloads(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    operation: &super::headers::EffectOperationHeader,
+    output: &mut TypedInterfaces,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    let range = super::headers::effect_operation_parameters(operation);
+    if(ordinal < super::headers::range_count(range)) {
+        let at = super::headers::range_start(range) + ordinal;
+        let parameter = handle super::headers::parameter_at(
+            super::headers::parsed_index(headers), usize_from_u32(at)
+        ) {
+            Result::Err(_) => @collect_effect_payloads(Result::Err(
+                ElaborationError::MissingParameterHeader(usize_from_u32(at))
+            )),
+            Result::Ok(found) => found
+        };
+        let ty = try(resolve_signature_type(
+            headers,
+            declarations,
+            output,
+            super::headers::parameter_type(parameter),
+            module,
+            Option::Some(scope)
+        ), @collect_effect_payloads);
+        Vec::push(&mut output.effect_payloads, type_id_from_u32(ty));
+        collect_effect_payloads(
+            headers,
+            declarations,
+            operation,
+            output,
+            module,
+            scope,
+            ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+collect_effect_operations(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    effect_header: &super::headers::EffectHeader,
+    effect_id: InterfaceEffectId,
+    output: &mut TypedInterfaces,
+    module: Option<ShellId>,
+    effect_scope: SignatureScope,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    let count = super::headers::range_count(
+        super::headers::effect_operations(effect_header)
+    );
+    if(ordinal < count) {
+        let operation = handle effect_operation_header(
+            headers, effect_header, ordinal
+        ) {
+            Result::Err(_) => @collect_effect_operations(Result::Err(
+                ElaborationError::MissingEffectOperationHeader(
+                    usize_from_u32(ordinal)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        let name = Id::to_u32(super::headers::effect_operation_name(operation));
+        handle find_operation_name_before(
+            headers, effect_header, name, ordinal, 0
+        ) {
+            Result::Ok(previous) => @collect_effect_operations(Result::Err(
+                ElaborationError::DuplicateEffectOperation(
+                    super::headers::effect_operation_name_token(operation),
+                    previous
+                )
+            )),
+            Result::Err(_) => ()
+        };
+        try(validate_operation_generics(
+            headers,
+            super::headers::effect_generics(effect_header),
+            super::headers::effect_operation_generics(operation),
+            0
+        ), @collect_effect_operations);
+        let operation_scope = signature_scope(
+            super::headers::effect_shell(effect_header),
+            super::headers::effect_operation_generics(operation)
+        );
+        let operation_id = interface_effect_operation_id_from_usize(
+            Arena::len(&output.effect_operations)
+        );
+        let scope = SignatureTypeScope::EffectOperation(
+            effect_scope, operation_scope, operation_id
+        );
+        let payload_start = Vec::len(&output.effect_payloads);
+        try(collect_effect_payloads(
+            headers,
+            declarations,
+            operation,
+            &mut *output,
+            module,
+            scope,
+            0
+        ), @collect_effect_operations);
+        let result = if(
+            super::headers::effect_operation_is_terminal(operation)
+        ) { type_id_from_u32(1) } else {
+            handle super::headers::effect_operation_result(operation) {
+                Result::Err(_) => type_id_from_u32(0),
+                Result::Ok(result) => type_id_from_u32(try(
+                    resolve_signature_type(
+                        headers,
+                        declarations,
+                        &mut *output,
+                        result,
+                        module,
+                        Option::Some(scope)
+                    ),
+                    @collect_effect_operations
+                ))
+            }
+        };
+        let interval = try(
+            resumption_interval(operation), @collect_effect_operations
+        );
+        let where_tokens =
+            super::headers::effect_operation_where_tokens(operation);
+        let payload_end = Vec::len(&output.effect_payloads);
+        let terminal =
+            super::headers::effect_operation_is_terminal(operation);
+        let semantic_operation = InterfaceEffectOperation {
+            owner: effect_id,
+            ordinal: ordinal,
+            name: name,
+            generics: operation_scope,
+            constraints: constraint_token_range(where_tokens),
+            payloads: super::syntax::id_range(payload_start, payload_end),
+            result: result,
+            terminal: terminal,
+            resumption: interval
+        };
+        let allocated = alloc_interface_effect_operation(
+            &mut *output,
+            semantic_operation
+        );
+        if(allocated == operation_id) {
+            collect_effect_operations(
+                headers,
+                declarations,
+                effect_header,
+                effect_id,
+                &mut *output,
+                module,
+                effect_scope,
+                ordinal + 1
+            )
+        } else { unreachable() }
+    } else { Result::Ok(()) }
+}
+
+collect_effects(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    index: usize
+) -> Result<(), ElaborationError> {
+    let nominal = super::headers::nominal_index(headers);
+    if(index < super::headers::effect_count(nominal)) {
+        let declaration = handle super::headers::effect_at(nominal, index) {
+            Result::Err(_) => @collect_effects(Result::Err(
+                ElaborationError::MissingEffectHeader(index)
+            )),
+            Result::Ok(found) => found
+        };
+        try(validate_effect_generics(
+            headers, super::headers::effect_generics(declaration), 0
+        ), @collect_effects);
+        let shell = super::headers::effect_shell(declaration);
+        let scope = signature_scope(
+            shell, super::headers::effect_generics(declaration)
+        );
+        let operation_start = Arena::len(&output.effect_operations);
+        let operation_count = usize_from_u32(super::headers::range_count(
+            super::headers::effect_operations(declaration)
+        ));
+        let where_tokens = super::headers::effect_where_tokens(declaration);
+        let effect_id = alloc_interface_effect(
+            output,
+            InterfaceEffect {
+                shell: shell,
+                generics: scope,
+                constraints: constraint_token_range(where_tokens),
+                operations: super::syntax::id_range(
+                    operation_start, operation_start + operation_count
+                )
+            }
+        );
+        handle IndexVec::replace(
+            &mut output.shell_to_effect, shell, Option::Some(effect_id)
+        ) {
+            Result::Err(_) => @collect_effects(Result::Err(
+                ElaborationError::MissingEffectType(shell)
+            )),
+            Result::Ok(_) => ()
+        };
+        let module = handle super::scanner::shell_at(declarations, shell) {
+            Result::Err(_) => None,
+            Result::Ok(owner) => shell_parent_module(owner)
+        };
+        try(collect_effect_operations(
+            headers,
+            declarations,
+            declaration,
+            effect_id,
+            output,
+            module,
+            scope,
+            0
+        ), @collect_effects);
+        collect_effects(headers, declarations, output, index + 1)
+    } else { Result::Ok(()) }
 }
 
 collect_callables(
@@ -3972,7 +4795,7 @@ collect_callables(
                             output,
                             result_type,
                             module,
-                            Option::Some(scope)
+                            Option::Some(SignatureTypeScope::Declaration(scope))
                         ), @collect_callables);
                         collect_callable(
                             headers,
@@ -4086,6 +4909,8 @@ predeclared_nominal(
         super::headers::HeaderOrder::Alias(_) =>
             Result::Ok(PredeclaredNominal::Skip),
         super::headers::HeaderOrder::Fixity(_) =>
+            Result::Ok(PredeclaredNominal::Skip),
+        super::headers::HeaderOrder::Effect(_) =>
             Result::Ok(PredeclaredNominal::Skip)
     }
 }
@@ -4227,7 +5052,7 @@ collect_struct_fields(
                     output,
                     *super::headers::field_type(field),
                     module,
-                    Option::Some(scope)
+                    Option::Some(SignatureTypeScope::Declaration(scope))
                 ), @collect_struct_fields);
                 alloc_interface_field(output, InterfaceField {
                     owner: owner,
@@ -4266,7 +5091,7 @@ collect_variant_payloads<'a>(
             &mut *output,
             super::headers::type_edge_type(field),
             module,
-            Option::Some(scope)
+            Option::Some(SignatureTypeScope::Declaration(scope))
         ), @collect_variant_payloads);
         Vec::push(
             &mut output.variant_payloads,
@@ -4720,9 +5545,13 @@ pub collect_interfaces(
         instance_parameters: Vec::new(),
         instance_substitutions: Vec::new(),
         callable_effects: Vec::new(),
+        effects: Arena::new(),
+        effect_operations: Arena::new(),
+        effect_payloads: Vec::new(),
         shell_to_callable: IndexVec::new(),
         shell_to_nominal: IndexVec::new(),
         shell_to_type: IndexVec::new(),
+        shell_to_effect: IndexVec::new(),
         alias_states: Vec::new()
     };
     seed_types(&mut output);
@@ -4730,6 +5559,7 @@ pub collect_interfaces(
     push_missing_callable_ids(&mut output.shell_to_callable, shell_count);
     push_missing_nominal_ids(&mut output.shell_to_nominal, shell_count);
     push_missing_type_ids(&mut output.shell_to_type, shell_count);
+    push_missing_effect_ids(&mut output.shell_to_effect, shell_count);
     push_unresolved_aliases(
         &mut output.alias_states,
         super::headers::alias_count(super::headers::nominal_index(headers))
@@ -4749,6 +5579,12 @@ pub collect_interfaces(
         @collect_interfaces
     );
     try(collect_callables(
+        headers,
+        declarations,
+        &mut output,
+        0
+    ), @collect_interfaces);
+    try(collect_effects(
         headers,
         declarations,
         &mut output,
@@ -5416,13 +6252,19 @@ infer_call_substitutions(
 ) -> Bool {
     handle type_kind_at(interfaces, formal) {
         TypeKind::TypeParameter(parameter_owner, ordinal) => if(
-            parameter_owner == owner
+            type_parameter_owners_equal(
+                parameter_owner,
+                TypeParameterOwner::Declaration(owner)
+            )
         ) {
             handle call_substitution_at(substitutions, ordinal) {
                 Result::Ok(bound) => bound == actual,
                 Result::Err(_) => handle type_kind_at(interfaces, actual) {
                     TypeKind::TypeParameter(actual_owner, actual_ordinal) => if(
-                        actual_owner == owner
+                        type_parameter_owners_equal(
+                            actual_owner,
+                            TypeParameterOwner::Declaration(owner)
+                        )
                             and { actual_ordinal == ordinal }
                     ) { true } else {
                         *Vec::index_mut(
@@ -5548,7 +6390,10 @@ call_type_has_unbound_parameter(
 ) -> Bool {
     handle type_kind_at(interfaces, ty) {
         TypeKind::TypeParameter(parameter_owner, ordinal) =>
-            parameter_owner == owner
+            type_parameter_owners_equal(
+                parameter_owner,
+                TypeParameterOwner::Declaration(owner)
+            )
                 and { Option::is_none(&call_substitution_at(
                     substitutions, ordinal
                 )) },
@@ -5612,7 +6457,10 @@ instantiate_call_type(
 ) -> TypeId {
     handle type_kind_at(&*interfaces, ty) {
         TypeKind::TypeParameter(parameter_owner, ordinal) => if(
-            parameter_owner == owner
+            type_parameter_owners_equal(
+                parameter_owner,
+                TypeParameterOwner::Declaration(owner)
+            )
         ) {
             call_substitution_at(substitutions, ordinal) else { ty }
         } else { ty },

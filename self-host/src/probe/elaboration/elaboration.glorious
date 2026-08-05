@@ -73,6 +73,410 @@ pub interface_type_metadata(
     }
 }
 
+write_constraint_text(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    start: usize,
+    end: usize
+) {
+    if(start < end) {
+        let source = super::super::frontend::headers::parsed_source(headers);
+        let first = handle super::super::frontend::lexer::token_at(
+            source, start
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) =>
+                super::super::frontend::lexer::token_span(found)
+        };
+        let last = handle super::super::frontend::lexer::token_at(
+            source, end - 1
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) =>
+                super::super::frontend::lexer::token_span(found)
+        };
+        write_string(
+            output,
+            &super::super::frontend::lexer::text_slice(
+                original,
+                super::super::frontend::lexer::span_start(&first),
+                super::super::frontend::lexer::span_end(&last)
+            )
+        )
+    } else { write_string(output, &"") }
+}
+
+write_effect_type_elements<'a>(
+    output: &mut ByteBuf,
+    interfaces: &TypedInterfaces,
+    elements: Slice<'a, super::super::frontend::elaboration::TypeId>,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId,
+    ordinal: usize
+) {
+    if(ordinal < Slice::len(elements)) {
+        let ty = handle Slice::get(elements, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => *found
+        };
+        write_effect_type(
+            output, interfaces, ty, effect_shell, operation
+        );
+        write_effect_type_elements(
+            output,
+            interfaces,
+            elements,
+            effect_shell,
+            operation,
+            ordinal + 1
+        )
+    } else { () }
+}
+
+write_effect_type(
+    output: &mut ByteBuf,
+    interfaces: &TypedInterfaces,
+    ty: super::super::frontend::elaboration::TypeId,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId
+) {
+    handle super::super::frontend::elaboration::interface_type_at(
+        interfaces, Id::to_usize(ty)
+    ) {
+        super::super::frontend::elaboration::InterfaceTypeView::Unit =>
+            ByteBuf::push(output, 1),
+        super::super::frontend::elaboration::InterfaceTypeView::Never =>
+            ByteBuf::push(output, 2),
+        super::super::frontend::elaboration::InterfaceTypeView::Scalar(kind) => {
+            ByteBuf::push(output, 3);
+            ByteBuf::push(output, kind)
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::Tuple(elements) => {
+            ByteBuf::push(output, 4);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(elements)));
+            write_effect_type_elements(
+                output, interfaces, elements, effect_shell, operation, 0
+            )
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::Nominal(id) => {
+            ByteBuf::push(output, 5);
+            ByteBuf::write_u32_le(output, id)
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::SharedReference(child) => {
+            ByteBuf::push(output, 6);
+            write_effect_type(
+                output, interfaces, Id::from_u32(child), effect_shell, operation
+            )
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::UniqueReference(child) => {
+            ByteBuf::push(output, 7);
+            write_effect_type(
+                output, interfaces, Id::from_u32(child), effect_shell, operation
+            )
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::TypeParameter(
+            owner_kind, owner, ordinal
+        ) => {
+            ByteBuf::push(output, 8);
+            let role = if(owner_kind == 0 and { owner == Id::to_u32(effect_shell) }) {
+                1
+            } else {
+                if(owner_kind == 1 and { owner == Id::to_u32(operation) }) {
+                    2
+                } else { 0 }
+            };
+            ByteBuf::push(output, role);
+            ByteBuf::write_u32_le(output, ordinal)
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::Array(child) => {
+            ByteBuf::push(output, 9);
+            write_effect_type(
+                output, interfaces, Id::from_u32(child), effect_shell, operation
+            )
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::Application(
+            constructor, elements
+        ) => {
+            ByteBuf::push(output, 10);
+            write_effect_type(
+                output,
+                interfaces,
+                Id::from_u32(constructor),
+                effect_shell,
+                operation
+            );
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(elements)));
+            write_effect_type_elements(
+                output, interfaces, elements, effect_shell, operation, 0
+            )
+        },
+        super::super::frontend::elaboration::InterfaceTypeView::Text =>
+            ByteBuf::push(output, 11),
+        super::super::frontend::elaboration::InterfaceTypeView::Bytes =>
+            ByteBuf::push(output, 12),
+        super::super::frontend::elaboration::InterfaceTypeView::Effect(id) => {
+            ByteBuf::push(output, 13);
+            ByteBuf::write_u32_le(output, id)
+        }
+    }
+}
+
+write_effect_operation(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    interfaces: &TypedInterfaces,
+    effect_id: super::super::frontend::elaboration::InterfaceEffectId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId
+) {
+    let source = super::super::frontend::headers::parsed_source(headers);
+    write_name_id(
+        output,
+        source,
+        Id::from_u32(
+            super::super::frontend::elaboration::interface_effect_operation_name(
+                interfaces, operation
+            )
+        )
+    );
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::elaboration::interface_effect_operation_ordinal(
+            interfaces, operation
+        )
+    );
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::elaboration::interface_effect_operation_generic_count(
+            interfaces, operation
+        )
+    );
+    write_constraint_text(
+        output,
+        original,
+        headers,
+        super::super::frontend::elaboration::interface_effect_operation_constraint_start(
+            interfaces, operation
+        ),
+        super::super::frontend::elaboration::interface_effect_operation_constraint_end(
+            interfaces, operation
+        )
+    );
+    let payload_count =
+        super::super::frontend::elaboration::interface_effect_operation_payload_count(
+            interfaces, operation
+        );
+    ByteBuf::write_u32_le(output, payload_count);
+    for_range(Range::new(0, wrapping_convert_to_usize(payload_count)), { ordinal => {
+        let ty = handle
+            super::super::frontend::elaboration::interface_effect_operation_payload_at(
+                interfaces, operation, u32_from_usize(ordinal)
+            ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_effect_type(
+            output,
+            interfaces,
+            ty,
+            super::super::frontend::elaboration::interface_effect_shell(
+                interfaces, effect_id
+            ),
+            operation
+        )
+    }});
+    write_effect_type(
+        output,
+        interfaces,
+        super::super::frontend::elaboration::interface_effect_operation_result(
+            interfaces, operation
+        ),
+        super::super::frontend::elaboration::interface_effect_shell(
+            interfaces, effect_id
+        ),
+        operation
+    );
+    ByteBuf::push(
+        output,
+        if(super::super::frontend::elaboration::interface_effect_operation_is_terminal(
+            interfaces, operation
+        )) { 1 } else { 0 }
+    );
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::elaboration::interface_effect_operation_resumption_lower(
+            interfaces, operation
+        )
+    );
+    handle super::super::frontend::elaboration::interface_effect_operation_resumption_upper(
+        interfaces, operation
+    ) {
+        Result::Err(_) => ByteBuf::push(output, 0),
+        Result::Ok(found) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u32_le(output, found)
+        }
+    }
+}
+
+write_effects(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    interfaces: &TypedInterfaces,
+    index: usize
+) {
+    if(index < super::super::frontend::elaboration::interface_effect_count(
+        interfaces
+    )) {
+        let id = handle
+            super::super::frontend::elaboration::interface_effect_id_at(
+                interfaces, index
+            ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        ByteBuf::write_u32_le(
+            output,
+            super::super::frontend::elaboration::interface_effect_generic_count(
+                interfaces, id
+            )
+        );
+        write_constraint_text(
+            output,
+            original,
+            headers,
+            super::super::frontend::elaboration::interface_effect_constraint_start(
+                interfaces, id
+            ),
+            super::super::frontend::elaboration::interface_effect_constraint_end(
+                interfaces, id
+            )
+        );
+        let count =
+            super::super::frontend::elaboration::interface_effect_operation_count(
+                interfaces, id
+            );
+        ByteBuf::write_u32_le(output, count);
+        for_range(Range::new(0, wrapping_convert_to_usize(count)), { ordinal => {
+            let operation = handle
+                super::super::frontend::elaboration::interface_effect_operation_id(
+                    interfaces, id, u32_from_usize(ordinal)
+                ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            write_effect_operation(
+                output, original, headers, interfaces, id, operation
+            )
+        }});
+        write_effects(output, original, headers, interfaces, index + 1)
+    } else { () }
+}
+
+effect_error_code(value: ElaborationError) -> u8 {
+    handle value {
+        ElaborationError::DuplicateEffectGeneric(_, _) => 101,
+        ElaborationError::DuplicateEffectOperation(_, _) => 102,
+        ElaborationError::DuplicateEffectOperationGeneric(_, _) => 103,
+        ElaborationError::TerminalOperationResumptionQuantity(_) => 104,
+        ElaborationError::InvalidResumptionInterval(_) => 105,
+        ElaborationError::ResumptionQuantityOverflow(_) => 106,
+        _ => 4
+    }
+}
+
+pub effect_interface_bytes(original: String) -> Bytes {
+    let output = ByteBuf::new();
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => ByteBuf::push(&mut output, 1),
+        Result::Ok(source) => handle super::super::frontend::scanner::scan(
+            &source
+        ) {
+            Result::Err(_) => ByteBuf::push(&mut output, 2),
+            Result::Ok(declarations) => handle
+                super::super::frontend::headers::parse(
+                    &original, source, &declarations
+                ) {
+                Result::Err(_) => ByteBuf::push(&mut output, 3),
+                Result::Ok(headers) => handle collect_interfaces(
+                    &headers, &declarations
+                ) {
+                    Result::Err(error) =>
+                        ByteBuf::push(&mut output, effect_error_code(error)),
+                    Result::Ok(interfaces) => {
+                        ByteBuf::push(&mut output, 0);
+                        ByteBuf::write_u32_le(
+                            &mut output,
+                            u32_from_usize(
+                                super::super::frontend::elaboration::interface_effect_count(
+                                    &interfaces
+                                )
+                            )
+                        );
+                        write_effects(
+                            &mut output,
+                            &original,
+                            &headers,
+                            &interfaces,
+                            0
+                        )
+                    }
+                }
+            }
+        }
+    };
+    ByteBuf::finish(output)
+}
+
+process_effect_interface_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    if(index < Vec::len(arguments)) {
+        let path = *Vec::index(arguments, index);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(&mut *output, 1),
+            Result::Ok(source) => {
+                let encoded = effect_interface_bytes(source);
+                ByteBuf::append_bytes(&mut *output, &encoded)
+            }
+        };
+        process_effect_interface_inputs(
+            arguments, index + 1, &mut *output
+        )
+    } else { () }
+}
+
+pub effect_interface_application() / {
+    ProcessArgs,
+    FileRead,
+    FileWrite,
+    Diagnostic
+} {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-effect-interfaces <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded, u32_from_usize(count - 1)
+        );
+        process_effect_interface_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
+}
+
 shell_parent_module(
     shell: &super::super::frontend::scanner::DeclarationShell
 ) -> Option<ShellId> {

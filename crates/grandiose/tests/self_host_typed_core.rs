@@ -26,12 +26,9 @@ fn repository_root() -> PathBuf {
         .to_owned()
 }
 
-fn self_host_bundle() -> SourceBundle {
+fn self_host_bundle_with_main(main: &str) -> SourceBundle {
     let root = repository_root().join("self-host/src");
-    let primary = Segment::new(
-        root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::elaboration::application) }\n",
-    );
+    let primary = Segment::new(root.join("main.glorious").to_string_lossy(), main);
     let paths = [
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
@@ -60,6 +57,18 @@ fn self_host_bundle() -> SourceBundle {
     )
 }
 
+fn self_host_bundle() -> SourceBundle {
+    self_host_bundle_with_main(
+        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::elaboration::application) }\n",
+    )
+}
+
+fn self_host_effect_bundle() -> SourceBundle {
+    self_host_bundle_with_main(
+        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::elaboration::effect_interface_application) }\n",
+    )
+}
+
 fn artifact_function_id(artifact: &grandiose_vm::Artifact, suffix: &str) -> u32 {
     artifact
         .functions
@@ -82,8 +91,9 @@ fn inspect_self_host_interface_type_metadata() {
     .unwrap();
     let function = artifact_function_id(&phases.artifact, ":interface_type_metadata");
     let verified = verify(phases.artifact).unwrap();
-    let source = fs::read_to_string(repository_root().join("target/self-host-replay/input.glorious"))
-        .unwrap();
+    let source =
+        fs::read_to_string(repository_root().join("target/self-host-replay/input.glorious"))
+            .unwrap();
     for index in [363_u64, 364] {
         let vm = Vm::with_host(
             verified.clone(),
@@ -112,6 +122,174 @@ fn push_u64(output: &mut Vec<u8>, value: u64) {
 fn push_string(output: &mut Vec<u8>, value: &str) {
     push_u32(output, value.len().try_into().unwrap());
     output.extend(value.as_bytes());
+}
+
+fn encode_constraint_span(output: &mut Vec<u8>, source: &str, clause: Option<&ast::WhereClause>) {
+    match clause {
+        Some(clause) => push_string(output, &source[clause.span.start..clause.span.end]),
+        None => push_string(output, ""),
+    }
+}
+
+fn scalar_code(name: &str) -> Option<u8> {
+    Some(match name {
+        "u8" => 1,
+        "u16" => 2,
+        "u32" => 3,
+        "u64" => 4,
+        "u128" => 5,
+        "usize" => 6,
+        "i8" => 7,
+        "i16" => 8,
+        "i32" => 9,
+        "i64" => 10,
+        "i128" => 11,
+        "isize" => 12,
+        "f32" => 13,
+        "f64" => 14,
+        "char" => 15,
+        _ => return None,
+    })
+}
+
+fn encode_effect_signature_type(
+    output: &mut Vec<u8>,
+    ty: &ast::TypeSyntax,
+    effect_generics: &[ast::GenericParam],
+    operation_generics: &[ast::GenericParam],
+) {
+    use ast::TypeSyntaxKind;
+
+    match &ty.kind {
+        TypeSyntaxKind::Path(path) if path.len() == 1 => {
+            let name = path[0].name.as_str();
+            if let Some(ordinal) = operation_generics
+                .iter()
+                .position(|parameter| parameter.name == name)
+            {
+                output.extend([8, 2]);
+                push_u32(output, ordinal.try_into().unwrap());
+            } else if let Some(ordinal) = effect_generics
+                .iter()
+                .position(|parameter| parameter.name == name)
+            {
+                output.extend([8, 1]);
+                push_u32(output, ordinal.try_into().unwrap());
+            } else if let Some(kind) = scalar_code(name) {
+                output.extend([3, kind]);
+            } else {
+                match name {
+                    "Unit" => output.push(1),
+                    "Text" => output.push(11),
+                    "Bytes" => output.push(12),
+                    other => panic!("focused effect oracle does not normalize `{other}`"),
+                }
+            }
+        }
+        TypeSyntaxKind::Tuple(elements) if elements.is_empty() => output.push(1),
+        TypeSyntaxKind::Tuple(elements) => {
+            output.push(4);
+            push_u32(output, elements.len().try_into().unwrap());
+            for element in elements {
+                encode_effect_signature_type(output, element, effect_generics, operation_generics);
+            }
+        }
+        TypeSyntaxKind::SharedReference { referent, .. } => {
+            output.push(6);
+            encode_effect_signature_type(output, referent, effect_generics, operation_generics);
+        }
+        TypeSyntaxKind::UniqueReference { referent, .. } => {
+            output.push(7);
+            encode_effect_signature_type(output, referent, effect_generics, operation_generics);
+        }
+        TypeSyntaxKind::Application {
+            constructor,
+            arguments,
+            lifetime_arguments,
+        } if constructor.simple_name() == Some("Array") && lifetime_arguments.is_empty() => {
+            assert_eq!(arguments.len(), 1);
+            output.push(9);
+            encode_effect_signature_type(
+                output,
+                &arguments[0],
+                effect_generics,
+                operation_generics,
+            );
+        }
+        TypeSyntaxKind::Never => output.push(2),
+        other => panic!("unsupported focused effect signature type: {other:?}"),
+    }
+}
+
+fn encode_rust_effect_interfaces(source: &str) -> Vec<u8> {
+    let tokens = grandiose::lexer::lex(source).unwrap();
+    let program = grandiose::parser::parse(tokens).unwrap();
+    let mut output = vec![0];
+    push_u32(&mut output, program.effects.len().try_into().unwrap());
+    for declaration in &program.effects {
+        let effect_generics = declaration
+            .generics
+            .as_ref()
+            .map_or(&[][..], |generics| generics.params.as_slice());
+        push_u32(&mut output, effect_generics.len().try_into().unwrap());
+        encode_constraint_span(&mut output, source, declaration.where_clause.as_ref());
+        push_u32(
+            &mut output,
+            declaration.operations.len().try_into().unwrap(),
+        );
+        for (ordinal, operation) in declaration.operations.iter().enumerate() {
+            let operation_generics = operation
+                .generics
+                .as_ref()
+                .map_or(&[][..], |generics| generics.params.as_slice());
+            push_string(&mut output, &operation.name);
+            push_u32(&mut output, ordinal.try_into().unwrap());
+            push_u32(&mut output, operation_generics.len().try_into().unwrap());
+            encode_constraint_span(&mut output, source, operation.where_clause.as_ref());
+            push_u32(&mut output, operation.params.len().try_into().unwrap());
+            for parameter in &operation.params {
+                encode_effect_signature_type(
+                    &mut output,
+                    &parameter.ty,
+                    effect_generics,
+                    operation_generics,
+                );
+            }
+            if operation.terminal {
+                output.push(2);
+            } else if let Some(result) = &operation.return_type {
+                encode_effect_signature_type(
+                    &mut output,
+                    result,
+                    effect_generics,
+                    operation_generics,
+                );
+            } else {
+                output.push(1);
+            }
+            output.push(u8::from(operation.terminal));
+            push_u32(
+                &mut output,
+                if operation.terminal {
+                    0
+                } else {
+                    operation.resumption_lower.try_into().unwrap()
+                },
+            );
+            match if operation.terminal {
+                Some(0)
+            } else {
+                operation.resumption_upper
+            } {
+                Some(upper) => {
+                    output.push(1);
+                    push_u32(&mut output, upper.try_into().unwrap());
+                }
+                None => output.push(0),
+            }
+        }
+    }
+    output
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -996,6 +1174,157 @@ fn rust_typed_core_oracle_classifies_stage_a_aggregates() {
             path.display()
         );
     }
+}
+
+#[test]
+fn self_hosted_effect_interfaces_match_rust_semantics_and_rejections() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_effect_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":effect_interface_bytes");
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact.clone()).unwrap();
+
+    let source = "effect Control<'a, T, E: EffectRow> where T: Marker { \
+        [0, infinity] choose<U>(left: &'a T, right: U) -> (T, U) where U: Marker; \
+        [0, 0] optional(value: Array<T>) ->; \
+        [2, 4] repeat(value: u16) -> u16; \
+        stop(reason: Text) -> !; \
+    }";
+    let expected = encode_rust_effect_interfaces(source);
+    let value = Vm::with_host(
+        verified.clone(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap()
+    .run(function, vec![Value::Text(source.to_owned().into())])
+    .unwrap();
+    let Value::Bytes(actual) = value else {
+        panic!("effect interface probe returned {value:?}");
+    };
+    assert_eq!(actual.as_ref(), expected.as_slice());
+
+    let rejected = [
+        // The Rust parser rejects a duplicate binder before validation and
+        // therefore has no stable G0113 code. The self-host header graph
+        // intentionally preserves it until semantic collection, where 101 is
+        // the precise duplicate-effect-generic classification.
+        ("effect Bad<T, T> { stop() -> ! }", None, 101_u8),
+        (
+            "effect Bad<T> { stop<T>(value: T) -> ! }",
+            Some("G0113"),
+            103_u8,
+        ),
+        (
+            "effect Bad { first() -> ! first(value: u8) -> ! }",
+            Some("G0003"),
+            102_u8,
+        ),
+        ("effect Bad { [0, 1] stop() -> ! }", Some("G0004"), 104_u8),
+        (
+            "effect Bad { [2, 1] choose() -> u8 }",
+            Some("G0005"),
+            105_u8,
+        ),
+    ];
+    for &(invalid, rust_code, self_host_code) in &rejected {
+        let tokens = grandiose::lexer::lex(invalid).unwrap();
+        match (grandiose::parser::parse(tokens), rust_code) {
+            (Err(_), None) => {}
+            (Ok(program), Some(code)) => {
+                let errors = grandiose::validate::validate(&program).unwrap_err();
+                assert!(
+                    errors
+                        .iter()
+                        .any(|error| error.code.as_deref() == Some(code)),
+                    "Rust oracle did not report {code} for {invalid:?}: {errors:#?}"
+                );
+            }
+            (Err(error), Some(code)) => {
+                panic!("Rust parser rejected before expected {code}: {error:#?}")
+            }
+            (Ok(_), None) => panic!("Rust parser unexpectedly accepted {invalid:?}"),
+        }
+        let value = Vm::with_host(
+            verified.clone(),
+            ["process.args", "fs.read", "fs.write", "diagnostic"],
+            SystemHost::new(Vec::<OsString>::new()),
+        )
+        .unwrap()
+        .run(function, vec![Value::Text(invalid.to_owned().into())])
+        .unwrap();
+        let Value::Bytes(actual) = value else {
+            panic!("effect rejection probe returned {value:?}");
+        };
+        assert_eq!(actual.as_ref(), &[self_host_code], "input: {invalid}");
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    let mut expected_all = Vec::new();
+    push_u32(&mut expected_all, (1 + rejected.len()).try_into().unwrap());
+    expected_all.extend(&expected);
+    let positive_path = directory.path().join("effect-valid.glorious");
+    fs::write(&positive_path, source).unwrap();
+    paths.push(positive_path);
+    for (index, (invalid, _, self_host_code)) in rejected.iter().enumerate() {
+        let path = directory
+            .path()
+            .join(format!("effect-error-{index}.glorious"));
+        fs::write(&path, invalid).unwrap();
+        paths.push(path);
+        expected_all.push(*self_host_code);
+    }
+
+    let vm_path = directory.path().join("effect-vm.bin");
+    let vm_args = std::iter::once(vm_path.clone().into_os_string())
+        .chain(paths.iter().map(|path| path.clone().into_os_string()))
+        .collect::<Vec<_>>();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vm_args),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(&vm_path).unwrap(), expected_all);
+
+    let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+    let llvm = directory.path().join("self-host-effect-interfaces.ll");
+    let executable = directory.path().join("self-host-effect-interfaces");
+    fs::write(&llvm, module.ir).unwrap();
+    let clang = Command::new("clang")
+        .arg(&llvm)
+        .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+        .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+        .arg("-O0")
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        clang.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clang.stderr)
+    );
+    let native_path = directory.path().join("effect-native.bin");
+    let native = Command::new(&executable)
+        .arg(&native_path)
+        .args(&paths)
+        .output()
+        .unwrap();
+    assert!(
+        native.status.success(),
+        "native effect interface status: {:?}\n{}",
+        native.status,
+        String::from_utf8_lossy(&native.stderr)
+    );
+    assert_eq!(fs::read(native_path).unwrap(), expected_all);
 }
 
 #[test]

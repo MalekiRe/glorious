@@ -25,7 +25,7 @@ effect_surface_redesign.rs	effects_control	unported	-
 effectful_generic_specialization.rs	effects_control	unported	-
 effectful_generics.rs	effects_control	unported	-
 entry_return_reborrow.rs	ownership_lifetimes	unported	-
-finite_resumption_quantities.rs	effects_control	unported	-
+finite_resumption_quantities.rs	effects_control	partial	self_host_typed_core.rs#self_hosted_effect_interfaces_match_rust_semantics_and_rejections
 first_class_callable_planning.rs	compiler_pipeline	unported	-
 float_parsing_surface.rs	compiler_pipeline	unported	-
 float_runtime_leaves.rs	compiler_pipeline	unported	-
@@ -36,7 +36,7 @@ general_first_class_callable_acceptance.rs	compiler_pipeline	unported	-
 generic_alias_shadowing.rs	types_traits_generics	unported	-
 generic_alias_trait_evidence.rs	types_traits_generics	unported	-
 generic_callable_evidence.rs	types_traits_generics	unported	-
-generic_effect_instances.rs	effects_control	unported	-
+generic_effect_instances.rs	effects_control	partial	self_host_typed_core.rs#self_hosted_effect_interfaces_match_rust_semantics_and_rejections
 generic_reference_transport.rs	types_traits_generics	unported	-
 generic_use_drop_grounding.rs	types_traits_generics	unported	-
 generic_zero_use.rs	types_traits_generics	unported	-
