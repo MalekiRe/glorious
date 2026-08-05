@@ -735,6 +735,173 @@ fn self_host_scanner_module_items_match_bootstrap() {
 }
 
 #[test]
+fn self_host_unit_external_and_inline_modules_are_structural() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+                pub mod network;
+                mod syntax {
+                    pub mod tokens;
+                    parse() -> i64 { 1 }
+                }
+                main() -> { () }
+            "#;
+            let tokens = grandiose::lexer::lex(source).unwrap();
+            let (program, diagnostics) = parser::parse_recovering(tokens.clone());
+            assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+            assert_eq!(program.modules.len(), 3);
+            assert_eq!(program.modules[0].name, "network");
+            assert_eq!(program.modules[0].visibility, grandiose::ast::Visibility::Public);
+            assert!(matches!(
+                program.modules[0].kind,
+                grandiose::ast::ModuleKind::External
+            ));
+            assert_eq!(program.modules[1].name, "syntax");
+            let grandiose::ast::ModuleKind::Inline { body } = program.modules[1].kind else {
+                panic!("syntax must be an inline module")
+            };
+            assert!(body.start < body.end);
+            assert_eq!(program.modules[2].name, "tokens");
+            assert_eq!(program.modules[2].visibility, grandiose::ast::Visibility::Public);
+            assert!(matches!(
+                program.modules[2].kind,
+                grandiose::ast::ModuleKind::External
+            ));
+            assert!(body.start <= program.modules[2].span.start);
+            assert!(program.modules[2].span.end <= body.end);
+            assert_eq!(
+                program
+                    .functions
+                    .iter()
+                    .map(|function| function.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["parse", "main"]
+            );
+            assert_eq!(program.visibility(program.functions[0].span), grandiose::ast::Visibility::Private);
+            assert_eq!(program.visibility(program.functions[1].span), grandiose::ast::Visibility::Private);
+
+            // Convert the AST’s source spans to the token ranges used by the
+            // self-host scanner. This expected value is structural, rather
+            // than a fixture of token offsets or a call to the scanner oracle.
+            let token_at_start = |offset: usize| {
+                tokens
+                    .iter()
+                    .position(|token| token.span.start == offset)
+                    .unwrap()
+            };
+            let token_at_end = |offset: usize| {
+                tokens
+                    .iter()
+                    .position(|token| token.span.end == offset)
+                    .unwrap()
+            };
+            let mut expected_shells = Vec::new();
+            for module in &program.modules {
+                let declaration = token_at_start(module.span.start);
+                let start = if module.visibility == grandiose::ast::Visibility::Public {
+                    declaration - 1
+                } else {
+                    declaration
+                };
+                let end_token = token_at_end(module.span.end);
+                let (header_end, body) = match module.kind {
+                    grandiose::ast::ModuleKind::External => (end_token, None),
+                    grandiose::ast::ModuleKind::Inline { body } => {
+                        let open = token_at_end(body.start);
+                        let close = token_at_start(body.end);
+                        (open, Some(((open + 1) as u32, close as u32)))
+                    }
+                };
+                let parent = program
+                    .modules
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, owner)| match owner.kind {
+                        grandiose::ast::ModuleKind::Inline { body }
+                            if body.start <= module.span.start
+                                && module.span.end <= body.end
+                                && owner.span != module.span => Some((body.end - body.start, index)),
+                        _ => None,
+                    })
+                    .min_by_key(|(size, _)| *size)
+                    .map(|(_, index)| index as u32);
+                expected_shells.push(Shell {
+                    kind: ShellKind::Module,
+                    public: module.visibility == grandiose::ast::Visibility::Public,
+                    name: Some(module.name.clone()),
+                    header: (
+                        start as u32,
+                        (if body.is_some() { header_end } else { header_end + 1 }) as u32,
+                    ),
+                    body,
+                    whole: (start as u32, (end_token + 1) as u32),
+                    parent,
+                });
+            }
+            for function in &program.functions {
+                let start = token_at_start(function.span.start);
+                let open = token_at_start(function.body.span.start);
+                let close = token_at_end(function.body.span.end);
+                let parent = program
+                    .modules
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, module)| match module.kind {
+                        grandiose::ast::ModuleKind::Inline { body }
+                            if body.start <= function.span.start
+                                && function.span.end <= body.end => {
+                                Some((body.end - body.start, index as u32))
+                            }
+                        _ => None,
+                    })
+                    .min_by_key(|(size, _)| *size)
+                    .map(|(_, index)| index);
+                expected_shells.push(Shell {
+                    kind: ShellKind::Function,
+                    public: program.visibility(function.span) == grandiose::ast::Visibility::Public,
+                    name: Some(function.name.clone()),
+                    header: (start as u32, open as u32),
+                    body: Some(((open + 1) as u32, close as u32)),
+                    whole: (start as u32, (close + 1) as u32),
+                    parent,
+                });
+            }
+            expected_shells.sort_by_key(|shell| shell.whole.0);
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            expected.push(0);
+            push_u32(&mut expected, expected_shells.len() as u32);
+            for shell in &expected_shells {
+                encode_shell(&mut expected, shell);
+            }
+
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("module-structure.glorious");
+            let output = directory.path().join("module-structure.bin");
+            fs::write(&input, source).unwrap();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_scanner_recovery_matches_bootstrap() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
