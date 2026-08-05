@@ -2517,21 +2517,33 @@ operation_where_end(
                 TokenKind::LParen => operation_where_end(
                     value, cursor + 1, parentheses + 1, angles, brackets
                 ),
-                TokenKind::RParen => operation_where_end(
+                TokenKind::RParen => if(parentheses == 0) {
+                    operation_where_end(
+                        value, cursor + 1, parentheses, angles, brackets
+                    )
+                } else { operation_where_end(
                     value, cursor + 1, parentheses - 1, angles, brackets
-                ),
+                ) },
                 TokenKind::Lt => operation_where_end(
                     value, cursor + 1, parentheses, angles + 1, brackets
                 ),
-                TokenKind::Gt => operation_where_end(
+                TokenKind::Gt => if(angles == 0) {
+                    operation_where_end(
+                        value, cursor + 1, parentheses, angles, brackets
+                    )
+                } else { operation_where_end(
                     value, cursor + 1, parentheses, angles - 1, brackets
-                ),
+                ) },
                 TokenKind::LBracket => operation_where_end(
                     value, cursor + 1, parentheses, angles, brackets + 1
                 ),
-                TokenKind::RBracket => operation_where_end(
+                TokenKind::RBracket => if(brackets == 0) {
+                    operation_where_end(
+                        value, cursor + 1, parentheses, angles, brackets
+                    )
+                } else { operation_where_end(
                     value, cursor + 1, parentheses, angles, brackets - 1
-                ),
+                ) },
                 _ => operation_where_end(
                     value, cursor + 1, parentheses, angles, brackets
                 )

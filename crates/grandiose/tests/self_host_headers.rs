@@ -295,6 +295,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "pub effect Control<'a, T, E: EffectRow> where T: Marker { [0, infinity] choose<U>(input: &'a T, fallback: U) -> Result<T, U> where U: Marker; [2, 4] repeat(value: T) -> T; stop(reason: String) -> !; unit() ->; implicit() }",
         "effect Adjacent { first() second(value: u8) -> u8 third() -> ! }",
         "effect AdjacentWhere<T> { first(value: T) -> T where T: Marker second<U>(value: U) -> U }",
+        "effect GenericWhere<T> { first<F, U>(value: T, function: F) -> U where Vec<Result<T, U>>: Marker, F: Fn<(T), Output=U> next<V>(value: V) -> V }",
         "effect BadQuantity { [0 1] choose() -> u8; }",
         "effect BadOperationWhere { choose() -> u8 where; }",
     ];
@@ -318,6 +319,21 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     fs::write(&path, deep).unwrap();
     paths.push(path);
     paths
+}
+
+#[test]
+fn effect_where_unmatched_closers_are_rejected_before_header_parity() {
+    for source in [
+        "effect Bad { first<T>() where T: Marker) second() }",
+        "effect Bad { first<T>() where T: Marker> second() }",
+        "effect Bad { first<T>() where T: Marker] second() }",
+    ] {
+        let tokens = grandiose::lexer::lex(source).unwrap();
+        assert!(
+            grandiose::parser::parse(tokens).is_err(),
+            "the bootstrap parser unexpectedly accepted `{source}`"
+        );
+    }
 }
 
 #[test]
