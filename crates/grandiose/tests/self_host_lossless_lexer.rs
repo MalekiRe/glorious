@@ -277,13 +277,11 @@ fn assert_bootstrap_cases(encoded: &[u8]) {
     assert_eq!(sources[6][..value.start].encode_utf16().count(), 6);
 }
 
-#[test]
-fn self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap() {
+fn assert_self_host_matches_bootstrap(sources: Vec<&'static str>) {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             let directory = tempfile::tempdir().unwrap();
-            let sources = fixtures();
             let paths = sources
                 .iter()
                 .enumerate()
@@ -295,10 +293,9 @@ fn self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap() {
                 .collect::<Vec<_>>();
             let mut expected = Vec::new();
             push_u32(&mut expected, sources.len().try_into().unwrap());
-            for source in &sources {
+            for source in sources {
                 encode_rust(&mut expected, source);
             }
-            assert_bootstrap_cases(&expected);
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
@@ -322,7 +319,6 @@ fn self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             let vm_output = fs::read(vm_path).unwrap();
             assert_eq!(vm_output, expected, "VM lossless lexer diverged");
-            assert_bootstrap_cases(&vm_output);
 
             let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
             let llvm = directory.path().join("self-host-lossless.ll");
@@ -356,9 +352,26 @@ fn self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap() {
             );
             let native_output = fs::read(native_path).unwrap();
             assert_eq!(native_output, expected, "native lossless lexer diverged");
-            assert_bootstrap_cases(&native_output);
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap() {
+    let sources = fixtures();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, sources.len().try_into().unwrap());
+    for source in &sources {
+        encode_rust(&mut expected, source);
+    }
+    assert_bootstrap_cases(&expected);
+    assert_self_host_matches_bootstrap(sources);
+}
+
+#[test]
+fn self_host_lossless_lexer_malformed_delimiter_spans_match_bootstrap() {
+    let sources = vec!["prefix /* open", "prefix \"open", "prefix b\"open"];
+    assert_self_host_matches_bootstrap(sources);
 }
