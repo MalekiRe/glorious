@@ -2448,6 +2448,22 @@ operation_end(value: &Parser) -> usize {
     operation_end_from(value, value.tokens.position)
 }
 
+parse_operation_where_clause(
+    value: &mut Parser,
+    related: usize
+) -> Result<HeaderTokenRange, HeaderError> {
+    let start = value.tokens.position;
+    if(start < value.tokens.limit) {
+        handle super::lexer::token_kind_at(&value.source, start) {
+            TokenKind::Keyword(super::lexer::Keyword::Where) => {
+                let end = operation_end(&*value);
+                parse_bounded_where_clause(value, related, end)
+            },
+            _ => Result::Ok(token_range(start, start))
+        }
+    } else { Result::Ok(token_range(start, start)) }
+}
+
 operation_end_from(value: &Parser, cursor: usize) -> usize {
     if(cursor < value.tokens.limit) {
         handle super::lexer::token_kind_at(&value.source, cursor) {
@@ -2491,14 +2507,11 @@ parse_effect_operations(
                 }
             }
         } else { None };
-        let where_end = operation_end(&*value);
         let where_tokens = try(
-            parse_bounded_where_clause(value, related, where_end),
+            parse_operation_where_clause(value, related),
             @parse_effect_operations
         );
-        if(value.tokens.position < value.tokens.limit) {
-            value.tokens.position = value.tokens.position + 1;
-        } else { () };
+        eat_token(value, TokenPattern::Semicolon);
         let end = value.tokens.position;
         Vec::push(
             &mut operations.values,

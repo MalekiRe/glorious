@@ -293,6 +293,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "bad(value: T) trailing { () }",
         "bad<T>(value: T) -> T where { value }",
         "pub effect Control<'a, T, E: EffectRow> where T: Marker { [0, infinity] choose<U>(input: &'a T, fallback: U) -> Result<T, U> where U: Marker; [2, 4] repeat(value: T) -> T; stop(reason: String) -> !; unit() ->; implicit() }",
+        "effect Adjacent { first() second(value: u8) -> u8 third() -> ! }",
         "effect BadQuantity { [0 1] choose() -> u8; }",
         "effect BadOperationWhere { choose() -> u8 where; }",
     ];
