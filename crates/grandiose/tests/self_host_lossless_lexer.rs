@@ -278,7 +278,7 @@ fn assert_bootstrap_cases(encoded: &[u8]) {
 }
 
 #[test]
-fn self_hosted_lossless_lexer_covers_bootstrap_contract_in_vm_and_native() {
+fn self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
