@@ -563,6 +563,69 @@ fn encode_rust_grouping(output: &mut Vec<u8>, source: &str) {
     output.extend(encoded);
 }
 
+#[test]
+fn self_host_body_parser_arbitrary_sources_terminate() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let mut source = String::new();
+            for index in 0..50 {
+                let name = format!("case_{index}");
+                let nesting = "name(".repeat(16);
+                let body = format!("{nesting}name{}", ")".repeat(16));
+                source.push_str(&format!("{name}() {{ {body} }}\n"));
+            }
+            let input = directory.path().join("packed-arbitrary.glorious");
+            let vm_path = directory.path().join("vm.bin");
+            fs::write(&input, &source).unwrap();
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, &source);
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![vm_path.clone().into_os_string(), input.clone().into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM arbitrary body corpus diverged");
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("self-host-body-arbitrary.ll");
+            let executable = directory.path().join("self-host-body-arbitrary");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let native_path = directory.path().join("native.bin");
+            let native = Command::new(&executable)
+                .arg(&native_path)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+            assert_eq!(fs::read(native_path).unwrap(), expected, "native arbitrary body corpus diverged");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 fn corpus(directory: &Path) -> Vec<PathBuf> {
     let valid = [
         "probe_ident() { alpha }",

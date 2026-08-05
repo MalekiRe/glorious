@@ -3765,7 +3765,7 @@ handler_clause_brace(
                     if((kind is TokenKind::LParen)
                         or { (kind is TokenKind::LBrace)
                         or { kind is TokenKind::LBracket } }) {
-                        depth + 1
+                        if(depth < 65535) { depth + 1 } else { depth }
                     } else {
                         if((kind is TokenKind::RParen)
                             or { (kind is TokenKind::RBrace)
