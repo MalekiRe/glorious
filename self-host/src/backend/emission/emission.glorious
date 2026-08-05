@@ -21,6 +21,13 @@ enum Opcode {
     Jump,
     Switch,
     Call,
+    MakeHandler,
+    MakeHandlerShared,
+    Handle,
+    Perform,
+    Resume,
+    TailResume,
+    Cancel,
     Return
 }
 
@@ -47,6 +54,13 @@ opcode_spec(opcode: Opcode) -> OpcodeSpec {
         Opcode::Jump => OpcodeSpec { code: 32, operand_words: 1 },
         Opcode::Switch => OpcodeSpec { code: 33, operand_words: 4 },
         Opcode::Call => OpcodeSpec { code: 34, operand_words: 4 },
+        Opcode::MakeHandler => OpcodeSpec { code: 16, operand_words: 4 },
+        Opcode::MakeHandlerShared => OpcodeSpec { code: 71, operand_words: 6 },
+        Opcode::Handle => OpcodeSpec { code: 64, operand_words: 5 },
+        Opcode::Perform => OpcodeSpec { code: 65, operand_words: 5 },
+        Opcode::Resume => OpcodeSpec { code: 66, operand_words: 4 },
+        Opcode::TailResume => OpcodeSpec { code: 72, operand_words: 3 },
+        Opcode::Cancel => OpcodeSpec { code: 67, operand_words: 2 },
         Opcode::Return => OpcodeSpec { code: 38, operand_words: 1 }
     }
 }
@@ -185,7 +199,45 @@ pub enum EmissionError {
     // are remapped across dead-function elimination. MirType construction
     // itself cannot produce an unsupported semantic kind.
     UnsupportedType(super::lowering::MirTypeId, u8),
+    InvalidProtocol(u32, ProtocolValidationError),
+    InvalidHandlerDefinition(u32, HandlerValidationError),
+    InvalidEffectInstruction(
+        super::lowering::MirFunctionId,
+        u32,
+        EffectInstructionValidationError
+    ),
     ArtifactWrite(super::artifact::ArtifactWriteError)
+}
+
+pub enum ProtocolValidationError {
+    CanonicalOrder,
+    Signature,
+    ResultType,
+    TerminalContract,
+    Quantity,
+    TypeArgument
+}
+
+pub enum HandlerValidationError {
+    ResultType,
+    UnknownProtocol,
+    UnknownOperation,
+    DuplicateClause,
+    CallableSignature,
+    TerminalResumption,
+    ResumptionTypeUnavailable
+}
+
+pub enum EffectInstructionValidationError {
+    UnknownHandler,
+    ClauseCount,
+    SharedClauseFunctions,
+    UnknownProtocol,
+    UnknownOperation,
+    PerformContract,
+    TailResumeControl,
+    ReceiverMode,
+    FunctionEffectRow
 }
 
 pub enum EmissionName {
@@ -307,6 +359,44 @@ collect_names(
             )
         )
     })
+}
+
+collect_operation_names(
+    protocol: &super::lowering::MirProtocol,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    for_range(Range::new(
+        index,
+        super::lowering::mir_protocol_operation_count(protocol)
+    ), { current =>
+        Vec::push(
+            &mut *output,
+            *super::lowering::mir_operation_name(
+                super::lowering::mir_protocol_operation_at(protocol, current)
+            )
+        )
+    })
+}
+
+collect_protocol_names(
+    program: &super::lowering::MirProgram,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    for_range(Range::new(
+        index,
+        super::lowering::mir_program_protocol_count(program)
+    ), { current => {
+        let protocol = super::lowering::mir_program_protocol_at(
+            program, Id::from_u32(checked_u32(current))
+        );
+        Vec::push(
+            &mut *output,
+            *super::lowering::mir_protocol_display_name(protocol)
+        );
+        collect_operation_names(protocol, 0, output)
+    } })
 }
 
 host_import_count(program: &super::lowering::MirProgram) -> u32 {
@@ -870,9 +960,127 @@ signature_key(
             super::lowering::mir_function_result(function)
         )
     );
-    ByteBuf::write_u32_le(&mut output, 0);
+    ByteBuf::write_u32_le(
+        &mut output,
+        checked_u32(
+            super::lowering::mir_function_outward_protocol_count(function)
+        )
+    );
     append_parameter_types(function, 0, &mut output);
+    append_function_outward_protocols(function, 0, &mut output);
     ByteBuf::finish(output)
+}
+
+mir_signature_key(value: &super::lowering::MirSignature) -> Bytes {
+    let output = ByteBuf::new();
+    ByteBuf::write_u32_le(
+        &mut output,
+        checked_u32(super::lowering::mir_signature_parameter_count(value))
+    );
+    ByteBuf::write_u32_le(
+        &mut output,
+        super::lowering::artifact_type_raw(
+            super::lowering::mir_signature_result(value)
+        )
+    );
+    ByteBuf::write_u32_le(
+        &mut output,
+        checked_u32(super::lowering::mir_signature_outward_count(value))
+    );
+    append_mir_signature_parameters(value, 0, &mut output);
+    append_mir_signature_outward(value, 0, &mut output);
+    ByteBuf::finish(output)
+}
+
+append_mir_signature_parameters(
+    value: &super::lowering::MirSignature,
+    index: usize,
+    output: &mut ByteBuf
+) {
+    if(index < super::lowering::mir_signature_parameter_count(value)) {
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::artifact_type_raw(
+                super::lowering::mir_signature_parameter_at(value, index)
+            )
+        );
+        append_mir_signature_parameters(value, index + 1, output)
+    } else { () }
+}
+
+append_mir_signature_outward(
+    value: &super::lowering::MirSignature,
+    index: usize,
+    output: &mut ByteBuf
+) {
+    if(index < super::lowering::mir_signature_outward_count(value)) {
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::mir_signature_outward_at(value, index)
+        );
+        append_mir_signature_outward(value, index + 1, output)
+    } else { () }
+}
+
+collect_protocol_signatures(
+    program: &super::lowering::MirProgram,
+    index: usize,
+    output: &mut Vec<Bytes>
+) {
+    for_range(Range::new(
+        index,
+        super::lowering::mir_program_protocol_count(program)
+    ), { protocol_index => {
+        let protocol = super::lowering::mir_program_protocol_at(
+            program, Id::from_u32(checked_u32(protocol_index))
+        );
+        for_range(Range::new(
+            0,
+            super::lowering::mir_protocol_operation_count(protocol)
+        ), { operation_index =>
+            Vec::push(
+                &mut *output,
+                mir_signature_key(
+                    super::lowering::mir_operation_payload_signature(
+                        super::lowering::mir_protocol_operation_at(
+                            protocol, operation_index
+                        )
+                    )
+                )
+            )
+        })
+    } })
+}
+
+collect_handler_signatures(
+    program: &super::lowering::MirProgram,
+    index: usize,
+    output: &mut Vec<Bytes>
+) {
+    for_range(Range::new(
+        index,
+        super::lowering::mir_program_handler_definition_count(program)
+    ), { definition_index => {
+        let definition =
+            super::lowering::mir_program_handler_definition_at(
+                program, Id::from_u32(checked_u32(definition_index))
+            );
+        for_range(Range::new(
+            0,
+            super::lowering::mir_handler_definition_clause_count(definition)
+        ), { clause_index =>
+            Vec::push(
+                &mut *output,
+                mir_signature_key(
+                    super::lowering::mir_handler_clause_signature(
+                        super::lowering::mir_handler_definition_clause_at(
+                            definition, clause_index
+                        )
+                    )
+                )
+            )
+        })
+    } })
 }
 
 append_parameter_types(
@@ -892,6 +1100,21 @@ append_parameter_types(
             )
         )
     })
+}
+
+append_function_outward_protocols(
+    function: &super::lowering::MirFunction,
+    index: usize,
+    output: &mut ByteBuf
+) {
+    if(index
+        < super::lowering::mir_function_outward_protocol_count(function)) {
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::mir_function_outward_protocol_at(function, index)
+        );
+        append_function_outward_protocols(function, index + 1, output)
+    } else { () }
 }
 
 require_signature(
@@ -922,7 +1145,9 @@ collect_signatures(
             )
         );
         Vec::push(&mut *output, key)
-    } })
+    } });
+    collect_protocol_signatures(program, 0, output);
+    collect_handler_signatures(program, 0, output)
 }
 
 host_role_at(index: usize) -> u32 {
@@ -1040,6 +1265,25 @@ append_arguments(
                     arguments,
                     current
                 )
+            )
+        )
+    })
+}
+
+append_functions(
+    functions: &super::lowering::MirFunctionPack,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) {
+    let count = super::lowering::mir_function_pack_count(functions);
+    for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current =>
+        Vec::push(
+            &mut *output,
+            super::lowering::mir_function_raw(
+                super::lowering::mir_function_pack_at(functions, current)
             )
         )
     })
@@ -1360,6 +1604,150 @@ write_instruction(
             super::lowering::register_pack_count(arguments)
         );
         Result::Ok(())
+    } else if(*instruction is MirInstruction::MakeHandler(
+        target,
+        definition,
+        clauses_id
+    )) {
+        let clauses = super::lowering::mir_function_register_pack(
+            mir_function, clauses_id
+        );
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(clauses, 0, operands);
+        write_opcode(&mut *code, Opcode::MakeHandler);
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(&mut *code, Id::to_u32(definition));
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(
+            code, super::lowering::register_pack_count(clauses)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::MakeHandlerShared(
+        target,
+        definition,
+        functions_id,
+        captures_id
+    )) {
+        let functions = super::lowering::mir_function_function_pack(
+            mir_function, functions_id
+        );
+        let captures = super::lowering::mir_function_register_pack(
+            mir_function, captures_id
+        );
+        let function_start = checked_u32(Vec::len(&*operands));
+        append_functions(functions, 0, operands);
+        let capture_start = checked_u32(Vec::len(&*operands));
+        append_arguments(captures, 0, operands);
+        write_opcode(&mut *code, Opcode::MakeHandlerShared);
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(&mut *code, Id::to_u32(definition));
+        ByteBuf::write_u32_le(&mut *code, function_start);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::mir_function_pack_count(functions)
+        );
+        ByteBuf::write_u32_le(&mut *code, capture_start);
+        ByteBuf::write_u32_le(
+            code, super::lowering::register_pack_count(captures)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Handle(
+        target,
+        handler,
+        body,
+        arguments_id
+    )) {
+        let arguments = super::lowering::mir_function_register_pack(
+            mir_function, arguments_id
+        );
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(arguments, 0, operands);
+        write_opcode(&mut *code, Opcode::Handle);
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(handler)
+        );
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(body)
+        );
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(
+            code, super::lowering::register_pack_count(arguments)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Perform(
+        target,
+        protocol,
+        operation,
+        payloads_id
+    )) {
+        let payloads = super::lowering::mir_function_register_pack(
+            mir_function, payloads_id
+        );
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(payloads, 0, operands);
+        write_opcode(&mut *code, Opcode::Perform);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            handle target {
+                None => super::artifact::absent_id(),
+                Option::Some(found) => super::lowering::register_raw(found)
+            }
+        );
+        ByteBuf::write_u32_le(&mut *code, Id::to_u32(protocol));
+        ByteBuf::write_u32_le(&mut *code, operation);
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(
+            code, super::lowering::register_pack_count(payloads)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Resume(
+        target,
+        resumption,
+        receiver_mode,
+        resumed
+    )) {
+        write_opcode(&mut *code, Opcode::Resume);
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(resumption)
+        );
+        ByteBuf::write_u32_le(&mut *code, receiver_mode);
+        ByteBuf::write_u32_le(
+            code, super::lowering::register_raw(resumed)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::TailResume(
+        resumption,
+        receiver_mode,
+        resumed
+    )) {
+        write_opcode(&mut *code, Opcode::TailResume);
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(resumption)
+        );
+        ByteBuf::write_u32_le(&mut *code, receiver_mode);
+        ByteBuf::write_u32_le(
+            code, super::lowering::register_raw(resumed)
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Cancel(target, resumption)) {
+        write_opcode(&mut *code, Opcode::Cancel);
+        ByteBuf::write_u32_le(
+            &mut *code, super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            code, super::lowering::register_raw(resumption)
+        );
+        Result::Ok(())
     } else if(*instruction is MirInstruction::Return(source)) {
         write_opcode(&mut *code, Opcode::Return);
         ByteBuf::write_u32_le(
@@ -1603,6 +1991,7 @@ new_emission_context<'a>(
 ) -> EmissionContext<'a> {
     let name_values = Vec::new();
     collect_names(program, 0, &mut name_values);
+    collect_protocol_names(program, 0, &mut name_values);
     collect_type_names(program, 0, &mut name_values);
     collect_host_names(program, &mut name_values);
     let signature_values = Vec::new();
@@ -1661,11 +2050,870 @@ write_context_functions<'a>(
     )
 }
 
+canonical_string_position(
+    names: &CanonicalPool<String>,
+    key: &String,
+    index: usize
+) -> u32 {
+    if(*Vec::index(&names.values, index) == *key) {
+        checked_u32(index)
+    } else {
+        canonical_string_position(names, key, index + 1)
+    }
+}
+
+// These record writers are intentionally direct recursion rather than
+// `for_range` callbacks. The current bootstrap ownership/control-fusion path
+// mis-models a mutable ByteBuf captured by the equivalent callback and emits a
+// duplicate Drop after the borrow is transferred. Keep this boundary local;
+// once mutable-capture fusion is fixed, control-plan tests may migrate it back
+// to the standard traversal kernel without changing the wire schema.
+write_protocol_type_arguments(
+    protocol: &super::lowering::MirProtocol,
+    index: usize,
+    payload: &mut ByteBuf
+) {
+    if(index < super::lowering::mir_protocol_type_argument_count(protocol)) {
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            super::lowering::artifact_type_raw(
+                super::lowering::mir_protocol_type_argument_at(protocol, index)
+            )
+        );
+        write_protocol_type_arguments(protocol, index + 1, payload)
+    } else { () }
+}
+
+write_protocol_operations(
+    protocol: &super::lowering::MirProtocol,
+    index: usize,
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
+    payload: &mut ByteBuf
+) {
+    if(index < super::lowering::mir_protocol_operation_count(protocol)) {
+        let operation = super::lowering::mir_protocol_operation_at(
+            protocol, index
+        );
+        let operation_name = canonical_string_position(
+            names,
+            super::lowering::mir_operation_name(operation),
+            0
+        );
+        let signature = handle canonical_bytes_id(
+            signatures,
+            &mir_signature_key(
+                super::lowering::mir_operation_payload_signature(operation)
+            )
+        ) {
+            None => unreachable(),
+            Option::Some(found) => found
+        };
+        ByteBuf::write_u32_le(&mut *payload, operation_name);
+        ByteBuf::write_u32_le(&mut *payload, signature);
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            super::lowering::artifact_type_raw(
+                super::lowering::mir_operation_result(operation)
+            )
+        );
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            super::lowering::mir_operation_resumption_lower(operation)
+        );
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            handle super::lowering::mir_operation_resumption_upper(operation) {
+                None => super::artifact::absent_id(),
+                Option::Some(found) => found
+            }
+        );
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            if(super::lowering::mir_operation_terminal(operation)) { 1 } else { 0 }
+        );
+        write_protocol_operations(
+            protocol, index + 1, names, signatures, payload
+        )
+    } else { () }
+}
+
+protocol_record(
+    protocol: &super::lowering::MirProtocol,
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>
+) -> super::artifact::Record {
+    let payload = ByteBuf::new();
+    let name = canonical_string_position(
+        names,
+        super::lowering::mir_protocol_display_name(protocol),
+        0
+    );
+    ByteBuf::write_u32_le(&mut payload, name);
+    ByteBuf::write_u32_le(
+        &mut payload,
+        checked_u32(super::lowering::mir_protocol_type_argument_count(protocol))
+    );
+    write_protocol_type_arguments(protocol, 0, &mut payload);
+    ByteBuf::write_u32_le(
+        &mut payload,
+        checked_u32(super::lowering::mir_protocol_operation_count(protocol))
+    );
+    write_protocol_operations(protocol, 0, names, signatures, &mut payload);
+    super::artifact::record(0, 0, ByteBuf::finish(payload))
+}
+
+protocol_records(
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
+    output: &mut Vec<super::artifact::Record>
+) {
+    for_range(Range::new(
+        0,
+        super::lowering::mir_program_protocol_count(program)
+    ), { current =>
+        Vec::push(
+            &mut *output,
+            protocol_record(
+                super::lowering::mir_program_protocol_at(
+                    program, Id::from_u32(checked_u32(current))
+                ),
+                names,
+                signatures
+            )
+        )
+    })
+}
+
+handler_definition_record(
+    definition: &super::lowering::MirHandlerDefinition,
+    signatures: &CanonicalPool<Bytes>
+) -> super::artifact::Record {
+    let payload = ByteBuf::new();
+    ByteBuf::write_u32_le(
+        &mut payload,
+        super::lowering::artifact_type_raw(
+            super::lowering::mir_handler_definition_result(definition)
+        )
+    );
+    ByteBuf::write_u32_le(
+        &mut payload,
+        checked_u32(
+            super::lowering::mir_handler_definition_clause_count(definition)
+        )
+    );
+    write_handler_definition_clauses(
+        definition, 0, signatures, &mut payload
+    );
+    super::artifact::record(
+        0,
+        if(super::lowering::mir_handler_definition_partial(definition)) {
+            1
+        } else { 0 },
+        ByteBuf::finish(payload)
+    )
+}
+
+write_handler_definition_clauses(
+    definition: &super::lowering::MirHandlerDefinition,
+    index: usize,
+    signatures: &CanonicalPool<Bytes>,
+    payload: &mut ByteBuf
+) {
+    if(index < super::lowering::mir_handler_definition_clause_count(definition)) {
+        let clause = super::lowering::mir_handler_definition_clause_at(
+            definition, index
+        );
+        let signature = handle canonical_bytes_id(
+            signatures,
+            &mir_signature_key(
+                super::lowering::mir_handler_clause_signature(clause)
+            )
+        ) {
+            None => unreachable(),
+            Option::Some(found) => found
+        };
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            Id::to_u32(super::lowering::mir_handler_clause_protocol(clause))
+        );
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            super::lowering::mir_handler_clause_operation(clause)
+        );
+        ByteBuf::write_u32_le(&mut *payload, signature);
+        ByteBuf::write_u32_le(
+            &mut *payload,
+            handle super::lowering::mir_handler_clause_resumption_type(clause) {
+                None => super::artifact::absent_id(),
+                Option::Some(found) => super::lowering::artifact_type_raw(found)
+            }
+        );
+        write_handler_definition_clauses(
+            definition, index + 1, signatures, payload
+        )
+    } else { () }
+}
+
+handler_definition_records(
+    program: &super::lowering::MirProgram,
+    signatures: &CanonicalPool<Bytes>,
+    output: &mut Vec<super::artifact::Record>
+) {
+    for_range(Range::new(
+        0,
+        super::lowering::mir_program_handler_definition_count(program)
+    ), { current =>
+        Vec::push(
+            &mut *output,
+            handler_definition_record(
+                super::lowering::mir_program_handler_definition_at(
+                    program, Id::from_u32(checked_u32(current))
+                ),
+                signatures
+            )
+        )
+    })
+}
+
+function_has_effect_instruction(
+    function: &super::lowering::MirFunction,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_function_instruction_count(function)) {
+        let instruction = super::lowering::mir_function_instruction_at(
+            function, index
+        );
+        let found = handle *instruction {
+            MirInstruction::MakeHandler(_, _, _) => true,
+            MirInstruction::MakeHandlerShared(_, _, _, _) => true,
+            MirInstruction::Handle(_, _, _, _) => true,
+            MirInstruction::Perform(_, _, _, _) => true,
+            MirInstruction::Resume(_, _, _, _) => true,
+            MirInstruction::TailResume(_, _, _) => true,
+            MirInstruction::Cancel(_, _) => true,
+            _ => false
+        };
+        if(found) { true } else {
+            function_has_effect_instruction(function, index + 1)
+        }
+    } else { false }
+}
+
+program_has_effect_instruction(
+    program: &super::lowering::MirProgram,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_program_function_count(program)) {
+        if(function_has_effect_instruction(
+            super::lowering::mir_program_function_at(
+                program,
+                super::lowering::mir_function_id_from_usize(index)
+            ),
+            0
+        )) { true } else {
+            program_has_effect_instruction(program, index + 1)
+        }
+    } else { false }
+}
+
+valid_artifact_type(
+    program: &super::lowering::MirProgram,
+    value: super::lowering::ArtifactTypeId
+) -> Bool {
+    usize_from_u32(super::lowering::artifact_type_raw(value))
+        < 19 + super::lowering::mir_program_type_count(program)
+}
+
+valid_signature_row(
+    program: &super::lowering::MirProgram,
+    signature: &super::lowering::MirSignature,
+    index: usize,
+    previous: Option<u32>
+) -> Bool {
+    if(index < super::lowering::mir_signature_outward_count(signature)) {
+        let protocol = super::lowering::mir_signature_outward_at(
+            signature, index
+        );
+        if(usize_from_u32(protocol)
+            >= super::lowering::mir_program_protocol_count(program)) {
+            false
+        } else {
+            handle previous {
+                None => valid_signature_row(
+                    program, signature, index + 1, Option::Some(protocol)
+                ),
+                Option::Some(found) => if(found < protocol) {
+                    valid_signature_row(
+                        program, signature, index + 1,
+                        Option::Some(protocol)
+                    )
+                } else { false }
+            }
+        }
+    } else { true }
+}
+
+valid_signature_types(
+    program: &super::lowering::MirProgram,
+    signature: &super::lowering::MirSignature,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_signature_parameter_count(signature)) {
+        if(valid_artifact_type(
+            program,
+            super::lowering::mir_signature_parameter_at(signature, index)
+        )) {
+            valid_signature_types(program, signature, index + 1)
+        } else { false }
+    } else {
+        valid_artifact_type(
+            program, super::lowering::mir_signature_result(signature)
+        ) and { valid_signature_row(program, signature, 0, None) }
+    }
+}
+
+type_arguments_less(
+    left: &super::lowering::MirProtocol,
+    right: &super::lowering::MirProtocol,
+    index: usize
+) -> Bool {
+    let left_count = super::lowering::mir_protocol_type_argument_count(left);
+    let right_count = super::lowering::mir_protocol_type_argument_count(right);
+    if(index < left_count and { index < right_count }) {
+        let left_value = super::lowering::artifact_type_raw(
+            super::lowering::mir_protocol_type_argument_at(left, index)
+        );
+        let right_value = super::lowering::artifact_type_raw(
+            super::lowering::mir_protocol_type_argument_at(right, index)
+        );
+        if(left_value < right_value) { true } else if(left_value == right_value) {
+            type_arguments_less(left, right, index + 1)
+        } else { false }
+    } else { left_count < right_count }
+}
+
+string_bytes_order(
+    left: &Bytes,
+    right: &Bytes,
+    index: usize
+) -> u32 {
+    if(index < Bytes::len(left) and { index < Bytes::len(right) }) {
+        let left_byte = handle Bytes::get(left, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => wrapping_convert_to_u32(found)
+        };
+        let right_byte = handle Bytes::get(right, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => wrapping_convert_to_u32(found)
+        };
+        if(left_byte < right_byte) { 1 } else if(left_byte == right_byte) {
+            string_bytes_order(left, right, index + 1)
+        } else { 2 }
+    } else if(Bytes::len(left) < Bytes::len(right)) {
+        1
+    } else if(Bytes::len(left) == Bytes::len(right)) { 0 } else { 2 }
+}
+
+protocol_identity_less(
+    left: &super::lowering::MirProtocol,
+    right: &super::lowering::MirProtocol
+) -> Bool {
+    let order = string_bytes_order(
+        &String::as_bytes(super::lowering::mir_protocol_display_name(left)),
+        &String::as_bytes(super::lowering::mir_protocol_display_name(right)),
+        0
+    );
+    if(order == 1) { true } else if(order == 0) {
+        type_arguments_less(left, right, 0)
+    } else { false }
+}
+
+validate_protocol_operation(
+    program: &super::lowering::MirProgram,
+    protocol: u32,
+    operation: u32
+) -> Result<(), EmissionError> {
+    let value = super::lowering::mir_protocol_operation_at(
+        super::lowering::mir_program_protocol_at(
+            program, Id::from_u32(protocol)
+        ),
+        usize_from_u32(operation)
+    );
+    let signature = super::lowering::mir_operation_payload_signature(value);
+    if(not(valid_signature_types(program, signature, 0))) {
+        Result::Err(EmissionError::InvalidProtocol(protocol, ProtocolValidationError::Signature))
+    } else if(not(valid_artifact_type(
+        program, super::lowering::mir_operation_result(value)
+    ))) {
+        Result::Err(EmissionError::InvalidProtocol(protocol, ProtocolValidationError::ResultType))
+    } else {
+        let lower = super::lowering::mir_operation_resumption_lower(value);
+        let upper = super::lowering::mir_operation_resumption_upper(value);
+        let terminal = super::lowering::mir_operation_terminal(value);
+        if(terminal) {
+            if(
+                super::lowering::artifact_type_raw(
+                    super::lowering::mir_operation_result(value)
+                ) == 1
+                and { lower == 0 }
+                and { upper == Option::Some(0) }
+            ) { Result::Ok(()) } else {
+                Result::Err(EmissionError::InvalidProtocol(protocol, ProtocolValidationError::TerminalContract))
+            }
+        } else {
+            handle upper {
+                None => Result::Ok(()),
+                Option::Some(found) => if(lower <= found) {
+                    Result::Ok(())
+                } else {
+                    Result::Err(EmissionError::InvalidProtocol(protocol, ProtocolValidationError::Quantity))
+                }
+            }
+        }
+    }
+}
+
+validate_protocol_operations(
+    program: &super::lowering::MirProgram,
+    protocol: u32,
+    index: usize
+) -> Result<(), EmissionError> {
+    let value = super::lowering::mir_program_protocol_at(
+        program, Id::from_u32(protocol)
+    );
+    try_for_range(Range::new(
+        index,
+        super::lowering::mir_protocol_operation_count(value)
+    ), { current => validate_protocol_operation(
+        program, protocol, checked_u32(current)
+    ) })
+}
+
+validate_protocols(
+    program: &super::lowering::MirProgram,
+    index: usize
+) -> Result<(), EmissionError> {
+    try_for_range(Range::new(
+        index,
+        super::lowering::mir_program_protocol_count(program)
+    ), { current => {
+        let id = checked_u32(current);
+        let protocol = super::lowering::mir_program_protocol_at(
+            program, Id::from_u32(id)
+        );
+        if(current > 0 and {
+            not(protocol_identity_less(
+                super::lowering::mir_program_protocol_at(
+                    program, Id::from_u32(id - 1)
+                ),
+                protocol
+            ))
+        }) {
+            Result::Err(EmissionError::InvalidProtocol(id, ProtocolValidationError::CanonicalOrder))
+        } else {
+            let bad_type = find_range(Range::new(
+                0,
+                super::lowering::mir_protocol_type_argument_count(protocol)
+            ), { argument => not(valid_artifact_type(
+                program,
+                super::lowering::mir_protocol_type_argument_at(
+                    protocol, argument
+                )
+            )) });
+            handle bad_type {
+                Option::Some(_) =>
+                    Result::Err(EmissionError::InvalidProtocol(id, ProtocolValidationError::TypeArgument)),
+                None => validate_protocol_operations(program, id, 0)
+            }
+        }
+    } })
+}
+
+same_signature_parameter_prefix(
+    left: &super::lowering::MirSignature,
+    right: &super::lowering::MirSignature,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_signature_parameter_count(left)) {
+        if(
+            super::lowering::mir_signature_parameter_at(left, index)
+                == super::lowering::mir_signature_parameter_at(right, index)
+        ) {
+            same_signature_parameter_prefix(left, right, index + 1)
+        } else { false }
+    } else { true }
+}
+
+handler_has_prior_target(
+    definition: &super::lowering::MirHandlerDefinition,
+    clause: &super::lowering::MirHandlerClause,
+    index: usize,
+    end: usize
+) -> Bool {
+    if(index < end) {
+        let candidate = super::lowering::mir_handler_definition_clause_at(
+            definition, index
+        );
+        if(
+            super::lowering::mir_handler_clause_protocol(candidate)
+                == super::lowering::mir_handler_clause_protocol(clause)
+            and {
+                super::lowering::mir_handler_clause_operation(candidate)
+                    == super::lowering::mir_handler_clause_operation(clause)
+            }
+        ) { true } else {
+            handler_has_prior_target(definition, clause, index + 1, end)
+        }
+    } else { false }
+}
+
+validate_handler_clause(
+    program: &super::lowering::MirProgram,
+    definition_id: u32,
+    clause_index: usize
+) -> Result<(), EmissionError> {
+    let definition = super::lowering::mir_program_handler_definition_at(
+        program, Id::from_u32(definition_id)
+    );
+    let clause = super::lowering::mir_handler_definition_clause_at(
+        definition, clause_index
+    );
+    let protocol_id = Id::to_u32(
+        super::lowering::mir_handler_clause_protocol(clause)
+    );
+    if(usize_from_u32(protocol_id)
+        >= super::lowering::mir_program_protocol_count(program)) {
+        Result::Err(EmissionError::InvalidHandlerDefinition(definition_id, HandlerValidationError::UnknownProtocol))
+    } else {
+        let protocol = super::lowering::mir_program_protocol_at(
+            program, Id::from_u32(protocol_id)
+        );
+        let operation_index =
+            super::lowering::mir_handler_clause_operation(clause);
+        if(usize_from_u32(operation_index)
+            >= super::lowering::mir_protocol_operation_count(protocol)) {
+            Result::Err(
+                EmissionError::InvalidHandlerDefinition(definition_id, HandlerValidationError::UnknownOperation)
+            )
+        } else if(handler_has_prior_target(
+            definition, clause, 0, clause_index
+        )) {
+            Result::Err(
+                EmissionError::InvalidHandlerDefinition(definition_id, HandlerValidationError::DuplicateClause)
+            )
+        } else {
+            let operation = super::lowering::mir_protocol_operation_at(
+                protocol, usize_from_u32(operation_index)
+            );
+            let payload =
+                super::lowering::mir_operation_payload_signature(operation);
+            let callable = super::lowering::mir_handler_clause_signature(clause);
+            let payload_count =
+                super::lowering::mir_signature_parameter_count(payload);
+            let terminal = super::lowering::mir_operation_terminal(operation);
+            let expected_count = if(terminal) {
+                payload_count
+            } else { payload_count + 1 };
+            if(not(valid_signature_types(program, callable, 0))
+                or {
+                    super::lowering::mir_signature_parameter_count(callable)
+                        != expected_count
+                }
+                or { not(same_signature_parameter_prefix(payload, callable, 0)) }
+                or {
+                    super::lowering::artifact_type_raw(
+                        super::lowering::mir_signature_result(callable)
+                    ) != super::lowering::artifact_type_raw(
+                        super::lowering::mir_handler_definition_result(
+                            definition
+                        )
+                    )
+                }
+            ) {
+                Result::Err(
+                    EmissionError::InvalidHandlerDefinition(definition_id, HandlerValidationError::CallableSignature)
+                )
+            } else if(terminal) {
+                handle super::lowering::mir_handler_clause_resumption_type(clause) {
+                    None => Result::Ok(()),
+                    Option::Some(_) => Result::Err(
+                        EmissionError::InvalidHandlerDefinition(definition_id, HandlerValidationError::TerminalResumption)
+                    )
+                }
+            } else {
+                // Resumption descriptors require the Resumption MirTypeKind.
+                // Reject explicitly until that structural type is available;
+                // emitting an arbitrary aggregate type would violate the VM ABI.
+                Result::Err(
+                    EmissionError::InvalidHandlerDefinition(definition_id, HandlerValidationError::ResumptionTypeUnavailable)
+                )
+            }
+        }
+    }
+}
+
+validate_handler_definitions(
+    program: &super::lowering::MirProgram,
+    index: usize
+) -> Result<(), EmissionError> {
+    try_for_range(Range::new(
+        index,
+        super::lowering::mir_program_handler_definition_count(program)
+    ), { current => {
+        let id = checked_u32(current);
+        let definition =
+            super::lowering::mir_program_handler_definition_at(
+                program, Id::from_u32(id)
+            );
+        if(not(valid_artifact_type(
+            program,
+            super::lowering::mir_handler_definition_result(definition)
+        ))) {
+            Result::Err(EmissionError::InvalidHandlerDefinition(id, HandlerValidationError::ResultType))
+        } else {
+            try_for_range(Range::new(
+                0,
+                super::lowering::mir_handler_definition_clause_count(definition)
+            ), { clause => validate_handler_clause(program, id, clause) })
+        }
+    } })
+}
+
+validate_effect_instruction(
+    program: &super::lowering::MirProgram,
+    function_id: super::lowering::MirFunctionId,
+    function: &super::lowering::MirFunction,
+    index: usize
+) -> Result<(), EmissionError> {
+    let instruction = super::lowering::mir_function_instruction_at(
+        function, index
+    );
+    if(*instruction is MirInstruction::MakeHandler(_, definition, clauses)) {
+        let definition_index = Id::to_usize(definition);
+        if(definition_index
+            >= super::lowering::mir_program_handler_definition_count(program)) {
+            Result::Err(EmissionError::InvalidEffectInstruction(
+                function_id, checked_u32(index), EffectInstructionValidationError::UnknownHandler
+            ))
+        } else {
+            let expected =
+                super::lowering::mir_handler_definition_clause_count(
+                    super::lowering::mir_program_handler_definition_at(
+                        program, definition
+                    )
+                );
+            let found = usize_from_u32(
+                super::lowering::register_pack_count(
+                    super::lowering::mir_function_register_pack(
+                        function, clauses
+                    )
+                )
+            );
+            if(expected == found) { Result::Ok(()) } else {
+                Result::Err(EmissionError::InvalidEffectInstruction(
+                    function_id, checked_u32(index), EffectInstructionValidationError::ClauseCount
+                ))
+            }
+        }
+    } else if(*instruction is MirInstruction::MakeHandlerShared(
+        _, definition, functions, _
+    )) {
+        let definition_index = Id::to_usize(definition);
+        if(definition_index
+            >= super::lowering::mir_program_handler_definition_count(program)) {
+            Result::Err(EmissionError::InvalidEffectInstruction(
+                function_id, checked_u32(index), EffectInstructionValidationError::UnknownHandler
+            ))
+        } else {
+            let expected =
+                super::lowering::mir_handler_definition_clause_count(
+                    super::lowering::mir_program_handler_definition_at(
+                        program, definition
+                    )
+                );
+            let pack = super::lowering::mir_function_function_pack(
+                function, functions
+            );
+            let found = usize_from_u32(
+                super::lowering::mir_function_pack_count(pack)
+            );
+            let bad_function = find_range(Range::new(0, found), { current =>
+                Id::to_usize(super::lowering::mir_function_pack_at(pack, current))
+                    >= super::lowering::mir_program_function_count(program)
+            });
+            if(expected == found and { found > 0 } and { bad_function is None }) {
+                Result::Ok(())
+            } else {
+                Result::Err(EmissionError::InvalidEffectInstruction(
+                    function_id, checked_u32(index), EffectInstructionValidationError::SharedClauseFunctions
+                ))
+            }
+        }
+    } else if(*instruction is MirInstruction::Perform(
+        target, protocol, operation, payloads
+    )) {
+        if(Id::to_usize(protocol)
+            >= super::lowering::mir_program_protocol_count(program)) {
+            Result::Err(EmissionError::InvalidEffectInstruction(
+                function_id, checked_u32(index), EffectInstructionValidationError::UnknownProtocol
+            ))
+        } else if(not(function_declares_protocol(function, Id::to_u32(protocol), 0))) {
+            Result::Err(EmissionError::InvalidEffectInstruction(
+                function_id,
+                checked_u32(index),
+                EffectInstructionValidationError::FunctionEffectRow
+            ))
+        } else {
+            let protocol_value = super::lowering::mir_program_protocol_at(
+                program, protocol
+            );
+            if(usize_from_u32(operation)
+                >= super::lowering::mir_protocol_operation_count(protocol_value)) {
+                Result::Err(EmissionError::InvalidEffectInstruction(
+                    function_id, checked_u32(index), EffectInstructionValidationError::UnknownOperation
+                ))
+            } else {
+                let operation_value =
+                    super::lowering::mir_protocol_operation_at(
+                        protocol_value, usize_from_u32(operation)
+                    );
+                let expected =
+                    super::lowering::mir_signature_parameter_count(
+                        super::lowering::mir_operation_payload_signature(
+                            operation_value
+                        )
+                    );
+                let found = usize_from_u32(
+                    super::lowering::register_pack_count(
+                        super::lowering::mir_function_register_pack(
+                            function, payloads
+                        )
+                    )
+                );
+                let terminal =
+                    super::lowering::mir_operation_terminal(operation_value);
+                let destination_valid = if(terminal) {
+                    target is None
+                } else { target is Option::Some(_) };
+                let control_valid = if(terminal) {
+                    super::lowering::mir_function_instruction_ends_block(
+                        function, index
+                    )
+                } else { true };
+                if(expected != found) {
+                    Result::Err(EmissionError::InvalidEffectInstruction(
+                        function_id, checked_u32(index), EffectInstructionValidationError::PerformContract
+                    ))
+                } else if(not(destination_valid)) {
+                    Result::Err(EmissionError::InvalidEffectInstruction(
+                        function_id, checked_u32(index), EffectInstructionValidationError::PerformContract
+                    ))
+                } else if(not(control_valid)) {
+                    Result::Err(EmissionError::InvalidEffectInstruction(
+                        function_id, checked_u32(index), EffectInstructionValidationError::PerformContract
+                    ))
+                } else { Result::Ok(()) }
+            }
+        }
+    } else if(*instruction is MirInstruction::TailResume(_, mode, _)) {
+        if(mode <= 2 and {
+            super::lowering::mir_function_instruction_ends_block(
+                function, index
+            )
+        }) { Result::Ok(()) } else {
+            Result::Err(EmissionError::InvalidEffectInstruction(
+                function_id, checked_u32(index), EffectInstructionValidationError::TailResumeControl
+            ))
+        }
+    } else if(*instruction is MirInstruction::Resume(_, _, mode, _)) {
+        if(mode <= 2) { Result::Ok(()) } else {
+            Result::Err(EmissionError::InvalidEffectInstruction(
+                function_id, checked_u32(index), EffectInstructionValidationError::ReceiverMode
+            ))
+        }
+    } else { Result::Ok(()) }
+}
+
+function_declares_protocol(
+    function: &super::lowering::MirFunction,
+    protocol: u32,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_function_outward_protocol_count(function)) {
+        if(super::lowering::mir_function_outward_protocol_at(
+            function, index
+        ) == protocol) { true } else {
+            function_declares_protocol(function, protocol, index + 1)
+        }
+    } else { false }
+}
+
+validate_effect_instructions(
+    program: &super::lowering::MirProgram,
+    function_index: usize
+) -> Result<(), EmissionError> {
+    try_for_range(Range::new(
+        function_index,
+        super::lowering::mir_program_function_count(program)
+    ), { current => {
+        let id = super::lowering::mir_function_id_from_usize(current);
+        let function = super::lowering::mir_program_function_at(program, id);
+        if(not(valid_function_effect_row(program, function, 0, None))) {
+            Result::Err(EmissionError::InvalidEffectInstruction(
+                id,
+                0,
+                EffectInstructionValidationError::FunctionEffectRow
+            ))
+        } else {
+            try_for_range(Range::new(
+                0,
+                super::lowering::mir_function_instruction_count(function)
+            ), { instruction => validate_effect_instruction(
+                program, id, function, instruction
+            ) })
+        }
+    } })
+}
+
+valid_function_effect_row(
+    program: &super::lowering::MirProgram,
+    function: &super::lowering::MirFunction,
+    index: usize,
+    previous: Option<u32>
+) -> Bool {
+    if(index < super::lowering::mir_function_outward_protocol_count(function)) {
+        let protocol = super::lowering::mir_function_outward_protocol_at(
+            function, index
+        );
+        if(usize_from_u32(protocol)
+            >= super::lowering::mir_program_protocol_count(program)) {
+            false
+        } else {
+            handle previous {
+                None => valid_function_effect_row(
+                    program, function, index + 1, Option::Some(protocol)
+                ),
+                Option::Some(found) => if(found < protocol) {
+                    valid_function_effect_row(
+                        program, function, index + 1,
+                        Option::Some(protocol)
+                    )
+                } else { false }
+            }
+        }
+    } else { true }
+}
+
 pub encode(
     program: &super::lowering::MirProgram,
     entry: Option<super::lowering::MirFunctionId>
 ) -> Result<Bytes, EmissionError> {
     let context = new_emission_context(program);
+    try(validate_protocols(program, 0), @encode);
+    try(validate_handler_definitions(program, 0), @encode);
+    try(validate_effect_instructions(program, 0), @encode);
     let signature_table_records = Vec::new();
     signature_records(
         &context.signatures,
@@ -1678,6 +2926,20 @@ pub encode(
         &context.constants,
         0,
         &mut constant_table_records
+    );
+
+    let protocol_table_records = Vec::new();
+    protocol_records(
+        program,
+        &context.names,
+        &context.signatures,
+        &mut protocol_table_records
+    );
+    let handler_definition_table_records = Vec::new();
+    handler_definition_records(
+        program,
+        &context.signatures,
+        &mut handler_definition_table_records
     );
 
     let code = ByteBuf::new();
@@ -1737,6 +2999,18 @@ pub encode(
     );
     super::artifact::set_section(
         &mut context.writer,
+        super::artifact::SectionId::Protocols,
+        super::artifact::variable_section(&protocol_table_records)
+    );
+    super::artifact::set_section(
+        &mut context.writer,
+        super::artifact::SectionId::HandlerDefinitions,
+        super::artifact::variable_section(
+            &handler_definition_table_records
+        )
+    );
+    super::artifact::set_section(
+        &mut context.writer,
         super::artifact::SectionId::Functions,
         super::artifact::section(
             ByteBuf::finish(functions),
@@ -1772,9 +3046,23 @@ pub encode(
     let raw_entry = Option::map(entry, {
         found => super::lowering::mir_function_raw(found)
     });
-    let required_features = if(host_import_count(context.program) == 0) {
-        1
+    let handler_features = if(
+        super::lowering::mir_program_protocol_count(context.program) == 0
+        and {
+            super::lowering::mir_program_handler_definition_count(
+                context.program
+            ) == 0
+        }
+        and { not(program_has_effect_instruction(context.program, 0)) }
+    ) {
+            0
+    } else { 8 };
+    let host_features = if(host_import_count(context.program) == 0) {
+        0
     } else { 32 };
+    let required_features = 1
+        + wrapping_convert_to_u64(handler_features)
+        + wrapping_convert_to_u64(host_features);
     handle super::artifact::encode_writer(
         &context.writer,
         raw_entry,

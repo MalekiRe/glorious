@@ -50,6 +50,49 @@ pub type MirBlockId = Id<MirBlockTag>;
 pub struct MirSwitchPackTag {}
 pub type MirSwitchPackId = Id<MirSwitchPackTag>;
 
+pub struct MirFunctionPackTag {}
+pub type MirFunctionPackId = Id<MirFunctionPackTag>;
+
+pub struct MirProtocolTag {}
+pub type MirProtocolId = Id<MirProtocolTag>;
+
+pub struct MirHandlerDefinitionTag {}
+pub type MirHandlerDefinitionId = Id<MirHandlerDefinitionTag>;
+
+pub struct MirSignature {
+    parameters: Vec<ArtifactTypeId>,
+    result: ArtifactTypeId,
+    outward_protocols: Vec<u32>
+}
+
+pub struct MirOperation {
+    name: String,
+    payload_signature: MirSignature,
+    result: ArtifactTypeId,
+    resumption_lower: u32,
+    resumption_upper: Option<u32>,
+    terminal: Bool
+}
+
+pub struct MirProtocol {
+    display_name: String,
+    type_arguments: Vec<ArtifactTypeId>,
+    operations: Vec<MirOperation>
+}
+
+pub struct MirHandlerClause {
+    protocol: MirProtocolId,
+    operation: u32,
+    callable_signature: MirSignature,
+    resumption_type: Option<ArtifactTypeId>
+}
+
+pub struct MirHandlerDefinition {
+    result: ArtifactTypeId,
+    clauses: Vec<MirHandlerClause>,
+    partial: Bool
+}
+
 pub enum MirInstruction {
     Const(RegisterId, Bytes),
     Move(RegisterId, RegisterId),
@@ -67,6 +110,27 @@ pub enum MirInstruction {
     Jump(MirBlockId),
     Switch(RegisterId, MirSwitchPackId, MirBlockId),
     Call(Option<RegisterId>, MirFunctionId, RegisterPackId),
+    MakeHandler(
+        RegisterId,
+        MirHandlerDefinitionId,
+        RegisterPackId
+    ),
+    MakeHandlerShared(
+        RegisterId,
+        MirHandlerDefinitionId,
+        MirFunctionPackId,
+        RegisterPackId
+    ),
+    Handle(RegisterId, RegisterId, RegisterId, RegisterPackId),
+    Perform(
+        Option<RegisterId>,
+        MirProtocolId,
+        u32,
+        RegisterPackId
+    ),
+    Resume(RegisterId, RegisterId, u32, RegisterId),
+    TailResume(RegisterId, u32, RegisterId),
+    Cancel(RegisterId, RegisterId),
     Return(Option<RegisterId>)
 }
 
@@ -234,6 +298,8 @@ impl<'a> Use<[0, *]> for MirVariantView<'a> {}
 
 pub struct RegisterPack { registers: Vec<RegisterId> }
 
+pub struct MirFunctionPack { functions: Vec<MirFunctionId> }
+
 pub struct MirCleanup {
     first_instruction: u32,
     end_instruction: u32,
@@ -244,10 +310,12 @@ pub struct MirFunction {
     name: String,
     parameters: Vec<ArtifactTypeId>,
     result: ArtifactTypeId,
+    outward_protocols: Vec<u32>,
     register_count: u32,
     instructions: Vec<MirInstruction>,
     cleanups: Vec<MirCleanup>,
     register_packs: Arena<RegisterPackTag, RegisterPack>,
+    function_packs: Arena<MirFunctionPackTag, MirFunctionPack>,
     blocks: Arena<MirBlockTag, Option<u32>>,
     switch_packs: Arena<MirSwitchPackTag, MirSwitchPack>
 }
@@ -257,7 +325,10 @@ pub struct MirProgram {
     constants: Arena<MirConstantTag, Vec<u8>>,
     types: MirTypes,
     type_facts: Vec<MirTypeFacts>,
-    type_names: Vec<String>
+    type_names: Vec<String>,
+    protocols: Arena<MirProtocolTag, MirProtocol>,
+    handler_definitions:
+        Arena<MirHandlerDefinitionTag, MirHandlerDefinition>
 }
 
 __g1_walk_mir_register_pack<L, R, F, e: EffectRow>(
@@ -379,6 +450,54 @@ F: Use<[0, 0]> {
                 stop,
                 visitor
             )
+        },
+        MirInstruction::MakeHandler(target, _, clauses) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            __g1_walk_mir_register_pack(
+                function, instruction, clauses,
+                MirPlaceRole::Transfer, 0, stop, visitor
+            )
+        },
+        MirInstruction::MakeHandlerShared(target, _, _, captures) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            __g1_walk_mir_register_pack(
+                function, instruction, captures,
+                MirPlaceRole::Transfer, 0, stop, visitor
+            )
+        },
+        MirInstruction::Handle(target, handler, body, arguments) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, handler, MirPlaceRole::Transfer, stop);
+            visitor(instruction, body, MirPlaceRole::Transfer, stop);
+            __g1_walk_mir_register_pack(
+                function, instruction, arguments,
+                MirPlaceRole::Transfer, 0, stop, visitor
+            )
+        },
+        MirInstruction::Perform(target, _, _, payloads) => {
+            handle target {
+                None => (),
+                Option::Some(found) => visitor(
+                    instruction, found, MirPlaceRole::Definition, stop
+                )
+            };
+            __g1_walk_mir_register_pack(
+                function, instruction, payloads,
+                MirPlaceRole::Transfer, 0, stop, visitor
+            )
+        },
+        MirInstruction::Resume(target, resumption, _, resumed) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, resumption, MirPlaceRole::Transfer, stop);
+            visitor(instruction, resumed, MirPlaceRole::Transfer, stop)
+        },
+        MirInstruction::TailResume(resumption, _, resumed) => {
+            visitor(instruction, resumption, MirPlaceRole::Transfer, stop);
+            visitor(instruction, resumed, MirPlaceRole::Transfer, stop)
+        },
+        MirInstruction::Cancel(target, resumption) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            visitor(instruction, resumption, MirPlaceRole::Transfer, stop)
         },
         MirInstruction::Return(source) => handle source {
             None => (),
@@ -731,6 +850,213 @@ pub mir_program_function_count(value: &MirProgram) -> usize {
     Arena::len(&value.functions)
 }
 
+pub mir_program_protocol_count(value: &MirProgram) -> usize {
+    Arena::len(&value.protocols)
+}
+
+pub mir_program_protocol_at<'a>(
+    value: &'a MirProgram,
+    id: MirProtocolId
+) -> &'a MirProtocol {
+    Arena::index(&value.protocols, id)
+}
+
+pub mir_program_handler_definition_count(value: &MirProgram) -> usize {
+    Arena::len(&value.handler_definitions)
+}
+
+pub mir_program_handler_definition_at<'a>(
+    value: &'a MirProgram,
+    id: MirHandlerDefinitionId
+) -> &'a MirHandlerDefinition {
+    Arena::index(&value.handler_definitions, id)
+}
+
+pub mir_signature(
+    parameters: Vec<ArtifactTypeId>,
+    result: ArtifactTypeId,
+    outward_protocols: Vec<u32>
+) -> MirSignature {
+    MirSignature {
+        parameters: parameters,
+        result: result,
+        outward_protocols: outward_protocols
+    }
+}
+
+pub mir_signature_parameter_count(value: &MirSignature) -> usize {
+    Vec::len(&value.parameters)
+}
+
+pub mir_signature_parameter_at(
+    value: &MirSignature,
+    index: usize
+) -> ArtifactTypeId {
+    *Vec::index(&value.parameters, index)
+}
+
+pub mir_signature_result(value: &MirSignature) -> ArtifactTypeId {
+    value.result
+}
+
+pub mir_signature_outward_count(value: &MirSignature) -> usize {
+    Vec::len(&value.outward_protocols)
+}
+
+pub mir_signature_outward_at(value: &MirSignature, index: usize) -> u32 {
+    *Vec::index(&value.outward_protocols, index)
+}
+
+pub mir_operation(
+    name: String,
+    payload_signature: MirSignature,
+    result: ArtifactTypeId,
+    resumption_lower: u32,
+    resumption_upper: Option<u32>,
+    terminal: Bool
+) -> MirOperation {
+    MirOperation {
+        name: name,
+        payload_signature: payload_signature,
+        result: result,
+        resumption_lower: resumption_lower,
+        resumption_upper: resumption_upper,
+        terminal: terminal
+    }
+}
+
+pub mir_protocol(
+    display_name: String,
+    type_arguments: Vec<ArtifactTypeId>,
+    operations: Vec<MirOperation>
+) -> MirProtocol {
+    MirProtocol {
+        display_name: display_name,
+        type_arguments: type_arguments,
+        operations: operations
+    }
+}
+
+pub mir_handler_clause(
+    protocol: MirProtocolId,
+    operation: u32,
+    callable_signature: MirSignature,
+    resumption_type: Option<ArtifactTypeId>
+) -> MirHandlerClause {
+    MirHandlerClause {
+        protocol: protocol,
+        operation: operation,
+        callable_signature: callable_signature,
+        resumption_type: resumption_type
+    }
+}
+
+pub mir_handler_definition(
+    result: ArtifactTypeId,
+    clauses: Vec<MirHandlerClause>,
+    partial: Bool
+) -> MirHandlerDefinition {
+    MirHandlerDefinition {
+        result: result,
+        clauses: clauses,
+        partial: partial
+    }
+}
+
+pub mir_protocols() -> Arena<MirProtocolTag, MirProtocol> { Arena::new() }
+
+pub mir_handler_definitions()
+    -> Arena<MirHandlerDefinitionTag, MirHandlerDefinition> {
+    Arena::new()
+}
+
+pub mir_protocol_display_name(value: &MirProtocol) -> &String {
+    &value.display_name
+}
+
+pub mir_protocol_type_argument_count(value: &MirProtocol) -> usize {
+    Vec::len(&value.type_arguments)
+}
+
+pub mir_protocol_type_argument_at(
+    value: &MirProtocol,
+    index: usize
+) -> ArtifactTypeId {
+    *Vec::index(&value.type_arguments, index)
+}
+
+pub mir_protocol_operation_count(value: &MirProtocol) -> usize {
+    Vec::len(&value.operations)
+}
+
+pub mir_protocol_operation_at<'a>(
+    value: &'a MirProtocol,
+    index: usize
+) -> &'a MirOperation {
+    Vec::index(&value.operations, index)
+}
+
+pub mir_operation_name(value: &MirOperation) -> &String { &value.name }
+
+pub mir_operation_payload_signature(value: &MirOperation) -> &MirSignature {
+    &value.payload_signature
+}
+
+pub mir_operation_result(value: &MirOperation) -> ArtifactTypeId {
+    value.result
+}
+
+pub mir_operation_resumption_lower(value: &MirOperation) -> u32 {
+    value.resumption_lower
+}
+
+pub mir_operation_resumption_upper(value: &MirOperation) -> Option<u32> {
+    value.resumption_upper
+}
+
+pub mir_operation_terminal(value: &MirOperation) -> Bool { value.terminal }
+
+pub mir_handler_definition_result(
+    value: &MirHandlerDefinition
+) -> ArtifactTypeId {
+    value.result
+}
+
+pub mir_handler_definition_clause_count(
+    value: &MirHandlerDefinition
+) -> usize {
+    Vec::len(&value.clauses)
+}
+
+pub mir_handler_definition_clause_at<'a>(
+    value: &'a MirHandlerDefinition,
+    index: usize
+) -> &'a MirHandlerClause {
+    Vec::index(&value.clauses, index)
+}
+
+pub mir_handler_definition_partial(value: &MirHandlerDefinition) -> Bool {
+    value.partial
+}
+
+pub mir_handler_clause_protocol(value: &MirHandlerClause) -> MirProtocolId {
+    value.protocol
+}
+
+pub mir_handler_clause_operation(value: &MirHandlerClause) -> u32 {
+    value.operation
+}
+
+pub mir_handler_clause_signature(value: &MirHandlerClause) -> &MirSignature {
+    &value.callable_signature
+}
+
+pub mir_handler_clause_resumption_type(
+    value: &MirHandlerClause
+) -> Option<ArtifactTypeId> {
+    value.resumption_type
+}
+
 pub mir_program_function_at<'a>(
     value: &'a MirProgram,
     id: MirFunctionId
@@ -1033,6 +1359,17 @@ pub mir_function_result(value: &MirFunction) -> ArtifactTypeId {
     value.result
 }
 
+pub mir_function_outward_protocol_count(value: &MirFunction) -> usize {
+    Vec::len(&value.outward_protocols)
+}
+
+pub mir_function_outward_protocol_at(
+    value: &MirFunction,
+    index: usize
+) -> u32 {
+    *Vec::index(&value.outward_protocols, index)
+}
+
 pub mir_function_register_count(value: &MirFunction) -> u32 {
     value.register_count
 }
@@ -1046,6 +1383,34 @@ pub mir_function_instruction_at<'a>(
     index: usize
 ) -> &'a MirInstruction {
     Vec::index(&value.instructions, index)
+}
+
+mir_function_has_block_start(
+    value: &MirFunction,
+    offset: u32,
+    index: usize
+) -> Bool {
+    if(index < Arena::len(&value.blocks)) {
+        handle *Arena::index(&value.blocks, Id::from_u32(checked_u32(index))) {
+            None => mir_function_has_block_start(value, offset, index + 1),
+            Option::Some(found) => if(found == offset) {
+                true
+            } else {
+                mir_function_has_block_start(value, offset, index + 1)
+            }
+        }
+    } else { false }
+}
+
+pub mir_function_instruction_ends_block(
+    value: &MirFunction,
+    index: usize
+) -> Bool {
+    if(index + 1 == Vec::len(&value.instructions)) {
+        true
+    } else {
+        mir_function_has_block_start(value, checked_u32(index + 1), 0)
+    }
 }
 
 mir_function_host_role_at(
@@ -1114,6 +1479,24 @@ pub mir_function_register_pack<'a>(
     id: RegisterPackId
 ) -> &'a RegisterPack {
     Arena::index(&value.register_packs, id)
+}
+
+pub mir_function_function_pack<'a>(
+    value: &'a MirFunction,
+    id: MirFunctionPackId
+) -> &'a MirFunctionPack {
+    Arena::index(&value.function_packs, id)
+}
+
+pub mir_function_pack_count(value: &MirFunctionPack) -> u32 {
+    checked_u32(Vec::len(&value.functions))
+}
+
+pub mir_function_pack_at(
+    value: &MirFunctionPack,
+    index: usize
+) -> MirFunctionId {
+    *Vec::index(&value.functions, index)
 }
 
 pub register_pack_count(value: &RegisterPack) -> u32 {
@@ -3407,10 +3790,12 @@ pub lower_function(
                 name: name,
                 parameters: parameters,
                 result: result_type,
+                outward_protocols: Vec::new(),
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
                 register_packs: builder.register_packs,
+                function_packs: Arena::new(),
                 blocks: builder.blocks,
                 switch_packs: builder.switch_packs
             };
@@ -3429,10 +3814,12 @@ pub lower_function(
                 name: name,
                 parameters: parameters,
                 result: result_type,
+                outward_protocols: Vec::new(),
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
                 register_packs: builder.register_packs,
+                function_packs: Arena::new(),
                 blocks: builder.blocks,
                 switch_packs: builder.switch_packs
             };
@@ -3509,10 +3896,12 @@ pub lower_primitive_function(
             None => unreachable(),
             Option::Some(found) => found
         },
+        outward_protocols: Vec::new(),
         register_count: builder.register_count,
         instructions: builder.instructions,
         cleanups: builder.cleanups,
         register_packs: builder.register_packs,
+        function_packs: Arena::new(),
         blocks: builder.blocks,
         switch_packs: builder.switch_packs
     };
@@ -3556,10 +3945,12 @@ pub lower_abort_function(
             None => unreachable(),
             Option::Some(found) => found
         },
+        outward_protocols: Vec::new(),
         register_count: parameter_count + 1,
         instructions: instructions,
         cleanups: Vec::new(),
         register_packs: Arena::new(),
+        function_packs: Arena::new(),
         blocks: Arena::new(),
         switch_packs: Arena::new()
     };
@@ -3637,10 +4028,12 @@ pub lower_host_function(
             None => unreachable(),
             Option::Some(found) => found
         },
+        outward_protocols: Vec::new(),
         register_count: builder.register_count,
         instructions: builder.instructions,
         cleanups: builder.cleanups,
         register_packs: builder.register_packs,
+        function_packs: Arena::new(),
         blocks: builder.blocks,
         switch_packs: builder.switch_packs
     };
@@ -3955,6 +4348,95 @@ pub finish_program(
         constants: constants,
         types: types,
         type_facts: type_facts,
-        type_names: type_names
+        type_names: type_names,
+        protocols: Arena::new(),
+        handler_definitions: Arena::new()
     }
+}
+
+// Backend integration boundary for effect-aware lowering. Continuation
+// capture is deliberately not serialized here: the Core-to-MIR ownership pass
+// must use its capture facts to construct each instruction's cleanup entry.
+// The emitted cleanup table is the VM contract for cancellation and terminal
+// abandonment.
+pub finish_effect_program(
+    functions: Arena<MirFunctionTag, MirFunction>,
+    types: MirTypes,
+    type_names: Vec<String>,
+    protocols: Arena<MirProtocolTag, MirProtocol>,
+    handler_definitions:
+        Arena<MirHandlerDefinitionTag, MirHandlerDefinition>
+) -> MirProgram {
+    let value = finish_program(functions, types, type_names);
+    value.protocols = protocols;
+    value.handler_definitions = handler_definitions;
+    value
+}
+
+pub new_mir_function(
+    name: String,
+    parameters: Vec<ArtifactTypeId>,
+    result: ArtifactTypeId,
+    outward_protocols: Vec<u32>,
+    register_count: u32
+) -> MirFunction {
+    MirFunction {
+        name: name,
+        parameters: parameters,
+        result: result,
+        outward_protocols: outward_protocols,
+        register_count: register_count,
+        instructions: Vec::new(),
+        cleanups: Vec::new(),
+        register_packs: Arena::new(),
+        function_packs: Arena::new(),
+        blocks: Arena::new(),
+        switch_packs: Arena::new()
+    }
+}
+
+pub alloc_mir_register_pack(
+    value: &mut MirFunction,
+    registers: Vec<RegisterId>
+) -> RegisterPackId {
+    handle Arena::alloc(
+        &mut value.register_packs,
+        RegisterPack { registers: registers }
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+pub alloc_mir_function_pack(
+    value: &mut MirFunction,
+    functions: Vec<MirFunctionId>
+) -> MirFunctionPackId {
+    handle Arena::alloc(
+        &mut value.function_packs,
+        MirFunctionPack { functions: functions }
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+pub push_mir_instruction(
+    value: &mut MirFunction,
+    instruction: MirInstruction
+) {
+    Vec::push(&mut value.instructions, instruction)
+}
+
+pub push_mir_cleanup(
+    value: &mut MirFunction,
+    first_instruction: u32,
+    end_instruction: u32,
+    registers: Vec<RegisterId>
+) {
+    Vec::push(&mut value.cleanups, MirCleanup {
+        first_instruction: first_instruction,
+        end_instruction: end_instruction,
+        registers: registers
+    })
 }

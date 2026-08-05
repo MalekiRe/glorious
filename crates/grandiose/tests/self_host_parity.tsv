@@ -130,7 +130,7 @@ surface_simplifications.rs	syntax_frontend	unported	-
 tail_calls.rs	mir_lowering	unported	-
 tail_resumption_acceptance.rs	effects_control	unported	-
 temporary_reference_projection.rs	ownership_lifetimes	unported	-
-terminal_effects.rs	effects_control	unported	-
+terminal_effects.rs	effects_control	partial	self_host_bytecode.rs#self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentable_metadata
 text_iteration_formatting.rs	standard_library	unported	-
 toolkit_foundations.rs	standard_library	unported	-
 trait_methods.rs	types_traits_generics	unported	-

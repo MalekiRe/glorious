@@ -9,6 +9,7 @@ use super::super::backend::artifact;
 use super::super::backend::emission;
 use super::super::backend::emission::EmissionError;
 use super::super::backend::lowering::LoweringError;
+use super::super::backend::lowering::MirFunctionId;
 use super::super::frontend::scanner::ShellId;
 
 pub lowering_diagnostic(
@@ -377,6 +378,147 @@ emission_name_diagnostic(name: emission::EmissionName) -> CompilerDiagnostic {
     }
 }
 
+protocol_validation_diagnostic(
+    protocol: u32,
+    reason: &emission::ProtocolValidationError
+) -> CompilerDiagnostic {
+    let site = model::site(
+        DiagnosticSpace::Artifact,
+        wrapping_convert_to_usize(protocol)
+    );
+    handle *reason {
+        emission::ProtocolValidationError::CanonicalOrder => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 15,
+            "self-host compiler: protocol identities are not strictly sorted and unique",
+            site, None, None, 0, 0
+        ),
+        emission::ProtocolValidationError::Signature => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 16,
+            "self-host compiler: protocol operation signature has an invalid type or outward-effect row",
+            site, None, None, 0, 0
+        ),
+        emission::ProtocolValidationError::ResultType => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 17,
+            "self-host compiler: protocol operation result type is not present in the artifact type table",
+            site, None, None, 0, 0
+        ),
+        emission::ProtocolValidationError::TerminalContract => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 18,
+            "self-host compiler: terminal operation must return Never and declare quantity [0,0]",
+            site, None, None, 0, 0
+        ),
+        emission::ProtocolValidationError::Quantity => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 19,
+            "self-host compiler: operation resumption lower bound exceeds its upper bound",
+            site, None, None, 0, 0
+        ),
+        emission::ProtocolValidationError::TypeArgument => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 20,
+            "self-host compiler: protocol type argument is not present in the artifact type table",
+            site, None, None, 0, 0
+        )
+    }
+}
+
+handler_validation_diagnostic(
+    definition: u32,
+    reason: &emission::HandlerValidationError
+) -> CompilerDiagnostic {
+    let site = model::site(
+        DiagnosticSpace::Artifact,
+        wrapping_convert_to_usize(definition)
+    );
+    handle *reason {
+        emission::HandlerValidationError::ResultType => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 21,
+            "self-host compiler: handler result type is not present in the artifact type table",
+            site, None, None, 0, 0
+        ),
+        emission::HandlerValidationError::UnknownProtocol => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 22,
+            "self-host compiler: handler clause refers to an unknown protocol",
+            site, None, None, 0, 0
+        ),
+        emission::HandlerValidationError::UnknownOperation => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 23,
+            "self-host compiler: handler clause refers to an unknown operation",
+            site, None, None, 0, 0
+        ),
+        emission::HandlerValidationError::DuplicateClause => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 24,
+            "self-host compiler: handler definition contains duplicate protocol-operation clauses",
+            site, None, None, 0, 0
+        ),
+        emission::HandlerValidationError::CallableSignature => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 25,
+            "self-host compiler: handler clause callable signature does not match its operation and handler result",
+            site, None, None, 0, 0
+        ),
+        emission::HandlerValidationError::TerminalResumption => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 26,
+            "self-host compiler: terminal handler clause must not carry a resumption type",
+            site, None, None, 0, 0
+        ),
+        emission::HandlerValidationError::ResumptionTypeUnavailable => model::make_diagnostic(
+            DiagnosticPhase::Emission, DiagnosticClass::Emission, 27,
+            "self-host compiler: nonterminal handler requires a structural Resumption MIR type that is not yet representable",
+            site, None, None, 0, 0
+        )
+    }
+}
+
+effect_instruction_validation_diagnostic(
+    function: MirFunctionId,
+    instruction: u32,
+    reason: &emission::EffectInstructionValidationError
+) -> CompilerDiagnostic {
+    let message = handle *reason {
+        emission::EffectInstructionValidationError::UnknownHandler =>
+            "self-host compiler: effect instruction refers to an unknown handler definition",
+        emission::EffectInstructionValidationError::ClauseCount =>
+            "self-host compiler: MakeHandler clause count does not match its handler definition",
+        emission::EffectInstructionValidationError::SharedClauseFunctions =>
+            "self-host compiler: MakeHandlerShared targets are empty, invalid, or misaligned with its clauses",
+        emission::EffectInstructionValidationError::UnknownProtocol =>
+            "self-host compiler: Perform refers to an unknown protocol",
+        emission::EffectInstructionValidationError::UnknownOperation =>
+            "self-host compiler: Perform refers to an unknown operation",
+        emission::EffectInstructionValidationError::PerformContract =>
+            "self-host compiler: Perform payload count, destination, or terminal control position is invalid",
+        emission::EffectInstructionValidationError::TailResumeControl =>
+            "self-host compiler: TailResume has an invalid receiver mode or is not terminal in its MIR block",
+        emission::EffectInstructionValidationError::ReceiverMode =>
+            "self-host compiler: Resume receiver mode is outside the frozen 0..=2 ABI",
+        emission::EffectInstructionValidationError::FunctionEffectRow =>
+            "self-host compiler: function outward-effect row is invalid or does not declare its performed protocol"
+    };
+    let code = handle *reason {
+        emission::EffectInstructionValidationError::UnknownHandler => 28,
+        emission::EffectInstructionValidationError::ClauseCount => 29,
+        emission::EffectInstructionValidationError::SharedClauseFunctions => 30,
+        emission::EffectInstructionValidationError::UnknownProtocol => 31,
+        emission::EffectInstructionValidationError::UnknownOperation => 32,
+        emission::EffectInstructionValidationError::PerformContract => 33,
+        emission::EffectInstructionValidationError::TailResumeControl => 34,
+        emission::EffectInstructionValidationError::ReceiverMode => 35,
+        emission::EffectInstructionValidationError::FunctionEffectRow => 36
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Emission,
+        DiagnosticClass::Emission,
+        code,
+        message,
+        model::site(DiagnosticSpace::Function, Id::to_usize(function)),
+        Option::Some(model::site(
+            DiagnosticSpace::Artifact,
+            wrapping_convert_to_usize(instruction)
+        )),
+        None,
+        0,
+        0
+    )
+}
+
 pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
     handle *error {
         EmissionError::MissingConstant(register) => model::make_diagnostic(
@@ -457,6 +599,14 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             0,
             wrapping_convert_to_u32(tag)
         ),
+        EmissionError::InvalidProtocol(protocol, reason) =>
+            protocol_validation_diagnostic(protocol, &reason),
+        EmissionError::InvalidHandlerDefinition(definition, reason) =>
+            handler_validation_diagnostic(definition, &reason),
+        EmissionError::InvalidEffectInstruction(function, instruction, reason) =>
+            effect_instruction_validation_diagnostic(
+                function, instruction, &reason
+            ),
         EmissionError::ArtifactWrite(error) => handle error {
             artifact::ArtifactWriteError::InvalidSectionCount => model::make_argument_diagnostic(
                 DiagnosticPhase::Emission,

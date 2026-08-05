@@ -434,6 +434,194 @@ const DIAGNOSTIC_PROBES: &str = r#"
     }
 "#;
 
+const EFFECT_BACKEND_PROBES: &str = r#"
+    effect_backend_terminal_artifact() -> Bytes {
+        let protocols = backend::lowering::mir_protocols();
+        let operations = Vec::new();
+        Vec::push(&mut operations, backend::lowering::mir_operation(
+            "stop",
+            backend::lowering::mir_signature(
+                Vec::new(),
+                backend::lowering::artifact_type_id(0),
+                Vec::new()
+            ),
+            backend::lowering::artifact_type_id(1),
+            0,
+            Option::Some(0),
+            true
+        ));
+        let protocol = handle Arena::alloc(
+            &mut protocols,
+            backend::lowering::mir_protocol(
+                "Probe",
+                Vec::new(),
+                operations
+            )
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let outward_protocols = Vec::new();
+        Vec::push(&mut outward_protocols, 0);
+        let function = backend::lowering::new_mir_function(
+            "terminal_probe",
+            Vec::new(),
+            backend::lowering::artifact_type_id(1),
+            outward_protocols,
+            1
+        );
+        let payloads = backend::lowering::alloc_mir_register_pack(
+            &mut function,
+            Vec::new()
+        );
+        backend::lowering::push_mir_instruction(
+            &mut function,
+            backend::lowering::MirInstruction::Perform(
+                None,
+                protocol,
+                0,
+                payloads
+            )
+        );
+        backend::lowering::push_mir_cleanup(
+            &mut function,
+            0,
+            1,
+            Vec::new()
+        );
+        let functions = Arena::new();
+        handle Arena::alloc(&mut functions, function) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        };
+        let program = backend::lowering::finish_effect_program(
+            functions,
+            backend::lowering::mir_types(),
+            Vec::new(),
+            protocols,
+            backend::lowering::mir_handler_definitions()
+        );
+        handle backend::emission::encode(&program, None) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(bytes) => bytes
+        }
+    }
+
+    effect_backend_invalid_terminal_reason() -> u32 {
+        let protocols = backend::lowering::mir_protocols();
+        let operations = Vec::new();
+        Vec::push(&mut operations, backend::lowering::mir_operation(
+            "bad",
+            backend::lowering::mir_signature(
+                Vec::new(),
+                backend::lowering::artifact_type_id(0),
+                Vec::new()
+            ),
+            backend::lowering::artifact_type_id(0),
+            0,
+            Option::Some(0),
+            true
+        ));
+        handle Arena::alloc(
+            &mut protocols,
+            backend::lowering::mir_protocol("Bad", Vec::new(), operations)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        };
+        let program = backend::lowering::finish_effect_program(
+            Arena::new(),
+            backend::lowering::mir_types(),
+            Vec::new(),
+            protocols,
+            backend::lowering::mir_handler_definitions()
+        );
+        handle backend::emission::encode(&program, None) {
+            Result::Err(error) => handle error {
+                backend::emission::EmissionError::InvalidProtocol(
+                    _, reason
+                ) => handle reason {
+                    backend::emission::ProtocolValidationError::TerminalContract => 4,
+                    _ => 998
+                },
+                _ => 999
+            },
+            Result::Ok(_) => 997
+        }
+    }
+
+    effect_backend_nonterminal_boundary_reason() -> u32 {
+        let protocols = backend::lowering::mir_protocols();
+        let operations = Vec::new();
+        Vec::push(&mut operations, backend::lowering::mir_operation(
+            "ask",
+            backend::lowering::mir_signature(
+                Vec::new(),
+                backend::lowering::artifact_type_id(0),
+                Vec::new()
+            ),
+            backend::lowering::artifact_type_id(0),
+            0,
+            Option::Some(1),
+            false
+        ));
+        let protocol = handle Arena::alloc(
+            &mut protocols,
+            backend::lowering::mir_protocol("Ask", Vec::new(), operations)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let clauses = Vec::new();
+        let parameters = Vec::new();
+        Vec::push(
+            &mut parameters,
+            backend::lowering::artifact_type_id(4)
+        );
+        Vec::push(&mut clauses, backend::lowering::mir_handler_clause(
+            protocol,
+            0,
+            backend::lowering::mir_signature(
+                parameters,
+                backend::lowering::artifact_type_id(0),
+                Vec::new()
+            ),
+            Option::Some(backend::lowering::artifact_type_id(4))
+        ));
+        let definitions = backend::lowering::mir_handler_definitions();
+        handle Arena::alloc(
+            &mut definitions,
+            backend::lowering::mir_handler_definition(
+                backend::lowering::artifact_type_id(0),
+                clauses,
+                false
+            )
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        };
+        let program = backend::lowering::finish_effect_program(
+            Arena::new(),
+            backend::lowering::mir_types(),
+            Vec::new(),
+            protocols,
+            definitions
+        );
+        handle backend::emission::encode(&program, None) {
+            Result::Err(error) => handle error {
+                backend::emission::EmissionError::InvalidHandlerDefinition(
+                    _, reason
+                ) => handle reason {
+                    backend::emission::HandlerValidationError::ResumptionTypeUnavailable => 7,
+                    _ => 998
+                },
+                _ => 999
+            },
+            Result::Ok(_) => 997
+        }
+    }
+"#;
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -523,6 +711,31 @@ fn self_host_bundle() -> SourceBundle {
         DIAGNOSTIC_PROBES,
         r#"
             main() { run_compiler_host(diagnostics::application) }
+        "#,
+    ]
+    .concat();
+    let primary = Segment::new(root.join("main.glorious").to_string_lossy(), primary_source);
+    SourceBundle::distributed(
+        primary,
+        self_host_module_paths(&root).into_iter().map(|path| {
+            let source = fs::read_to_string(&path).unwrap();
+            Segment::new(path.to_string_lossy(), source)
+        }),
+    )
+}
+
+fn self_host_effect_backend_bundle() -> SourceBundle {
+    let root = repository_root().join("self-host/src");
+    let primary_source = [
+        r#"
+            mod frontend;
+            mod backend;
+            mod compiler;
+            mod diagnostics;
+        "#,
+        EFFECT_BACKEND_PROBES,
+        r#"
+            main() { () }
         "#,
     ]
     .concat();
@@ -786,6 +999,73 @@ fn assert_compiled_artifact(bytes: &[u8]) {
 }
 
 #[test]
+fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentable_metadata() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_effect_backend_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            let run = |name: &str| {
+                Vm::new(compiler.clone())
+                    .run(function_id(&phases.artifact, name), vec![])
+                    .unwrap()
+            };
+
+            let Value::Bytes(bytes) = run("effect_backend_terminal_artifact") else {
+                panic!("terminal backend probe did not return artifact bytes")
+            };
+            let decoded =
+                Artifact::decode(bytes.as_ref()).expect("terminal effect artifact must decode");
+            assert_eq!(
+                decoded.encode(),
+                bytes.as_ref(),
+                "bootstrap and self-host encoders must agree"
+            );
+            assert_eq!(decoded.required_features, 1 | (1 << 3));
+            assert_eq!(decoded.protocols.len(), 1);
+            assert_eq!(decoded.protocols[0].display_name, "Probe");
+            assert_eq!(decoded.protocols[0].operations.len(), 1);
+            let operation = &decoded.protocols[0].operations[0];
+            assert_eq!(operation.name, "stop");
+            assert!(operation.terminal);
+            assert_eq!(
+                (operation.resumption_lower, operation.resumption_upper),
+                (0, Some(0))
+            );
+            assert!(matches!(
+                decoded.code.as_slice(),
+                [Instruction::Perform {
+                    dst: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads,
+                }] if payloads.is_empty()
+            ));
+            load_verified(bytes.as_ref()).expect("terminal effect artifact must verify");
+
+            assert_eq!(
+                run("effect_backend_invalid_terminal_reason"),
+                Value::U64(4),
+                "terminal metadata must require NEVER and [0,0]"
+            );
+            assert_eq!(
+                run("effect_backend_nonterminal_boundary_reason"),
+                Value::U64(7),
+                "nonterminal handlers must fail explicitly until Resumption is representable"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
@@ -900,6 +1180,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             let llvm = directory.path().join("self-host-bytecode.ll");
             let executable = directory.path().join("self-host-bytecode");
             fs::write(&llvm, module.ir).unwrap();
+            drop(phases);
             let clang = Command::new("clang")
                 .arg(&llvm)
                 .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
@@ -976,6 +1257,7 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
                 .artifact
                 .entry_function
                 .expect("the bootstrap compiler must have an entry function");
+            drop(phases);
 
             let directory = tempfile::tempdir().unwrap();
             let input = directory.path().join("self-host-bundle.glorious");
