@@ -15,6 +15,7 @@ use grandiose::{
 use grandiose_vm::{SystemHost, Value, Vm, verify};
 
 static CONTEXTUAL_PUB_ONLY: AtomicBool = AtomicBool::new(false);
+static FIXITY_ONLY: AtomicBool = AtomicBool::new(false);
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -478,6 +479,15 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         return vec![repository_root()
             .join("crates/grandiose/tests/fixtures/contextual_pub_headers.glorious")];
     }
+    if FIXITY_ONLY.load(Ordering::Relaxed) {
+        let path = directory.join("fixity.glorious");
+        fs::write(
+            &path,
+            "infixl 10 left; infixr 20 right; infix 30 ==; infixl 40 <+>;",
+        )
+        .unwrap();
+        return vec![path];
+    }
     let focused = [
         "",
         "}",
@@ -486,7 +496,6 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "use std::prelude::*; cases Io = { Read, Write };",
         "pub type Bytes = Vec<u8>; let answer: u32 = choose(40, 2);",
         "infixl 70 +; prefix 90 !;",
-        "infixl 10 left; infixr 20 right; infix 30 ==; infixl 40 <+>;",
         "effect Console { write(String) (); }",
         "struct Pair<T> { left: T, right: T } enum Maybe<T> { None, Some(T) }",
         "trait Show<T> { show(T) String; } impl<T> Show<T> for T { show(x: T) { x } }",
@@ -524,6 +533,7 @@ fn self_host_scanner_contextual_pub_headers_match_bootstrap() {
 
 #[test]
 fn self_host_scanner_fixity_declarations_match_bootstrap() {
+    FIXITY_ONLY.store(true, Ordering::Relaxed);
     self_hosted_scanner_matches_rust_in_vm_and_native_execution();
 }
 
