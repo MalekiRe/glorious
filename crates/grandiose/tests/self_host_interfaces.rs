@@ -451,6 +451,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "type First = u8; effect Ignored { ping() -> !; } struct Middle { value: First } enum Last { Done }",
         "pub effect Control<'a, T, E: EffectRow> where T: Marker { [0, infinity] choose<U>(input: &'a T, fallback: U) -> Result<T, U> where U: Marker; [2, 4] repeat(value: T) -> T; stop(reason: String) -> !; unit() ->; implicit() }",
         "effect Adjacent { first() second(value: u8) -> u8 third() -> ! }",
+        "effect AdjacentWhere<T> { first(value: T) -> T where T: Marker second<U>(value: U) -> U }",
         "infixl 30 +; infixr 1 else; infix 50 ==; prefix 90 !;",
         "prefix 0 not; infixl 0xFF <*>; infixr 0b1_000 cons; infix 2_5_5 &=;",
         "infixl 35 <*>=; prefix 99 !!; infix 17 &=;",

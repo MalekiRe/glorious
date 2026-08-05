@@ -2456,12 +2456,88 @@ parse_operation_where_clause(
     if(start < value.tokens.limit) {
         handle super::lexer::token_kind_at(&value.source, start) {
             TokenKind::Keyword(super::lexer::Keyword::Where) => {
-                let end = operation_end(&*value);
+                let end = operation_where_end(&*value, start + 1, 0, 0, 0);
                 parse_bounded_where_clause(value, related, end)
             },
             _ => Result::Ok(token_range(start, start))
         }
     } else { Result::Ok(token_range(start, start)) }
+}
+
+generic_operation_tail(value: &Parser, cursor: usize, depth: usize) -> Bool {
+    if(cursor < value.tokens.limit) {
+        handle super::lexer::token_kind_at(&value.source, cursor) {
+            TokenKind::Lt => generic_operation_tail(value, cursor + 1, depth + 1),
+            TokenKind::Gt => if(depth == 1) {
+                if(cursor + 1 < value.tokens.limit) {
+                    handle super::lexer::token_kind_at(&value.source, cursor + 1) {
+                        TokenKind::LParen => true,
+                        _ => false
+                    }
+                } else { false }
+            } else { generic_operation_tail(value, cursor + 1, depth - 1) },
+            _ => generic_operation_tail(value, cursor + 1, depth)
+        }
+    } else { false }
+}
+
+operation_starts_at(value: &Parser, cursor: usize) -> Bool {
+    if(cursor + 1 < value.tokens.limit) {
+        handle super::lexer::token_kind_at(&value.source, cursor) {
+            TokenKind::LBracket => true,
+            TokenKind::Ident(_) => handle super::lexer::token_kind_at(
+                &value.source,
+                cursor + 1
+            ) {
+                TokenKind::LParen => true,
+                TokenKind::Lt => generic_operation_tail(value, cursor + 1, 0),
+                _ => false
+            },
+            _ => false
+        }
+    } else { false }
+}
+
+operation_where_end(
+    value: &Parser,
+    cursor: usize,
+    parentheses: usize,
+    angles: usize,
+    brackets: usize
+) -> usize {
+    if(cursor < value.tokens.limit) {
+        let top = parentheses == 0 and { angles == 0 } and { brackets == 0 };
+        if(top and { operation_starts_at(value, cursor) }) { cursor } else {
+            handle super::lexer::token_kind_at(&value.source, cursor) {
+                TokenKind::Semicolon => if(top) { cursor } else {
+                    operation_where_end(
+                        value, cursor + 1, parentheses, angles, brackets
+                    )
+                },
+                TokenKind::LParen => operation_where_end(
+                    value, cursor + 1, parentheses + 1, angles, brackets
+                ),
+                TokenKind::RParen => operation_where_end(
+                    value, cursor + 1, parentheses - 1, angles, brackets
+                ),
+                TokenKind::Lt => operation_where_end(
+                    value, cursor + 1, parentheses, angles + 1, brackets
+                ),
+                TokenKind::Gt => operation_where_end(
+                    value, cursor + 1, parentheses, angles - 1, brackets
+                ),
+                TokenKind::LBracket => operation_where_end(
+                    value, cursor + 1, parentheses, angles, brackets + 1
+                ),
+                TokenKind::RBracket => operation_where_end(
+                    value, cursor + 1, parentheses, angles, brackets - 1
+                ),
+                _ => operation_where_end(
+                    value, cursor + 1, parentheses, angles, brackets
+                )
+            }
+        }
+    } else { value.tokens.limit }
 }
 
 operation_end_from(value: &Parser, cursor: usize) -> usize {
