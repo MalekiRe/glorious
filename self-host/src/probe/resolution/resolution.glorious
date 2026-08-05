@@ -1,6 +1,7 @@
 use super::super::frontend::lexer::TokenKind;
 use super::super::frontend::resolution::{
     ResolvedBody,
+    ResolvedGenericTarget,
     ResolvedTarget,
     ResolutionError,
     ResolutionIndex,
@@ -9,6 +10,7 @@ use super::super::frontend::resolution::{
     local_count,
     local_name_token_at,
     resolve_function_body_indexed,
+    resolve_callable_generic_name,
     resolved_name_count,
     resolved_name_expression_id_at,
     resolved_name_target_at
@@ -22,6 +24,163 @@ shell_parent_module(
     shell: &super::super::frontend::scanner::DeclarationShell
 ) -> Option<ShellId> {
     *super::super::frontend::scanner::shell_parent(shell)
+}
+
+write_generic_target(
+    output: &mut ByteBuf,
+    target: ResolvedGenericTarget,
+    token: usize
+) {
+    handle target {
+        ResolvedGenericTarget::Unknown => {
+            ByteBuf::push(output, 0);
+            ByteBuf::write_u32_le(output, u32_from_usize(token));
+            ()
+        },
+        ResolvedGenericTarget::TypeParameter(ordinal) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u32_le(output, ordinal);
+            ()
+        },
+        ResolvedGenericTarget::EffectRowParameter(ordinal) => {
+            ByteBuf::push(output, 2);
+            ByteBuf::write_u32_le(output, ordinal);
+            ()
+        },
+        ResolvedGenericTarget::GlobalType(shell) => {
+            ByteBuf::push(output, 3);
+            ByteBuf::write_u32_le(output, Id::to_u32(shell));
+            ()
+        }
+    }
+}
+
+generic_parameter_name_token(
+    source: &super::super::frontend::lexer::LexedSource,
+    parameter: &super::super::frontend::headers::GenericParam,
+    cursor: usize
+) -> usize {
+    if(cursor < super::super::frontend::headers::generic_param_token_end(parameter)) {
+        handle super::super::frontend::lexer::token_kind_at(source, cursor) {
+            TokenKind::Ident(name) => if(name == super::super::frontend::headers::generic_param_name(parameter)) {
+                1 + super::super::frontend::lexer::token_start_at(source, cursor)
+            } else {
+                generic_parameter_name_token(source, parameter, cursor + 1)
+            },
+            _ => generic_parameter_name_token(source, parameter, cursor + 1)
+        }
+    } else {
+        unreachable()
+    }
+}
+
+write_generic_function(
+    output: &mut ByteBuf,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    shell_index: ShellId
+) {
+    let index = super::super::frontend::headers::parsed_index(headers);
+    let nominal = super::super::frontend::headers::nominal_index(headers);
+    let callable_id = handle super::super::frontend::headers::def_kind_for_shell(
+        nominal,
+        shell_index
+    ) {
+        Option::Some(super::super::frontend::headers::HeaderOrder::Callable(found)) => found,
+        _ => unreachable()
+    };
+    let callable = handle super::super::frontend::headers::callable_at(
+        index,
+        Id::to_usize(callable_id)
+    ) {
+        None => unreachable(),
+        Option::Some(found) => found
+    };
+            let source = super::super::frontend::headers::parsed_source(headers);
+            write_name_id(
+                output,
+                source,
+                super::super::frontend::headers::callable_name(callable)
+            );
+            let generics = super::super::frontend::headers::callable_generics(callable);
+            ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(generics));
+            write_generic_parameters(
+                output,
+                source,
+                index,
+                declarations,
+                callable,
+                shell_index,
+                generics,
+                0
+            )
+}
+
+write_generic_parameters(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    index: &super::super::frontend::headers::HeaderIndex,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    callable: &super::super::frontend::headers::CallableHeader,
+    shell_index: ShellId,
+    generics: &super::super::frontend::headers::HeaderRange,
+    ordinal: u32
+) {
+    if(ordinal < super::super::frontend::headers::range_count(generics)) {
+        let parameter = super::super::frontend::resolution::generic_parameter_at(
+            index,
+            usize_from_u32(
+                super::super::frontend::headers::range_start(generics) + ordinal
+            )
+        );
+        let kind = super::super::frontend::headers::generic_param_kind_code(parameter);
+        let token = generic_parameter_name_token(
+            source,
+            parameter,
+            super::super::frontend::headers::generic_param_token(parameter)
+        );
+        ByteBuf::push(output, kind);
+        write_name_id(
+            output,
+            source,
+            super::super::frontend::headers::generic_param_name(parameter)
+        );
+        ByteBuf::write_u32_le(
+            output,
+            u32_from_usize(token)
+        );
+        write_generic_target(
+                output,
+                resolve_callable_generic_name(
+                    index,
+                    declarations,
+                    callable,
+                    super::super::frontend::headers::generic_param_name(parameter),
+                    kind,
+                    shell_parent_module(handle super::super::frontend::scanner::shell_at(
+                        declarations,
+                        shell_index
+                    ) {
+                        None => unreachable(),
+                        Option::Some(found) => found
+                    }),
+                    token
+                ),
+            token
+        );
+        write_generic_parameters(
+            output,
+            source,
+            index,
+            declarations,
+            callable,
+            shell_index,
+            generics,
+            ordinal + 1
+        )
+    } else {
+        ()
+    }
 }
 
 write_string(output: &mut ByteBuf, value: &String) {
@@ -448,6 +607,18 @@ write_functions(
     }})
 }
 
+write_generic_functions(
+    output: &mut ByteBuf,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    declarations: &super::super::frontend::scanner::DeclarationIndex
+) {
+    super::super::frontend::scanner::for_each_shell(declarations, { shell_id, shell => {
+        if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
+            write_generic_function(output, headers, declarations, shell_id);
+        } else { () };
+    }})
+}
+
 encode_source(output: &mut ByteBuf, original: String) {
     handle super::super::frontend::lexer::lex(&original) {
         Result::Err(_) => ByteBuf::push( output, 1),
@@ -493,6 +664,39 @@ encode_source(output: &mut ByteBuf, original: String) {
     }
 }
 
+encode_generic_source(output: &mut ByteBuf, original: String) {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => ByteBuf::push(output, 1),
+        Result::Ok(source) => handle super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => ByteBuf::push(output, 2),
+            Result::Ok(declarations) => handle super::super::frontend::headers::parse(
+                &original,
+                source,
+                &declarations
+            ) {
+                Result::Err(_) => ByteBuf::push(output, 3),
+                Result::Ok(headers) => {
+                    let encoded = ByteBuf::new();
+                    ByteBuf::write_u32_le(
+                        &mut encoded,
+                        u32_from_usize(function_count(&declarations))
+                    );
+                    write_generic_functions(
+                        &mut encoded,
+                        &headers,
+                        &declarations
+                    );
+                    ByteBuf::push(output, 0);
+                    ByteBuf::append_bytes(
+                        output,
+                        &ByteBuf::finish(encoded)
+                    )
+                }
+            }
+        }
+    }
+}
+
 process_inputs(
     arguments: &Vec<String>,
     index: usize,
@@ -531,5 +735,40 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             );
             process_inputs(&arguments, 1, &mut encoded);
             write_file(output_path, ByteBuf::finish( encoded))
+    }
+}
+
+process_generic_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    if(index < Vec::len(arguments)) {
+        let path = *Vec::index(arguments, index);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(output, 1),
+            Result::Ok(source) => encode_generic_source(output, source)
+        };
+        process_generic_inputs(arguments, index + 1, output)
+    } else { () }
+}
+
+pub generic_application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-generic-resolution <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            u32_from_usize(count - 1)
+        );
+        process_generic_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
     }
 }

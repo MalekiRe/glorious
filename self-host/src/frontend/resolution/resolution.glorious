@@ -39,6 +39,29 @@ pub enum ResolvedTarget {
     EffectOperation(EffectOperationIdentity)
 }
 
+// Header generic names are lexical binders, not entries in the declaration
+// search table. Keep their identity as the ordinal in the owning callable's
+// generic range so a same-spelled global type/effect name cannot win.
+pub enum ResolvedGenericTarget {
+    TypeParameter(u32),
+    EffectRowParameter(u32),
+    GlobalType(ShellId),
+    Unknown
+}
+
+impl Use<[0, *]> for ResolvedGenericTarget {}
+
+pub generic_parameter_at(
+    headers: &super::headers::HeaderIndex,
+    index: usize
+) -> &super::headers::GenericParam {
+    handle super::headers::generic_param_at(headers, index) {
+        None => unreachable(),
+        Option::Some(found) => found
+    }
+}
+
+
 impl Use<[0, *]> for ResolvedTarget {}
 
 pub struct LocalBinding {
@@ -112,6 +135,91 @@ pub enum ResolutionError {
     MissingBodyCallable(ShellId),
     MissingParameterRange(ShellId),
     BodyParseFailure(ShellId)
+}
+
+pub resolve_callable_generic_name(
+    headers: &super::headers::HeaderIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    callable: &super::headers::CallableHeader,
+    name: Id<String>,
+    kind: u8,
+    module: Option<ShellId>,
+    token: usize
+) -> ResolvedGenericTarget {
+    let generics = super::headers::callable_generics(callable);
+    resolve_callable_generic_name_at(
+        headers,
+        declarations,
+        generics,
+        name,
+        kind,
+        module,
+        token,
+        0
+    )
+}
+
+resolve_callable_generic_name_at(
+    headers: &super::headers::HeaderIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    generics: &super::headers::HeaderRange,
+    name: Id<String>,
+    kind: u8,
+    module: Option<ShellId>,
+    token: usize,
+    ordinal: u32
+) -> ResolvedGenericTarget {
+    if(ordinal < super::headers::range_count(generics)) {
+        let index = super::headers::range_start(generics) + ordinal;
+        let parameter = generic_parameter_at(
+            headers,
+            usize_from_u32(index)
+        );
+        if(super::headers::generic_param_name(parameter) == name
+            and { super::headers::generic_param_kind_code(parameter) == kind }) {
+            handle kind {
+                1 => ResolvedGenericTarget::TypeParameter(ordinal),
+                3 => ResolvedGenericTarget::EffectRowParameter(ordinal),
+                _ => ResolvedGenericTarget::Unknown
+            }
+        } else {
+            resolve_callable_generic_name_at(
+                headers,
+                declarations,
+                generics,
+                name,
+                kind,
+                module,
+                token,
+                ordinal + 1
+            )
+        }
+    } else {
+        let found = super::scanner::def_search(
+            declarations,
+            module,
+            name,
+            super::scanner::Namespace::Type
+        );
+        if(super::scanner::def_search_count(&found) == 0
+            and { Option::is_some(&module) }) {
+            let root = super::scanner::def_search(
+                declarations,
+                None,
+                name,
+                super::scanner::Namespace::Type
+            );
+            handle super::scanner::def_search_first(&root) {
+                None => ResolvedGenericTarget::Unknown,
+                Option::Some(shell) => ResolvedGenericTarget::GlobalType(shell)
+            }
+        } else {
+            handle super::scanner::def_search_first(&found) {
+                None => ResolvedGenericTarget::Unknown,
+                Option::Some(shell) => ResolvedGenericTarget::GlobalType(shell)
+            }
+        }
+    }
 }
 
 struct ScopeBinding {

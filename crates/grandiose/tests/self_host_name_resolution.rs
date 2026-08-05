@@ -24,10 +24,20 @@ fn repository_root() -> PathBuf {
 }
 
 fn self_host_bundle() -> SourceBundle {
+    self_host_bundle_for("probe::resolution::application")
+}
+
+fn self_host_generic_bundle() -> SourceBundle {
+    self_host_bundle_for("probe::resolution::generic_application")
+}
+
+fn self_host_bundle_for(entry: &str) -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary = Segment::new(
         root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::resolution::application) }\n",
+        format!(
+            "mod frontend;\nmod probe;\n\nmain() {{ run_compiler_host({entry}) }}\n"
+        ),
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
@@ -56,6 +66,45 @@ fn self_host_bundle() -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
+}
+
+fn encode_rust_generic_resolution(output: &mut Vec<u8>, source: &str) {
+    let bundle = raw_source_bundle(source);
+    let program = grandiose::modules::parse_bundle(&bundle).unwrap();
+    push_u32(output, program.functions.len().try_into().unwrap());
+    for function in &program.functions {
+        push_string(output, &function.name);
+        let generics = function.generics.as_ref();
+        push_u32(
+            output,
+            generics
+                .map_or(0, |value| value.params.len())
+                .try_into()
+                .unwrap(),
+        );
+        for (ordinal, parameter) in generics
+            .into_iter()
+            .flat_map(|value| &value.params)
+            .enumerate()
+        {
+            let kind = match parameter.kind {
+                grandiose::ast::GenericParamKind::Type => 1,
+                grandiose::ast::GenericParamKind::Lifetime => 2,
+                grandiose::ast::GenericParamKind::EffectRow => 3,
+                grandiose::ast::GenericParamKind::Const(_) => 4,
+            };
+            output.push(kind);
+            push_string(output, &parameter.name);
+            push_u32(output, parameter.span.start.try_into().unwrap());
+            output.push(match parameter.kind {
+                grandiose::ast::GenericParamKind::Type => 1,
+                grandiose::ast::GenericParamKind::EffectRow => 2,
+                grandiose::ast::GenericParamKind::Lifetime => 0,
+                grandiose::ast::GenericParamKind::Const(_) => 0,
+            });
+            push_u32(output, ordinal.try_into().unwrap());
+        }
+    }
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
@@ -854,4 +903,73 @@ fn self_hosted_effect_path_syntax_and_name_resolution_match_rust_in_vm_and_nativ
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_resolution_generic_binders_shadow_global_aliases() {
+    let source = r#"
+        type A = Text;
+        type E = Text;
+        type F = Text;
+        cases R = {};
+
+        choose<A, E, F, R: EffectRow>(answer: A, evidence: E, fallback: F) -> A / {|R} {
+            answer
+        }
+
+        main() { () }
+    "#;
+    let expected_one = {
+        let mut output = Vec::new();
+        output.push(0);
+        encode_rust_generic_resolution(&mut output, source);
+        output
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("generic-binders.glorious");
+    let vm_output = directory.path().join("vm.bin");
+    fs::write(&input, source).unwrap();
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_generic_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact.clone()).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![vm_output.clone().into_os_string(), input.clone().into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    expected.extend(&expected_one);
+    assert_eq!(fs::read(&vm_output).unwrap(), expected);
+
+    let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+    let llvm = directory.path().join("generic-binders.ll");
+    let executable = directory.path().join("generic-binders");
+    fs::write(&llvm, module.ir).unwrap();
+    let clang = Command::new("clang")
+        .arg(&llvm)
+        .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+        .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+        .arg("-O0")
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+    let native_output = directory.path().join("native.bin");
+    let native = Command::new(&executable)
+        .arg(&native_output)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    assert_eq!(fs::read(&native_output).unwrap(), expected);
 }

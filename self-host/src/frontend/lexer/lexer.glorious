@@ -327,6 +327,13 @@ pub span_start(value: &Span) -> usize { value.start }
 
 pub span_end(value: &Span) -> usize { value.end }
 
+pub token_start_at(value: &LexedSource, index: usize) -> usize {
+    handle token_at(value, index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => span_start(&token_span(token))
+    }
+}
+
 pub number_spelling(value: &NumberToken) -> Span {
     Span { start: value.spelling.start, end: value.spelling.end }
 }

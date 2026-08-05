@@ -684,6 +684,10 @@ pub generic_param_token(value: &GenericParam) -> usize {
     super::syntax::token_start(&value.tokens)
 }
 
+pub generic_param_token_end(value: &GenericParam) -> usize {
+    super::syntax::token_end(&value.tokens)
+}
+
 pub generic_param_kind_code(value: &GenericParam) -> u8 {
     handle value.kind {
         GenericParamKind::Type => 1,
