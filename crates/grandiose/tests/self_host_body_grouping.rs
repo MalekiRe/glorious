@@ -276,6 +276,53 @@ fn encode_direct_enum_handle(
     Ok(())
 }
 
+fn encode_effect_handle(
+    output: &mut Vec<u8>,
+    program: &Program,
+    source: &str,
+    computation: &Expr,
+    clauses: &[grandiose::ast::HandlerClause],
+) -> Result<(), ()> {
+    output.push(12);
+    encode_expression(output, program, source, computation)?;
+    push_u32(output, clauses.len().try_into().map_err(|_| ())?);
+    for clause in clauses {
+        push_string(output, &clause.effect);
+        push_string(output, &clause.operation);
+        push_u32(output, clause.patterns.len().try_into().map_err(|_| ())?);
+        for pattern in &clause.patterns {
+            match &pattern.kind {
+                PatternKind::Wildcard => output.push(0),
+                PatternKind::Binding(name) => {
+                    output.push(1);
+                    push_string(output, name);
+                }
+                _ => return Err(()),
+            }
+        }
+        let body = match (&clause.resumption, &clause.body.kind) {
+            (
+                Some(expected),
+                ExprKind::TailResume {
+                    resumption,
+                    value: Some(value),
+                },
+            ) if matches!(
+                &resumption.kind,
+                ExprKind::Variable(path)
+                    if matches!(path.as_ref(), [name] if name.as_ref() == expected)
+            ) =>
+            {
+                value.as_ref()
+            }
+            (None, _) => &clause.body,
+            _ => return Err(()),
+        };
+        encode_expression(output, program, source, body)?;
+    }
+    Ok(())
+}
+
 fn encode_expression(
     output: &mut Vec<u8>,
     program: &Program,
@@ -284,6 +331,13 @@ fn encode_expression(
 ) -> Result<(), ()> {
     if let Some((computation, arms)) = normalized_direct_enum_handle(expression) {
         return encode_direct_enum_handle(output, program, source, computation, &arms);
+    }
+    if let ExprKind::Handle {
+        computation,
+        clauses,
+    } = &expression.kind
+    {
+        return encode_effect_handle(output, program, source, computation, clauses);
     }
     match &expression.kind {
         ExprKind::Variable(path) => {
@@ -340,6 +394,19 @@ fn encode_expression(
             encode_expression(output, program, source, callee)?;
             push_u32(output, arguments.len().try_into().map_err(|_| ())?);
             for argument in arguments.iter() {
+                encode_expression(output, program, source, argument)?;
+            }
+        }
+        ExprKind::Perform {
+            effect,
+            operation,
+            args,
+        } => {
+            output.push(14);
+            push_string(output, effect);
+            push_string(output, operation);
+            push_u32(output, args.len().try_into().map_err(|_| ())?);
+            for argument in args.iter() {
                 encode_expression(output, program, source, argument)?;
             }
         }
@@ -431,6 +498,20 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_zero_call() { ping() }",
         "probe_args() { send(alpha, 42, ()) }",
         "probe_nested_call() { outer(inner(1), leaf()) }",
+        "effect Signal { raise(value: u64) -> u64 } \
+         probe_perform(value: u64) -> u64 / {Signal} { \
+             perform Signal::raise(value) \
+         }",
+        "effect Signal { raise(value: u64) -> u64 } \
+         probe_implicit_perform(value: u64) -> u64 / {Signal} { \
+             Signal::raise(value) \
+         }",
+        "effect Signal { inspect(value: u64) -> u64 } \
+         probe_effect_handle(value: u64) -> u64 { \
+             handle perform Signal::inspect(value) { \
+                 Signal::inspect(found) => found \
+             } \
+         }",
         "infixl 10 op; probe_operator_arg() { combine(a op b, c) }",
         "infixl 10 op; probe_postfix_binds() { left() op right(2) }",
         "probe_let() { let x = 1; x }",
@@ -467,6 +548,8 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_bad_struct_colon() { Pair { left first } }",
         "probe_bad_projection() { value. }",
         "probe_bad_path() { Choice::(value) }",
+        "effect Signal { raise() -> u64 } \
+         probe_bad_perform() -> u64 / {Signal} { perform Signal::() }",
     ];
 
     let mut paths = Vec::new();

@@ -11,13 +11,32 @@ pub type ParameterId = Id<ParameterTag>;
 pub struct LocalTag {}
 pub type LocalId = Id<LocalTag>;
 
+// Effect shells are generative declaration identities. The operation ordinal
+// is local to that shell, so this pair cannot collide with an enum variant or
+// with a same-spelled operation in another effect/module.
+pub struct EffectOperationIdentity {
+    protocol: ShellId,
+    operation: u32
+}
+
+impl Use<[0, *]> for EffectOperationIdentity {}
+
+pub effect_operation_effect(value: &EffectOperationIdentity) -> ShellId {
+    value.protocol
+}
+
+pub effect_operation_ordinal(value: &EffectOperationIdentity) -> u32 {
+    value.operation
+}
+
 pub enum ResolvedTarget {
     Parameter(ParameterId),
     Local(LocalId),
     Function(ShellId),
     FunctionAlias(ShellId),
     Struct(super::headers::StructHeaderId),
-    Variant(super::headers::VariantHeaderId)
+    Variant(super::headers::VariantHeaderId),
+    EffectOperation(EffectOperationIdentity)
 }
 
 impl Use<[0, *]> for ResolvedTarget {}
@@ -39,8 +58,15 @@ pub struct ResolvedBinderRangeTag {}
 pub type ResolvedBinderRange =
     super::syntax::IdRange<ResolvedBinderRangeTag>;
 
+pub enum ResolvedHandleTarget {
+    Variant(super::headers::VariantHeaderId),
+    EffectOperation(EffectOperationIdentity)
+}
+
+impl Use<[0, *]> for ResolvedHandleTarget {}
+
 pub struct ResolvedHandleArm {
-    variant: super::headers::VariantHeaderId,
+    target: ResolvedHandleTarget,
     binders: ResolvedBinderRange
 }
 
@@ -61,10 +87,14 @@ pub enum ResolutionError {
     UnknownStruct(usize),
     UnknownEnum(usize),
     UnknownVariant(usize),
+    UnknownEffect(usize),
+    UnknownOperation(usize, usize),
+    InvalidEffectTarget(usize, usize),
     InvalidNamePath(usize),
     AmbiguousFunction(usize, ShellId),
     AmbiguousStruct(usize, usize),
     AmbiguousEnum(usize, usize),
+    AmbiguousEffect(usize, ShellId),
     DuplicateParameter(usize, usize),
     MissingCallableHeader(usize),
     MissingDeclarationShell(usize, ShellId),
@@ -156,8 +186,15 @@ pub resolved_handle_arm<'a>(
 
 pub resolved_handle_variant(
     value: &ResolvedHandleArm
-) -> super::headers::VariantHeaderId {
-    value.variant
+) -> Option<super::headers::VariantHeaderId> {
+    handle value.target {
+        ResolvedHandleTarget::Variant(found) => Option::Some(found),
+        ResolvedHandleTarget::EffectOperation(_) => None
+    }
+}
+
+pub resolved_handle_target(value: &ResolvedHandleArm) -> ResolvedHandleTarget {
+    value.target
 }
 
 pub resolved_handle_binders<'a>(
@@ -677,6 +714,226 @@ resolve_variant_name(
             enum_token,
             variant_token
         )
+    }
+}
+
+finish_effect_name(
+    nominal: &super::headers::NominalIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    found: super::scanner::DefSearch,
+    token: usize
+) -> Result<(ShellId, super::headers::EffectHeaderId), ResolutionError> {
+    handle super::scanner::def_search_count(&found) {
+        0 => Result::Err(ResolutionError::UnknownEffect(token)),
+        1 => {
+            let shell = handle super::scanner::def_search_first(&found) {
+                None => @finish_effect_name(Result::Err(
+                    ResolutionError::UnknownEffect(token)
+                )),
+                Option::Some(value) => value
+            };
+            let declaration = handle super::scanner::shell_at(
+                declarations, shell
+            ) {
+                None => @finish_effect_name(Result::Err(
+                    ResolutionError::MissingDeclarationShell(token, shell)
+                )),
+                Option::Some(value) => value
+            };
+            if(not(super::scanner::shell_kind(declaration)
+                is super::scanner::DeclarationKind::Effect)) {
+                @finish_effect_name(Result::Err(
+                    ResolutionError::InvalidEffectTarget(token, token)
+                ))
+            } else { () };
+            handle super::headers::def_kind_for_shell(nominal, shell) {
+                Option::Some(super::headers::HeaderOrder::Effect(protocol)) =>
+                    Result::Ok((shell, protocol)),
+                _ => Result::Err(ResolutionError::UnknownEffect(token))
+            }
+        },
+        _ => handle super::scanner::def_search_first(&found) {
+            None => Result::Err(ResolutionError::UnknownEffect(token)),
+            Option::Some(first) => Result::Err(
+                ResolutionError::AmbiguousEffect(token, first)
+            )
+        }
+    }
+}
+
+resolve_effect_name(
+    nominal: &super::headers::NominalIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    name: Id<String>,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<(ShellId, super::headers::EffectHeaderId), ResolutionError> {
+    let local = super::scanner::def_search(
+        declarations, module, name, super::scanner::Namespace::Type
+    );
+    if(super::scanner::def_search_count(&local) == 0
+        and { Option::is_some(&module) }) {
+        finish_effect_name(
+            nominal,
+            declarations,
+            super::scanner::def_search(
+                declarations,
+                None,
+                name,
+                super::scanner::Namespace::Type
+            ),
+            token
+        )
+    } else {
+        finish_effect_name(nominal, declarations, local, token)
+    }
+}
+
+find_effect_operation(
+    headers: &super::headers::ParsedHeaders,
+    protocol: super::headers::EffectHeaderId,
+    expected: Id<String>,
+    ordinal: u32,
+    token: usize
+) -> Result<EffectOperationIdentity, ResolutionError> {
+    let nominal = super::headers::nominal_index(headers);
+    let declaration = handle super::headers::effect_at(
+        nominal, Id::to_usize(protocol)
+    ) {
+        None => @find_effect_operation(Result::Err(
+            ResolutionError::UnknownEffect(token)
+        )),
+        Option::Some(value) => value
+    };
+    let operations = super::headers::effect_operations(declaration);
+    if(ordinal < super::headers::range_count(operations)) {
+        let index = super::headers::range_start(operations) + ordinal;
+        let operation = handle super::headers::effect_operation_at(
+            nominal, usize_from_u32(index)
+        ) {
+            None => @find_effect_operation(Result::Err(
+                ResolutionError::UnknownOperation(token, token)
+            )),
+            Option::Some(value) => value
+        };
+        if(super::headers::effect_operation_name(operation) == expected) {
+            Result::Ok(EffectOperationIdentity {
+                protocol: super::headers::effect_shell(declaration),
+                operation: ordinal
+            })
+        } else {
+            find_effect_operation(
+                headers, protocol, expected, ordinal + 1, token
+            )
+        }
+    } else {
+        Result::Err(ResolutionError::UnknownOperation(token, token))
+    }
+}
+
+resolve_effect_operation(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    effect_name: Id<String>,
+    operation_name: Id<String>,
+    module: Option<ShellId>,
+    effect_token: usize,
+    operation_token: usize
+) -> Result<EffectOperationIdentity, ResolutionError> {
+    let (_, protocol) = try(resolve_effect_name(
+        super::headers::nominal_index(headers),
+        declarations,
+        effect_name,
+        module,
+        effect_token
+    ), @resolve_effect_operation);
+    handle find_effect_operation(
+        headers, protocol, operation_name, 0, operation_token
+    ) {
+        Result::Err(ResolutionError::UnknownOperation(_, _)) => Result::Err(
+            ResolutionError::UnknownOperation(operation_token, effect_token)
+        ),
+        other => other
+    }
+}
+
+resolve_qualified_handle_target(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    owner_name: Id<String>,
+    member_name: Id<String>,
+    module: Option<ShellId>,
+    owner_token: usize,
+    member_token: usize
+) -> Result<ResolvedHandleTarget, ResolutionError> {
+    let local = super::scanner::def_search(
+        declarations,
+        module,
+        owner_name,
+        super::scanner::Namespace::Type
+    );
+    let found = if(super::scanner::def_search_count(&local) == 0
+        and { Option::is_some(&module) }) {
+        super::scanner::def_search(
+            declarations,
+            None,
+            owner_name,
+            super::scanner::Namespace::Type
+        )
+    } else { local };
+    if(super::scanner::def_search_count(&found) != 1) {
+        @resolve_qualified_handle_target(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(
+                member_token, owner_token
+            )
+        ))
+    } else { () };
+    let shell = handle super::scanner::def_search_first(&found) {
+        None => @resolve_qualified_handle_target(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(
+                member_token, owner_token
+            )
+        )),
+        Option::Some(value) => value
+    };
+    let declaration = handle super::scanner::shell_at(declarations, shell) {
+        None => @resolve_qualified_handle_target(Result::Err(
+            ResolutionError::MissingDeclarationShell(owner_token, shell)
+        )),
+        Option::Some(value) => value
+    };
+    handle super::scanner::shell_kind(declaration) {
+        super::scanner::DeclarationKind::Effect => Result::map(
+            resolve_effect_operation(
+                headers,
+                declarations,
+                owner_name,
+                member_name,
+                module,
+                owner_token,
+                member_token
+            ),
+            { operation => ResolvedHandleTarget::EffectOperation(operation) }
+        ),
+        super::scanner::DeclarationKind::Enum => handle resolve_variant_name(
+            super::headers::nominal_index(headers),
+            declarations,
+            Id::to_u32(owner_name),
+            Id::to_u32(member_name),
+            module,
+            owner_token,
+            member_token
+        ) {
+            Result::Ok(ResolvedTarget::Variant(variant)) =>
+                Result::Ok(ResolvedHandleTarget::Variant(variant)),
+            Result::Err(error) => Result::Err(error),
+            _ => Result::Err(ResolutionError::UnexpectedHandleTarget(
+                member_token, owner_token
+            ))
+        },
+        _ => Result::Err(ResolutionError::UnexpectedHandleTarget(
+            member_token, owner_token
+        ))
     }
 }
 
@@ -1317,7 +1574,22 @@ resolve_handle_arm(
                     variant_token, enum_token
                 )
             )),
-            Option::Some(found) => found
+            Option::Some(found) => handle found {
+                ResolvedTarget::Variant(variant) =>
+                    ResolvedHandleTarget::Variant(variant),
+                ResolvedTarget::FunctionAlias(function) =>
+                    ResolvedHandleTarget::Variant(try(
+                        function_pattern_variant(
+                            headers, declarations, function, enum_token
+                        ),
+                        @resolve_handle_arm
+                    )),
+                _ => @resolve_handle_arm(Result::Err(
+                    ResolutionError::UnexpectedHandleTarget(
+                        variant_token, enum_token
+                    )
+                ))
+            }
         }
     } else {
         handle resolve_global_alias(
@@ -1331,30 +1603,23 @@ resolve_handle_arm(
             module,
             enum_token
         ) {
-            Option::Some(found) => found,
-            None => try(resolve_variant_name(
-                super::headers::nominal_index(headers),
+            Option::Some(ResolvedTarget::Variant(variant)) =>
+                ResolvedHandleTarget::Variant(variant),
+            Option::Some(_) => @resolve_handle_arm(Result::Err(
+                ResolutionError::UnexpectedHandleTarget(
+                    variant_token, enum_token
+                )
+            )),
+            None => try(resolve_qualified_handle_target(
+                headers,
                 declarations,
-                Id::to_u32(super::bodies::handle_arm_enum_name(arm)),
-                Id::to_u32(super::bodies::handle_arm_variant_name(arm)),
+                super::bodies::handle_arm_enum_name(arm),
+                super::bodies::handle_arm_variant_name(arm),
                 module,
                 enum_token,
                 variant_token
             ), @resolve_handle_arm)
         }
-    };
-    let variant = handle target {
-        ResolvedTarget::Variant(found) => found,
-        ResolvedTarget::FunctionAlias(function) => if(bare_alias) {
-            try(function_pattern_variant(
-                headers, declarations, function, enum_token
-            ), @resolve_handle_arm)
-        } else { @resolve_handle_arm(Result::Err(
-            ResolutionError::UnexpectedHandleTarget(variant_token, enum_token)
-        )) },
-        _ => @resolve_handle_arm(Result::Err(
-            ResolutionError::UnexpectedHandleTarget(variant_token, enum_token)
-        ))
     };
     let frame = scope_frame(move bindings);
     let binder_start = super::syntax::range_mark(&output.pattern_binders);
@@ -1367,6 +1632,10 @@ resolve_handle_arm(
         0
     ), @resolve_handle_arm);
     if(bare_alias) {
+        let variant = handle target {
+            ResolvedHandleTarget::Variant(found) => found,
+            ResolvedHandleTarget::EffectOperation(_) => unreachable()
+        };
         let header = handle super::headers::variant_at(
             super::headers::nominal_index(headers),
             Id::to_usize(variant)
@@ -1395,7 +1664,7 @@ resolve_handle_arm(
     let resolved_binders = resolved_binder_range(binder_start, binder_end);
     *IndexVec::index_mut(&mut output.handle_arms, arm_id) =
         Option::Some(ResolvedHandleArm {
-            variant: variant,
+            target: target,
             binders: resolved_binders
         });
     try(resolve_expression(
@@ -1584,6 +1853,32 @@ resolve_expression(
                 Id::to_u32(callee),
                 module
             ), @resolve_expression);
+            resolve_edges(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                arguments,
+                module
+            )
+        },
+        super::bodies::BodyExpressionView::Perform(path, arguments) => {
+            let operation = try(resolve_effect_operation(
+                headers,
+                declarations,
+                super::bodies::effect_operation_effect_name(&path),
+                super::bodies::effect_operation_name(&path),
+                module,
+                super::bodies::effect_operation_effect_token(&path),
+                super::bodies::effect_operation_token(&path)
+            ), @resolve_expression);
+            push_resolution(
+                output,
+                Id::from_u32(expression),
+                ResolvedTarget::EffectOperation(operation)
+            );
             resolve_edges(
                 headers,
                 index,

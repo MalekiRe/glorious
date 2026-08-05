@@ -8,7 +8,7 @@ use std::{
 
 use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
-    ast::{Expr, ExprKind, Function, Program, Stmt},
+    ast::{Expr, ExprKind, Function, PatternKind, Program, Stmt},
     modules::{ModuleId, ModuleResolution},
     source_bundle::{Segment, SourceBundle},
 };
@@ -85,6 +85,7 @@ enum Target {
     Function(FunctionIdentity),
     Struct(u32),
     Variant(u32),
+    EffectOperation(FunctionIdentity, u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +144,7 @@ struct Resolver<'a> {
     functions: &'a BTreeMap<(ModuleId, String), FunctionIdentity>,
     structs: &'a BTreeMap<String, u32>,
     variants: &'a BTreeMap<(String, String), u32>,
+    effects: &'a BTreeMap<(ModuleId, String), (FunctionIdentity, Vec<String>)>,
     result: FunctionResolution,
 }
 
@@ -162,6 +164,17 @@ impl Resolver<'_> {
             .or_else(|| {
                 (self.current_module != ModuleId(0))
                     .then(|| self.functions.get(&(ModuleId(0), name.to_owned())))
+                    .flatten()
+            })
+            .cloned()
+    }
+
+    fn effect(&self, name: &str) -> Option<(FunctionIdentity, Vec<String>)> {
+        self.effects
+            .get(&(self.current_module, name.to_owned()))
+            .or_else(|| {
+                (self.current_module != ModuleId(0))
+                    .then(|| self.effects.get(&(ModuleId(0), name.to_owned())))
                     .flatten()
             })
             .cloned()
@@ -235,6 +248,72 @@ impl Resolver<'_> {
                 Ok(())
             }
             ExprKind::Field(subject, _) => self.expression(subject, locals),
+            ExprKind::Perform {
+                effect,
+                operation,
+                args,
+            } => {
+                let (identity, operations) = self.effect(effect).ok_or(())?;
+                let ordinal = operations
+                    .iter()
+                    .position(|candidate| candidate == operation.as_ref())
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or(())?;
+                self.result.occurrences.push(Occurrence {
+                    spelling: effect.to_string(),
+                    target: Target::EffectOperation(identity, ordinal),
+                });
+                for argument in args.iter() {
+                    self.expression(argument, locals)?;
+                }
+                Ok(())
+            }
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                self.expression(computation, locals)?;
+                for clause in clauses.iter() {
+                    let (_, operations) = self.effect(&clause.effect).ok_or(())?;
+                    if !operations.iter().any(|name| name == &clause.operation) {
+                        return Err(());
+                    }
+                    let mut nested = locals.clone();
+                    for pattern in &clause.patterns {
+                        match &pattern.kind {
+                            PatternKind::Wildcard | PatternKind::Int(_) => {}
+                            PatternKind::Binding(name) => {
+                                let id = self.define(2, name)?;
+                                nested.insert(name.clone(), id);
+                            }
+                            _ => return Err(()),
+                        }
+                    }
+                    let body = match (&clause.resumption, &clause.body.kind) {
+                        (
+                            Some(expected),
+                            ExprKind::TailResume {
+                                resumption,
+                                value: Some(value),
+                            },
+                        ) if matches!(
+                            &resumption.kind,
+                            ExprKind::Variable(path)
+                                if matches!(
+                                    path.as_ref(),
+                                    [name] if name.as_ref() == expected
+                                )
+                        ) =>
+                        {
+                            value.as_ref()
+                        }
+                        (None, _) => &clause.body,
+                        _ => return Err(()),
+                    };
+                    self.expression(body, &nested)?;
+                }
+                Ok(())
+            }
             _ => Err(()),
         }
     }
@@ -267,6 +346,7 @@ fn resolve_function(
     functions: &BTreeMap<(ModuleId, String), FunctionIdentity>,
     structs: &BTreeMap<String, u32>,
     variants: &BTreeMap<(String, String), u32>,
+    effects: &BTreeMap<(ModuleId, String), (FunctionIdentity, Vec<String>)>,
     function: &Function,
 ) -> Result<FunctionResolution, ()> {
     let current_module = graph.owner(bundle, function.span).ok_or(())?;
@@ -275,6 +355,7 @@ fn resolve_function(
         functions,
         structs,
         variants,
+        effects,
         result: FunctionResolution::default(),
     };
     let mut locals = BTreeMap::new();
@@ -337,6 +418,33 @@ fn encode_rust_resolution(output: &mut Vec<u8>, source: &str) {
             variant_index += 1;
         }
     }
+    let mut effects = BTreeMap::new();
+    for declaration in &program.effects {
+        let module = match graph.owner(&bundle, declaration.span) {
+            Some(value) => value,
+            None => {
+                output.push(3);
+                return;
+            }
+        };
+        let identity = FunctionIdentity {
+            module,
+            path: graph.module(module).path.clone(),
+            name: declaration.name.clone(),
+        };
+        let operations = declaration
+            .operations
+            .iter()
+            .map(|operation| operation.name.clone())
+            .collect();
+        if effects
+            .insert((module, declaration.name.clone()), (identity, operations))
+            .is_some()
+        {
+            output.push(3);
+            return;
+        }
+    }
     let mut declarations = program.functions.iter().collect::<Vec<_>>();
     declarations.sort_by_key(|function| function.span.start);
 
@@ -347,9 +455,9 @@ fn encode_rust_resolution(output: &mut Vec<u8>, source: &str) {
             output.push(3);
             return;
         };
-        let Ok(resolved) =
-            resolve_function(&graph, &bundle, &functions, &structs, &variants, function)
-        else {
+        let Ok(resolved) = resolve_function(
+            &graph, &bundle, &functions, &structs, &variants, &effects, function,
+        ) else {
             output.push(3);
             return;
         };
@@ -378,6 +486,11 @@ fn encode_rust_resolution(output: &mut Vec<u8>, source: &str) {
                 Target::Variant(index) => {
                     encoded.push(4);
                     push_u32(&mut encoded, index);
+                }
+                Target::EffectOperation(identity, ordinal) => {
+                    encoded.push(5);
+                    encode_function_identity(&mut encoded, &identity);
+                    push_u32(&mut encoded, ordinal);
                 }
             }
         }
@@ -411,6 +524,45 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          Pair { right: right, left: left }.left }",
         "enum Choice { None(), Some(u64) } \
          probe_variant(value: u64) { Choice::Some(value) }",
+        "effect Signal { raise(value: u64) -> u64 } \
+         probe_effect(value: u64) -> u64 / {Signal} { \
+             perform Signal::raise(value) \
+         }",
+        "effect Signal { raise(value: u64) -> u64 } \
+         probe_implicit_effect(value: u64) -> u64 / {Signal} { \
+             Signal::raise(value) \
+         }",
+        "effect RootSignal { raise() -> u64 } \
+         mod inner { \
+             probe_root_effect() -> u64 / {RootSignal} { \
+                 perform RootSignal::raise() \
+             } \
+         }",
+        "effect Signal { root() -> u64 } \
+         mod inner { \
+             effect Signal { local() -> u64 } \
+             probe_local_effect() -> u64 / {Signal} { \
+                 perform Signal::local() \
+             } \
+         }",
+        "effect Signal { first() -> u64 second() -> u64 } \
+         probe_second() -> u64 / {Signal} { perform Signal::second() }",
+        "effect Signal { inspect(value: u64) -> u64 } \
+         probe_effect_handle(value: u64) -> u64 { \
+             handle perform Signal::inspect(value) { \
+                 Signal::inspect(found) => found \
+             } \
+         }",
+        "effect Outer { inspect(value: u64) -> u64 } \
+         effect Inner { inspect(value: u64) -> u64 } \
+         probe_nested_effect_binders(value: u64) -> u64 { \
+             handle perform Outer::inspect(value) { \
+                 Outer::inspect(outer) => \
+                     handle perform Inner::inspect(outer) { \
+                         Inner::inspect(inner) => inner \
+                     } \
+             } \
+         }",
     ];
     let malformed = [
         "probe_before_let() { x; let x = 1; x }",
@@ -425,6 +577,27 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_unknown_struct() { Missing {} }",
         "enum Choice { Some(u64) } \
          probe_unknown_variant(value: u64) { Choice::Missing(value) }",
+        "probe_unknown_effect() -> u64 { perform Missing::raise() }",
+        "effect Signal { raise() -> u64 } \
+         probe_unknown_operation() -> u64 / {Signal} { \
+             perform Signal::missing() \
+         }",
+        "struct Signal {} \
+         probe_invalid_effect_owner() -> u64 { perform Signal::raise() }",
+        "effect Signal { raise() -> u64 } \
+         probe_unknown_handle_operation() -> u64 { \
+             handle perform Signal::raise() { Signal::missing() => 1 } \
+         }",
+        "struct Signal {} \
+         probe_invalid_handle_target(value: Signal) -> u64 { \
+             handle value { Signal::missing => 1 } \
+         }",
+        "mod outer { \
+             effect Signal { raise() -> u64 } \
+             mod child { \
+                 probe_no_parent_effect() -> u64 { perform Signal::raise() } \
+             } \
+         }",
     ];
 
     let mut paths = Vec::new();

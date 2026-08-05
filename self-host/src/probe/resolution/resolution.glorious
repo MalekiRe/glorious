@@ -268,6 +268,23 @@ write_target(
         ResolvedTarget::Variant(variant) => {
             ByteBuf::push(&mut *output, 4);
             ByteBuf::write_u32_le(output, Id::to_u32(variant))
+        },
+        ResolvedTarget::EffectOperation(operation) => {
+            ByteBuf::push(&mut *output, 5);
+            write_function_identity(
+                output,
+                source,
+                declarations,
+                super::super::frontend::resolution::effect_operation_effect(
+                    &operation
+                )
+            );
+            ByteBuf::write_u32_le(
+                output,
+                super::super::frontend::resolution::effect_operation_ordinal(
+                    &operation
+                )
+            )
         }
     }
 }
@@ -285,19 +302,34 @@ write_occurrences(
         Range::new(occurrence, resolved_name_count(resolved)),
         { current => {
         let expression = resolved_name_expression_id_at(resolved, current);
+        let target = resolved_name_target_at(resolved, current);
+        let spelling_token = handle target {
+            ResolvedTarget::EffectOperation(_) => {
+                handle super::super::frontend::bodies::expression_view(
+                    body, Id::to_u32(expression)
+                ) {
+                    super::super::frontend::bodies::BodyExpressionView::Perform(
+                        path, _
+                    ) => super::super::frontend::bodies::effect_operation_effect_token(
+                        &path
+                    ),
+                    _ => unreachable()
+                }
+            },
+            _ => super::super::frontend::bodies::expression_token_start_at(
+                body, Id::to_u32(expression)
+            )
+        };
         write_name_token(
             &mut *output,
             source,
-            super::super::frontend::bodies::expression_token_start_at(
-                body,
-                Id::to_u32(expression)
-            )
+            spelling_token
         );
         write_target(
             &mut *output,
             source,
             declarations,
-            resolved_name_target_at(resolved, current),
+            target,
             parameter_count
         )
     } })
@@ -445,7 +477,7 @@ encode_source(output: &mut ByteBuf, original: String) {
                         &resolution_index,
                         &declarations
                     ) {
-                        Result::Err(_) => ByteBuf::push( output, 3),
+                        Result::Err(_) => ByteBuf::push(output, 3),
                         Result::Ok(_) => {
                             ByteBuf::push(&mut *output, 0);
                             ByteBuf::append_bytes(

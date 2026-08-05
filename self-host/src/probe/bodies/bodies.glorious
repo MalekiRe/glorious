@@ -306,6 +306,23 @@ write_expression(
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
             write_children(output, original, source, value, arguments)
         },
+        BodyExpressionView::Perform(path, arguments) => {
+            ByteBuf::push(output, 14);
+            try(write_name(
+                output,
+                source,
+                super::super::frontend::bodies::effect_operation_effect_name(&path),
+                super::super::frontend::bodies::effect_operation_effect_token(&path)
+            ), @write_expression);
+            try(write_name(
+                output,
+                source,
+                super::super::frontend::bodies::effect_operation_name(&path),
+                super::super::frontend::bodies::effect_operation_token(&path)
+            ), @write_expression);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
+            write_children(output, original, source, value, arguments)
+        },
         BodyExpressionView::Block(statements) => {
             ByteBuf::push(output, 8);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(statements)));

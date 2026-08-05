@@ -537,10 +537,14 @@ resolution_local_code(error: &ResolutionError) -> u32 {
         ResolutionError::UnknownStruct(_) => 5,
         ResolutionError::UnknownEnum(_) => 6,
         ResolutionError::UnknownVariant(_) => 4,
+        ResolutionError::UnknownEffect(_) => 26,
+        ResolutionError::UnknownOperation(_, _) => 27,
+        ResolutionError::InvalidEffectTarget(_, _) => 29,
         ResolutionError::InvalidNamePath(_) => 7,
         ResolutionError::AmbiguousFunction(_, _) => 2,
         ResolutionError::AmbiguousStruct(_, _) => 8,
         ResolutionError::AmbiguousEnum(_, _) => 9,
+        ResolutionError::AmbiguousEffect(_, _) => 28,
         ResolutionError::DuplicateParameter(_, _) => 10,
         ResolutionError::MissingCallableHeader(_) => 3,
         ResolutionError::MissingDeclarationShell(_, _) => 11,
@@ -587,6 +591,26 @@ resolution_shape(error: &ResolutionError) -> DiagnosticShape {
             0,
             0
         ),
+        ResolutionError::UnknownEffect(token) => token_shape(
+            DiagnosticClass::Resolution,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::UnknownOperation(token, protocol) => token_pair_shape(
+            DiagnosticClass::Resolution,
+            token,
+            protocol,
+            0,
+            0
+        ),
+        ResolutionError::InvalidEffectTarget(token, related) => token_pair_shape(
+            DiagnosticClass::Resolution,
+            token,
+            related,
+            0,
+            0
+        ),
         ResolutionError::InvalidNamePath(token) => token_shape(
             DiagnosticClass::Resolution,
             token,
@@ -614,6 +638,16 @@ resolution_shape(error: &ResolutionError) -> DiagnosticShape {
             DiagnosticClass::Resolution,
             model::site(DiagnosticSpace::Token, token),
             Option::Some(model::site(DiagnosticSpace::Interface, interface)),
+            0,
+            0
+        ),
+        ResolutionError::AmbiguousEffect(token, declaration) => shape(
+            DiagnosticClass::Resolution,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(
+                DiagnosticSpace::Declaration,
+                Id::to_usize(declaration)
+            )),
             0,
             0
         ),

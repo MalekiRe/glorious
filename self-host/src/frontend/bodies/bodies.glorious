@@ -72,6 +72,19 @@ pub struct HandleArm {
     body: ExprId
 }
 
+// A source effect-operation path deliberately lives outside the ordinary
+// expression-name arena. `perform E::op(...)` is control syntax, not a call
+// through a value named `E::op`, and retaining both tokens lets resolution
+// diagnose the owner and member independently.
+pub struct EffectOperationSyntax {
+    effect_name: Id<String>,
+    effect_token: usize,
+    operation_name: Id<String>,
+    operation_token: usize
+}
+
+impl Use<[0, *]> for EffectOperationSyntax {}
+
 enum ExpressionName {
     Identifier(Id<String>, usize),
     TupleField(u32, usize)
@@ -88,6 +101,7 @@ enum ExprKind {
     Prefix(BodyTokenRange, ExprId),
     Infix(BodyTokenRange, ExprId, ExprId),
     Call(ExprId, ExprEdgeRange),
+    Perform(EffectOperationSyntax, ExprEdgeRange),
     Block(ExprEdgeRange),
     Tuple(ExprEdgeRange),
     Construction(ExpressionNameRange, ExprEdgeRange),
@@ -118,6 +132,7 @@ pub enum BodyExpressionView<'a> {
     Prefix(BodyTokenRange, ExprId),
     Infix(BodyTokenRange, ExprId, ExprId),
     Call(ExprId, Slice<'a, ExprEdge>),
+    Perform(EffectOperationSyntax, Slice<'a, ExprEdge>),
     Block(Slice<'a, ExprEdge>),
     Tuple(Slice<'a, ExprEdge>),
     Construction(ExpressionNameView, Slice<'a, ExprEdge>),
@@ -304,6 +319,13 @@ expression_child_set(
                 usize_from_u32(range.start + child - 1)
             ), replacement);
             ExprKind::Call(callee, range)
+        },
+        ExprKind::Perform(path, range) => {
+            expression_edge_set_value(Vec::index_mut(
+                &mut value.edges,
+                usize_from_u32(range.start + child)
+            ), replacement);
+            ExprKind::Perform(path, range)
         },
         ExprKind::Block(range) => {
             expression_edge_set_value(Vec::index_mut(
@@ -962,6 +984,22 @@ pub expression_name_count_at(value: &ParsedBody, index: u32) -> u32 {
     node_name_range(arena_node_at_raw(&value.nodes, index)).count
 }
 
+pub effect_operation_effect_name(value: &EffectOperationSyntax) -> Id<String> {
+    value.effect_name
+}
+
+pub effect_operation_effect_token(value: &EffectOperationSyntax) -> usize {
+    value.effect_token
+}
+
+pub effect_operation_name(value: &EffectOperationSyntax) -> Id<String> {
+    value.operation_name
+}
+
+pub effect_operation_token(value: &EffectOperationSyntax) -> usize {
+    value.operation_token
+}
+
 node_name_range(value: &ExprNode) -> ExpressionNameRange {
     handle value.kind {
         ExprKind::Identifier(range) => range,
@@ -1148,6 +1186,8 @@ pub expression_child_count_at(
         BodyExpressionView::Infix(_, _, _) => 2,
         BodyExpressionView::Call(_, arguments) =>
             u32_from_usize(Slice::len(arguments)) + 1,
+        BodyExpressionView::Perform(_, arguments) =>
+            u32_from_usize(Slice::len(arguments)),
         BodyExpressionView::Block(children) =>
             u32_from_usize(Slice::len(children)),
         BodyExpressionView::Tuple(children) =>
@@ -1179,6 +1219,11 @@ pub expression_child_at(
                 usize_from_u32(child - 1)
             )))
         },
+        BodyExpressionView::Perform(_, arguments) =>
+            Id::to_u32(expression_edge_value(edge_in_slice(
+                arguments,
+                usize_from_u32(child)
+            ))),
         BodyExpressionView::Block(children) =>
             Id::to_u32(expression_edge_value(edge_in_slice(
                 children,
@@ -1263,6 +1308,10 @@ pub expression_view<'a>(
             BodyExpressionView::Infix(operator, left, right),
         ExprKind::Call(callee, arguments) => BodyExpressionView::Call(
             callee,
+            expression_edges(value, arguments)
+        ),
+        ExprKind::Perform(path, arguments) => BodyExpressionView::Perform(
+            path,
             expression_edges(value, arguments)
         ),
         ExprKind::Block(children) =>
@@ -1538,6 +1587,108 @@ push_call(
     push_node(
         value,
         ExprKind::Call(callee, edges),
+        token_range(start, end)
+    )
+}
+
+effect_name_is_declared(
+    declarations: &super::scanner::DeclarationIndex,
+    name: Id<String>,
+    module: Option<ShellId>
+) -> Bool {
+    let local = super::scanner::def_search(
+        declarations, module, name, super::scanner::Namespace::Type
+    );
+    let found = if(super::scanner::def_search_count(&local) == 0
+        and { Option::is_some(&module) }) {
+        super::scanner::def_search(
+            declarations, None, name, super::scanner::Namespace::Type
+        )
+    } else { local };
+    if(super::scanner::def_search_count(&found) == 1) {
+        handle super::scanner::def_search_first(&found) {
+            None => false,
+            Option::Some(shell) => handle super::scanner::shell_at(
+                declarations, shell
+            ) {
+                None => false,
+                Option::Some(declaration) => super::scanner::shell_kind(
+                    declaration
+                ) is super::scanner::DeclarationKind::Effect
+            }
+        }
+    } else { false }
+}
+
+implicit_effect_operation(
+    declarations: &super::scanner::DeclarationIndex,
+    value: &BodyParser,
+    callee: ExprId,
+    module: Option<ShellId>
+) -> Option<EffectOperationSyntax> {
+    let node = Arena::index(&value.nodes, callee);
+    let names = handle node.kind {
+        ExprKind::Identifier(found) => found,
+        _ => @implicit_effect_operation(None)
+    };
+    if(names.count == 2) {
+        let owner = *Vec::index(
+            &value.names, usize_from_u32(names.start)
+        );
+        let member = *Vec::index(
+            &value.names, usize_from_u32(names.start + 1)
+        );
+        handle (owner, member) {
+            (
+                ExpressionName::Identifier(effect_name, effect_token),
+                ExpressionName::Identifier(operation_name, operation_token)
+            ) => if(effect_name_is_declared(
+                declarations, effect_name, module
+            )) {
+                Option::Some(EffectOperationSyntax {
+                    effect_name: effect_name,
+                    effect_token: effect_token,
+                    operation_name: operation_name,
+                    operation_token: operation_token
+                })
+            } else { None },
+            _ => None
+        }
+    } else { None }
+}
+
+push_call_or_perform(
+    declarations: &super::scanner::DeclarationIndex,
+    value: &mut BodyParser,
+    module: Option<ShellId>,
+    callee: ExprId,
+    arguments: &Vec<ExprId>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    handle implicit_effect_operation(
+        declarations, &*value, callee, module
+    ) {
+        None => push_call(value, callee, arguments, start, end),
+        Option::Some(path) => push_perform(
+            value, path, arguments, start, end
+        )
+    }
+}
+
+push_perform(
+    value: &mut BodyParser,
+    path: EffectOperationSyntax,
+    arguments: &Vec<ExprId>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let edge_start = super::syntax::range_mark(&value.edges);
+    push_argument_edges(value, arguments, 0);
+    let edge_end = Vec::len(&value.edges);
+    push_node(
+        value,
+        ExprKind::Perform(path, edge_range(edge_start, edge_end)),
         token_range(start, end)
     )
 }
@@ -2553,6 +2704,69 @@ parse_handle(
     }
 }
 
+parse_perform(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize
+) -> Result<ExprId, BodyError> {
+    let effect_token = start + 1;
+    let effect_name = try(identifier_name(
+        source, effect_token, start
+    ), @parse_perform);
+    let separator = effect_token + 1;
+    if(separator >= value.tokens.limit or {
+        not(super::lexer::token_matches_at(
+            source, separator, TokenPattern::DoubleColon
+        ))
+    }) {
+        @parse_perform(Result::Err(BodyError::ExpectedIdentifier(
+            separator, effect_token
+        )))
+    } else { () };
+    let operation_token = separator + 1;
+    let operation_name = try(identifier_name(
+        source, operation_token, separator
+    ), @parse_perform);
+    let open = operation_token + 1;
+    if(open >= value.tokens.limit or {
+        not(super::lexer::token_matches_at(source, open, TokenPattern::LParen))
+    }) {
+        @parse_perform(Result::Err(BodyError::ExpectedCallClose(
+            open, operation_token
+        )))
+    } else { () };
+    value.tokens.position = open + 1;
+    let arguments = Vec::new();
+    try(parse_call_arguments(
+        original,
+        source,
+        declarations,
+        nominal,
+        value,
+        owner,
+        depth + 1,
+        &mut arguments,
+        open
+    ), @parse_perform);
+    Result::Ok(push_perform(
+        value,
+        EffectOperationSyntax {
+            effect_name: effect_name,
+            effect_token: effect_token,
+            operation_name: operation_name,
+            operation_token: operation_token
+        },
+        &arguments,
+        start,
+        value.tokens.position
+    ))
+}
+
 parse_atom(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -2566,6 +2780,16 @@ parse_atom(
     if(start < value.tokens.limit) {
         handle super::lexer::token_kind_at(source, start) {
             TokenKind::Keyword(Keyword::Handle) => parse_handle(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth,
+                start
+            ),
+            TokenKind::Keyword(Keyword::Perform) => parse_perform(
                 original,
                 source,
                 declarations,
@@ -3058,8 +3282,10 @@ parse_postfix(
                         @parse_postfix
                     );
                     let end = value.tokens.position;
-                    let call = push_call(
+                    let call = push_call_or_perform(
+                        declarations,
                         value,
+                        owner,
                         callee,
                         &arguments,
                         start,
