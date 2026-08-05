@@ -7,8 +7,8 @@ use std::{
 
 use grandiose::{
     ast::{
-        EffectDecl, EffectRowSyntax, Function, GenericParamKind, GenericParams, TypeSyntax,
-        TypeSyntaxKind, Visibility,
+        EffectDecl, EffectRowSyntax, FieldVisibility, Function, GenericParamKind, GenericParams,
+        StructDecl, TypeSyntax, TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
     CompileOptions, LlvmOptions, OptimizationLevel,
@@ -240,6 +240,27 @@ fn encode_effect(
     Ok(())
 }
 
+fn encode_struct(
+    output: &mut Vec<u8>,
+    program: &grandiose::ast::Program,
+    declaration: &StructDecl,
+) -> Result<(), ()> {
+    output.push(u8::from(
+        program.visibility(declaration.span) == Visibility::Public,
+    ));
+    push_string(output, &declaration.name);
+    encode_generics(output, declaration.generics.as_ref())?;
+    push_u32(output, declaration.fields.len().try_into().unwrap());
+    for field in &declaration.fields {
+        output.push(u8::from(field.visibility == FieldVisibility::Public));
+        push_string(output, &field.name);
+        encode_type(output, &field.ty)?;
+        push_u64(output, field.span.start as u64);
+        push_u64(output, field.span.end as u64);
+    }
+    Ok(())
+}
+
 fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     let Ok(tokens) = grandiose::lexer::lex(source) else {
         output.push(1);
@@ -269,6 +290,15 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
             return;
         }
     }
+    let mut structs = program.structs.iter().collect::<Vec<_>>();
+    structs.sort_by_key(|declaration| declaration.span.start);
+    push_u32(&mut encoded, structs.len().try_into().unwrap());
+    for declaration in structs {
+        if encode_struct(&mut encoded, &program, declaration).is_err() {
+            output.push(3);
+            return;
+        }
+    }
     output.push(0);
     output.extend(encoded);
 }
@@ -276,6 +306,7 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
 fn corpus(directory: &Path) -> Vec<PathBuf> {
     let focused = [
         "",
+        "struct Vault { private secret: i64, visible: Text, private: i64 }",
         "noop() { () }",
         "identity<T>(value: T) -> T { value }",
         "pub consume(value: &mut Vec<u8>) { () }",
@@ -320,6 +351,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     fs::write(&path, deep).unwrap();
     paths.push(path);
     paths
+}
+
+#[test]
+fn self_host_header_struct_visibility_matches_bootstrap() {
+    self_hosted_headers_match_rust_in_vm_and_native_execution();
 }
 
 #[test]

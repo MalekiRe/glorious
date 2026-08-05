@@ -156,6 +156,7 @@ pub struct TypeAliasHeader {
 pub struct FieldHeader {
     name: Id<String>,
     name_token: usize,
+    tokens: HeaderTokenRange,
     private: Bool,
     ty: TypeId
 }
@@ -850,6 +851,8 @@ pub field_name_raw(value: &FieldHeader) -> u32 { Id::to_u32(value.name) }
 pub field_name(value: &FieldHeader) -> Id<String> { value.name }
 
 pub field_name_token(value: &FieldHeader) -> usize { value.name_token }
+
+pub field_tokens(value: &FieldHeader) -> &HeaderTokenRange { &value.tokens }
 
 pub field_type(value: &FieldHeader) -> &TypeId { &value.ty }
 
@@ -2393,6 +2396,7 @@ parse_fields(
     related: usize
 ) -> Result<(), HeaderError> {
     if(value.tokens.position < value.tokens.limit) {
+            let field_start = value.tokens.position;
             let private = at_ident(&*value, &"private")
                 and { next_is_ident(&*value) };
             if(private) {
@@ -2406,6 +2410,7 @@ parse_fields(
                 FieldHeader {
                     name: name.name,
                     name_token: name.token,
+                    tokens: token_range(field_start, value.tokens.position),
                     private: private,
                     ty: ty
                 }

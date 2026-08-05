@@ -344,7 +344,8 @@ write_alias(
 write_struct(
     output: &mut ByteBuf,
     parsed: &ParsedHeaders,
-    value: &StructHeader
+    value: &StructHeader,
+    include_field_spans: Bool
 ) {
     write_common(
         output,
@@ -388,7 +389,36 @@ write_struct(
             output,
             parsed,
             *super::super::frontend::headers::field_type(field)
-        )
+        );
+        if(include_field_spans) {
+            let field_tokens = super::super::frontend::headers::field_tokens(field);
+            let first = handle super::super::frontend::lexer::token_at(
+                super::super::frontend::headers::parsed_source(parsed),
+                super::super::frontend::headers::token_range_start(field_tokens)
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+            };
+            let last = handle super::super::frontend::lexer::token_at(
+                super::super::frontend::headers::parsed_source(parsed),
+                super::super::frontend::headers::token_range_end(field_tokens) - 1
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+            };
+            ByteBuf::write_u64_le(
+                output,
+                wrapping_convert_to_u64(
+                    super::super::frontend::lexer::span_start(&first)
+                )
+            );
+            ByteBuf::write_u64_le(
+                output,
+                wrapping_convert_to_u64(
+                    super::super::frontend::lexer::span_end(&last)
+                )
+            )
+        } else { () }
     }})
 }
 
@@ -552,7 +582,12 @@ write_fixity(
     write_string(output, &spelling)
 }
 
-write_interfaces(output: &mut ByteBuf, original: &String, parsed: &ParsedHeaders) {
+write_interfaces(
+    output: &mut ByteBuf,
+    original: &String,
+    parsed: &ParsedHeaders,
+    include_field_spans: Bool
+) {
     let nominal = super::super::frontend::headers::nominal_index(parsed);
     let index = super::super::frontend::headers::parsed_index(parsed);
     for_range(Range::new(
@@ -584,7 +619,7 @@ write_interfaces(output: &mut ByteBuf, original: &String, parsed: &ParsedHeaders
                 super::super::frontend::headers::struct_at(nominal, declaration) {
                 Result::Err(_) => unreachable(),
                 Result::Ok(found) => found
-            }),
+            }, include_field_spans),
             9 => write_enum(output, parsed, handle
                 super::super::frontend::headers::enum_at(nominal, declaration) {
                 Result::Err(_) => unreachable(),
@@ -626,7 +661,7 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                                 )
                             )
                         );
-                        write_interfaces(output, &source, &parsed)
+                        write_interfaces(output, &source, &parsed, false)
                     } else {
                         ByteBuf::write_u32_le(
                             output,
@@ -665,6 +700,26 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                                 Result::Ok(value) => value
                             };
                             write_effect(output, &parsed, found)
+                        }});
+                        ByteBuf::write_u32_le(
+                            output,
+                            wrapping_convert_to_u32(
+                                super::super::frontend::headers::struct_count(nominal)
+                            )
+                        );
+                        for_range(Range::new(
+                            0,
+                            super::super::frontend::headers::struct_count(nominal)
+                        ), { current => {
+                            let found = handle
+                                super::super::frontend::headers::struct_at(
+                                    nominal,
+                                    current
+                                ) {
+                                Result::Err(_) => unreachable(),
+                                Result::Ok(value) => value
+                            };
+                            write_struct(output, &parsed, found, true)
                         }})
                     }
                 }
