@@ -2689,6 +2689,39 @@ parse_primary(
                 node_tokens(&*value, child).end
             ))
         } else {
+            if(at_token(&*value, source, TokenPattern::Star)
+                and { start + 1 < value.tokens.limit }
+                and {
+                    let operator = token_span(source, start);
+                    let operand = token_span(source, start + 1);
+                    super::lexer::span_end(&operator)
+                        == super::lexer::span_start(&operand)
+                }) {
+                value.tokens.position = start + 1;
+                let child = try(parse_primary(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth + 1
+                ), @parse_primary);
+                let end = node_tokens(&*value, child).end;
+                Result::Ok(push_prefix(
+                    value,
+                    OperatorUse {
+                        fixity: 0,
+                        start: start,
+                        end: start + 1,
+                        form: 0,
+                        precedence: 0
+                    },
+                    child,
+                    start,
+                    end
+                ))
+            } else {
             let prefix = try(
                 peek_operator(
                     original,
@@ -2749,6 +2782,7 @@ parse_primary(
                         atom
                     )
                 }
+            }
             }
         }
     } else {

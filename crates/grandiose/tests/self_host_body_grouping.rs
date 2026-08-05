@@ -1272,6 +1272,53 @@ fn self_host_body_fixity_grouping_matches_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_body_dereference_adjacency_matches_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let sources = [
+                "infixl 40 *; valid(value: &i64) -> i64 { *value * 2 }",
+                "infixl 40 *; invalid(value: &i64) -> i64 { * value }",
+            ];
+            let mut inputs = Vec::new();
+            let mut expected = Vec::new();
+            push_u32(&mut expected, sources.len() as u32);
+            for (index, source) in sources.iter().enumerate() {
+                let path = directory.path().join(format!("case-{index}.glorious"));
+                fs::write(&path, source).unwrap();
+                inputs.push(path);
+                encode_rust_grouping(&mut expected, source);
+            }
+
+            let output = directory.path().join("self-host.bin");
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact).unwrap();
+            let args = std::iter::once(output.clone().into_os_string())
+                .chain(inputs.into_iter().map(|path| path.into_os_string()))
+                .collect::<Vec<_>>();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(args),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_body_whitespace_calls_match_bootstrap_ast() {
     // The probe is deliberately limited to the frontend body contract.
     // It exercises both spelling normalization and grouping in one source.
