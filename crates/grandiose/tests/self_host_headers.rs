@@ -92,32 +92,40 @@ fn encode_optional_lifetime(output: &mut Vec<u8>, lifetime: Option<&str>) {
     }
 }
 
-fn encode_type(output: &mut Vec<u8>, ty: &TypeSyntax) -> Result<(), ()> {
-    push_u32(output, ty.span.start as u32);
-    push_u32(output, ty.span.end as u32);
+fn encode_type(output: &mut Vec<u8>, _source: &str, ty: &TypeSyntax) -> Result<(), ()> {
     match &ty.kind {
         TypeSyntaxKind::Path(segments) => {
             output.push(1);
+            push_u32(output, ty.span.start.try_into().unwrap());
+            push_u32(output, ty.span.end.try_into().unwrap());
             push_u32(output, segments.len().try_into().unwrap());
             for segment in segments {
                 push_string(output, &segment.name);
+                push_u32(output, segment.span.start.try_into().unwrap());
+                push_u32(output, segment.span.end.try_into().unwrap());
             }
         }
         TypeSyntaxKind::SharedReference { lifetime, referent } => {
             output.push(2);
+            push_u32(output, ty.span.start.try_into().unwrap());
+            push_u32(output, ty.span.end.try_into().unwrap());
             encode_optional_lifetime(output, lifetime.as_ref().map(|value| value.name.as_str()));
-            encode_type(output, referent)?;
+            encode_type(output, _source, referent)?;
         }
         TypeSyntaxKind::UniqueReference { lifetime, referent } => {
             output.push(3);
+            push_u32(output, ty.span.start.try_into().unwrap());
+            push_u32(output, ty.span.end.try_into().unwrap());
             encode_optional_lifetime(output, lifetime.as_ref().map(|value| value.name.as_str()));
-            encode_type(output, referent)?;
+            encode_type(output, _source, referent)?;
         }
         TypeSyntaxKind::Tuple(elements) => {
             output.push(4);
+            push_u32(output, ty.span.start.try_into().unwrap());
+            push_u32(output, ty.span.end.try_into().unwrap());
             push_u32(output, elements.len().try_into().unwrap());
             for element in elements {
-                encode_type(output, element)?;
+                encode_type(output, _source, element)?;
             }
         }
         TypeSyntaxKind::Application {
@@ -126,17 +134,25 @@ fn encode_type(output: &mut Vec<u8>, ty: &TypeSyntax) -> Result<(), ()> {
             lifetime_arguments,
         } => {
             output.push(5);
-            encode_type(output, constructor)?;
+            push_u32(output, ty.span.start.try_into().unwrap());
+            push_u32(output, ty.span.end.try_into().unwrap());
+            encode_type(output, _source, constructor)?;
             push_u32(output, lifetime_arguments.len().try_into().unwrap());
             for lifetime in lifetime_arguments {
                 push_string(output, &lifetime.lifetime.name);
+                push_u32(output, lifetime.lifetime.span.start.try_into().unwrap());
+                push_u32(output, lifetime.lifetime.span.end.try_into().unwrap());
             }
             push_u32(output, arguments.len().try_into().unwrap());
             for argument in arguments {
-                encode_type(output, argument)?;
+                encode_type(output, _source, argument)?;
             }
         }
-        TypeSyntaxKind::Never => output.push(6),
+        TypeSyntaxKind::Never => {
+            output.push(6);
+            push_u32(output, ty.span.start.try_into().unwrap());
+            push_u32(output, ty.span.end.try_into().unwrap());
+        }
         TypeSyntaxKind::Projection { .. } => return Err(()),
     }
     Ok(())
@@ -200,11 +216,15 @@ fn encode_where_clause(
     Ok(())
 }
 
-fn encode_effect_row(output: &mut Vec<u8>, row: &EffectRowSyntax) -> Result<(), ()> {
+fn encode_effect_row(
+    output: &mut Vec<u8>,
+    source: &str,
+    row: &EffectRowSyntax,
+) -> Result<(), ()> {
     push_u32(output, row.effects.len().try_into().unwrap());
     for effect in &row.effects {
         push_span(output, effect.span);
-        encode_type(output, effect)?;
+        encode_type(output, source, effect)?;
     }
     push_span(output, row.span);
     match &row.tail {
@@ -217,7 +237,11 @@ fn encode_effect_row(output: &mut Vec<u8>, row: &EffectRowSyntax) -> Result<(), 
     Ok(())
 }
 
-fn encode_where_contract(output: &mut Vec<u8>, clause: Option<&ast::WhereClause>) {
+fn encode_where_contract(
+    output: &mut Vec<u8>,
+    source: &str,
+    clause: Option<&ast::WhereClause>,
+) {
     let Some(clause) = clause else {
         output.push(0);
         return;
@@ -228,7 +252,7 @@ fn encode_where_contract(output: &mut Vec<u8>, clause: Option<&ast::WhereClause>
     for goal in &clause.goals {
         push_span(output, goal.span);
         push_span(output, goal.subject.span);
-        encode_type(output, &goal.subject).unwrap();
+        encode_type(output, source, &goal.subject).unwrap();
         output.push(u8::from(goal.polarity == ast::GoalPolarity::Negative));
         push_u32(output, goal.relation.path.len().try_into().unwrap());
         for segment in &goal.relation.path {
@@ -241,7 +265,7 @@ fn encode_where_contract(output: &mut Vec<u8>, clause: Option<&ast::WhereClause>
                     output.push(1);
                     output.push(1);
                     push_span(output, ty.span);
-                    encode_type(output, ty).unwrap();
+                    encode_type(output, source, ty).unwrap();
                 }
                 ast::GoalArgument::Lifetime { .. } => {
                     output.push(2);
@@ -265,11 +289,11 @@ fn encode_where_contract(output: &mut Vec<u8>, clause: Option<&ast::WhereClause>
                 ast::AssociatedBindingValue::Type(ty) => {
                     output.push(1);
                     push_span(output, ty.span);
-                    encode_type(output, ty).unwrap();
+                    encode_type(output, source, ty).unwrap();
                 }
                 ast::AssociatedBindingValue::EffectRow(row) => {
                     output.push(2);
-                    encode_effect_row(output, row).unwrap();
+                    encode_effect_row(output, source, row).unwrap();
                 }
             }
         }
@@ -299,6 +323,7 @@ fn encode_where_contract(output: &mut Vec<u8>, clause: Option<&ast::WhereClause>
 
 fn encode_callable(
     output: &mut Vec<u8>,
+    source: &str,
     program: &grandiose::ast::Program,
     declaration: &Function,
 ) -> Result<(), ()> {
@@ -316,28 +341,29 @@ fn encode_callable(
     push_u32(output, declaration.params.len().try_into().unwrap());
     for parameter in &declaration.params {
         push_string(output, &parameter.name);
-        encode_type(output, &parameter.ty)?;
+        encode_type(output, source, &parameter.ty)?;
     }
     match &declaration.return_type {
         Some(return_type) => {
             output.push(1);
-            encode_type(output, return_type)?;
+            encode_type(output, source, return_type)?;
         }
         None => output.push(0),
     }
     match &declaration.outward_effects {
         Some(effects) => {
             output.push(1);
-            encode_effect_row(output, effects)?;
+            encode_effect_row(output, source, effects)?;
         }
         None => output.push(0),
     }
-    encode_where_contract(output, declaration.where_clause.as_ref());
+    encode_where_contract(output, source, declaration.where_clause.as_ref());
     Ok(())
 }
 
 fn encode_effect(
     output: &mut Vec<u8>,
+    source: &str,
     program: &grandiose::ast::Program,
     declaration: &EffectDecl,
 ) -> Result<(), ()> {
@@ -354,12 +380,12 @@ fn encode_effect(
         push_u32(output, operation.params.len().try_into().unwrap());
         for parameter in &operation.params {
             push_string(output, &parameter.name);
-            encode_type(output, &parameter.ty)?;
+            encode_type(output, source, &parameter.ty)?;
         }
         match &operation.return_type {
             Some(result) => {
                 output.push(1);
-                encode_type(output, result)?;
+                encode_type(output, source, result)?;
             }
             None => output.push(0),
         }
@@ -380,6 +406,7 @@ fn encode_effect(
 
 fn encode_struct(
     output: &mut Vec<u8>,
+    source: &str,
     program: &grandiose::ast::Program,
     declaration: &StructDecl,
 ) -> Result<(), ()> {
@@ -392,7 +419,7 @@ fn encode_struct(
     for field in &declaration.fields {
         output.push(u8::from(field.visibility == FieldVisibility::Public));
         push_string(output, &field.name);
-        encode_type(output, &field.ty)?;
+        encode_type(output, source, &field.ty)?;
         push_u64(output, field.span.start as u64);
         push_u64(output, field.span.end as u64);
     }
@@ -414,7 +441,7 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     let mut encoded = Vec::new();
     push_u32(&mut encoded, callables.len().try_into().unwrap());
     for callable in callables {
-        if encode_callable(&mut encoded, &program, callable).is_err() {
+        if encode_callable(&mut encoded, source, &program, callable).is_err() {
             output.push(3);
             return;
         }
@@ -423,7 +450,7 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     effects.sort_by_key(|declaration| declaration.span.start);
     push_u32(&mut encoded, effects.len().try_into().unwrap());
     for effect in effects {
-        if encode_effect(&mut encoded, &program, effect).is_err() {
+        if encode_effect(&mut encoded, source, &program, effect).is_err() {
             output.push(3);
             return;
         }
@@ -432,7 +459,7 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     structs.sort_by_key(|declaration| declaration.span.start);
     push_u32(&mut encoded, structs.len().try_into().unwrap());
     for declaration in structs {
-        if encode_struct(&mut encoded, &program, declaration).is_err() {
+        if encode_struct(&mut encoded, source, &program, declaration).is_err() {
             output.push(3);
             return;
         }
@@ -452,6 +479,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "slice<'a, T>(value: &'a Vec<T>) -> pkg::Slice<'a, T> { unreachable() }",
         "tuples(unit: (), single: (u8,), trio: (u8, String, !)) -> (u8, u8) { (0, 0) }",
         "view<T>(value: pkg::View<(T, !)>) -> pkg::View<(T, !)> { value }",
+        "type Alias = Result<&mut (i64, Option<&Text>), ()>; struct Record { value: &Map<Text, (i64, &mut Bytes)> } enum Event { Send(core::Packet<&Text>, ()), Empty } effect Query { ask(input: &mut Vec<(i64, Text)>) -> Option<&Text>; } run(arg: &Alias) -> Result<(i64, Text), &mut Error> { () }",
         "first<T>(value: Vec<T>) -> T { unreachable() } second(value: core::Pair<u8, u16>) { () }",
         "spaced<T,>(value: Vec< /* element */ T, >) -> Vec<T> { value }",
         "read<T, E: EffectRow>(value: T) -> pkg::Result<T, !> / {Console, Io<T> | E} { value }",
@@ -790,4 +818,9 @@ fn self_host_header_generic_where_effect_rows_match_bootstrap() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_header_nested_type_spans_match_bootstrap() {
+    self_hosted_headers_match_rust_in_vm_and_native_execution();
 }

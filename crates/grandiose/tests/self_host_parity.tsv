@@ -135,7 +135,7 @@ terminal_effects.rs	effects_control	partial	self_host_bytecode.rs#self_host_effe
 text_iteration_formatting.rs	standard_library	unported	-
 toolkit_foundations.rs	standard_library	unported	-
 trait_methods.rs	types_traits_generics	unported	-
-type_syntax.rs	syntax_frontend	partial	self_host_headers.rs#self_host_header_struct_visibility_matches_bootstrap
+type_syntax.rs	syntax_frontend	partial	self_host_headers.rs#self_host_header_struct_visibility_matches_bootstrap,self_host_headers.rs#self_host_header_nested_type_spans_match_bootstrap
 typed_anonymous_callables.rs	compiler_pipeline	unported	-
 vec_copying_growth.rs	standard_library	unported	-
 vec_deque.rs	standard_library	unported	-

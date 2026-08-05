@@ -98,6 +98,35 @@ write_narrow_token_span(
     )
 }
 
+write_type_node_span(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    start: usize,
+    end: usize
+) {
+    let source = super::super::frontend::headers::parsed_source(parsed);
+    let first = handle super::super::frontend::lexer::token_at(source, start) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    let last = handle super::super::frontend::lexer::token_at(source, end - 1) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::lexer::span_start(&first)
+        )
+    );
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::lexer::span_end(&last)
+        )
+    )
+}
+
 write_type_edges<'a>(
     output: &mut ByteBuf,
     parsed: &ParsedHeaders,
@@ -118,15 +147,10 @@ write_type_edges<'a>(
 
 write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
     let index = super::super::frontend::headers::parsed_index(parsed);
-    let tokens = super::super::frontend::headers::type_tokens(index, id);
-    write_narrow_token_span(
-        output,
-        super::super::frontend::headers::parsed_source(parsed),
-        &tokens
-    );
     handle super::super::frontend::headers::header_type_view(index, id) {
-        HeaderTypeView::Path(_, names) => {
+        HeaderTypeView::Path(start, end, names) => {
             ByteBuf::push(output, 1);
+            write_type_node_span(output, parsed, start, end);
             ByteBuf::write_u32_le(
                 output,
                 wrapping_convert_to_u32(Slice::len(names))
@@ -140,11 +164,33 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                     output,
                     super::super::frontend::headers::parsed_source(parsed),
                     super::super::frontend::headers::name_use_name(name)
+                );
+                let source = super::super::frontend::headers::parsed_source(parsed);
+                let token = super::super::frontend::lexer::token_at(
+                    source,
+                    super::super::frontend::headers::name_use_token(name)
+                );
+                let span = handle token {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+                };
+                ByteBuf::write_u32_le(
+                    output,
+                    wrapping_convert_to_u32(
+                        super::super::frontend::lexer::span_start(&span)
+                    )
+                );
+                ByteBuf::write_u32_le(
+                    output,
+                    wrapping_convert_to_u32(
+                        super::super::frontend::lexer::span_end(&span)
+                    )
                 )
             }})
         },
-        HeaderTypeView::SharedReference(_, lifetime, child) => {
+        HeaderTypeView::SharedReference(start, end, lifetime, child) => {
             ByteBuf::push(output, 2);
+            write_type_node_span(output, parsed, start, end);
             write_optional_name_token(
                 output,
                 super::super::frontend::headers::parsed_source(parsed),
@@ -152,8 +198,9 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             );
             write_type(output, parsed, child)
         },
-        HeaderTypeView::UniqueReference(_, lifetime, child) => {
+        HeaderTypeView::UniqueReference(start, end, lifetime, child) => {
             ByteBuf::push(output, 3);
+            write_type_node_span(output, parsed, start, end);
             write_optional_name_token(
                 output,
                 super::super::frontend::headers::parsed_source(parsed),
@@ -161,16 +208,18 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             );
             write_type(output, parsed, child)
         },
-        HeaderTypeView::Tuple(_, children) => {
+        HeaderTypeView::Tuple(start, end, children) => {
             ByteBuf::push(output, 4);
+            write_type_node_span(output, parsed, start, end);
             ByteBuf::write_u32_le(
                 output,
                 wrapping_convert_to_u32(Slice::len(children))
             );
             write_type_edges(output, parsed, children)
         },
-        HeaderTypeView::Application(_, constructor, lifetimes, arguments) => {
+        HeaderTypeView::Application(start, end, constructor, lifetimes, arguments) => {
             ByteBuf::push(output, 5);
+            write_type_node_span(output, parsed, start, end);
             write_type(output, parsed, constructor);
             ByteBuf::write_u32_le(
                 output,
@@ -185,6 +234,27 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                     output,
                     super::super::frontend::headers::parsed_source(parsed),
                     super::super::frontend::headers::name_use_name(lifetime)
+                );
+                let source = super::super::frontend::headers::parsed_source(parsed);
+                let token = super::super::frontend::lexer::token_at(
+                    source,
+                    super::super::frontend::headers::name_use_token(lifetime)
+                );
+                let span = handle token {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+                };
+                ByteBuf::write_u32_le(
+                    output,
+                    wrapping_convert_to_u32(
+                        super::super::frontend::lexer::span_start(&span)
+                    )
+                );
+                ByteBuf::write_u32_le(
+                    output,
+                    wrapping_convert_to_u32(
+                        super::super::frontend::lexer::span_end(&span)
+                    )
                 )
             }});
             ByteBuf::write_u32_le(
@@ -193,7 +263,10 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             );
             write_type_edges(output, parsed, arguments)
         },
-        HeaderTypeView::Never(_) => ByteBuf::push(output, 6)
+        HeaderTypeView::Never(start, end) => {
+            ByteBuf::push(output, 6);
+            write_type_node_span(output, parsed, start, end)
+        }
     }
 }
 
@@ -227,7 +300,7 @@ write_token_span(
     }
 }
 
-write_type_span(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
+write_wide_type_span(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
     let index = super::super::frontend::headers::parsed_index(parsed);
     let range = super::super::frontend::headers::type_tokens(index, id);
     write_token_span(
@@ -264,7 +337,7 @@ write_where_contract(
                     super::super::frontend::headers::parsed_source(parsed),
                     super::super::frontend::headers::where_goal_tokens(goal)
                 );
-                write_type_span(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
+                write_wide_type_span(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
                 write_type(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
                 ByteBuf::push(output, bool_code(super::super::frontend::headers::where_goal_is_negative(goal)));
                 let relation = super::super::frontend::headers::where_goal_relation(index, goal);
@@ -279,7 +352,7 @@ write_where_contract(
                     ByteBuf::push(output, super::super::frontend::headers::goal_argument_kind_code(argument));
                     handle super::super::frontend::headers::goal_argument_type(argument) {
                         None => { ByteBuf::push(output, 0) },
-                        Option::Some(ty) => { ByteBuf::push(output, 1); write_type_span(output, parsed, ty); write_type(output, parsed, ty) }
+                        Option::Some(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_type(output, parsed, ty) }
                     }
                 }});
                 ByteBuf::write_u32_le(output, super::super::frontend::headers::where_goal_binding_count(goal));
@@ -288,7 +361,7 @@ write_where_contract(
                     write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::name_use_name(super::super::frontend::headers::associated_binding_name(binding)));
                     write_token_span(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::associated_binding_tokens(binding));
                     handle super::super::frontend::headers::associated_binding_value(binding) {
-                        super::super::frontend::headers::AssociatedBindingValue::Type(ty) => { ByteBuf::push(output, 1); write_type_span(output, parsed, ty); write_type(output, parsed, ty) },
+                        super::super::frontend::headers::AssociatedBindingValue::Type(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_type(output, parsed, ty) },
                         super::super::frontend::headers::AssociatedBindingValue::EffectRow(row) => { ByteBuf::push(output, 2); write_effect_row(output, parsed, &row) }
                     }
                 }})
@@ -455,7 +528,7 @@ write_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) 
             Result::Ok(found) => found
         };
         let ty = super::super::frontend::headers::type_edge_type(edge);
-        write_type_span(output, parsed, ty);
+        write_wide_type_span(output, parsed, ty);
         write_type(output, parsed, ty)
     }});
     write_token_span(

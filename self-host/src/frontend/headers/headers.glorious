@@ -37,12 +37,12 @@ struct TypeNode {
 // Semantic consumers borrow the parsed type graph through this view rather
 // than depending on its arena kind codes and packed ranges.
 pub enum HeaderTypeView<'a> {
-    Path(usize, Slice<'a, NameUse>),
-    SharedReference(usize, Option<usize>, TypeId),
-    UniqueReference(usize, Option<usize>, TypeId),
-    Tuple(usize, Slice<'a, TypeEdge>),
-    Application(usize, TypeId, Slice<'a, NameUse>, Slice<'a, TypeEdge>),
-    Never(usize)
+    Path(usize, usize, Slice<'a, NameUse>),
+    SharedReference(usize, usize, Option<usize>, TypeId),
+    UniqueReference(usize, usize, Option<usize>, TypeId),
+    Tuple(usize, usize, Slice<'a, TypeEdge>),
+    Application(usize, usize, TypeId, Slice<'a, NameUse>, Slice<'a, TypeEdge>),
+    Never(usize, usize)
 }
 
 impl<'a> Use<[0, *]> for HeaderTypeView<'a> {}
@@ -756,14 +756,17 @@ pub header_type_view<'a>(
 ) -> HeaderTypeView<'a> {
     let node = Arena::index(&value.types, id);
     let token = node.tokens.start;
+    let end = node.tokens.end;
     handle node.kind {
         HeaderTypeKind::Path(names) => HeaderTypeView::Path(
             token,
+            end,
             header_slice(&value.names, &names)
         ),
         HeaderTypeKind::SharedReference(lifetime, referent) =>
             HeaderTypeView::SharedReference(
             token,
+            end,
             handle Option::as_ref(&lifetime) {
                 Result::Err(_) => None,
                 Result::Ok(found) => Option::Some(found.token)
@@ -773,6 +776,7 @@ pub header_type_view<'a>(
         HeaderTypeKind::UniqueReference(lifetime, referent) =>
             HeaderTypeView::UniqueReference(
             token,
+            end,
             handle Option::as_ref(&lifetime) {
                 Result::Err(_) => None,
                 Result::Ok(found) => Option::Some(found.token)
@@ -781,16 +785,18 @@ pub header_type_view<'a>(
         ),
         HeaderTypeKind::Tuple(children) => HeaderTypeView::Tuple(
             token,
+            end,
             type_edges(value, &children)
         ),
         HeaderTypeKind::Application(constructor, lifetimes, children) =>
             HeaderTypeView::Application(
             token,
+            end,
             constructor,
             lifetime_arguments(value, &lifetimes),
             type_edges(value, &children)
         ),
-        HeaderTypeKind::Never => HeaderTypeView::Never(token)
+        HeaderTypeKind::Never => HeaderTypeView::Never(token, end)
     }
 }
 
