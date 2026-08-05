@@ -446,7 +446,7 @@ write_expression_kind(
         BodyExpressionView::Is(subject, pattern) => {
             ByteBuf::push(output, 16);
             try(write_expression(output, original, source, value,
-                Id::to_u32(subject)), @write_expression);
+                Id::to_u32(subject)), @write_expression_kind);
             write_pattern(
                 output,
                 original,

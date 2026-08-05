@@ -1547,13 +1547,6 @@ pub expression_view<'a>(
     }
 }
 
-pub expression_tokens(
-    value: &ParsedBody,
-    expression: u32
-) -> BodyTokenRange {
-    Arena::index(&value.nodes, Id::from_u32(expression)).tokens
-}
-
 token_range(start: usize, end: usize) -> BodyTokenRange {
     super::syntax::token_span(start, end)
 }
