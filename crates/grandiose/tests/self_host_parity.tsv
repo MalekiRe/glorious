@@ -18,7 +18,7 @@ const_nominals.rs	types_traits_generics	unported	-
 control_kernel_lints.rs	compiler_pipeline	unported	-
 custom_drop_breadth.rs	ownership_lifetimes	unported	-
 deconstruction.rs	ownership_lifetimes	unported	-
-effect_aware_fn.rs	effects_control	unported	-
+effect_aware_fn.rs	effects_control	partial	self_host_typed_core.rs#self_hosted_effect_interfaces_match_rust_semantics_and_rejections
 effect_path_syntax.rs	effects_control	unported	-
 effect_row_gats.rs	effects_control	unported	-
 effect_surface_redesign.rs	effects_control	unported	-

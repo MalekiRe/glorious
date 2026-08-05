@@ -135,6 +135,362 @@ write_effect_type_elements<'a>(
     } else { () }
 }
 
+write_constraint_argument(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    interfaces: &TypedInterfaces,
+    argument: super::super::frontend::elaboration::ConstraintArgumentId,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId
+) {
+    let kind = super::super::frontend::elaboration::constraint_argument_kind_code(
+        interfaces, argument
+    );
+    ByteBuf::push(output, kind);
+    handle kind {
+        1 => write_effect_type(
+            output,
+            interfaces,
+            handle super::super::frontend::elaboration::constraint_argument_type(
+                interfaces, argument
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            },
+            effect_shell,
+            operation
+        ),
+        2 => write_name_id(
+            output,
+            source,
+            Id::from_u32(handle
+                super::super::frontend::elaboration::constraint_argument_name(
+                    interfaces, argument
+                ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            })
+        ),
+        3 => {
+            ByteBuf::write_u32_le(output, handle
+                super::super::frontend::elaboration::constraint_argument_lower(
+                    interfaces, argument
+                ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            });
+            handle super::super::frontend::elaboration::constraint_argument_upper(
+                interfaces, argument
+            ) {
+                Result::Err(_) => ByteBuf::push(output, 0),
+                Result::Ok(found) => {
+                    ByteBuf::push(output, 1);
+                    ByteBuf::write_u32_le(output, found)
+                }
+            }
+        },
+        4 => ByteBuf::write_u32_le(output, handle
+            super::super::frontend::elaboration::constraint_argument_lower(
+                interfaces, argument
+            ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        }),
+        _ => unreachable()
+    }
+}
+
+write_constraint_arguments(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    interfaces: &TypedInterfaces,
+    goal: super::super::frontend::elaboration::ConstraintGoalId,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId,
+    ordinal: u32
+) {
+    let count = super::super::frontend::elaboration::constraint_goal_argument_count(
+        interfaces, goal
+    );
+    if(ordinal < count) {
+        let argument = handle
+            super::super::frontend::elaboration::constraint_goal_argument_id(
+                interfaces, goal, ordinal
+            ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_constraint_argument(
+            output, source, interfaces, argument, effect_shell, operation
+        );
+        write_constraint_arguments(
+            output, source, interfaces, goal, effect_shell, operation,
+            ordinal + 1
+        )
+    } else { () }
+}
+
+write_binding_arguments(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    interfaces: &TypedInterfaces,
+    binding: super::super::frontend::elaboration::ConstraintBindingId,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId,
+    ordinal: u32
+) {
+    let count =
+        super::super::frontend::elaboration::constraint_binding_argument_count(
+            interfaces, binding
+        );
+    if(ordinal < count) {
+        let argument = handle
+            super::super::frontend::elaboration::constraint_binding_argument_id(
+                interfaces, binding, ordinal
+            ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_constraint_argument(
+            output, source, interfaces, argument, effect_shell, operation
+        );
+        write_binding_arguments(
+            output, source, interfaces, binding, effect_shell, operation,
+            ordinal + 1
+        )
+    } else { () }
+}
+
+write_constraint_binding(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    interfaces: &TypedInterfaces,
+    binding: super::super::frontend::elaboration::ConstraintBindingId,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId
+) {
+    write_name_id(
+        output,
+        source,
+        Id::from_u32(
+            super::super::frontend::elaboration::constraint_binding_name(
+                interfaces, binding
+            )
+        )
+    );
+    let argument_count =
+        super::super::frontend::elaboration::constraint_binding_argument_count(
+            interfaces, binding
+        );
+    ByteBuf::write_u32_le(output, argument_count);
+    write_binding_arguments(
+        output, source, interfaces, binding, effect_shell, operation, 0
+    );
+    let kind =
+        super::super::frontend::elaboration::constraint_binding_value_kind_code(
+            interfaces, binding
+        );
+    ByteBuf::push(output, kind);
+    if(kind == 1) {
+        write_effect_type(
+            output,
+            interfaces,
+            handle super::super::frontend::elaboration::constraint_binding_type(
+                interfaces, binding
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            },
+            effect_shell,
+            operation
+        )
+    } else {
+        let count =
+            super::super::frontend::elaboration::constraint_binding_effect_count(
+                interfaces, binding
+            );
+        ByteBuf::write_u32_le(output, count);
+        for_range(Range::new(0, usize_from_u32(count)), { ordinal => {
+            write_effect_type(
+                output,
+                interfaces,
+                handle super::super::frontend::elaboration::constraint_binding_effect_at(
+                    interfaces, binding, u32_from_usize(ordinal)
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                },
+                effect_shell,
+                operation
+            )
+        }});
+        handle super::super::frontend::elaboration::constraint_binding_effect_tail(
+            interfaces, binding
+        ) {
+            Result::Err(_) => ByteBuf::push(output, 0),
+            Result::Ok(found) => {
+                ByteBuf::push(output, 1);
+                write_name_id(output, source, Id::from_u32(found))
+            }
+        }
+    }
+}
+
+write_constraint_bindings(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    interfaces: &TypedInterfaces,
+    goal: super::super::frontend::elaboration::ConstraintGoalId,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId,
+    ordinal: u32
+) {
+    let count = super::super::frontend::elaboration::constraint_goal_binding_count(
+        interfaces, goal
+    );
+    if(ordinal < count) {
+        let binding = handle
+            super::super::frontend::elaboration::constraint_goal_binding_id(
+                interfaces, goal, ordinal
+            ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_constraint_binding(
+            output, source, interfaces, binding, effect_shell, operation
+        );
+        write_constraint_bindings(
+            output, source, interfaces, goal, effect_shell, operation,
+            ordinal + 1
+        )
+    } else { () }
+}
+
+write_constraint_goal(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    interfaces: &TypedInterfaces,
+    goal: super::super::frontend::elaboration::ConstraintGoalId,
+    effect_shell: ShellId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId
+) {
+    let binder_count =
+        super::super::frontend::elaboration::constraint_goal_binder_count(
+            interfaces, goal
+        );
+    ByteBuf::write_u32_le(output, binder_count);
+    for_range(Range::new(0, usize_from_u32(binder_count)), { ordinal => {
+        write_name_id(
+            output,
+            source,
+            Id::from_u32(handle
+                super::super::frontend::elaboration::constraint_goal_binder_name(
+                    interfaces, goal, u32_from_usize(ordinal)
+                ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            })
+        )
+    }});
+    write_effect_type(
+        output,
+        interfaces,
+        super::super::frontend::elaboration::constraint_goal_subject(
+            interfaces, goal
+        ),
+        effect_shell,
+        operation
+    );
+    ByteBuf::push(output, if(
+        super::super::frontend::elaboration::constraint_goal_is_negative(
+            interfaces, goal
+        )
+    ) { 1 } else { 0 });
+    write_name_id(
+        output,
+        source,
+        Id::from_u32(
+            super::super::frontend::elaboration::constraint_goal_relation_name(
+                interfaces, goal
+            )
+        )
+    );
+    let argument_count =
+        super::super::frontend::elaboration::constraint_goal_argument_count(
+            interfaces, goal
+        );
+    ByteBuf::write_u32_le(output, argument_count);
+    write_constraint_arguments(
+        output, source, interfaces, goal, effect_shell, operation, 0
+    );
+    let binding_count =
+        super::super::frontend::elaboration::constraint_goal_binding_count(
+            interfaces, goal
+        );
+    ByteBuf::write_u32_le(output, binding_count);
+    write_constraint_bindings(
+        output, source, interfaces, goal, effect_shell, operation, 0
+    )
+}
+
+write_effect_constraint_goals(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    interfaces: &TypedInterfaces,
+    effect_id: super::super::frontend::elaboration::InterfaceEffectId,
+    operation:
+        super::super::frontend::elaboration::InterfaceEffectOperationId,
+    operation_clause: Bool,
+    ordinal: u32
+) {
+    let count = if(operation_clause) {
+        super::super::frontend::elaboration::interface_effect_operation_constraint_goal_count(
+            interfaces, operation
+        )
+    } else {
+        super::super::frontend::elaboration::interface_effect_constraint_goal_count(
+            interfaces, effect_id
+        )
+    };
+    if(ordinal < count) {
+        let goal = if(operation_clause) {
+            handle super::super::frontend::elaboration::interface_effect_operation_constraint_goal_id(
+                interfaces, operation, ordinal
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }
+        } else {
+            handle super::super::frontend::elaboration::interface_effect_constraint_goal_id(
+                interfaces, effect_id, ordinal
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }
+        };
+        write_constraint_goal(
+            output,
+            source,
+            interfaces,
+            goal,
+            super::super::frontend::elaboration::interface_effect_shell(
+                interfaces, effect_id
+            ),
+            operation
+        );
+        write_effect_constraint_goals(
+            output, source, interfaces, effect_id, operation, operation_clause,
+            ordinal + 1
+        )
+    } else { () }
+}
+
 write_effect_type(
     output: &mut ByteBuf,
     interfaces: &TypedInterfaces,
@@ -266,6 +622,20 @@ write_effect_operation(
             interfaces, operation
         )
     );
+    let constraint_count =
+        super::super::frontend::elaboration::interface_effect_operation_constraint_goal_count(
+            interfaces, operation
+        );
+    ByteBuf::write_u32_le(output, constraint_count);
+    write_effect_constraint_goals(
+        output, source, interfaces, effect_id, operation, true, 0
+    );
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::elaboration::interface_effect_operation_constraint_lifetime_count(
+            interfaces, operation
+        )
+    );
     let payload_count =
         super::super::frontend::elaboration::interface_effect_operation_payload_count(
             interfaces, operation
@@ -330,6 +700,7 @@ write_effects(
     interfaces: &TypedInterfaces,
     index: usize
 ) {
+    let source = super::super::frontend::headers::parsed_source(headers);
     if(index < super::super::frontend::elaboration::interface_effect_count(
         interfaces
     )) {
@@ -361,6 +732,29 @@ write_effects(
             super::super::frontend::elaboration::interface_effect_operation_count(
                 interfaces, id
             );
+        let constraint_count =
+            super::super::frontend::elaboration::interface_effect_constraint_goal_count(
+                interfaces, id
+            );
+        ByteBuf::write_u32_le(output, constraint_count);
+        if(constraint_count > 0) {
+            let first_operation = handle
+                super::super::frontend::elaboration::interface_effect_operation_id(
+                    interfaces, id, 0
+                ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            write_effect_constraint_goals(
+                output, source, interfaces, id, first_operation, false, 0
+            )
+        } else { () };
+        ByteBuf::write_u32_le(
+            output,
+            super::super::frontend::elaboration::interface_effect_constraint_lifetime_count(
+                interfaces, id
+            )
+        );
         ByteBuf::write_u32_le(output, count);
         for_range(Range::new(0, wrapping_convert_to_usize(count)), { ordinal => {
             let operation = handle
@@ -386,6 +780,11 @@ effect_error_code(value: ElaborationError) -> u8 {
         ElaborationError::TerminalOperationResumptionQuantity(_) => 104,
         ElaborationError::InvalidResumptionInterval(_) => 105,
         ElaborationError::ResumptionQuantityOverflow(_) => 106,
+        ElaborationError::UnknownConstraintRelation(_) => 107,
+        ElaborationError::InvalidConstraintRelation(_, _) => 108,
+        ElaborationError::InvalidHigherRankedConstraintBinder(_) => 109,
+        ElaborationError::ConstraintIntegerOverflow(_) => 110,
+        ElaborationError::UnknownConstraintLifetime(_) => 111,
         _ => 4
     }
 }

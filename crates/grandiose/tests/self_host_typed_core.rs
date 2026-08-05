@@ -131,6 +131,155 @@ fn encode_constraint_span(output: &mut Vec<u8>, source: &str, clause: Option<&as
     }
 }
 
+fn encode_quantity(output: &mut Vec<u8>, quantity: &ast::QuantitySyntax) {
+    push_u32(output, quantity.lower.try_into().unwrap());
+    match quantity.upper {
+        Some(upper) => {
+            output.push(1);
+            push_u32(output, upper.try_into().unwrap());
+        }
+        None => output.push(0),
+    }
+}
+
+fn encode_goal_argument(
+    output: &mut Vec<u8>,
+    argument: &ast::GoalArgument,
+    effect_generics: &[ast::GenericParam],
+    operation_generics: &[ast::GenericParam],
+) {
+    match argument {
+        ast::GoalArgument::Type(ty) => {
+            output.push(1);
+            encode_effect_signature_type(output, ty, effect_generics, operation_generics);
+        }
+        ast::GoalArgument::Lifetime { name, .. } => {
+            output.push(2);
+            push_string(output, name);
+        }
+        ast::GoalArgument::Quantity(quantity) => {
+            output.push(3);
+            encode_quantity(output, quantity);
+        }
+        ast::GoalArgument::U32 { value, .. } => {
+            output.push(4);
+            push_u32(output, (*value).try_into().unwrap());
+        }
+    }
+}
+
+fn encode_associated_argument(
+    output: &mut Vec<u8>,
+    binding: &ast::AssociatedBinding,
+    position: usize,
+    ordinary_index: &mut usize,
+    effect_generics: &[ast::GenericParam],
+    operation_generics: &[ast::GenericParam],
+) {
+    if let Some(argument) = binding
+        .const_arguments
+        .iter()
+        .find(|argument| argument.position == position)
+    {
+        match &argument.value {
+            ast::ConstArgumentValueSyntax::Quantity(quantity) => {
+                output.push(3);
+                encode_quantity(output, quantity);
+            }
+            ast::ConstArgumentValueSyntax::U32 { value, .. } => {
+                output.push(4);
+                push_u32(output, (*value).try_into().unwrap());
+            }
+            other => panic!("unsupported focused associated const argument: {other:?}"),
+        }
+    } else {
+        match &binding.arguments[*ordinary_index] {
+            ast::AssociatedArgumentSyntax::Type(ty) => {
+                output.push(1);
+                encode_effect_signature_type(output, ty, effect_generics, operation_generics);
+            }
+            ast::AssociatedArgumentSyntax::Lifetime { name, .. } => {
+                output.push(2);
+                push_string(output, name);
+            }
+        }
+        *ordinary_index += 1;
+    }
+}
+
+fn encode_where_clause(
+    output: &mut Vec<u8>,
+    clause: Option<&ast::WhereClause>,
+    effect_generics: &[ast::GenericParam],
+    operation_generics: &[ast::GenericParam],
+) {
+    let Some(clause) = clause else {
+        push_u32(output, 0);
+        push_u32(output, 0);
+        return;
+    };
+    push_u32(output, clause.goals.len().try_into().unwrap());
+    for goal in &clause.goals {
+        push_u32(
+            output,
+            goal.higher_ranked_lifetimes.len().try_into().unwrap(),
+        );
+        for binder in &goal.higher_ranked_lifetimes {
+            push_string(output, &binder.name);
+        }
+        encode_effect_signature_type(output, &goal.subject, effect_generics, operation_generics);
+        output.push(u8::from(goal.polarity == ast::GoalPolarity::Negative));
+        push_string(output, &goal.relation.path.last().unwrap().name);
+        push_u32(output, goal.relation.arguments.len().try_into().unwrap());
+        for argument in &goal.relation.arguments {
+            encode_goal_argument(output, argument, effect_generics, operation_generics);
+        }
+        push_u32(output, goal.relation.bindings.len().try_into().unwrap());
+        for binding in &goal.relation.bindings {
+            push_string(output, &binding.name);
+            let argument_count = binding.arguments.len() + binding.const_arguments.len();
+            push_u32(output, argument_count.try_into().unwrap());
+            let mut ordinary_index = 0;
+            for position in 0..argument_count {
+                encode_associated_argument(
+                    output,
+                    binding,
+                    position,
+                    &mut ordinary_index,
+                    effect_generics,
+                    operation_generics,
+                );
+            }
+            match &binding.value {
+                ast::AssociatedBindingValue::Type(ty) => {
+                    output.push(1);
+                    encode_effect_signature_type(output, ty, effect_generics, operation_generics);
+                }
+                ast::AssociatedBindingValue::EffectRow(row) => {
+                    output.push(2);
+                    push_u32(output, row.effects.len().try_into().unwrap());
+                    for effect in &row.effects {
+                        encode_effect_signature_type(
+                            output,
+                            effect,
+                            effect_generics,
+                            operation_generics,
+                        );
+                    }
+                    match &row.tail {
+                        Some(tail) => {
+                            output.push(1);
+                            push_string(output, &tail.name);
+                        }
+                        None => output.push(0),
+                    }
+                }
+            }
+        }
+    }
+    push_u32(output, clause.lifetime_outlives.len().try_into().unwrap());
+}
+
 fn scalar_code(name: &str) -> Option<u8> {
     Some(match name {
         "u8" => 1,
@@ -233,6 +382,12 @@ fn encode_rust_effect_interfaces(source: &str) -> Vec<u8> {
             .map_or(&[][..], |generics| generics.params.as_slice());
         push_u32(&mut output, effect_generics.len().try_into().unwrap());
         encode_constraint_span(&mut output, source, declaration.where_clause.as_ref());
+        encode_where_clause(
+            &mut output,
+            declaration.where_clause.as_ref(),
+            effect_generics,
+            &[],
+        );
         push_u32(
             &mut output,
             declaration.operations.len().try_into().unwrap(),
@@ -246,6 +401,12 @@ fn encode_rust_effect_interfaces(source: &str) -> Vec<u8> {
             push_u32(&mut output, ordinal.try_into().unwrap());
             push_u32(&mut output, operation_generics.len().try_into().unwrap());
             encode_constraint_span(&mut output, source, operation.where_clause.as_ref());
+            encode_where_clause(
+                &mut output,
+                operation.where_clause.as_ref(),
+                effect_generics,
+                operation_generics,
+            );
             push_u32(&mut output, operation.params.len().try_into().unwrap());
             for parameter in &operation.params {
                 encode_effect_signature_type(
@@ -1189,9 +1350,11 @@ fn self_hosted_effect_interfaces_match_rust_semantics_and_rejections() {
     let entry = phases.artifact.entry_function.unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
 
-    let source = "effect Control<'a, T, E: EffectRow> where T: Marker { \
-        [0, infinity] choose<U>(left: &'a T, right: U) -> (T, U) where U: Marker; \
-        [0, 0] optional(value: Array<T>) ->; \
+    let source = "trait Marker {} \
+        effect Control<'a, T, E: EffectRow> where T: Marker<T, Out = T> { \
+        [0, infinity] choose<U>(left: &'a T, right: U) -> (T, U) \
+            where for<'b> U: !Marker<[0, *], Out = { | E }>; \
+        [0, 0] optional(value: Array<T>) -> Unit where 'a: 'a; \
         [2, 4] repeat(value: u16) -> u16; \
         stop(reason: Text) -> !; \
     }";
@@ -1230,6 +1393,11 @@ fn self_hosted_effect_interfaces_match_rust_semantics_and_rejections() {
             "effect Bad { [2, 1] choose() -> u8 }",
             Some("G0005"),
             105_u8,
+        ),
+        (
+            "trait Marker {} effect Bad<T> where T: Marker<Out = T, Out = T> {}",
+            None,
+            3_u8,
         ),
     ];
     for &(invalid, rust_code, self_host_code) in &rejected {

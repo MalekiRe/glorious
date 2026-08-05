@@ -86,9 +86,86 @@ type InterfaceEffectOperationRange =
 struct EffectPayloadRangeTag {}
 type EffectPayloadRange = super::syntax::IdRange<EffectPayloadRangeTag>;
 
-struct ConstraintTokenRange { start: usize, end: usize }
+pub struct ConstraintGoalRangeTag {}
+pub type ConstraintGoalId = Id<ConstraintGoalRangeTag>;
+type ConstraintGoalRange = super::syntax::IdRange<ConstraintGoalRangeTag>;
+pub struct ConstraintArgumentRangeTag {}
+pub type ConstraintArgumentId = Id<ConstraintArgumentRangeTag>;
+type ConstraintArgumentRange =
+    super::syntax::IdRange<ConstraintArgumentRangeTag>;
+pub struct ConstraintBindingRangeTag {}
+pub type ConstraintBindingId = Id<ConstraintBindingRangeTag>;
+type ConstraintBindingRange =
+    super::syntax::IdRange<ConstraintBindingRangeTag>;
+pub struct ConstraintLifetimeRangeTag {}
+type ConstraintLifetimeRange =
+    super::syntax::IdRange<ConstraintLifetimeRangeTag>;
+pub struct ConstraintBinderRangeTag {}
+type ConstraintBinderRange =
+    super::syntax::IdRange<ConstraintBinderRangeTag>;
 
-impl Use<[0, *]> for ConstraintTokenRange {}
+struct ConstraintClause {
+    goals: ConstraintGoalRange,
+    lifetime_outlives: ConstraintLifetimeRange,
+    start: usize,
+    end: usize
+}
+
+impl Use<[0, *]> for ConstraintClause {}
+
+struct ConstraintGoal {
+    higher_ranked_lifetimes: ConstraintBinderRange,
+    subject: TypeId,
+    negative: Bool,
+    relation: ShellId,
+    relation_name: u32,
+    arguments: ConstraintArgumentRange,
+    bindings: ConstraintBindingRange,
+    start: usize,
+    end: usize
+}
+
+impl Use<[0, *]> for ConstraintGoal {}
+
+enum ConstraintArgument {
+    Type(TypeId),
+    Lifetime(u32, usize),
+    Quantity(u32, Option<u32>, usize),
+    U32(u32, usize)
+}
+
+impl Use<[0, *]> for ConstraintArgument {}
+
+enum ConstraintBindingValue {
+    Type(TypeId),
+    EffectRow(TypeElementRange, Option<u32>)
+}
+
+impl Use<[0, *]> for ConstraintBindingValue {}
+
+struct ConstraintBinding {
+    name: u32,
+    arguments: ConstraintArgumentRange,
+    value: ConstraintBindingValue,
+    start: usize,
+    end: usize
+}
+
+impl Use<[0, *]> for ConstraintBinding {}
+
+struct ConstraintLifetime {
+    higher_ranked_lifetimes: ConstraintBinderRange,
+    longer: u32,
+    shorter: u32,
+    start: usize,
+    end: usize
+}
+
+impl Use<[0, *]> for ConstraintLifetime {}
+
+struct ConstraintBinder { name: u32, token: usize }
+
+impl Use<[0, *]> for ConstraintBinder {}
 
 pub struct ResumptionInterval {
     lower: u32,
@@ -100,7 +177,7 @@ impl Use<[0, *]> for ResumptionInterval {}
 struct InterfaceEffect {
     shell: ShellId,
     generics: SignatureScope,
-    constraints: ConstraintTokenRange,
+    constraints: ConstraintClause,
     operations: InterfaceEffectOperationRange
 }
 
@@ -111,7 +188,7 @@ struct InterfaceEffectOperation {
     ordinal: u32,
     name: u32,
     generics: SignatureScope,
-    constraints: ConstraintTokenRange,
+    constraints: ConstraintClause,
     payloads: EffectPayloadRange,
     result: TypeId,
     terminal: Bool,
@@ -229,6 +306,12 @@ pub struct TypedInterfaces {
     effect_operations:
         Arena<InterfaceEffectOperationTag, InterfaceEffectOperation>,
     effect_payloads: Vec<TypeId>,
+    constraint_goals: Vec<ConstraintGoal>,
+    constraint_arguments: Vec<ConstraintArgument>,
+    constraint_bindings: Vec<ConstraintBinding>,
+    constraint_effects: Vec<TypeId>,
+    constraint_lifetimes: Vec<ConstraintLifetime>,
+    constraint_binders: Vec<ConstraintBinder>,
     // Indexed by declaration shell.
     shell_to_callable:
         IndexVec<ShellTag, Option<InterfaceCallableId>>,
@@ -362,6 +445,14 @@ pub enum ElaborationError {
     DuplicateEffectGeneric(usize, usize),
     DuplicateEffectOperation(usize, usize),
     DuplicateEffectOperationGeneric(usize, usize),
+    MissingConstraintGoal(usize),
+    MissingConstraintArgument(usize),
+    MissingConstraintBinding(usize),
+    UnknownConstraintRelation(usize),
+    InvalidConstraintRelation(usize, ShellId),
+    InvalidHigherRankedConstraintBinder(usize),
+    ConstraintIntegerOverflow(usize),
+    UnknownConstraintLifetime(usize),
     TerminalOperationResumptionQuantity(usize),
     InvalidResumptionInterval(usize),
     ResumptionQuantityOverflow(usize),
@@ -1349,6 +1440,31 @@ pub interface_effect_constraint_end(
     interface_effect_at(value, id).constraints.end
 }
 
+pub interface_effect_constraint_goal_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId
+) -> u32 {
+    interface_effect_at(value, id).constraints.goals.count
+}
+
+pub interface_effect_constraint_goal_id(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId,
+    ordinal: u32
+) -> Option<ConstraintGoalId> {
+    let range = interface_effect_at(value, id).constraints.goals;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub interface_effect_constraint_lifetime_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectId
+) -> u32 {
+    interface_effect_at(value, id).constraints.lifetime_outlives.count
+}
+
 pub interface_effect_operation_count(
     value: &TypedInterfaces,
     id: InterfaceEffectId
@@ -1407,6 +1523,259 @@ pub interface_effect_operation_constraint_end(
     id: InterfaceEffectOperationId
 ) -> usize {
     interface_effect_operation_at(value, id).constraints.end
+}
+
+pub interface_effect_operation_constraint_goal_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> u32 {
+    interface_effect_operation_at(value, id).constraints.goals.count
+}
+
+pub interface_effect_operation_constraint_goal_id(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId,
+    ordinal: u32
+) -> Option<ConstraintGoalId> {
+    let range = interface_effect_operation_at(value, id).constraints.goals;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub interface_effect_operation_constraint_lifetime_count(
+    value: &TypedInterfaces,
+    id: InterfaceEffectOperationId
+) -> u32 {
+    interface_effect_operation_at(value, id).constraints.lifetime_outlives.count
+}
+
+constraint_goal_at(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> &ConstraintGoal {
+    Vec::index(&value.constraint_goals, Id::to_usize(id))
+}
+
+pub constraint_goal_subject(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> TypeId { constraint_goal_at(value, id).subject }
+
+pub constraint_goal_is_negative(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> Bool { constraint_goal_at(value, id).negative }
+
+pub constraint_goal_relation(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> ShellId { constraint_goal_at(value, id).relation }
+
+pub constraint_goal_relation_name(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> u32 { constraint_goal_at(value, id).relation_name }
+
+pub constraint_goal_start(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> usize { constraint_goal_at(value, id).start }
+
+pub constraint_goal_end(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> usize { constraint_goal_at(value, id).end }
+
+pub constraint_goal_argument_count(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> u32 { constraint_goal_at(value, id).arguments.count }
+
+pub constraint_goal_argument_id(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId,
+    ordinal: u32
+) -> Option<ConstraintArgumentId> {
+    let range = constraint_goal_at(value, id).arguments;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub constraint_goal_binding_count(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> u32 { constraint_goal_at(value, id).bindings.count }
+
+pub constraint_goal_binding_id(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId,
+    ordinal: u32
+) -> Option<ConstraintBindingId> {
+    let range = constraint_goal_at(value, id).bindings;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub constraint_goal_binder_count(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId
+) -> u32 { constraint_goal_at(value, id).higher_ranked_lifetimes.count }
+
+pub constraint_goal_binder_name(
+    value: &TypedInterfaces,
+    id: ConstraintGoalId,
+    ordinal: u32
+) -> Option<u32> {
+    let range = constraint_goal_at(value, id).higher_ranked_lifetimes;
+    if(ordinal < range.count) {
+        Option::Some(Vec::index(
+            &value.constraint_binders,
+            usize_from_u32(range.start + ordinal)
+        ).name)
+    } else { None }
+}
+
+pub constraint_argument_kind_code(
+    value: &TypedInterfaces,
+    id: ConstraintArgumentId
+) -> u8 {
+    handle *Vec::index(&value.constraint_arguments, Id::to_usize(id)) {
+        ConstraintArgument::Type(_) => 1,
+        ConstraintArgument::Lifetime(_, _) => 2,
+        ConstraintArgument::Quantity(_, _, _) => 3,
+        ConstraintArgument::U32(_, _) => 4
+    }
+}
+
+pub constraint_argument_type(
+    value: &TypedInterfaces,
+    id: ConstraintArgumentId
+) -> Option<TypeId> {
+    handle *Vec::index(&value.constraint_arguments, Id::to_usize(id)) {
+        ConstraintArgument::Type(found) => Option::Some(found),
+        _ => None
+    }
+}
+
+pub constraint_argument_name(
+    value: &TypedInterfaces,
+    id: ConstraintArgumentId
+) -> Option<u32> {
+    handle *Vec::index(&value.constraint_arguments, Id::to_usize(id)) {
+        ConstraintArgument::Lifetime(found, _) => Option::Some(found),
+        _ => None
+    }
+}
+
+pub constraint_argument_lower(
+    value: &TypedInterfaces,
+    id: ConstraintArgumentId
+) -> Option<u32> {
+    handle *Vec::index(&value.constraint_arguments, Id::to_usize(id)) {
+        ConstraintArgument::Quantity(lower, _, _) => Option::Some(lower),
+        ConstraintArgument::U32(found, _) => Option::Some(found),
+        _ => None
+    }
+}
+
+pub constraint_argument_upper(
+    value: &TypedInterfaces,
+    id: ConstraintArgumentId
+) -> Option<u32> {
+    handle *Vec::index(&value.constraint_arguments, Id::to_usize(id)) {
+        ConstraintArgument::Quantity(_, upper, _) => upper,
+        ConstraintArgument::U32(found, _) => Option::Some(found),
+        _ => None
+    }
+}
+
+constraint_binding_at(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId
+) -> &ConstraintBinding {
+    Vec::index(&value.constraint_bindings, Id::to_usize(id))
+}
+
+pub constraint_binding_name(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId
+) -> u32 { constraint_binding_at(value, id).name }
+
+pub constraint_binding_argument_count(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId
+) -> u32 { constraint_binding_at(value, id).arguments.count }
+
+pub constraint_binding_argument_id(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId,
+    ordinal: u32
+) -> Option<ConstraintArgumentId> {
+    let range = constraint_binding_at(value, id).arguments;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub constraint_binding_value_kind_code(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId
+) -> u8 {
+    handle constraint_binding_at(value, id).value {
+        ConstraintBindingValue::Type(_) => 1,
+        ConstraintBindingValue::EffectRow(_, _) => 2
+    }
+}
+
+pub constraint_binding_type(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId
+) -> Option<TypeId> {
+    handle constraint_binding_at(value, id).value {
+        ConstraintBindingValue::Type(found) => Option::Some(found),
+        _ => None
+    }
+}
+
+pub constraint_binding_effect_count(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId
+) -> u32 {
+    handle constraint_binding_at(value, id).value {
+        ConstraintBindingValue::EffectRow(range, _) => range.count,
+        _ => 0
+    }
+}
+
+pub constraint_binding_effect_at(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId,
+    ordinal: u32
+) -> Option<TypeId> {
+    handle constraint_binding_at(value, id).value {
+        ConstraintBindingValue::EffectRow(range, _) => if(
+            ordinal < range.count
+        ) {
+            Option::Some(*Vec::index(
+                &value.constraint_effects,
+                usize_from_u32(range.start + ordinal)
+            ))
+        } else { None },
+        _ => None
+    }
+}
+
+pub constraint_binding_effect_tail(
+    value: &TypedInterfaces,
+    id: ConstraintBindingId
+) -> Option<u32> {
+    handle constraint_binding_at(value, id).value {
+        ConstraintBindingValue::EffectRow(_, row_tail) => row_tail,
+        _ => None
+    }
 }
 
 pub interface_effect_operation_payload_count(
@@ -4298,13 +4667,694 @@ collect_callable_effects(
     ))
 }
 
-constraint_token_range(
-    value: &super::headers::HeaderTokenRange
-) -> ConstraintTokenRange {
-    ConstraintTokenRange {
-        start: super::syntax::token_start(value),
-        end: super::syntax::token_end(value)
+constraint_relation_in(
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>,
+    name: u32
+) -> Option<ShellId> {
+    let found = super::scanner::def_search(
+        declarations,
+        module,
+        Id::from_u32(name),
+        super::scanner::Namespace::Type
+    );
+    if(super::scanner::def_search_count(&found) == 1) {
+        super::scanner::def_search_first(&found)
+    } else { None }
+}
+
+resolve_constraint_relation<'a>(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    names: Slice<'a, super::headers::NameUse>,
+    module: Option<ShellId>
+) -> Result<ShellId, ElaborationError> {
+    let count = Slice::len(names);
+    if(count == 0) {
+        @resolve_constraint_relation(Result::Err(
+            ElaborationError::UnknownConstraintRelation(0)
+        ))
+    } else { () };
+    let last = handle Slice::get(names, count - 1) {
+        Result::Err(_) => @resolve_constraint_relation(Result::Err(
+            ElaborationError::UnknownConstraintRelation(0)
+        )),
+        Result::Ok(found) => found
+    };
+    let token = super::headers::name_use_token(last);
+    let name = Id::to_u32(super::headers::name_use_name(last));
+    let target_module = if(count == 1) { module } else {
+        let resolved = handle resolve_type_path_module(
+            headers, declarations, names, 0, count - 1, module, true
+        ) {
+            Result::Err(_) => @resolve_constraint_relation(Result::Err(
+                ElaborationError::UnknownConstraintRelation(token)
+            )),
+            Result::Ok(found) => found
+        };
+        resolved.shell
+    };
+    let shell = handle constraint_relation_in(
+        declarations, target_module, name
+    ) {
+        Result::Ok(found) => found,
+        Result::Err(_) => if(count == 1) {
+            handle constraint_relation_in(declarations, None, name) {
+                Result::Err(_) => @resolve_constraint_relation(Result::Err(
+                    ElaborationError::UnknownConstraintRelation(token)
+                )),
+                Result::Ok(found) => found
+            }
+        } else { @resolve_constraint_relation(Result::Err(
+            ElaborationError::UnknownConstraintRelation(token)
+        )) }
+    };
+    let declaration = handle super::scanner::shell_at(declarations, shell) {
+        Result::Err(_) => @resolve_constraint_relation(Result::Err(
+            ElaborationError::UnknownConstraintRelation(token)
+        )),
+        Result::Ok(found) => found
+    };
+    if(super::scanner::shell_kind(declaration)
+        is super::scanner::DeclarationKind::Trait) {
+        Result::Ok(shell)
+    } else {
+        Result::Err(ElaborationError::InvalidConstraintRelation(token, shell))
     }
+}
+
+append_constraint_binders(
+    headers: &super::headers::ParsedHeaders,
+    output: &mut TypedInterfaces,
+    range: &super::headers::HeaderRange,
+    ordinal: u32
+) -> Result<ConstraintBinderRange, ElaborationError> {
+    let start = Vec::len(&output.constraint_binders);
+    try(append_constraint_binder_items(
+        headers, output, range, ordinal
+    ), @append_constraint_binders);
+    Result::Ok(super::syntax::id_range(
+        start, Vec::len(&output.constraint_binders)
+    ))
+}
+
+append_constraint_binder_items(
+    headers: &super::headers::ParsedHeaders,
+    output: &mut TypedInterfaces,
+    range: &super::headers::HeaderRange,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::range_count(range)) {
+        let parameter = handle super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(super::headers::range_start(range) + ordinal)
+        ) {
+            Result::Err(_) => @append_constraint_binder_items(Result::Err(
+                ElaborationError::InvalidHigherRankedConstraintBinder(0)
+            )),
+            Result::Ok(found) => found
+        };
+        let token = super::headers::generic_param_token(parameter);
+        if(super::headers::generic_param_kind_code(parameter) != 2) {
+            Result::Err(
+                ElaborationError::InvalidHigherRankedConstraintBinder(token)
+            )
+        } else {
+            Vec::push(
+                &mut output.constraint_binders,
+                ConstraintBinder {
+                    name: Id::to_u32(
+                        super::headers::generic_param_name(parameter)
+                    ),
+                    token: token
+                }
+            );
+            append_constraint_binder_items(
+                headers, output, range, ordinal + 1
+            )
+        }
+    } else { Result::Ok(()) }
+}
+
+constraint_usize_to_u32(
+    value: usize,
+    token: usize
+) -> Result<u32, ElaborationError> {
+    if(value <= 4294967295) {
+        Result::Ok(wrapping_convert_to_u32(value))
+    } else { Result::Err(ElaborationError::ConstraintIntegerOverflow(token)) }
+}
+
+append_constraint_argument(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    value: &super::headers::GoalArgument,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope
+) -> Result<(), ElaborationError> {
+    let token = super::headers::goal_argument_token(
+        super::headers::parsed_index(headers), value
+    );
+    let argument = handle super::headers::goal_argument_kind_code(value) {
+        1 => {
+            let syntax = handle super::headers::goal_argument_type(value) {
+                Result::Err(_) => @append_constraint_argument(Result::Err(
+                    ElaborationError::MissingConstraintArgument(token)
+                )),
+                Result::Ok(found) => found
+            };
+            ConstraintArgument::Type(type_id_from_u32(try(
+                resolve_signature_type(
+                    headers, declarations, output, syntax, module,
+                    Option::Some(scope)
+                ), @append_constraint_argument
+            )))
+        },
+        2 => {
+            let name = handle super::headers::goal_argument_name(value) {
+                Result::Err(_) => @append_constraint_argument(Result::Err(
+                    ElaborationError::MissingConstraintArgument(token)
+                )),
+                Result::Ok(found) => found
+            };
+            ConstraintArgument::Lifetime(name, token)
+        },
+        3 => {
+            let lower = handle super::headers::goal_argument_lower(value) {
+                Result::Err(_) => @append_constraint_argument(Result::Err(
+                    ElaborationError::MissingConstraintArgument(token)
+                )),
+                Result::Ok(found) => try(
+                    constraint_usize_to_u32(found, token),
+                    @append_constraint_argument
+                )
+            };
+            let upper = handle super::headers::goal_argument_upper(value) {
+                Result::Err(_) => None,
+                Result::Ok(found) => Option::Some(try(
+                    constraint_usize_to_u32(found, token),
+                    @append_constraint_argument
+                ))
+            };
+            ConstraintArgument::Quantity(lower, upper, token)
+        },
+        4 => {
+            let found = handle super::headers::goal_argument_lower(value) {
+                Result::Err(_) => @append_constraint_argument(Result::Err(
+                    ElaborationError::MissingConstraintArgument(token)
+                )),
+                Result::Ok(found) => found
+            };
+            ConstraintArgument::U32(try(
+                constraint_usize_to_u32(found, token),
+                @append_constraint_argument
+            ), token)
+        },
+        _ => @append_constraint_argument(Result::Err(
+            ElaborationError::MissingConstraintArgument(token)
+        ))
+    };
+    Vec::push(&mut output.constraint_arguments, argument);
+    Result::Ok(())
+}
+
+append_constraint_arguments(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    goal: &super::headers::WhereGoal,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope,
+    ordinal: u32
+) -> Result<ConstraintArgumentRange, ElaborationError> {
+    let start = Vec::len(&output.constraint_arguments);
+    try(append_constraint_argument_items(
+        headers, declarations, output, goal, module, scope, ordinal
+    ), @append_constraint_arguments);
+    Result::Ok(super::syntax::id_range(
+        start, Vec::len(&output.constraint_arguments)
+    ))
+}
+
+append_constraint_argument_items(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    goal: &super::headers::WhereGoal,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::where_goal_argument_count(goal)) {
+        let value = handle super::headers::where_goal_argument_at(
+            super::headers::parsed_index(headers), goal, ordinal
+        ) {
+            Result::Err(_) => @append_constraint_argument_items(Result::Err(
+                ElaborationError::MissingConstraintArgument(
+                    usize_from_u32(ordinal)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        try(append_constraint_argument(
+            headers, declarations, output, value, module, scope
+        ), @append_constraint_argument_items);
+        append_constraint_argument_items(
+            headers, declarations, output, goal, module, scope, ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+append_binding_argument_items(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    binding: &super::headers::AssociatedBinding,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::associated_binding_argument_count(binding)) {
+        let value = handle super::headers::associated_binding_argument_at(
+            super::headers::parsed_index(headers), binding, ordinal
+        ) {
+            Result::Err(_) => @append_binding_argument_items(Result::Err(
+                ElaborationError::MissingConstraintArgument(
+                    usize_from_u32(ordinal)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        try(append_constraint_argument(
+            headers, declarations, output, value, module, scope
+        ), @append_binding_argument_items);
+        append_binding_argument_items(
+            headers, declarations, output, binding, module, scope, ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+append_constraint_effect_items<'a>(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    values: Slice<'a, super::headers::TypeEdge>,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope,
+    ordinal: usize
+) -> Result<(), ElaborationError> {
+    if(ordinal < Slice::len(values)) {
+        let edge = handle Slice::get(values, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let ty = try(resolve_signature_type(
+            headers,
+            declarations,
+            output,
+            super::headers::type_edge_type(edge),
+            module,
+            Option::Some(scope)
+        ), @append_constraint_effect_items);
+        Vec::push(&mut output.constraint_effects, type_id_from_u32(ty));
+        append_constraint_effect_items(
+            headers, declarations, output, values, module, scope, ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+elaborate_constraint_binding_value(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    value: &super::headers::AssociatedBindingValue,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope
+) -> Result<ConstraintBindingValue, ElaborationError> {
+    handle value {
+        super::headers::AssociatedBindingValue::Type(syntax) =>
+            Result::Ok(ConstraintBindingValue::Type(type_id_from_u32(try(
+                resolve_signature_type(
+                    headers, declarations, output, syntax, module,
+                    Option::Some(scope)
+                ), @elaborate_constraint_binding_value
+            )))),
+        super::headers::AssociatedBindingValue::EffectRow(row) => {
+            elaborate_constraint_effect_row(
+                headers, declarations, output, row, module, scope
+            )
+        }
+    }
+}
+
+elaborate_constraint_effect_row(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    row: super::headers::EffectRow,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope
+) -> Result<ConstraintBindingValue, ElaborationError> {
+    let start = Vec::len(&output.constraint_effects);
+    try(append_constraint_effect_items(
+        headers,
+        declarations,
+        output,
+        super::headers::effect_row_types_value(
+            super::headers::parsed_index(headers), row
+        ),
+        module,
+        scope,
+        0
+    ), @elaborate_constraint_effect_row);
+    let row_tail = Option::map(
+        super::headers::effect_row_tail_value(row),
+        { name => Id::to_u32(super::headers::name_use_name(&name)) }
+    );
+    Result::Ok(ConstraintBindingValue::EffectRow(
+        super::syntax::id_range(
+            start, Vec::len(&output.constraint_effects)
+        ),
+        row_tail
+    ))
+}
+
+append_constraint_binding_items(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    goal: &super::headers::WhereGoal,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::where_goal_binding_count(goal)) {
+        let binding = handle super::headers::where_goal_binding_at(
+            super::headers::parsed_index(headers), goal, ordinal
+        ) {
+            Result::Err(_) => @append_constraint_binding_items(Result::Err(
+                ElaborationError::MissingConstraintBinding(
+                    usize_from_u32(ordinal)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        let argument_start = Vec::len(&output.constraint_arguments);
+        try(append_binding_argument_items(
+            headers, declarations, output, binding, module, scope, 0
+        ), @append_constraint_binding_items);
+        let syntax_tokens = super::headers::associated_binding_tokens(binding);
+        let semantic_value = try(elaborate_constraint_binding_value(
+            headers,
+            declarations,
+            output,
+            super::headers::associated_binding_value(binding),
+            module,
+            scope
+        ), @append_constraint_binding_items);
+        Vec::push(
+            &mut output.constraint_bindings,
+            ConstraintBinding {
+                name: Id::to_u32(super::headers::name_use_name(
+                    super::headers::associated_binding_name(binding)
+                )),
+                arguments: super::syntax::id_range(
+                    argument_start, Vec::len(&output.constraint_arguments)
+                ),
+                value: semantic_value,
+                start: super::syntax::token_start(syntax_tokens),
+                end: super::syntax::token_end(syntax_tokens)
+            }
+        );
+        append_constraint_binding_items(
+            headers, declarations, output, goal, module, scope, ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+append_constraint_goal_items(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    clause: super::headers::WhereClause,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::where_clause_goal_count(clause)) {
+        let goal = handle super::headers::where_goal_at(
+            super::headers::parsed_index(headers), clause, ordinal
+        ) {
+            Result::Err(_) => @append_constraint_goal_items(Result::Err(
+                ElaborationError::MissingConstraintGoal(
+                    usize_from_u32(ordinal)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        let binders = try(append_constraint_binders(
+            headers,
+            output,
+            super::headers::where_goal_higher_ranked(goal),
+            0
+        ), @append_constraint_goal_items);
+        let subject = type_id_from_u32(try(resolve_signature_type(
+            headers,
+            declarations,
+            output,
+            super::headers::where_goal_subject(goal),
+            module,
+            Option::Some(scope)
+        ), @append_constraint_goal_items));
+        let relation = try(resolve_constraint_relation(
+            headers,
+            declarations,
+            super::headers::where_goal_relation(
+                super::headers::parsed_index(headers), goal
+            ),
+            module
+        ), @append_constraint_goal_items);
+        let relation_names = super::headers::where_goal_relation(
+            super::headers::parsed_index(headers), goal
+        );
+        let relation_name = handle Slice::get(
+            relation_names, Slice::len(relation_names) - 1
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => Id::to_u32(
+                super::headers::name_use_name(found)
+            )
+        };
+        let arguments = try(append_constraint_arguments(
+            headers, declarations, output, goal, module, scope, 0
+        ), @append_constraint_goal_items);
+        let binding_start = Vec::len(&output.constraint_bindings);
+        try(append_constraint_binding_items(
+            headers, declarations, output, goal, module, scope, 0
+        ), @append_constraint_goal_items);
+        let tokens = super::headers::where_goal_tokens(goal);
+        Vec::push(
+            &mut output.constraint_goals,
+            ConstraintGoal {
+                higher_ranked_lifetimes: binders,
+                subject: subject,
+                negative: super::headers::where_goal_is_negative(goal),
+                relation: relation,
+                relation_name: relation_name,
+                arguments: arguments,
+                bindings: super::syntax::id_range(
+                    binding_start, Vec::len(&output.constraint_bindings)
+                ),
+                start: super::syntax::token_start(tokens),
+                end: super::syntax::token_end(tokens)
+            }
+        );
+        append_constraint_goal_items(
+            headers, declarations, output, clause, module, scope, ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+append_constraint_lifetime_items(
+    headers: &super::headers::ParsedHeaders,
+    output: &mut TypedInterfaces,
+    clause: super::headers::WhereClause,
+    scope: SignatureTypeScope,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::headers::where_clause_lifetime_count(clause)) {
+        let value = handle super::headers::lifetime_outlives_at(
+            super::headers::parsed_index(headers), clause, ordinal
+        ) {
+            Result::Err(_) => @append_constraint_lifetime_items(Result::Err(
+                ElaborationError::MissingConstraintGoal(
+                    usize_from_u32(ordinal)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        let binders = try(append_constraint_binders(
+            headers,
+            output,
+            super::headers::lifetime_outlives_higher_ranked(value),
+            0
+        ), @append_constraint_lifetime_items);
+        let tokens = super::headers::lifetime_outlives_tokens(value);
+        let longer = super::headers::lifetime_outlives_longer(value);
+        let shorter = super::headers::lifetime_outlives_shorter(value);
+        try(validate_constraint_lifetime(
+            headers, output, scope, binders, longer
+        ), @append_constraint_lifetime_items);
+        try(validate_constraint_lifetime(
+            headers, output, scope, binders, shorter
+        ), @append_constraint_lifetime_items);
+        Vec::push(
+            &mut output.constraint_lifetimes,
+            ConstraintLifetime {
+                higher_ranked_lifetimes: binders,
+                longer: Id::to_u32(super::headers::name_use_name(
+                    longer
+                )),
+                shorter: Id::to_u32(super::headers::name_use_name(
+                    shorter
+                )),
+                start: super::syntax::token_start(tokens),
+                end: super::syntax::token_end(tokens)
+            }
+        );
+        append_constraint_lifetime_items(
+            headers, output, clause, scope, ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+signature_scope_has_lifetime(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureScope,
+    name: u32,
+    ordinal: u32
+) -> Bool {
+    if(ordinal < scope.count) {
+        let parameter = handle super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(scope.start + ordinal)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        (super::headers::generic_param_kind_code(parameter) == 2
+            and { Id::to_u32(super::headers::generic_param_name(parameter))
+                == name }) or { signature_scope_has_lifetime(
+                    headers, scope, name, ordinal + 1
+                ) }
+    } else { false }
+}
+
+constraint_scope_has_lifetime(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureTypeScope,
+    name: u32
+) -> Bool {
+    handle scope {
+        SignatureTypeScope::Declaration(declaration) =>
+            signature_scope_has_lifetime(headers, declaration, name, 0),
+        SignatureTypeScope::EffectOperation(effect_scope, operation, _) =>
+            signature_scope_has_lifetime(headers, operation, name, 0)
+                or { signature_scope_has_lifetime(
+                    headers, effect_scope, name, 0
+                ) }
+    }
+}
+
+constraint_binders_have_lifetime(
+    output: &TypedInterfaces,
+    binders: ConstraintBinderRange,
+    name: u32,
+    ordinal: u32
+) -> Bool {
+    if(ordinal < binders.count) {
+        Vec::index(
+            &output.constraint_binders,
+            usize_from_u32(binders.start + ordinal)
+        ).name == name or { constraint_binders_have_lifetime(
+            output, binders, name, ordinal + 1
+        ) }
+    } else { false }
+}
+
+validate_constraint_lifetime(
+    headers: &super::headers::ParsedHeaders,
+    output: &TypedInterfaces,
+    scope: SignatureTypeScope,
+    binders: ConstraintBinderRange,
+    value: &super::headers::NameUse
+) -> Result<(), ElaborationError> {
+    let name = Id::to_u32(super::headers::name_use_name(value));
+    if(name_use_is(headers, value, &"'static")
+        or { constraint_scope_has_lifetime(headers, scope, name) }
+        or { constraint_binders_have_lifetime(output, binders, name, 0) }) {
+        Result::Ok(())
+    } else { Result::Err(ElaborationError::UnknownConstraintLifetime(
+        super::headers::name_use_token(value)
+    )) }
+}
+
+empty_constraint_clause(token: usize) -> ConstraintClause {
+    ConstraintClause {
+        goals: super::syntax::id_range(0, 0),
+        lifetime_outlives: super::syntax::id_range(0, 0),
+        start: token,
+        end: token
+    }
+}
+
+elaborate_constraint_clause(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    syntax: &Option<super::headers::WhereClause>,
+    provenance: &super::headers::HeaderTokenRange,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope
+) -> Result<ConstraintClause, ElaborationError> {
+    handle syntax {
+        Result::Err(_) => Result::Ok(empty_constraint_clause(
+            super::syntax::token_start(provenance)
+        )),
+        Result::Ok(clause) => elaborate_present_constraint_clause(
+            headers, declarations, output, clause, module, scope
+        )
+    }
+}
+
+elaborate_present_constraint_clause(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    clause: super::headers::WhereClause,
+    module: Option<ShellId>,
+    scope: SignatureTypeScope
+) -> Result<ConstraintClause, ElaborationError> {
+    let goal_start = Vec::len(&output.constraint_goals);
+    let lifetime_start = Vec::len(&output.constraint_lifetimes);
+    try(append_constraint_goal_items(
+        headers, declarations, output, clause, module, scope, 0
+    ), @elaborate_present_constraint_clause);
+    try(append_constraint_lifetime_items(
+        headers, output, clause, scope, 0
+    ), @elaborate_present_constraint_clause);
+    let tokens = super::headers::where_clause_tokens(clause);
+    Result::Ok(ConstraintClause {
+        goals: super::syntax::id_range(
+            goal_start, Vec::len(&output.constraint_goals)
+        ),
+        lifetime_outlives: super::syntax::id_range(
+            lifetime_start, Vec::len(&output.constraint_lifetimes)
+        ),
+        start: super::syntax::token_start(&tokens),
+        end: super::syntax::token_end(&tokens)
+    })
 }
 
 generic_parameter_at<'a>(
@@ -4658,6 +5708,15 @@ collect_effect_operations(
         );
         let where_tokens =
             super::headers::effect_operation_where_tokens(operation);
+        let constraints = try(elaborate_constraint_clause(
+            headers,
+            declarations,
+            &mut *output,
+            super::headers::effect_operation_where_clause(operation),
+            where_tokens,
+            module,
+            scope
+        ), @collect_effect_operations);
         let payload_end = Vec::len(&output.effect_payloads);
         let terminal =
             super::headers::effect_operation_is_terminal(operation);
@@ -4666,7 +5725,7 @@ collect_effect_operations(
             ordinal: ordinal,
             name: name,
             generics: operation_scope,
-            constraints: constraint_token_range(where_tokens),
+            constraints: constraints,
             payloads: super::syntax::id_range(payload_start, payload_end),
             result: result,
             terminal: terminal,
@@ -4717,12 +5776,18 @@ collect_effects(
             super::headers::effect_operations(declaration)
         ));
         let where_tokens = super::headers::effect_where_tokens(declaration);
+        let module = handle super::scanner::shell_at(declarations, shell) {
+            Result::Err(_) => None,
+            Result::Ok(owner) => shell_parent_module(owner)
+        };
         let effect_id = alloc_interface_effect(
             output,
             InterfaceEffect {
                 shell: shell,
                 generics: scope,
-                constraints: constraint_token_range(where_tokens),
+                constraints: empty_constraint_clause(
+                    super::syntax::token_start(where_tokens)
+                ),
                 operations: super::syntax::id_range(
                     operation_start, operation_start + operation_count
                 )
@@ -4736,10 +5801,16 @@ collect_effects(
             )),
             Result::Ok(_) => ()
         };
-        let module = handle super::scanner::shell_at(declarations, shell) {
-            Result::Err(_) => None,
-            Result::Ok(owner) => shell_parent_module(owner)
-        };
+        let constraints = try(elaborate_constraint_clause(
+            headers,
+            declarations,
+            output,
+            super::headers::effect_where_clause(declaration),
+            where_tokens,
+            module,
+            SignatureTypeScope::Declaration(scope)
+        ), @collect_effects);
+        set_effect_constraints(output, effect_id, constraints);
         try(collect_effect_operations(
             headers,
             declarations,
@@ -4752,6 +5823,17 @@ collect_effects(
         ), @collect_effects);
         collect_effects(headers, declarations, output, index + 1)
     } else { Result::Ok(()) }
+}
+
+set_effect_constraints(
+    output: &mut TypedInterfaces,
+    effect_id: InterfaceEffectId,
+    constraints: ConstraintClause
+) {
+    let semantic_effect = Arena::index_mut(
+        &mut output.effects, effect_id
+    );
+    (*semantic_effect).constraints = constraints;
 }
 
 collect_callables(
@@ -5548,6 +6630,12 @@ pub collect_interfaces(
         effects: Arena::new(),
         effect_operations: Arena::new(),
         effect_payloads: Vec::new(),
+        constraint_goals: Vec::new(),
+        constraint_arguments: Vec::new(),
+        constraint_bindings: Vec::new(),
+        constraint_effects: Vec::new(),
+        constraint_lifetimes: Vec::new(),
+        constraint_binders: Vec::new(),
         shell_to_callable: IndexVec::new(),
         shell_to_nominal: IndexVec::new(),
         shell_to_type: IndexVec::new(),
