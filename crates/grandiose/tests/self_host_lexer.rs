@@ -295,6 +295,81 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
+fn run_lexer_oracle(directory: &Path, corpus: &[PathBuf]) {
+    let expected_path = directory.join("expected.bin");
+    let vm_path = directory.join("vm.bin");
+    let native_path = directory.join("native.bin");
+    let mut expected = Vec::new();
+    push_u32(&mut expected, corpus.len().try_into().unwrap());
+    for path in corpus {
+        encode_rust_lex(&mut expected, &fs::read_to_string(path).unwrap());
+    }
+    fs::write(&expected_path, &expected).unwrap();
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm_args = std::iter::once(vm_path.clone().into_os_string())
+        .chain(corpus.iter().map(|path| path.clone().into_os_string()))
+        .collect::<Vec<OsString>>();
+    let vm = Vm::with_host(
+        verify(phases.artifact.clone()).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vm_args),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM lexer diverged");
+
+    let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+    let llvm = directory.join("self-host-lexer.ll");
+    let executable = directory.join("self-host-lexer");
+    fs::write(&llvm, module.ir).unwrap();
+    let clang = Command::new("clang")
+        .arg(&llvm)
+        .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+        .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+        .arg("-O0")
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        clang.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clang.stderr)
+    );
+    let native = Command::new(&executable)
+        .arg(&native_path)
+        .args(corpus)
+        .output()
+        .unwrap();
+    if !native.status.success() {
+        let status = native.status;
+        let stderr = String::from_utf8_lossy(&native.stderr).into_owned();
+        let preserved = directory;
+        panic!(
+            "native lexer failed with {status:?}: {stderr}\nartifacts: {}",
+            preserved.display()
+        );
+    }
+    assert_eq!(fs::read(&native_path).unwrap(), expected, "native lexer diverged");
+
+    let repeat_path = directory.join("repeat.bin");
+    let repeat = Command::new(executable)
+        .arg(&repeat_path)
+        .args(corpus)
+        .output()
+        .unwrap();
+    assert!(repeat.status.success());
+    assert_eq!(fs::read(repeat_path).unwrap(), expected);
+}
+
 #[test]
 fn self_hosted_lexer_matches_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
@@ -302,85 +377,49 @@ fn self_hosted_lexer_matches_rust_in_vm_and_native_execution() {
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
             let corpus = corpus(directory.path());
-            let expected_path = directory.path().join("expected.bin");
-            let vm_path = directory.path().join("vm.bin");
-            let native_path = directory.path().join("native.bin");
-            let mut expected = Vec::new();
-            push_u32(&mut expected, corpus.len().try_into().unwrap());
-            for path in &corpus {
-                encode_rust_lex(&mut expected, &fs::read_to_string(path).unwrap());
-            }
-            fs::write(&expected_path, &expected).unwrap();
-
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
-                },
-            )
-            .unwrap();
-            let entry = phases.artifact.entry_function.unwrap();
-            let vm_args = std::iter::once(vm_path.clone().into_os_string())
-                .chain(corpus.iter().map(|path| path.clone().into_os_string()))
-                .collect::<Vec<OsString>>();
-            let vm = Vm::with_host(
-                verify(phases.artifact.clone()).unwrap(),
-                ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(vm_args),
-            )
-            .unwrap();
-            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM lexer diverged");
-
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-lexer.ll");
-            let executable = directory.path().join("self-host-lexer");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
-            );
-            let native = Command::new(&executable)
-                .arg(&native_path)
-                .args(&corpus)
-                .output()
-                .unwrap();
-            if !native.status.success() {
-                let status = native.status;
-                let stderr = String::from_utf8_lossy(&native.stderr).into_owned();
-                let preserved = directory.keep();
-                panic!(
-                    "native lexer failed with {status:?}: {stderr}\nartifacts: {}",
-                    preserved.display()
-                );
-            }
-            assert_eq!(
-                fs::read(&native_path).unwrap(),
-                expected,
-                "native lexer diverged"
-            );
-
-            // The protocol is deterministic across independent executions.
-            let repeat_path = directory.path().join("repeat.bin");
-            let repeat = Command::new(executable)
-                .arg(&repeat_path)
-                .args(&corpus)
-                .output()
-                .unwrap();
-            assert!(repeat.status.success());
-            assert_eq!(fs::read(repeat_path).unwrap(), expected);
+            run_lexer_oracle(directory.path(), &corpus);
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_lexer_keywords_match_bootstrap() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = [
+        Kw::Cancel,
+        Kw::Effect,
+        Kw::Enum,
+        Kw::Handle,
+        Kw::Impl,
+        Kw::Is,
+        Kw::Let,
+        Kw::Perform,
+        Kw::Resume,
+        Kw::Struct,
+        Kw::Tail,
+        Kw::Trait,
+        Kw::Type,
+        Kw::Where,
+    ]
+    .into_iter()
+    .map(Kw::as_str)
+    .chain(
+        [
+            "if", "match", "loop", "return", "yield", "await", "label", "leave", "for",
+            "with", "mut", "move", "cases", "private", "const", "infinity", "infixl",
+            "infixr", "infix", "prefix", "self",
+        ]
+        .into_iter(),
+    )
+    .collect::<Vec<_>>()
+    .join(" ");
+    let input = tempfile::Builder::new()
+        .suffix(".glorious")
+        .tempfile_in(directory.path())
+        .unwrap();
+    fs::write(input.path(), source).unwrap();
+    let corpus = vec![input.path().to_owned()];
+    run_lexer_oracle(directory.path(), &corpus);
 }
