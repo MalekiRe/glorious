@@ -71,7 +71,7 @@ module_resolution.rs	modules_cli_sessions	partial	self_host_name_resolution.rs#s
 multi_origin_aggregates.rs	compiler_pipeline	unported	-
 multishot_effects.rs	effects_control	unported	-
 nested_captured_handlers.rs	effects_control	unported	-
-nested_generic_fields.rs	types_traits_generics	unported	-
+nested_generic_fields.rs	types_traits_generics	partial	self_host_interfaces.rs#self_host_unit_nested_generic_nominal_fields_construct_and_forward
 nested_handler_contextual_inference.rs	effects_control	unported	-
 nested_perform_payloads.rs	compiler_pipeline	unported	-
 numeric_selection.rs	mir_lowering	unported	-

@@ -16,6 +16,30 @@ use grandiose::{
 };
 use grandiose_vm::{verify, SystemHost, Value, Vm};
 
+const NESTED_GENERIC_NOMINAL_FIELDS: &str = r#"
+    struct NestedSlot<T> { value: T }
+    struct Ring<T> { slots: Vec<NestedSlot<T>> }
+    struct ArrayRing<T> { slots: Array<NestedSlot<T>> }
+
+    impl<T> Use<[0,1]> for NestedSlot<T> where T: Use<[0,1]> {}
+    impl<T> Use<[0,1]> for Ring<T> where Vec<NestedSlot<T>>: Use<[0,1]> {}
+    impl<T> Use<[0,1]> for ArrayRing<T> where Array<NestedSlot<T>>: Use<[0,1]> {}
+
+    empty_ring<T>() -> Ring<T> { Ring { slots: Vec::new() } }
+    forward_ring(value: Ring<i64>) -> Ring<i64> { value }
+    wrap_array<T>(slots: Array<NestedSlot<T>>) -> ArrayRing<T> {
+        ArrayRing { slots: move slots }
+    }
+    forward_array(value: Array<NestedSlot<i64>>) -> ArrayRing<i64> {
+        wrap_array(move value)
+    }
+    answer() -> usize {
+        let ring = forward_ring(empty_ring());
+        Vec::len(&ring.slots)
+    }
+    main() -> () { () }
+"#;
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -706,4 +730,57 @@ fn self_hosted_interfaces_match_rust_in_vm_and_native_execution() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_unit_nested_generic_nominal_fields_construct_and_forward() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("nested-generic-fields.glorious");
+    let output = directory.path().join("nested-generic-fields.grbc");
+    fs::write(&input, NESTED_GENERIC_NOMINAL_FIELDS).unwrap();
+
+    let bootstrap_answers = [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ]
+    .into_iter()
+    .map(|optimization_level| {
+        let phases = grandiose::compile_source_to_phases_with_options(
+            "nested-generic-fields.glorious",
+            NESTED_GENERIC_NOMINAL_FIELDS,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let answer = phases
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        let verified = verify(phases.artifact).unwrap();
+        Vm::new(verified).run(answer, vec![]).unwrap()
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(bootstrap_answers, vec![Value::U64(0); 3]);
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let compiler = verify(phases.artifact).unwrap();
+    let vm = Vm::with_host(
+        compiler,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+
+    let encoded = fs::read(output).unwrap();
+    assert_eq!(&encoded[..5], &[1, 0, 0, 0, 0]);
 }

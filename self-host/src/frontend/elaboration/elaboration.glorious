@@ -4219,7 +4219,7 @@ is_array_constructor(
         super::headers::parsed_index(headers),
         type_id
     ) {
-        super::headers::HeaderTypeView::Path(_, names) =>
+        super::headers::HeaderTypeView::Path(_, _, names) =>
             if(Slice::len(names) == 1) {
                 let name = handle Slice::first(names) {
                     Result::Err(_) => unreachable(),
@@ -4247,7 +4247,7 @@ signature_type_name_target<'a>(
         super::headers::parsed_index(headers),
         type_id
     ) {
-        super::headers::HeaderTypeView::Path(_, names) => if(
+        super::headers::HeaderTypeView::Path(_, _, names) => if(
             Slice::len(names) == 1
         ) {
             let name = handle Slice::first(names) {
@@ -4364,7 +4364,7 @@ resolve_signature_type(
 ) -> Result<u32, ElaborationError> {
     let index = super::headers::parsed_index(headers);
     handle super::headers::header_type_view(index, type_id) {
-        super::headers::HeaderTypeView::Path(token, names) => if(
+        super::headers::HeaderTypeView::Path(token, _, names) => if(
             Slice::len(names) == 1
         ) {
             let name = handle Slice::first(names) {
@@ -4442,6 +4442,7 @@ resolve_signature_type(
         },
         super::headers::HeaderTypeView::SharedReference(
             _,
+            _,
             lifetime,
             referent
         ) => if(reference_lifetime_valid(headers, scope, lifetime)) {
@@ -4468,6 +4469,7 @@ resolve_signature_type(
         ) },
         super::headers::HeaderTypeView::UniqueReference(
             _,
+            _,
             lifetime,
             referent
         ) => if(reference_lifetime_valid(headers, scope, lifetime)) {
@@ -4492,7 +4494,7 @@ resolve_signature_type(
                 }
             )
         ) },
-        super::headers::HeaderTypeView::Tuple(_, children) =>
+        super::headers::HeaderTypeView::Tuple(_, _, children) =>
             if(Slice::is_empty(children)) { Result::Ok(0) } else {
             let elements = Vec::new();
             try(Slice::try_for_each(children, { edge => {
@@ -4511,6 +4513,7 @@ resolve_signature_type(
         },
         super::headers::HeaderTypeView::Application(
             token,
+            _,
             constructor,
             lifetimes,
             arguments
@@ -4571,7 +4574,7 @@ resolve_signature_type(
                 }
             } }
         },
-        super::headers::HeaderTypeView::Never(_) => Result::Ok(1)
+        super::headers::HeaderTypeView::Never(_, _) => Result::Ok(1)
     }
 }
 
