@@ -346,6 +346,70 @@ pub enum HeaderError {
     TypeArenaExhausted(usize, usize)
 }
 
+// Keep the structural header identity available to the small conformance
+// probes without making them depend on the diagnostics/compiler layers.
+pub header_error_code(error: &HeaderError) -> u32 {
+    handle *error {
+        HeaderError::ExpectedIdentifier(_, _) => 1,
+        HeaderError::ExpectedLeftParenthesis(_, _) => 2,
+        HeaderError::ExpectedRightParenthesis(_, _) => 3,
+        HeaderError::ExpectedRightAngle(_, _) => 4,
+        HeaderError::EmptyTypeArguments(_, _) => 5,
+        HeaderError::EmptyGenericParameters(_, _) => 15,
+        HeaderError::UnsupportedGenericParameterKind(_, _) => 6,
+        HeaderError::ExpectedColon(_, _) => 7,
+        HeaderError::ExpectedRightBrace(_, _) => 8,
+        HeaderError::ExpectedSemicolon(_, _) => 16,
+        HeaderError::UnexpectedTrailingHeaderToken(_, _) => 9,
+        HeaderError::ExpectedEquals(_, _) => 10,
+        HeaderError::ExpectedIntegerPrecedence(_, _) => 11,
+        HeaderError::PrecedenceOutOfRange(_, _) => 17,
+        HeaderError::ExpectedOperator(_, _) => 12,
+        HeaderError::InvalidFixityForm(_, _) => 13,
+        HeaderError::ExpectedEffectBody(_, _) => 18,
+        HeaderError::ExpectedResumptionComma(_, _) => 19,
+        HeaderError::ExpectedResumptionUpper(_, _) => 20,
+        HeaderError::ExpectedResumptionRightBracket(_, _) => 21,
+        HeaderError::InvalidResumptionBound(_, _) => 22,
+        HeaderError::EmptyWhereClause(_, _) => 23,
+        HeaderError::InvalidWhereGoal(_, _) => 24,
+        HeaderError::InvalidWhereQuantity(_, _) => 25,
+        HeaderError::DuplicateAssociatedBinding(_, _) => 26,
+        HeaderError::TypeArenaExhausted(_, _) => 14
+    }
+}
+
+pub header_error_token(error: &HeaderError) -> usize {
+    handle *error {
+        HeaderError::ExpectedIdentifier(token, _) => token,
+        HeaderError::ExpectedLeftParenthesis(token, _) => token,
+        HeaderError::ExpectedRightParenthesis(token, _) => token,
+        HeaderError::ExpectedRightAngle(token, _) => token,
+        HeaderError::EmptyTypeArguments(token, _) => token,
+        HeaderError::EmptyGenericParameters(token, _) => token,
+        HeaderError::UnsupportedGenericParameterKind(token, _) => token,
+        HeaderError::ExpectedColon(token, _) => token,
+        HeaderError::ExpectedRightBrace(token, _) => token,
+        HeaderError::ExpectedSemicolon(token, _) => token,
+        HeaderError::UnexpectedTrailingHeaderToken(token, _) => token,
+        HeaderError::ExpectedEquals(token, _) => token,
+        HeaderError::ExpectedIntegerPrecedence(token, _) => token,
+        HeaderError::PrecedenceOutOfRange(token, _) => token,
+        HeaderError::ExpectedOperator(token, _) => token,
+        HeaderError::InvalidFixityForm(token, _) => token,
+        HeaderError::ExpectedEffectBody(token, _) => token,
+        HeaderError::ExpectedResumptionComma(token, _) => token,
+        HeaderError::ExpectedResumptionUpper(token, _) => token,
+        HeaderError::ExpectedResumptionRightBracket(token, _) => token,
+        HeaderError::InvalidResumptionBound(token, _) => token,
+        HeaderError::EmptyWhereClause(token, _) => token,
+        HeaderError::InvalidWhereGoal(token, _) => token,
+        HeaderError::InvalidWhereQuantity(token, _) => token,
+        HeaderError::DuplicateAssociatedBinding(token, _) => token,
+        HeaderError::TypeArenaExhausted(token, _) => token
+    }
+}
+
 struct HeaderBounds { start: usize, end: usize }
 
 struct Parser {

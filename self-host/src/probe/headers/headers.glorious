@@ -18,6 +18,36 @@ use super::super::frontend::lexer::{LexedSource, TokenKind};
 
 bool_code(value: Bool) -> u8 { if(value) { 1 } else { 0 } }
 
+write_header_error(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    error: &super::super::frontend::headers::HeaderError
+) {
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::headers::header_error_code(error)
+    );
+    let token = super::super::frontend::headers::header_error_token(error);
+    handle super::super::frontend::lexer::token_at(source, token) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => {
+            let span = super::super::frontend::lexer::token_span(found);
+            ByteBuf::write_u64_le(
+                output,
+                wrapping_convert_to_u64(
+                    super::super::frontend::lexer::span_start(&span)
+                )
+            );
+            ByteBuf::write_u64_le(
+                output,
+                wrapping_convert_to_u64(
+                    super::super::frontend::lexer::span_end(&span)
+                )
+            )
+        }
+    }
+}
+
 write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);
     ByteBuf::write_u32_le(
@@ -951,13 +981,24 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
         Result::Ok(lexed) =>
             handle super::super::frontend::scanner::scan(&lexed) {
             Result::Err(_) => ByteBuf::push(output, 2),
-            Result::Ok(declarations) =>
-                handle super::super::frontend::headers::parse(
+            Result::Ok(declarations) => {
+            let header_lexed = handle super::super::frontend::lexer::lex(&source) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let diagnostic_lexed = handle super::super::frontend::lexer::lex(&source) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            handle super::super::frontend::headers::parse(
                     &source,
-                    lexed,
+                    header_lexed,
                     &declarations
                 ) {
-                Result::Err(_) => ByteBuf::push(output, 3),
+                Result::Err(error) => {
+                    ByteBuf::push(output, 3);
+                    write_header_error(output, &diagnostic_lexed, &error)
+                },
                 Result::Ok(parsed) => {
                     ByteBuf::push(output, 0);
                     if(interfaces) {
@@ -1033,6 +1074,7 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                         }})
                     }
                 }
+            }
             }
         }
     }

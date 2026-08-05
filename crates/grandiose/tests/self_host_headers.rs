@@ -468,6 +468,70 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
     output.extend(encoded);
 }
 
+fn encode_rust_malformed_nested_type(output: &mut Vec<u8>, source: &str) {
+    let tokens = grandiose::lexer::lex(source).unwrap();
+    let error = grandiose::parser::parse(tokens).unwrap_err();
+    let code = match error.title.as_str() {
+        "empty generic application" => 5,
+        "expected a name" => 1,
+        "unexpected syntax" => {
+            match error.message.as_str() {
+                "expected `>` after generic type arguments" => 4,
+                "expected `)` to close the tuple type" => 3,
+                "expected a name" => 1,
+                message => panic!("unexpected bootstrap diagnostic payload: {message}"),
+            }
+        }
+        title => panic!("unexpected bootstrap diagnostic identity: {title}"),
+    };
+    output.push(3);
+    push_u32(output, code);
+    let span = error.span.unwrap();
+    push_u64(output, span.start as u64);
+    push_u64(output, span.end as u64);
+}
+
+#[test]
+fn self_host_header_malformed_nested_types_match_bootstrap() {
+    // The focused protocol carries the bootstrap parser's first diagnostic.
+    // Keep this acceptance at the component boundary.
+    let sources = [
+        "type Bad = Pair<>; main() -> { () }",
+        "type Bad = Pair<i64, Text; main() -> { () }",
+        "type Bad = (i64, Text; main() -> { () }",
+        "main(value: &mut) -> { () }",
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let mut inputs = Vec::new();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, sources.len().try_into().unwrap());
+    for (index, source) in sources.iter().enumerate() {
+        let path = directory.path().join(format!("malformed-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        inputs.push(path);
+        encode_rust_malformed_nested_type(&mut expected, source);
+    }
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let output_path = directory.path().join("malformed.bin");
+    let args = std::iter::once(output_path.clone().into_os_string())
+        .chain(inputs.iter().map(|path| path.clone().into_os_string()))
+        .collect::<Vec<OsString>>();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(args),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output_path).unwrap(), expected);
+}
+
 fn corpus(directory: &Path) -> Vec<PathBuf> {
     let focused = [
         "",

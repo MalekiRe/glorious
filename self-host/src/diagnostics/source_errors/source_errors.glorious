@@ -306,6 +306,15 @@ header_local_code(error: &HeaderError) -> u32 {
         HeaderError::PrecedenceOutOfRange(_, _) => 17,
         HeaderError::ExpectedOperator(_, _) => 12,
         HeaderError::InvalidFixityForm(_, _) => 13,
+        HeaderError::ExpectedEffectBody(_, _) => 18,
+        HeaderError::ExpectedResumptionComma(_, _) => 19,
+        HeaderError::ExpectedResumptionUpper(_, _) => 20,
+        HeaderError::ExpectedResumptionRightBracket(_, _) => 21,
+        HeaderError::InvalidResumptionBound(_, _) => 22,
+        HeaderError::EmptyWhereClause(_, _) => 23,
+        HeaderError::InvalidWhereGoal(_, _) => 24,
+        HeaderError::InvalidWhereQuantity(_, _) => 25,
+        HeaderError::DuplicateAssociatedBinding(_, _) => 26,
         HeaderError::TypeArenaExhausted(_, _) => 14
     }
 }
@@ -343,6 +352,24 @@ header_shape(error: &HeaderError) -> DiagnosticShape {
         HeaderError::ExpectedOperator(token, related) =>
             token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
         HeaderError::InvalidFixityForm(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedEffectBody(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedResumptionComma(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedResumptionUpper(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedResumptionRightBracket(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::InvalidResumptionBound(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::EmptyWhereClause(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::InvalidWhereGoal(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::InvalidWhereQuantity(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::DuplicateAssociatedBinding(token, related) =>
             token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
         HeaderError::TypeArenaExhausted(token, related) => token_pair_shape(
             DiagnosticClass::ResourceLimit,

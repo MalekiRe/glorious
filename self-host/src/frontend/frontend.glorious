@@ -227,6 +227,38 @@ pub mod syntax {
         Result::Ok(DelimiterMap { entries: entries })
     }
 
+    // Header parsing owns malformed type delimiters.  Keep an unmatched
+    // opener in the map so declaration scanning can still hand the complete
+    // declaration to that parser; mismatched and unexpected closers remain
+    // scanner errors.
+    pub build_delimiter_map_recovering(
+        source: &super::lexer::LexedSource
+    ) -> Result<DelimiterMap, DelimiterError> {
+        let count = super::lexer::token_count(source);
+        let sentinel = if(count == 0) { 0 } else { count - 1 };
+        let entries = Vec::new();
+        fill_entries(&mut entries, count);
+        let stack = Vec::new();
+        try(
+            try_for_range(Range::new(0, sentinel), { index =>
+                scan_delimiter(
+                    source,
+                    index,
+                    sentinel,
+                    &mut stack,
+                    &mut entries
+                )
+            }),
+            @build_delimiter_map_recovering
+        );
+        handle finish_delimiters(sentinel, &stack) {
+            Result::Err(DelimiterError::Unclosed(_, _)) =>
+                Result::Ok(DelimiterMap { entries: entries }),
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(()) => Result::Ok(DelimiterMap { entries: entries })
+        }
+    }
+
     pub delimiter_partner(value: &DelimiterMap, token: usize) -> Option<usize> {
         handle Vec::get(&value.entries, token) {
             Result::Err(_) => None,
