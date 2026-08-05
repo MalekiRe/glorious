@@ -177,6 +177,46 @@ fn encode_statement(
     }
 }
 
+fn encode_pattern(output: &mut Vec<u8>, source: &str, pattern: &Pattern) -> Result<(), ()> {
+    match &pattern.kind {
+        PatternKind::Int(_) | PatternKind::Float(_) => {
+            output.push(if matches!(&pattern.kind, PatternKind::Int(_)) { 1 } else { 2 });
+            push_string(output, &source[pattern.span.range()]);
+        }
+        PatternKind::String(value) => { output.push(3); push_string(output, value); }
+        PatternKind::Char(value) => { output.push(4); push_u32(output, *value as u32); }
+        PatternKind::Byte(value) => { output.push(5); output.push(*value); }
+        PatternKind::Unit => output.push(6),
+        PatternKind::Binding(name) => { output.push(1); push_string(output, name); }
+        PatternKind::Wildcard => output.push(2),
+        PatternKind::Int(value) => { output.push(3); push_u64(output, *value as u64); }
+        PatternKind::Variant { path, fields, rest } => {
+            output.push(4);
+            push_u32(output, path.segments.len().try_into().map_err(|_| ())?);
+            for segment in &path.segments { push_string(output, segment); }
+            output.push(u8::from(rest.is_some()));
+            push_u32(output, fields.len().try_into().map_err(|_| ())?);
+            for field in fields { encode_pattern(output, source, field)?; }
+        }
+        PatternKind::Tuple { elements, rest } => {
+            output.push(5); output.push(u8::from(rest.is_some()));
+            push_u32(output, elements.len().try_into().map_err(|_| ())?);
+            for element in elements { encode_pattern(output, source, element)?; }
+        }
+        PatternKind::Struct { name, fields, rest, .. } => {
+            output.push(6); push_string(output, name);
+            output.push(u8::from(rest.is_some()));
+            push_u32(output, fields.len().try_into().map_err(|_| ())?);
+            for field in fields {
+                push_string(output, &field.field);
+                encode_pattern(output, source, &field.pattern)?;
+            }
+        }
+        _ => return Err(()),
+    }
+    Ok(())
+}
+
 fn variable_named(expression: &Expr, expected: &str) -> bool {
     matches!(
         &expression.kind,
@@ -354,36 +394,6 @@ fn encode_effect_handle(
     Ok(())
 }
 
-fn encode_pattern(output: &mut Vec<u8>, source: &str, pattern: &Pattern) -> Result<(), ()> {
-    match &pattern.kind {
-        PatternKind::Int(_) | PatternKind::Float(_) => {
-            output.push(if matches!(&pattern.kind, PatternKind::Int(_)) {
-                1
-            } else {
-                2
-            });
-            push_string(output, &source[pattern.span.range()]);
-        }
-        PatternKind::String(value) => {
-            output.push(3);
-            push_string(output, value);
-        }
-        PatternKind::Char(value) => {
-            output.push(4);
-            push_u32(output, *value as u32);
-        }
-        PatternKind::Byte(value) => {
-            output.push(5);
-            output.push(*value);
-        }
-        PatternKind::Unit => output.push(6),
-        _ => return Err(()),
-    }
-    push_u32(output, pattern.span.start.try_into().map_err(|_| ())?);
-    push_u32(output, pattern.span.end.try_into().map_err(|_| ())?);
-    Ok(())
-}
-
 fn encode_expression(
     output: &mut Vec<u8>,
     program: &Program,
@@ -439,11 +449,6 @@ fn encode_expression(
             let value = literal.as_u64(expression.span).map_err(|_| ())?;
             output.push(2);
             push_u64(output, value);
-        }
-        ExprKind::Is { subject, pattern } => {
-            output.push(16);
-            encode_expression(output, program, source, subject)?;
-            encode_pattern(output, source, pattern)?;
         }
         ExprKind::Unit => output.push(3),
         ExprKind::Call(callee, arguments)
@@ -547,6 +552,11 @@ fn encode_expression(
             output.push(11);
             encode_expression(output, program, source, subject)?;
             push_string(output, field);
+        }
+        ExprKind::Is { subject, pattern } => {
+            output.push(18);
+            encode_expression(output, program, source, subject)?;
+            encode_pattern(output, source, pattern)?;
         }
         _ => return Err(()),
     }
@@ -1251,6 +1261,74 @@ fn self_host_body_labels_match_bootstrap_ast() {
                 .unwrap();
             assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
             assert_eq!(fs::read(native_output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_body_is_patterns_match_bootstrap_ast() {
+    // The acceptance covers the complete recursive pattern payload.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("is-pattern.glorious");
+            let output = directory.path().join("vm.bin");
+            let source = "main() { value is Shape::Circle(radius, (x, y), Point { x: px, .. }) }";
+            fs::write(&input, source).unwrap();
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.clone().into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&output).unwrap(), expected, "VM body AST diverged");
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("probe.ll");
+            let executable = directory.path().join("probe");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let native_output = directory.path().join("native.bin");
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+            assert_eq!(
+                fs::read(native_output).unwrap(),
+                expected,
+                "native body AST diverged"
+            );
         })
         .unwrap()
         .join()

@@ -9,11 +9,14 @@ use super::super::frontend::bodies::{
     ExpressionNameView,
     HandleArm,
     ParsedBody,
-    PatternBinder
+    PatternBinder,
+    expression_pattern,
+    expression_child_at
 };
 use super::super::frontend::lexer::LexedSource;
 
 u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
 
 write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);
@@ -50,7 +53,7 @@ write_token_span(
     );
 }
 
-write_pattern(
+write_scalar_pattern(
     output: &mut ByteBuf,
     original: &String,
     source: &LexedSource,
@@ -76,7 +79,7 @@ write_pattern(
             ByteBuf::push(output, 3);
             try(write_name(output, source, name,
                 token),
-                @write_pattern);
+                @write_scalar_pattern);
             write_token_span(output, source, &tokens);
             Result::Ok(())
         },
@@ -359,6 +362,122 @@ write_handle_arms<'a>(
     }})
 }
 
+write_pattern_fields(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    fields: super::super::frontend::bodies::PatternFieldRange,
+    index: usize
+) -> Result<(), BodyError> {
+    if(index < super::super::frontend::bodies::pattern_field_count(value, fields)) {
+        let field = super::super::frontend::bodies::pattern_field_at(value, fields, index);
+        write_name(
+            output,
+            source,
+            super::super::frontend::bodies::pattern_field_name(field),
+            super::super::frontend::bodies::pattern_field_token(field)
+        ) and {
+            write_pattern_node(
+                output,
+                original,
+                source,
+                value,
+                super::super::frontend::bodies::pattern_field_pattern(field)
+            ) and {
+                write_pattern_fields(output, original, source, value, fields, index + 1)
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+write_pattern_node(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    pattern: super::super::frontend::bodies::PatternId
+) -> Result<(), BodyError> {
+    handle super::super::frontend::bodies::pattern_view(value, pattern) {
+        super::super::frontend::bodies::PatternView::Float(token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 2);
+            write_string(output, &range_text(original, source, &tokens));
+            Result::Ok(())
+        },
+        super::super::frontend::bodies::PatternView::Text(name, token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 3);
+            write_name(output, source, name, token);
+            Result::Ok(())
+        },
+        super::super::frontend::bodies::PatternView::Character(found, token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 4);
+            ByteBuf::write_u32_le(output, char_to_u32(found));
+            Result::Ok(())
+        },
+        super::super::frontend::bodies::PatternView::Byte(found, token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 1);
+            ByteBuf::push(output, 5);
+            ByteBuf::push(output, found);
+            Result::Ok(())
+        },
+        super::super::frontend::bodies::PatternView::Unit(token) => {
+            let tokens = super::super::frontend::syntax::token_span(token, token + 2);
+            ByteBuf::push(output, 6);
+            Result::Ok(())
+        },
+        super::super::frontend::bodies::PatternView::Binding(name, token) => {
+            ByteBuf::push(output, 1);
+            write_name(output, source, name, token)
+        },
+        super::super::frontend::bodies::PatternView::Wildcard(token) => {
+            ByteBuf::push(output, 2);
+            Result::Ok(())
+        },
+        super::super::frontend::bodies::PatternView::Integer(token) => {
+            ByteBuf::push(output, 1);
+            let range = super::super::frontend::syntax::token_span(token, token + 1);
+            let text = range_text(original, source, &range);
+            write_string(output, &text);
+            Result::Ok(())
+        },
+        super::super::frontend::bodies::PatternView::Variant(names, fields, rest) => {
+            ByteBuf::push(output, 4);
+            ByteBuf::write_u32_le(output, super::super::frontend::bodies::pattern_name_count(value, pattern));
+            for_range(Range::new(0, usize_from_u32(super::super::frontend::bodies::pattern_name_count(value, pattern))), { index =>
+                handle write_name(output, source, super::super::frontend::bodies::pattern_name_value(value, pattern, u32_from_usize(index)), super::super::frontend::bodies::pattern_name_token(value, pattern, u32_from_usize(index))) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(_) => ()
+                }
+            });
+            ByteBuf::push(output, if(rest) { 1 } else { 0 });
+            let children = super::super::frontend::bodies::pattern_elements(value, fields);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(children)));
+            Slice::try_for_each(children, { child => write_pattern_node(output, original, source, value, *child) })
+        },
+        super::super::frontend::bodies::PatternView::Tuple(elements, rest) => {
+            ByteBuf::push(output, 5);
+            ByteBuf::push(output, if(rest) { 1 } else { 0 });
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(super::super::frontend::bodies::pattern_elements(value, elements))));
+            Slice::try_for_each(super::super::frontend::bodies::pattern_elements(value, elements), { child => write_pattern_node(output, original, source, value, *child) })
+        },
+        super::super::frontend::bodies::PatternView::Struct(names, fields, rest) => {
+            ByteBuf::push(output, 6);
+            try(write_name(
+                output,
+                source,
+                super::super::frontend::bodies::pattern_name_value(value, pattern, 0),
+                super::super::frontend::bodies::pattern_name_token(value, pattern, 0)
+            ), @write_pattern_node);
+            ByteBuf::push(output, if(rest) { 1 } else { 0 });
+            ByteBuf::write_u32_le(output, u32_from_usize(super::super::frontend::bodies::pattern_field_count(value, fields)));
+            write_pattern_fields(output, original, source, value, fields, 0)
+        }
+    }
+}
+
 write_block_statements<'a>(
     output: &mut ByteBuf,
     original: &String,
@@ -487,17 +606,6 @@ write_expression_kind(
                     Result::Ok(())
                 }
             }
-        },
-        BodyExpressionView::Is(subject, pattern) => {
-            ByteBuf::push(output, 16);
-            try(write_expression(output, original, source, value,
-                Id::to_u32(subject)), @write_expression_kind);
-            write_pattern(
-                output,
-                original,
-                source,
-                super::super::frontend::bodies::pattern_view(value, pattern)
-            )
         },
         BodyExpressionView::Unit(_) => {
             ByteBuf::push(output, 3);
@@ -647,6 +755,17 @@ write_expression_kind(
                 }
             };
             write_expression(output, original, source, value, Id::to_u32(body))
+        },
+        BodyExpressionView::Is(subject, pattern) => {
+            ByteBuf::push(output, 18);
+            try(write_expression(
+                output,
+                original,
+                source,
+                value,
+                Id::to_u32(subject)
+            ), @write_expression_kind);
+            write_pattern_node(output, original, source, value, pattern)
         }
     }
 }

@@ -37,6 +37,12 @@ type PatternBinderRange = super::syntax::IdRange<PatternBinderRangeTag>;
 pub struct PatternTag {}
 pub type PatternId = Id<PatternTag>;
 
+struct PatternRangeTag {}
+pub type PatternRange = super::syntax::IdRange<PatternRangeTag>;
+
+struct PatternFieldRangeTag {}
+pub type PatternFieldRange = super::syntax::IdRange<PatternFieldRangeTag>;
+
 type HandleArmRange = super::syntax::IdRange<HandleArmTag>;
 
 enum ExprEdgeKind {
@@ -72,6 +78,42 @@ pub enum PatternBinder {
     Binding(Id<String>, usize),
     Integer(usize)
 }
+
+enum PatternKind {
+    Integer(usize),
+    Float(usize),
+    Text(Id<String>, usize),
+    Character(char, usize),
+    Byte(u8, usize),
+    Unit(usize),
+    Binding(Id<String>, usize),
+    Wildcard(usize),
+    Variant(ExpressionNameRange, PatternRange, Bool),
+    Tuple(PatternRange, Bool),
+    Struct(ExpressionNameRange, PatternFieldRange, Bool)
+}
+
+struct PatternNode { kind: PatternKind, tokens: BodyTokenRange }
+struct PatternField { name: Id<String>, token: usize, pattern: PatternId }
+
+impl Use<[0, *]> for PatternNode {}
+impl Use<[0, *]> for PatternField {}
+
+pub enum PatternView {
+    Integer(usize),
+    Float(usize),
+    Text(Id<String>, usize),
+    Character(char, usize),
+    Byte(u8, usize),
+    Unit(usize),
+    Binding(Id<String>, usize),
+    Wildcard(usize),
+    Variant(ExpressionNameRange, PatternRange, Bool),
+    Tuple(PatternRange, Bool),
+    Struct(ExpressionNameRange, PatternFieldRange, Bool)
+}
+
+impl Use<[0, *]> for PatternView {}
 
 impl Use<[0, *]> for PatternBinder {}
 
@@ -152,30 +194,6 @@ enum ExprKind {
 
 impl Use<[0, *]> for ExprKind {}
 
-enum PatternKind {
-    Integer(usize),
-    Float(usize),
-    Text(Id<String>, usize),
-    Character(char, usize),
-    Byte(u8, usize),
-    Unit(usize)
-}
-
-impl Use<[0, *]> for PatternKind {}
-
-struct PatternNode { kind: PatternKind, tokens: BodyTokenRange }
-
-pub enum PatternView {
-    Integer(usize),
-    Float(usize),
-    Text(Id<String>, usize),
-    Character(char, usize),
-    Byte(u8, usize),
-    Unit(usize)
-}
-
-impl Use<[0, *]> for PatternView {}
-
 pub struct ExprNode { kind: ExprKind, tokens: BodyTokenRange }
 
 pub struct ParsedBody {
@@ -190,6 +208,8 @@ pub struct ParsedBody {
     handle_arms: Vec<HandleArm>,
     pattern_binders: Vec<PatternBinder>,
     patterns: Arena<PatternTag, PatternNode>
+    pattern_children: Vec<PatternId>
+    pattern_fields: Vec<PatternField>
 }
 
 pub enum BodyExpressionView<'a> {
@@ -565,7 +585,8 @@ pub enum BodyError {
     InvalidHandleArm(usize, usize),
     InvalidStructField(usize, usize),
     ExpectedProjectionName(usize, usize),
-    ExpectedPattern(usize, usize)
+    ExpectedPattern(usize, usize),
+    ChainedPatternTest(usize, usize)
 }
 
 struct BodyParser {
@@ -580,6 +601,8 @@ struct BodyParser {
     pattern_binders: Vec<PatternBinder>,
     in_whitespace_argument: Bool,
     patterns: Arena<PatternTag, PatternNode>
+    pattern_children: Vec<PatternId>
+    pattern_fields: Vec<PatternField>
 }
 
 // A speculative parse owns one transaction over every mutable component of a
@@ -602,6 +625,8 @@ pub struct CursorCheckpoint<'a> {
     arm_length: usize,
     binder_length: usize,
     pattern_mark: usize,
+    pattern_field_length: usize,
+    pattern_child_length: usize,
     armed: Bool
 }
 
@@ -618,6 +643,14 @@ impl<'a> Drop for CursorCheckpoint<'a> {
                 self.binder_length
             );
             Arena::truncate(&mut (*value).patterns, self.pattern_mark);
+            Vec::truncate(
+                &mut (*value).pattern_fields,
+                self.pattern_field_length
+            );
+            Vec::truncate(
+                &mut (*value).pattern_children,
+                self.pattern_child_length
+            );
             Vec::truncate(&mut (*value).handle_arms, self.arm_length);
             Vec::truncate(&mut (*value).names, self.name_length);
             Vec::truncate(
@@ -652,6 +685,8 @@ body_parser_checkpoint<'a>(
     let arm_length = Vec::len(&value.handle_arms);
     let binder_length = Vec::len(&value.pattern_binders);
     let pattern_mark = Arena::mark(&value.patterns);
+    let pattern_field_length = Vec::len(&value.pattern_fields);
+    let pattern_child_length = Vec::len(&value.pattern_children);
     CursorCheckpoint {
         token_position: move token_position,
         node_mark: move node_mark,
@@ -663,6 +698,8 @@ body_parser_checkpoint<'a>(
         arm_length: move arm_length,
         binder_length: move binder_length,
         pattern_mark: move pattern_mark,
+        pattern_field_length: move pattern_field_length,
+        pattern_child_length: move pattern_child_length,
         value: move value,
         armed: true
     }
@@ -1480,36 +1517,15 @@ pub expression_name_view_at(
     )
 }
 
-pattern_alloc(value: &mut BodyParser, node: PatternNode) -> PatternId {
-    handle Arena::alloc(&mut value.patterns, node) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(id) => id
-    }
-}
-
-pub pattern_token_start(value: &ParsedBody, pattern: PatternId) -> usize {
-    Arena::index(&value.patterns, pattern).tokens.start
-}
-
-pub pattern_token_end(value: &ParsedBody, pattern: PatternId) -> usize {
-    Arena::index(&value.patterns, pattern).tokens.end
-}
-
-pub pattern_view(value: &ParsedBody, pattern: PatternId) -> PatternView {
-    let node = Arena::index(&value.patterns, pattern);
-    handle node.kind {
-        PatternKind::Integer(token) => PatternView::Integer(token),
-        PatternKind::Float(token) => PatternView::Float(token),
-        PatternKind::Text(name, token) => PatternView::Text(name, token),
-        PatternKind::Character(found, token) =>
-            PatternView::Character(found, token),
-        PatternKind::Byte(found, token) => PatternView::Byte(found, token),
-        PatternKind::Unit(token) => PatternView::Unit(token)
-    }
-}
-
 pub expression_tokens(value: &ParsedBody, expression: u32) -> BodyTokenRange {
     arena_node_at_raw(&value.nodes, expression).tokens
+}
+
+pub expression_pattern(value: &ParsedBody, expression: u32) -> PatternId {
+    handle arena_node_at_raw(&value.nodes, expression).kind {
+        ExprKind::Is(_, pattern) => pattern,
+        _ => unreachable()
+    }
 }
 
 pub expression_view<'a>(
@@ -1586,6 +1602,109 @@ binder_range(start: usize, end: usize) -> PatternBinderRange {
 handle_arm_range(start: usize, end: usize) -> HandleArmRange {
     super::syntax::id_range(start, end)
 }
+
+pattern_range(start: usize, end: usize) -> PatternRange {
+    super::syntax::id_range(start, end)
+}
+
+pattern_field_range(start: usize, end: usize) -> PatternFieldRange {
+    super::syntax::id_range(start, end)
+}
+
+pattern_alloc(value: &mut BodyParser, node: PatternNode) -> PatternId {
+    handle Arena::alloc(&mut value.patterns, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+pattern_set_tokens(value: &mut BodyParser, pattern: PatternId, tokens: BodyTokenRange) {
+    let node = Arena::index_mut(&mut value.patterns, pattern);
+    (*node).tokens = tokens;
+}
+
+pub pattern_token_start(value: &ParsedBody, pattern: PatternId) -> usize {
+    Arena::index(&value.patterns, pattern).tokens.start
+}
+
+pub pattern_token_end(value: &ParsedBody, pattern: PatternId) -> usize {
+    Arena::index(&value.patterns, pattern).tokens.end
+}
+
+pub pattern_view(value: &ParsedBody, pattern: PatternId) -> PatternView {
+    handle Arena::index(&value.patterns, pattern).kind {
+        PatternKind::Integer(token) => PatternView::Integer(token),
+        PatternKind::Float(token) => PatternView::Float(token),
+        PatternKind::Text(name, token) => PatternView::Text(name, token),
+        PatternKind::Character(found, token) => PatternView::Character(found, token),
+        PatternKind::Byte(found, token) => PatternView::Byte(found, token),
+        PatternKind::Unit(token) => PatternView::Unit(token),
+        PatternKind::Binding(name, token) => PatternView::Binding(name, token),
+        PatternKind::Wildcard(token) => PatternView::Wildcard(token),
+        PatternKind::Variant(names, fields, rest) => PatternView::Variant(names, fields, rest),
+        PatternKind::Tuple(elements, rest) => PatternView::Tuple(elements, rest),
+        PatternKind::Struct(names, fields, rest) => PatternView::Struct(names, fields, rest)
+    }
+}
+
+pub pattern_name_count(value: &ParsedBody, pattern: PatternId) -> u32 {
+    handle Arena::index(&value.patterns, pattern).kind {
+        PatternKind::Variant(names, _, _) => names.count,
+        PatternKind::Struct(names, _, _) => names.count,
+        _ => 0
+    }
+}
+
+pub pattern_name_value(value: &ParsedBody, pattern: PatternId, ordinal: u32) -> Id<String> {
+    let names = handle Arena::index(&value.patterns, pattern).kind {
+        PatternKind::Variant(found, _, _) => found,
+        PatternKind::Struct(found, _, _) => found,
+        _ => unreachable()
+    };
+    handle *Vec::index(&value.names, usize_from_u32(names.start + ordinal)) {
+        ExpressionName::Identifier(name, _) => name,
+        ExpressionName::TupleField(_, _) => unreachable()
+    }
+}
+
+pub pattern_name_token(value: &ParsedBody, pattern: PatternId, ordinal: u32) -> usize {
+    let names = handle Arena::index(&value.patterns, pattern).kind {
+        PatternKind::Variant(found, _, _) => found,
+        PatternKind::Struct(found, _, _) => found,
+        _ => unreachable()
+    };
+    handle *Vec::index(&value.names, usize_from_u32(names.start + ordinal)) {
+        ExpressionName::Identifier(_, token) => token,
+        ExpressionName::TupleField(_, token) => token
+    }
+}
+
+pub pattern_elements<'a>(value: &'a ParsedBody, range: PatternRange) -> Slice<'a, PatternId> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.pattern_children),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) { Result::Err(_) => unreachable(), Result::Ok(found) => found }
+}
+
+pub pattern_field_count(value: &ParsedBody, range: PatternFieldRange) -> usize {
+    usize_from_u32(range.count)
+}
+
+pub pattern_field_at<'a>(value: &'a ParsedBody, range: PatternFieldRange, index: usize) -> &'a PatternField {
+    handle Slice::get(
+        handle Slice::subslice(
+            Vec::as_slice(&value.pattern_fields),
+            usize_from_u32(range.start),
+            usize_from_u32(range.count)
+        ) { Result::Err(_) => unreachable(), Result::Ok(found) => found },
+        index
+    ) { Result::Err(_) => unreachable(), Result::Ok(found) => found }
+}
+
+pub pattern_field_name(value: &PatternField) -> Id<String> { value.name }
+pub pattern_field_token(value: &PatternField) -> usize { value.token }
+pub pattern_field_pattern(value: &PatternField) -> PatternId { value.pattern }
 
 at_token(
     value: &BodyParser,
@@ -4062,6 +4181,254 @@ append_call_argument(
     )
 }
 
+pattern_append_children(
+    value: &mut BodyParser,
+    children: &Vec<PatternId>,
+    index: usize
+) {
+    if(index < Vec::len(children)) {
+        Vec::push(
+            &mut value.pattern_children,
+            *Vec::index(children, index)
+        );
+        pattern_append_children(value, children, index + 1)
+    } else { () }
+}
+
+struct PatternSequence { rest: Bool, saw_comma: Bool }
+
+parse_pattern_sequence(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize,
+    children: &mut Vec<PatternId>
+) -> Result<PatternSequence, BodyError> {
+    if(at_token(&*value, source, TokenPattern::RParen)) {
+        Result::Ok(PatternSequence { rest: false, saw_comma: false })
+    } else if(eat_token(value, source, TokenPattern::DotDot)) {
+        Result::Ok(PatternSequence { rest: true, saw_comma: false })
+    } else {
+        Vec::push(&mut *children, try(parse_pattern(source, value, related), @parse_pattern_sequence));
+        if(eat_token(value, source, TokenPattern::Comma)) {
+            let next = try(parse_pattern_sequence(source, value, related, children), @parse_pattern_sequence);
+            Result::Ok(PatternSequence { rest: next.rest, saw_comma: true })
+        } else {
+            Result::Ok(PatternSequence { rest: false, saw_comma: false })
+        }
+    }
+}
+
+parse_struct_pattern_fields(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize
+) -> Result<Bool, BodyError> {
+    if(at_token(&*value, source, TokenPattern::RBrace)) {
+        Result::Ok(false)
+    } else if(eat_token(value, source, TokenPattern::DotDot)) {
+        if(eat_token(value, source, TokenPattern::Comma)) { () } else { () };
+        Result::Ok(true)
+    } else {
+        let field_token = value.tokens.position;
+        let field_name = try(identifier_name(source, field_token, related), @parse_struct_pattern_fields);
+        value.tokens.position = field_token + 1;
+        let field_pattern = if(eat_token(value, source, TokenPattern::Colon)) {
+            try(parse_pattern(source, value, field_token), @parse_struct_pattern_fields)
+        } else {
+            pattern_alloc(value, PatternNode {
+                kind: PatternKind::Binding(
+                    handle super::lexer::token_kind_at(source, field_token) {
+                        TokenKind::Ident(found) => found,
+                        _ => unreachable()
+                    },
+                    field_token
+                ),
+                tokens: token_range(field_token, field_token + 1)
+            })
+        };
+        Vec::push(&mut value.pattern_fields, PatternField {
+            name: field_name, token: field_token, pattern: field_pattern
+        });
+        if(eat_token(value, source, TokenPattern::Comma)) {
+            parse_struct_pattern_fields(source, value, related)
+        } else { Result::Ok(false) }
+    }
+}
+
+parse_pattern_path_tail(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize
+) -> Result<(), BodyError> {
+    if(value.tokens.position < value.tokens.limit
+        and { at_token(&*value, source, TokenPattern::DoubleColon) }) {
+        let separator = value.tokens.position;
+        let next = separator + 1;
+        if(next >= value.tokens.limit) {
+            Result::Err(BodyError::ExpectedIdentifier(next, separator))
+        } else {
+            handle super::lexer::token_kind_at(source, next) {
+                TokenKind::Ident(next_name) => {
+                    Vec::push(
+                        &mut value.names,
+                        ExpressionName::Identifier(next_name, next)
+                    );
+                    value.tokens.position = next + 1;
+                    parse_pattern_path_tail(source, value, related)
+                },
+                _ => Result::Err(BodyError::ExpectedIdentifier(next, separator))
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+parse_pattern(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize
+) -> Result<PatternId, BodyError> {
+    let start = value.tokens.position;
+    if(start >= value.tokens.limit) {
+        @parse_pattern(Result::Err(BodyError::ExpectedPattern(start, related)))
+    } else {
+        handle super::lexer::token_kind_at(source, start) {
+            TokenKind::Number(_) => {
+                value.tokens.position = start + 1;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: handle super::lexer::token_kind_at(source, start) {
+                        TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) {
+                            PatternKind::Float(start)
+                        } else { PatternKind::Integer(start) },
+                        _ => unreachable()
+                    },
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::String(name) => {
+                value.tokens.position = start + 1;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Text(name, start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::Char(found) => {
+                value.tokens.position = start + 1;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Character(found, start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::Byte(found) => {
+                value.tokens.position = start + 1;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Byte(found, start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            },
+            TokenKind::Ident(name) => {
+                let names_start = super::syntax::range_mark(&value.names);
+                Vec::push(
+                    &mut value.names,
+                    ExpressionName::Identifier(name, start)
+                );
+                value.tokens.position = start + 1;
+                try(parse_pattern_path_tail(source, value, start), @parse_pattern);
+                let names_end = Vec::len(&value.names);
+                if(value.tokens.position < value.tokens.limit
+                    and { at_token(&*value, source, TokenPattern::LParen) }) {
+                    value.tokens.position = value.tokens.position + 1;
+                    let children = Vec::new();
+                    let sequence = try(parse_pattern_sequence(source, value, start, &mut children), @parse_pattern);
+                    if(not(eat_token(value, source, TokenPattern::RParen))) {
+                        @parse_pattern(Result::Err(BodyError::ExpectedGroupingClose(value.tokens.position, start)))
+                    } else { () };
+                    let child_start = super::syntax::range_mark(&value.pattern_children);
+                    pattern_append_children(value, &children, 0);
+                    let child_end = Vec::len(&value.pattern_children);
+                    Result::Ok(pattern_alloc(value, PatternNode {
+                        kind: PatternKind::Variant(
+                            name_range(names_start, names_end),
+                            pattern_range(child_start, child_end),
+                            sequence.rest
+                        ),
+                        tokens: token_range(start, value.tokens.position)
+                    }))
+                } else if(value.tokens.position < value.tokens.limit
+                    and { at_token(&*value, source, TokenPattern::LBrace) }) {
+                    value.tokens.position = value.tokens.position + 1;
+                    let fields_start = super::syntax::range_mark(&value.pattern_fields);
+                    let rest = try(parse_struct_pattern_fields(source, value, start), @parse_pattern);
+                    if(not(eat_token(value, source, TokenPattern::RBrace))) {
+                        @parse_pattern(Result::Err(BodyError::InvalidStructField(value.tokens.position, start)))
+                    } else { () };
+                    Result::Ok(pattern_alloc(value, PatternNode {
+                        kind: PatternKind::Struct(
+                            name_range(names_start, names_end),
+                            pattern_field_range(fields_start, Vec::len(&value.pattern_fields)),
+                            rest
+                        ),
+                        tokens: token_range(start, value.tokens.position)
+                    }))
+                } else {
+                    let names_end = Vec::len(&value.names);
+                    let is_wildcard = handle super::lexer::lexeme(source, name) {
+                        Result::Err(_) => false,
+                        Result::Ok(found) => String::eq(found, &"_")
+                    };
+                    if(names_end > names_start + 1) {
+                        Result::Ok(pattern_alloc(value, PatternNode {
+                            kind: PatternKind::Variant(
+                                name_range(names_start, names_end),
+                                pattern_range(Vec::len(&value.pattern_children), Vec::len(&value.pattern_children)),
+                                false
+                            ),
+                            tokens: token_range(start, value.tokens.position)
+                        }))
+                    } else if(is_wildcard) {
+                        Result::Ok(pattern_alloc(value, PatternNode {
+                            kind: PatternKind::Wildcard(start),
+                            tokens: token_range(start, value.tokens.position)
+                        }))
+                    } else {
+                        Result::Ok(pattern_alloc(value, PatternNode {
+                            kind: PatternKind::Binding(name, start),
+                            tokens: token_range(start, value.tokens.position)
+                        }))
+                    }
+                }
+            },
+            TokenKind::LParen => if(start + 1 < value.tokens.limit
+                and { super::lexer::token_matches_at(source, start + 1, TokenPattern::RParen) }) {
+                value.tokens.position = start + 2;
+                Result::Ok(pattern_alloc(value, PatternNode {
+                    kind: PatternKind::Unit(start),
+                    tokens: token_range(start, value.tokens.position)
+                }))
+            } else {
+                value.tokens.position = start + 1;
+                    let children = Vec::new();
+                    let sequence = try(parse_pattern_sequence(source, value, start, &mut children), @parse_pattern);
+                if(not(eat_token(value, source, TokenPattern::RParen))) {
+                    @parse_pattern(Result::Err(BodyError::ExpectedGroupingClose(value.tokens.position, start)))
+                } else { () };
+                let child_start = super::syntax::range_mark(&value.pattern_children);
+                pattern_append_children(value, &children, 0);
+                if(not(sequence.rest) and { not(sequence.saw_comma) and { Vec::len(&children) == 1 } }) {
+                    let child = *Vec::index(&children, 0);
+                    pattern_set_tokens(value, child, token_range(start, value.tokens.position));
+                    Result::Ok(child)
+                } else {
+                    Result::Ok(pattern_alloc(value, PatternNode {
+                        kind: PatternKind::Tuple(pattern_range(child_start, Vec::len(&value.pattern_children)), sequence.rest),
+                        tokens: token_range(start, value.tokens.position)
+                    }))
+                }
+            },
+            _ => Result::Err(BodyError::ExpectedPattern(start, related))
+        }
+    }
+}
+
 parse_postfix(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -4539,9 +4906,17 @@ parse_expression(
         let is_token = value.tokens.position;
         value.tokens.position = is_token + 1;
         let pattern = try(
-            parse_scalar_pattern(source, value, is_token),
+            parse_pattern(source, value, is_token),
             @parse_expression
         );
+        if(value.tokens.position < value.tokens.limit
+            and { super::lexer::token_kind_at(
+                source, value.tokens.position
+            ) is TokenKind::Keyword(Keyword::Is) }) {
+            @parse_expression(Result::Err(BodyError::ChainedPatternTest(
+                value.tokens.position, is_token
+            )))
+        } else { () };
         Result::Ok(push_pattern_test(
             value,
             grouped,
@@ -4871,7 +5246,9 @@ pub parse_function_body(
                         handle_arms: Vec::new(),
                         pattern_binders: Vec::new(),
                         in_whitespace_argument: false,
-                        patterns: Arena::new()
+                        patterns: Arena::new(),
+                        pattern_children: Vec::new(),
+                        pattern_fields: Vec::new()
                     };
                     let source = super::headers::parsed_source(headers);
                     let nominal = super::headers::nominal_index(headers);
@@ -4902,7 +5279,9 @@ pub parse_function_body(
                         handle_arms,
                         pattern_binders,
                         in_whitespace_argument: _,
-                        patterns
+                        patterns,
+                        pattern_children,
+                        pattern_fields
                     } = parser;
                     let output = ParsedBody {
                         shell: shell,
@@ -4915,7 +5294,9 @@ pub parse_function_body(
                         closure_parameters: closure_parameters,
                         handle_arms: handle_arms,
                         pattern_binders: pattern_binders,
-                        patterns: patterns
+                        patterns: patterns,
+                        pattern_children: pattern_children,
+                        pattern_fields: pattern_fields
                     };
                     Result::Ok(__g1_identity_rewrite_expr(
                         move output,

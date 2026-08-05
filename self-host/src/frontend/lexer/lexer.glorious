@@ -92,6 +92,7 @@ pub enum TokenPattern {
     Comma,
     Colon,
     DoubleColon,
+    DotDot,
     Dot,
     Semicolon,
     Arrow,
@@ -117,6 +118,7 @@ token_pattern_code(pattern: TokenPattern) -> u16 {
         TokenPattern::Comma => 17,
         TokenPattern::Colon => 18,
         TokenPattern::DoubleColon => 19,
+        TokenPattern::DotDot => 20,
         TokenPattern::Dot => 21,
         TokenPattern::Semicolon => 22,
         TokenPattern::Arrow => 23,
@@ -272,6 +274,7 @@ pub token_keyword_code(value: &Token) -> u8 {
 pub operator_symbol_at(value: &LexedSource, index: usize) -> Bool {
     handle token_kind_at(value, index) {
         TokenKind::Operator(_) => true,
+        TokenKind::DotDot => true,
         TokenKind::Slash => true,
         TokenKind::Plus => true,
         TokenKind::Minus => true,
