@@ -1,0 +1,3 @@
+pub use crate::syntax::{self as syntax_module, Ast, Token as Lexeme, nested::{Thing, *}};
+use super::support::helper;
+main() -> { () }

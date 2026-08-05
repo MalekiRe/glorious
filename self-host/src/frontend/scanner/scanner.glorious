@@ -339,7 +339,7 @@ find_semicolon(
             Result::Ok(index)
         } else if(super::syntax::delimiter_is_open(delimiters, index)) {
             handle super::syntax::delimiter_partner(delimiters, index) {
-                None => find_semicolon(value, delimiters, index + 1, limit, start),
+                None => Result::Err(ScanError::UnclosedDelimiter(limit, index)),
                 Option::Some(close) =>
                     find_semicolon(value, delimiters, close + 1, limit, start)
             }

@@ -764,3 +764,39 @@ fn self_host_scanner_recovery_matches_bootstrap() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn self_host_scanner_use_trees_match_bootstrap() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = repository_root().join("crates/grandiose/tests/fixtures/use_trees.glorious");
+            let source = fs::read_to_string(&input).unwrap();
+            let output = directory.path().join("scanner.bin");
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_scan(&mut expected, &source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm_args = vec![output.clone().into_os_string(), input.into_os_string()];
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vm_args),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

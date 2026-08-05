@@ -60,13 +60,7 @@ fn external_and_inline_modules_are_structural_and_flatten_their_items() {
 
 #[test]
 fn use_trees_preserve_groups_globs_aliases_and_self_imports() {
-    let program = parse(
-        r#"
-        pub use crate::syntax::{self as syntax_module, Ast, Token as Lexeme, nested::{Thing, *}};
-        use super::support::helper;
-        main() -> { () }
-        "#,
-    );
+    let program = parse(include_str!("fixtures/use_trees.glorious"));
 
     assert_eq!(program.imports.len(), 2);
     assert_eq!(program.imports[0].visibility, Visibility::Public);
