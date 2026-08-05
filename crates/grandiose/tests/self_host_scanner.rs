@@ -486,6 +486,8 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "use std::prelude::*; cases Io = { Read, Write };",
         "pub type Bytes = Vec<u8>; let answer: u32 = choose(40, 2);",
         "infixl 70 +; prefix 90 !;",
+        "infixl 10 left; infixr 20 right; infix 30 ==; infixl 40 <+>;",
+        "infixl nope; infixr 70 recovered;",
         "effect Console { write(String) (); }",
         "struct Pair<T> { left: T, right: T } enum Maybe<T> { None, Some(T) }",
         "trait Show<T> { show(T) String; } impl<T> Show<T> for T { show(x: T) { x } }",
@@ -517,6 +519,11 @@ fn self_host_scanner_contextual_pub_headers_match_bootstrap() {
     // parity test so the expected wire format is always produced by the Rust
     // scanner, rather than by a hand-maintained fixture.
     CONTEXTUAL_PUB_ONLY.store(true, Ordering::Relaxed);
+    self_hosted_scanner_matches_rust_in_vm_and_native_execution();
+}
+
+#[test]
+fn self_host_scanner_fixity_declarations_match_bootstrap() {
     self_hosted_scanner_matches_rust_in_vm_and_native_execution();
 }
 
