@@ -393,6 +393,30 @@ fn self_host_lexer_structural_operator_priority_matches_bootstrap() {
 }
 
 #[test]
+fn self_host_unit_lexer_comments_nest_and_line_comments_end_at_newlines() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let sources = [
+                "a // trailing /* not a block\nb",
+                "a /* one /* two */ still */ b",
+                "/* /* */",
+            ];
+            let mut paths = Vec::new();
+            for (index, source) in sources.into_iter().enumerate() {
+                let path = directory.path().join(format!("comments-{index}.glorious"));
+                fs::write(&path, source).unwrap();
+                paths.push(path);
+            }
+            run_lexer_oracle(directory.path(), &paths);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_hosted_lexer_matches_rust_in_vm_and_native_execution() {
     run_self_host_lexer_oracle();
 }
