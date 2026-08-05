@@ -53,8 +53,8 @@ integer_comparisons.rs	compiler_pipeline	unported	-
 integer_conversions.rs	compiler_pipeline	unported	-
 integer_mechanics.rs	compiler_pipeline	unported	-
 interpreter.rs	backend_runtime	unported	-
-is_refinements.rs	compiler_pipeline	unported	-
-labels_leave.rs	compiler_pipeline	unported	-
+is_refinements.rs	compiler_pipeline	partial	self_host_body_grouping.rs#self_host_body_is_patterns_match_bootstrap_ast
+labels_leave.rs	compiler_pipeline	partial	self_host_body_grouping.rs#self_host_body_labels_match_bootstrap_ast
 late_generic_inline_regressions.rs	types_traits_generics	unported	-
 late_resumption_regressions.rs	effects_control	unported	-
 lexer_conformance.rs	syntax_frontend	unported	-
@@ -83,7 +83,7 @@ outward_effect_calls.rs	effects_control	unported	-
 outward_perform_transfer.rs	effects_control	unported	-
 ownership_mir.rs	ownership_lifetimes	unported	-
 parity_manifest.rs	parity_infrastructure	partial	-
-parser_conformance.rs	syntax_frontend	partial	self_host_body_grouping.rs#self_host_body_parser_arbitrary_sources_terminate
+parser_conformance.rs	syntax_frontend	partial	self_host_body_grouping.rs#self_host_body_parser_arbitrary_sources_terminate,self_host_body_grouping.rs#self_host_body_whitespace_calls_match_bootstrap_ast,self_host_body_grouping.rs#self_host_body_labels_match_bootstrap_ast,self_host_body_grouping.rs#self_host_body_is_patterns_match_bootstrap_ast,self_host_body_grouping.rs#self_host_body_typed_closures_match_bootstrap_ast
 path_sensitive_suspension_acceptance.rs	compiler_pipeline	unported	-
 pattern_reachability.rs	compiler_pipeline	unported	-
 performance_summaries.rs	optimization_specialization	unported	-
@@ -136,7 +136,7 @@ text_iteration_formatting.rs	standard_library	unported	-
 toolkit_foundations.rs	standard_library	unported	-
 trait_methods.rs	types_traits_generics	unported	-
 type_syntax.rs	syntax_frontend	partial	self_host_headers.rs#self_host_header_struct_visibility_matches_bootstrap,self_host_headers.rs#self_host_header_nested_type_spans_match_bootstrap
-typed_anonymous_callables.rs	compiler_pipeline	unported	-
+typed_anonymous_callables.rs	compiler_pipeline	partial	self_host_body_grouping.rs#self_host_body_typed_closures_match_bootstrap_ast
 vec_copying_growth.rs	standard_library	unported	-
 vec_deque.rs	standard_library	unported	-
 vec_destructive_shrink.rs	standard_library	unported	-
