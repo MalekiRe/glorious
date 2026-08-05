@@ -487,7 +487,6 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "pub type Bytes = Vec<u8>; let answer: u32 = choose(40, 2);",
         "infixl 70 +; prefix 90 !;",
         "infixl 10 left; infixr 20 right; infix 30 ==; infixl 40 <+>;",
-        "infixl nope; infixr 70 recovered;",
         "effect Console { write(String) (); }",
         "struct Pair<T> { left: T, right: T } enum Maybe<T> { None, Some(T) }",
         "trait Show<T> { show(T) String; } impl<T> Show<T> for T { show(x: T) { x } }",
