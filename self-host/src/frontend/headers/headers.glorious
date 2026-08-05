@@ -134,6 +134,7 @@ pub struct CallableHeader {
     name: Id<String>,
     public: Bool,
     generics: HeaderRange,
+    generic_tokens: HeaderTokenRange,
     parameters: HeaderRange,
     result: Option<TypeId>,
     effects: Option<EffectRow>,
@@ -591,6 +592,10 @@ pub callable_generics(value: &CallableHeader) -> &HeaderRange {
     &value.generics
 }
 
+pub callable_generic_tokens(value: &CallableHeader) -> &HeaderTokenRange {
+    &value.generic_tokens
+}
+
 pub callable_parameters(value: &CallableHeader) -> &HeaderRange {
     &value.parameters
 }
@@ -665,6 +670,10 @@ pub effect_row_effects(value: &EffectRow) -> &HeaderRange {
 
 pub effect_row_tail(value: &EffectRow) -> &Option<NameUse> {
     &value.row_tail
+}
+
+pub effect_row_tokens(value: &EffectRow) -> &HeaderTokenRange {
+    &value.tokens
 }
 
 pub effect_row_types<'a>(
@@ -1956,7 +1965,9 @@ parse_callable(
         value.tokens.position = value.tokens.position + 1;
     } else { () };
     let name = try(ident(value, start), @parse_callable);
+    let generic_token_start = value.tokens.position;
     let generics = try(parse_generics(value, start), @parse_callable);
+    let generic_tokens = token_range(generic_token_start, value.tokens.position);
     try(expect_left_parenthesis(value, start), @parse_callable);
     let parameters = try(parse_parameters(value, start), @parse_callable);
     try(expect_right_parenthesis(value, start), @parse_callable);
@@ -1966,9 +1977,10 @@ parse_callable(
         shell,
          public,
         start,
-         name,
-         generics,
-         parameters
+        name,
+        generics,
+        generic_tokens,
+        parameters
     )
 }
 
@@ -1980,6 +1992,7 @@ parse_callable_suffix(
     start: usize,
     name: NameUse,
     generics: HeaderRange,
+    generic_tokens: HeaderTokenRange,
     parameters: HeaderRange
 ) -> Result<(), HeaderError> {
     if(eat_token(value, TokenPattern::Arrow)) { if(at_token(&*value, TokenPattern::Slash)) { parse_callable_effects(
@@ -1989,6 +2002,7 @@ parse_callable_suffix(
                 start,
                 name,
                 generics,
+                generic_tokens,
                 parameters,
                 Result::Err(())
             ) } else if(value.tokens.position == value.tokens.limit) {
@@ -2014,6 +2028,7 @@ parse_callable_suffix(
                 start,
                 name,
                 generics,
+                generic_tokens,
                 parameters,
                 Result::Ok(parsed_result)
             )
@@ -2024,6 +2039,7 @@ parse_callable_suffix(
             start,
             name,
             generics,
+            generic_tokens,
             parameters,
             Result::Err(())
         ) }
@@ -2037,6 +2053,7 @@ parse_callable_effects(
     start: usize,
     name: NameUse,
     generics: HeaderRange,
+    generic_tokens: HeaderTokenRange,
     parameters: HeaderRange,
     result: Option<TypeId>
 ) -> Result<(), HeaderError> {
@@ -2051,9 +2068,10 @@ parse_callable_effects(
             shell,
             public,
             start,
-            name,
-            generics,
-            parameters,
+        name,
+        generics,
+        generic_tokens,
+        parameters,
             result,
             Result::Ok(parsed_effects)
         )
@@ -2065,6 +2083,7 @@ parse_callable_effects(
             start,
             name,
             generics,
+            generic_tokens,
             parameters,
             result,
             Result::Err(())
@@ -2079,6 +2098,7 @@ finish_callable(
     start: usize,
     name: NameUse,
     generics: HeaderRange,
+    generic_tokens: HeaderTokenRange,
     parameters: HeaderRange,
     result: Option<TypeId>,
     effects: Option<EffectRow>
@@ -2111,6 +2131,7 @@ finish_callable(
                 name: name.name,
                 public: public,
                 generics: generics,
+                generic_tokens: generic_tokens,
                 parameters: parameters,
                 result: result,
                 effects: effects,

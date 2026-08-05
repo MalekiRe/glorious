@@ -69,7 +69,7 @@ write_optional_name_token(
     }
 }
 
-write_token_span(
+write_narrow_token_span(
     output: &mut ByteBuf,
     source: &LexedSource,
     tokens: &super::super::frontend::headers::HeaderTokenRange
@@ -119,7 +119,7 @@ write_type_edges<'a>(
 write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
     let index = super::super::frontend::headers::parsed_index(parsed);
     let tokens = super::super::frontend::headers::type_tokens(index, id);
-    write_token_span(
+    write_narrow_token_span(
         output,
         super::super::frontend::headers::parsed_source(parsed),
         &tokens
@@ -194,6 +194,119 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             write_type_edges(output, parsed, arguments)
         },
         HeaderTypeView::Never(_) => ByteBuf::push(output, 6)
+    }
+}
+
+write_token_span(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    range: &super::super::frontend::headers::HeaderTokenRange
+) {
+    if(super::super::frontend::syntax::token_is_empty(range)) {
+        ByteBuf::write_u64_le(output, 0);
+        ByteBuf::write_u64_le(output, 0)
+    } else {
+        let first = handle super::super::frontend::lexer::token_at(
+            source,
+            super::super::frontend::headers::token_range_start(range)
+        ) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        let last = handle super::super::frontend::lexer::token_at(
+            source,
+            super::super::frontend::headers::token_range_end(range) - 1
+        ) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        ByteBuf::write_u64_le(output, wrapping_convert_to_u64(
+            super::super::frontend::lexer::span_start(
+                &super::super::frontend::lexer::token_span(first)
+            )
+        ));
+        ByteBuf::write_u64_le(output, wrapping_convert_to_u64(
+            super::super::frontend::lexer::span_end(
+                &super::super::frontend::lexer::token_span(last)
+            )
+        ))
+    }
+}
+
+write_type_span(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    let range = super::super::frontend::headers::type_tokens(index, id);
+    write_token_span(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        &range
+    )
+}
+
+write_where_contract(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    clause: &Option<super::super::frontend::headers::WhereClause>
+) {
+    handle Option::as_ref(clause) {
+        Result::Err(_) => ByteBuf::push(output, 0),
+        Result::Ok(found) => {
+            ByteBuf::push(output, 1);
+            let index = super::super::frontend::headers::parsed_index(parsed);
+            write_token_span(
+                output,
+                super::super::frontend::headers::parsed_source(parsed),
+                &super::super::frontend::headers::where_clause_tokens(*found)
+            );
+            ByteBuf::write_u32_le(output, super::super::frontend::headers::where_clause_goal_count(*found));
+            for_range(Range::new(0, wrapping_convert_to_usize(
+                super::super::frontend::headers::where_clause_goal_count(*found)
+            )), { ordinal => {
+                let goal = handle super::super::frontend::headers::where_goal_at(
+                    index, *found, wrapping_convert_to_u32(ordinal)
+                ) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
+                write_token_span(
+                    output,
+                    super::super::frontend::headers::parsed_source(parsed),
+                    super::super::frontend::headers::where_goal_tokens(goal)
+                );
+                write_type_span(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
+                write_type(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
+                ByteBuf::push(output, bool_code(super::super::frontend::headers::where_goal_is_negative(goal)));
+                let relation = super::super::frontend::headers::where_goal_relation(index, goal);
+                ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(relation)));
+                for_range(Range::new(0, Slice::len(relation)), { part => {
+                    let name = handle Slice::get(relation, part) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
+                    write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::name_use_name(name))
+                }});
+                ByteBuf::write_u32_le(output, super::super::frontend::headers::where_goal_argument_count(goal));
+                for_range(Range::new(0, wrapping_convert_to_usize(super::super::frontend::headers::where_goal_argument_count(goal))), { part => {
+                    let argument = handle super::super::frontend::headers::where_goal_argument_at(index, goal, wrapping_convert_to_u32(part)) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
+                    ByteBuf::push(output, super::super::frontend::headers::goal_argument_kind_code(argument));
+                    handle super::super::frontend::headers::goal_argument_type(argument) {
+                        None => { ByteBuf::push(output, 0) },
+                        Option::Some(ty) => { ByteBuf::push(output, 1); write_type_span(output, parsed, ty); write_type(output, parsed, ty) }
+                    }
+                }});
+                ByteBuf::write_u32_le(output, super::super::frontend::headers::where_goal_binding_count(goal));
+                for_range(Range::new(0, wrapping_convert_to_usize(super::super::frontend::headers::where_goal_binding_count(goal))), { part => {
+                    let binding = handle super::super::frontend::headers::where_goal_binding_at(index, goal, wrapping_convert_to_u32(part)) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
+                    write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::name_use_name(super::super::frontend::headers::associated_binding_name(binding)));
+                    write_token_span(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::associated_binding_tokens(binding));
+                    handle super::super::frontend::headers::associated_binding_value(binding) {
+                        super::super::frontend::headers::AssociatedBindingValue::Type(ty) => { ByteBuf::push(output, 1); write_type_span(output, parsed, ty); write_type(output, parsed, ty) },
+                        super::super::frontend::headers::AssociatedBindingValue::EffectRow(row) => { ByteBuf::push(output, 2); write_effect_row(output, parsed, &row) }
+                    }
+                }})
+            }});
+            let lifetime_count = super::super::frontend::headers::where_clause_lifetime_count(*found);
+            ByteBuf::write_u32_le(output, lifetime_count);
+            for_range(Range::new(0, wrapping_convert_to_usize(lifetime_count)), { ordinal => {
+                let constraint = handle super::super::frontend::headers::lifetime_outlives_at(
+                    index,
+                    *found,
+                    wrapping_convert_to_u32(ordinal)
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(value) => value
+                };
+                write_outlives(output, parsed, constraint)
+            }})
+        }
     }
 }
 
@@ -284,7 +397,7 @@ write_outlives(
             super::super::frontend::headers::lifetime_outlives_shorter(value)
         )
     );
-    write_token_span(
+    write_narrow_token_span(
         output,
         super::super::frontend::headers::parsed_source(parsed),
         super::super::frontend::headers::lifetime_outlives_tokens(value)
@@ -303,7 +416,7 @@ write_callable_where(
         Result::Ok(clause) => {
             ByteBuf::push(output, 1);
             let clause_tokens = super::super::frontend::headers::where_clause_tokens(*clause);
-            write_token_span(
+            write_narrow_token_span(
                 output,
                 super::super::frontend::headers::parsed_source(parsed),
                 &clause_tokens
@@ -336,7 +449,20 @@ write_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) 
     );
     let index = super::super::frontend::headers::parsed_index(parsed);
     let edges = super::super::frontend::headers::type_edge_range(index, range);
-    write_type_edges(output, parsed, edges);
+    for_range(Range::new(0, Slice::len(edges)), { current => {
+        let edge = handle Slice::get(edges, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let ty = super::super::frontend::headers::type_edge_type(edge);
+        write_type_span(output, parsed, ty);
+        write_type(output, parsed, ty)
+    }});
+    write_token_span(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::effect_row_tokens(row)
+    );
     write_optional_name(
         output,
         super::super::frontend::headers::parsed_source(parsed),
@@ -364,6 +490,11 @@ write_callable(
         super::super::frontend::headers::range_count(generics)
     );
     write_generics(output, parsed, generics);
+    write_token_span(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::callable_generic_tokens(value)
+    );
     let parameters = super::super::frontend::headers::callable_parameters(value);
     ByteBuf::write_u32_le(
         output,
@@ -386,7 +517,11 @@ write_callable(
             write_effect_row(output, parsed, row)
         }
     };
-    write_callable_where(output, parsed, value)
+    write_where_contract(
+        output,
+        parsed,
+        super::super::frontend::headers::callable_where_clause(value)
+    )
 }
 
 write_callables(output: &mut ByteBuf, parsed: &ParsedHeaders) {

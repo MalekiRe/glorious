@@ -7,8 +7,8 @@ use std::{
 
 use grandiose::{
     ast::{
-        EffectDecl, EffectRowSyntax, FieldVisibility, Function, GenericParamKind, GenericParams,
-        StructDecl, TypeSyntax, TypeSyntaxKind, Visibility,
+        self, EffectDecl, EffectRowSyntax, FieldVisibility, Function, GenericParamKind,
+        GenericParams, StructDecl, TypeSyntax, TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
     CompileOptions, LlvmOptions, OptimizationLevel,
@@ -75,6 +75,11 @@ fn push_bytes(output: &mut Vec<u8>, value: &[u8]) {
 
 fn push_string(output: &mut Vec<u8>, value: &str) {
     push_bytes(output, value.as_bytes());
+}
+
+fn push_span(output: &mut Vec<u8>, span: grandiose::span::Span) {
+    push_u64(output, span.start as u64);
+    push_u64(output, span.end as u64);
 }
 
 fn encode_optional_lifetime(output: &mut Vec<u8>, lifetime: Option<&str>) {
@@ -198,8 +203,10 @@ fn encode_where_clause(
 fn encode_effect_row(output: &mut Vec<u8>, row: &EffectRowSyntax) -> Result<(), ()> {
     push_u32(output, row.effects.len().try_into().unwrap());
     for effect in &row.effects {
+        push_span(output, effect.span);
         encode_type(output, effect)?;
     }
+    push_span(output, row.span);
     match &row.tail {
         Some(tail) => {
             output.push(1);
@@ -208,6 +215,86 @@ fn encode_effect_row(output: &mut Vec<u8>, row: &EffectRowSyntax) -> Result<(), 
         None => output.push(0),
     }
     Ok(())
+}
+
+fn encode_where_contract(output: &mut Vec<u8>, clause: Option<&ast::WhereClause>) {
+    let Some(clause) = clause else {
+        output.push(0);
+        return;
+    };
+    output.push(1);
+    push_span(output, clause.span);
+    push_u32(output, clause.goals.len().try_into().unwrap());
+    for goal in &clause.goals {
+        push_span(output, goal.span);
+        push_span(output, goal.subject.span);
+        encode_type(output, &goal.subject).unwrap();
+        output.push(u8::from(goal.polarity == ast::GoalPolarity::Negative));
+        push_u32(output, goal.relation.path.len().try_into().unwrap());
+        for segment in &goal.relation.path {
+            push_string(output, &segment.name);
+        }
+        push_u32(output, goal.relation.arguments.len().try_into().unwrap());
+        for argument in &goal.relation.arguments {
+            match argument {
+                ast::GoalArgument::Type(ty) => {
+                    output.push(1);
+                    output.push(1);
+                    push_span(output, ty.span);
+                    encode_type(output, ty).unwrap();
+                }
+                ast::GoalArgument::Lifetime { .. } => {
+                    output.push(2);
+                    output.push(0);
+                }
+                ast::GoalArgument::Quantity(_) => {
+                    output.push(3);
+                    output.push(0);
+                }
+                ast::GoalArgument::U32 { .. } => {
+                    output.push(4);
+                    output.push(0);
+                }
+            }
+        }
+        push_u32(output, goal.relation.bindings.len().try_into().unwrap());
+        for binding in &goal.relation.bindings {
+            push_string(output, &binding.name);
+            push_span(output, binding.span);
+            match &binding.value {
+                ast::AssociatedBindingValue::Type(ty) => {
+                    output.push(1);
+                    push_span(output, ty.span);
+                    encode_type(output, ty).unwrap();
+                }
+                ast::AssociatedBindingValue::EffectRow(row) => {
+                    output.push(2);
+                    encode_effect_row(output, row).unwrap();
+                }
+            }
+        }
+    }
+    push_u32(output, clause.lifetime_outlives.len().try_into().unwrap());
+    for constraint in &clause.lifetime_outlives {
+        push_u32(
+            output,
+            constraint.higher_ranked_lifetimes.len().try_into().unwrap(),
+        );
+        for parameter in &constraint.higher_ranked_lifetimes {
+            let kind = match parameter.kind {
+                GenericParamKind::Type => 1,
+                GenericParamKind::Lifetime => 2,
+                GenericParamKind::EffectRow => 3,
+                GenericParamKind::Const(_) => return,
+            };
+            output.push(kind);
+            push_string(output, &parameter.name);
+        }
+        push_string(output, &constraint.longer.name);
+        push_string(output, &constraint.shorter.name);
+        push_u32(output, constraint.span.start as u32);
+        push_u32(output, constraint.span.end as u32);
+    }
 }
 
 fn encode_callable(
@@ -220,6 +307,12 @@ fn encode_callable(
     ));
     push_string(output, &declaration.name);
     encode_generics(output, declaration.generics.as_ref())?;
+    if let Some(generics) = declaration.generics.as_ref() {
+        push_span(output, generics.span);
+    } else {
+        push_u64(output, 0);
+        push_u64(output, 0);
+    }
     push_u32(output, declaration.params.len().try_into().unwrap());
     for parameter in &declaration.params {
         push_string(output, &parameter.name);
@@ -239,7 +332,7 @@ fn encode_callable(
         }
         None => output.push(0),
     }
-    encode_where_clause(output, declaration.where_clause.as_ref())?;
+    encode_where_contract(output, declaration.where_clause.as_ref());
     Ok(())
 }
 
@@ -622,6 +715,77 @@ fn self_host_header_reference_lifetimes_match_bootstrap() {
                 String::from_utf8_lossy(&native.stderr)
             );
             assert_eq!(fs::read(native_path).unwrap(), expected, "native contract diverged");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_header_generic_where_effect_rows_match_bootstrap() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("focused.glorious");
+            let vm_output = directory.path().join("vm.bin");
+            let native_output = directory.path().join("native.bin");
+            let source = "run<E, S, F, R>(body: F) -> R / {Ask, Trace<i32>} where F: Fn<(), Output = R>, F: RunsIn<E, (), After = S>, E: Use<[0, 0]> { body() }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_headers(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::headers::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact.clone()).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    vm_output.clone().into_os_string(),
+                    input.clone().into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&vm_output).unwrap(), expected, "VM headers diverged");
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("self-host-headers.ll");
+            let executable = directory.path().join("self-host-headers");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "{}",
+                String::from_utf8_lossy(&clang.stderr)
+            );
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(
+                native.status.success(),
+                "{}",
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_eq!(fs::read(&native_output).unwrap(), expected, "native headers diverged");
         })
         .unwrap()
         .join()
