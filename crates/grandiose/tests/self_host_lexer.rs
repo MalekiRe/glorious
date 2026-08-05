@@ -456,6 +456,22 @@ fn self_host_lexer_character_lifetime_and_byte_literals_match_bootstrap() {
 }
 
 #[test]
+fn self_host_unit_lexer_tuple_projection_digits_never_form_floats() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let source = "pair.0.1";
+            let path = directory.path().join("tuple-projection.glorious");
+            fs::write(&path, source).unwrap();
+            run_lexer_oracle(directory.path(), &[path]);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_lexer_numeric_forms_and_spans_match_bootstrap() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)

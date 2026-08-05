@@ -57,7 +57,7 @@ is_refinements.rs	compiler_pipeline	partial	self_host_body_grouping.rs#self_host
 labels_leave.rs	compiler_pipeline	partial	self_host_body_grouping.rs#self_host_body_labels_match_bootstrap_ast
 late_generic_inline_regressions.rs	types_traits_generics	unported	-
 late_resumption_regressions.rs	effects_control	unported	-
-lexer_conformance.rs	syntax_frontend	unported	-
+lexer_conformance.rs	syntax_frontend	partial	self_host_lexer.rs#self_host_unit_lexer_tuple_projection_digits_never_form_floats
 literal_lowering.rs	mir_lowering	unported	-
 llvm_backend.rs	backend_runtime	unported	-
 lossless_lexer.rs	syntax_frontend	covered	self_host_lossless_lexer.rs#self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap

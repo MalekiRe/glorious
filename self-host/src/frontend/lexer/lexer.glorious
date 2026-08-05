@@ -1135,7 +1135,7 @@ scan_exponent(
     value: &mut Lexer,
     base_code: u8
 ) -> Result<Option<NumberExponent>, LexError> {
-    let decimal = base_code == byte_value(3);
+    let decimal = base_code == byte_value(3) and { not(value.after_projection_dot) };
     if(decimal) {
         handle peek(&*value, 0) {
         Result::Ok(marker) => handle marker {
