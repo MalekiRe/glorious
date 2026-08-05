@@ -1566,6 +1566,54 @@ fn self_host_body_labels_match_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_unit_spans_are_exact_for_new_syntax_nodes() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let sources = [
+                "main() -> { @done(42) }",
+                "main() -> { subject is Point { x, .. } }",
+            ];
+            let mut inputs = Vec::new();
+            let mut expected = Vec::new();
+            push_u32(&mut expected, sources.len() as u32);
+            for (index, source) in sources.iter().enumerate() {
+                let path = directory.path().join(format!("unit-span-{index}.glorious"));
+                fs::write(&path, source).unwrap();
+                inputs.push(path);
+                encode_rust_grouping(&mut expected, source);
+            }
+
+            let output = directory.path().join("vm.bin");
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(
+                    std::iter::once(output.clone().into_os_string())
+                        .chain(inputs.iter().cloned().map(|path| path.into_os_string()))
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_body_resumption_nodes_match_bootstrap_ast() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
