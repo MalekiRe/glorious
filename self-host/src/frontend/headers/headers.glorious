@@ -1645,6 +1645,54 @@ parse_lifetime_arguments(
     }
 }
 
+parse_application_arguments(
+    value: &mut Parser,
+    closing: TokenPattern,
+    related: usize,
+    lifetimes: &mut Vec<NameUse>,
+    types: &mut Vec<TypeEdge>,
+    position: u32
+) -> Result<(), HeaderError> {
+    if(at_token(&*value, closing)) {
+        Result::Ok(())
+    } else {
+        let lifetime = take_lifetime(value);
+        handle lifetime {
+            Result::Ok(found) => {
+                Vec::push(lifetimes, found);
+                parse_application_argument_separator(
+                    value, closing, related, lifetimes, types, position + 1
+                )
+            },
+            Result::Err(_) => {
+                let ty = try(parse_type(value, related), @parse_application_arguments);
+                Vec::push(
+                    types,
+                    TypeEdge { value: ty, position: position }
+                );
+                parse_application_argument_separator(
+                    value, closing, related, lifetimes, types, position + 1
+                )
+            }
+        }
+    }
+}
+
+parse_application_argument_separator(
+    value: &mut Parser,
+    closing: TokenPattern,
+    related: usize,
+    lifetimes: &mut Vec<NameUse>,
+    types: &mut Vec<TypeEdge>,
+    position: u32
+) -> Result<(), HeaderError> {
+    if(eat_token(value, TokenPattern::Comma)) {
+        parse_application_arguments(
+            value, closing, related, lifetimes, types, position
+        )
+    } else { Result::Ok(()) }
+}
+
 parse_type_values(
     value: &mut Parser,
     closing: TokenPattern,
@@ -1709,21 +1757,15 @@ parse_application(
                 HeaderError::EmptyTypeArguments(value.tokens.position, related)
             ) } else {
         let lifetime_values = Vec::new();
-        try(
-            parse_lifetime_arguments(
-                value,
-                related,
-                &mut lifetime_values
-            ),
-            @parse_application
-        );
         let arguments = Vec::new();
         try(
-            parse_type_values(
+            parse_application_arguments(
                 value,
                 TokenPattern::Gt,
                 related,
-                &mut arguments
+                &mut lifetime_values,
+                &mut arguments,
+                0
             ),
             @parse_application
         );
@@ -1739,12 +1781,12 @@ parse_application(
         let lifetime_end = Vec::len(&value.output.lifetime_arguments);
         let lifetimes = header_range(lifetime_start, lifetime_end);
         let edge_start = super::syntax::range_mark(&value.output.type_edges);
-        append_edges(
-            &mut value.output.type_edges,
-            &arguments,
-            0,
-            0
-        );
+        for_range(Range::new(0, Vec::len(&arguments)), { current => {
+            Vec::push(
+                &mut value.output.type_edges,
+                *Vec::index(&arguments, current)
+            )
+        }});
         let edge_end = Vec::len(&value.output.type_edges);
         let arguments = header_range(edge_start, edge_end);
         push_type(

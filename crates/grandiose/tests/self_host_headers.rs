@@ -880,6 +880,86 @@ fn self_host_header_reference_lifetimes_match_bootstrap() {
 }
 
 #[test]
+fn self_host_header_mixed_nominal_arguments_match_bootstrap() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let source = "struct View<T, 'a> { value: &'a T } pass<'scope, U>(value: View<U, 'scope>) -> View<U, 'scope> { move value } main() -> { () }";
+            let input = directory.path().join("mixed-nominal-arguments.glorious");
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_headers(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::headers::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm_output = directory.path().join("vm.bin");
+            let vm = Vm::with_host(
+                verify(phases.artifact.clone()).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    vm_output.clone().into_os_string(),
+                    input.clone().into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_wire_eq(
+                &fs::read(&vm_output).unwrap(),
+                &expected,
+                "VM mixed nominal headers diverged",
+            );
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("self-host-headers.ll");
+            let executable = directory.path().join("self-host-headers");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "{}",
+                String::from_utf8_lossy(&clang.stderr)
+            );
+            let native_output = directory.path().join("native.bin");
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(
+                native.status.success(),
+                "native status: {:?}\n{}",
+                native.status,
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_wire_eq(
+                &fs::read(native_output).unwrap(),
+                &expected,
+                "native mixed nominal headers diverged",
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_header_generic_where_effect_rows_match_bootstrap() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
