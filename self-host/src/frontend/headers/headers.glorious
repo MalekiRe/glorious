@@ -3529,7 +3529,6 @@ parse_where_item(
     value: &mut Parser,
     related: usize
 ) -> Result<(), HeaderError> {
-    let start = value.tokens.position;
     let higher_ranked = if(at_ident(&*value, &"for")) {
         value.tokens.position = value.tokens.position + 1;
         try(parse_generics(value, related), @parse_where_item)
@@ -3537,12 +3536,13 @@ parse_where_item(
         let at = Vec::len(&value.output.generic_params);
         header_range(at, at)
     };
+    let predicate_start = value.tokens.position;
     let starts_with_lifetime = where_item_starts_with_lifetime(&*value);
     if(starts_with_lifetime) {
-        parse_lifetime_where_item(value, related, start, higher_ranked)
+        parse_lifetime_where_item(value, related, predicate_start, higher_ranked)
     } else {
         parse_trait_where_item(
-            original, value, related, start, higher_ranked
+            original, value, related, predicate_start, higher_ranked
         )
     }
 }

@@ -368,6 +368,12 @@ write_where_contract(
                     super::super::frontend::headers::parsed_source(parsed),
                     super::super::frontend::headers::where_goal_tokens(goal)
                 );
+                let higher = super::super::frontend::headers::where_goal_higher_ranked(goal);
+                ByteBuf::write_u32_le(
+                    output,
+                    super::super::frontend::headers::range_count(higher)
+                );
+                write_generics(output, parsed, higher);
                 write_wide_type_span(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
                 write_type(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
                 ByteBuf::push(output, bool_code(super::super::frontend::headers::where_goal_is_negative(goal)));
