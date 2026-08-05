@@ -69,6 +69,35 @@ write_optional_name_token(
     }
 }
 
+write_token_span(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    tokens: &super::super::frontend::headers::HeaderTokenRange
+) {
+    let start = super::super::frontend::headers::token_range_start(tokens);
+    let end = super::super::frontend::headers::token_range_end(tokens);
+    let first = handle super::super::frontend::lexer::token_at(source, start) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+    };
+    let last = handle super::super::frontend::lexer::token_at(source, end - 1) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => super::super::frontend::lexer::token_span(found)
+    };
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::lexer::span_start(&first)
+        )
+    );
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::lexer::span_end(&last)
+        )
+    )
+}
+
 write_type_edges<'a>(
     output: &mut ByteBuf,
     parsed: &ParsedHeaders,
@@ -89,6 +118,12 @@ write_type_edges<'a>(
 
 write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
     let index = super::super::frontend::headers::parsed_index(parsed);
+    let tokens = super::super::frontend::headers::type_tokens(index, id);
+    write_token_span(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        &tokens
+    );
     handle super::super::frontend::headers::header_type_view(index, id) {
         HeaderTypeView::Path(_, names) => {
             ByteBuf::push(output, 1);
@@ -227,6 +262,72 @@ write_parameters(
     }})
 }
 
+write_outlives(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &super::super::frontend::headers::LifetimeOutlives
+) {
+    let higher = super::super::frontend::headers::lifetime_outlives_higher_ranked(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(higher));
+    write_generics(output, parsed, higher);
+    write_name(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::name_use_name(
+            super::super::frontend::headers::lifetime_outlives_longer(value)
+        )
+    );
+    write_name(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::name_use_name(
+            super::super::frontend::headers::lifetime_outlives_shorter(value)
+        )
+    );
+    write_token_span(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::lifetime_outlives_tokens(value)
+    )
+}
+
+write_callable_where(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &CallableHeader
+) {
+    handle Option::as_ref(
+        super::super::frontend::headers::callable_where_clause(value)
+    ) {
+        Result::Err(_) => ByteBuf::push(output, 0),
+        Result::Ok(clause) => {
+            ByteBuf::push(output, 1);
+            let clause_tokens = super::super::frontend::headers::where_clause_tokens(*clause);
+            write_token_span(
+                output,
+                super::super::frontend::headers::parsed_source(parsed),
+                &clause_tokens
+            );
+            ByteBuf::write_u32_le(
+                output,
+                super::super::frontend::headers::where_clause_goal_count(*clause)
+            );
+            let count = super::super::frontend::headers::where_clause_lifetime_count(*clause);
+            ByteBuf::write_u32_le(output, count);
+            let index = super::super::frontend::headers::parsed_index(parsed);
+            for_range(Range::new(0, wrapping_convert_to_usize(count)), { ordinal => {
+                let found = handle super::super::frontend::headers::lifetime_outlives_at(
+                    index, *clause, wrapping_convert_to_u32(ordinal)
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(value) => value
+                };
+                write_outlives(output, parsed, found)
+            }})
+        }
+    }
+}
+
 write_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) {
     let range = super::super::frontend::headers::effect_row_effects(row);
     ByteBuf::write_u32_le(
@@ -284,7 +385,8 @@ write_callable(
             ByteBuf::push(output, 1);
             write_effect_row(output, parsed, row)
         }
-    }
+    };
+    write_callable_where(output, parsed, value)
 }
 
 write_callables(output: &mut ByteBuf, parsed: &ParsedHeaders) {

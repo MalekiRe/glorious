@@ -24,11 +24,14 @@ fn repository_root() -> PathBuf {
         .to_owned()
 }
 
-fn self_host_bundle() -> SourceBundle {
+fn self_host_bundle(application: &str) -> SourceBundle {
     let root = repository_root().join("self-host/src");
+    let primary_source = format!(
+        "mod frontend;\nmod probe;\n\nmain() {{ run_compiler_host({application}) }}\n"
+    );
     let primary = Segment::new(
         root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::headers::application) }\n",
+        primary_source,
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
@@ -85,6 +88,8 @@ fn encode_optional_lifetime(output: &mut Vec<u8>, lifetime: Option<&str>) {
 }
 
 fn encode_type(output: &mut Vec<u8>, ty: &TypeSyntax) -> Result<(), ()> {
+    push_u32(output, ty.span.start as u32);
+    push_u32(output, ty.span.end as u32);
     match &ty.kind {
         TypeSyntaxKind::Path(segments) => {
             output.push(1);
@@ -151,6 +156,45 @@ fn encode_generics(output: &mut Vec<u8>, generics: Option<&GenericParams>) -> Re
     Ok(())
 }
 
+fn encode_where_clause(
+    output: &mut Vec<u8>,
+    where_clause: Option<&grandiose::ast::WhereClause>,
+) -> Result<(), ()> {
+    let Some(where_clause) = where_clause else {
+        output.push(0);
+        return Ok(());
+    };
+    output.push(1);
+    push_u32(output, where_clause.span.start as u32);
+    push_u32(output, where_clause.span.end as u32);
+    push_u32(output, where_clause.goals.len().try_into().unwrap());
+    push_u32(
+        output,
+        where_clause.lifetime_outlives.len().try_into().unwrap(),
+    );
+    for constraint in &where_clause.lifetime_outlives {
+        push_u32(
+            output,
+            constraint.higher_ranked_lifetimes.len().try_into().unwrap(),
+        );
+        for parameter in &constraint.higher_ranked_lifetimes {
+            let kind = match parameter.kind {
+                GenericParamKind::Type => 1,
+                GenericParamKind::Lifetime => 2,
+                GenericParamKind::EffectRow => 3,
+                GenericParamKind::Const(_) => return Err(()),
+            };
+            output.push(kind);
+            push_string(output, &parameter.name);
+        }
+        push_string(output, &constraint.longer.name);
+        push_string(output, &constraint.shorter.name);
+        push_u32(output, constraint.span.start as u32);
+        push_u32(output, constraint.span.end as u32);
+    }
+    Ok(())
+}
+
 fn encode_effect_row(output: &mut Vec<u8>, row: &EffectRowSyntax) -> Result<(), ()> {
     push_u32(output, row.effects.len().try_into().unwrap());
     for effect in &row.effects {
@@ -195,6 +239,7 @@ fn encode_callable(
         }
         None => output.push(0),
     }
+    encode_where_clause(output, declaration.where_clause.as_ref())?;
     Ok(())
 }
 
@@ -380,7 +425,7 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
         .spawn(|| {
             if std::env::var_os("G1_SELF_HOST_HEADERS_CHECK_ONLY").is_some() {
                 let phases = grandiose::compile_bundle_to_phases_with_options(
-                    &self_host_bundle(),
+                    &self_host_bundle("probe::headers::application"),
                     CompileOptions {
                         optimization_level: OptimizationLevel::O0,
                     },
@@ -402,7 +447,7 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
             fs::write(&expected_path, &expected).unwrap();
 
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &self_host_bundle("probe::headers::application"),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -503,6 +548,79 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
                     path.display()
                 );
             }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_header_reference_lifetimes_match_bootstrap() {
+    // The component contract is exercised in both execution engines below.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let source = concat!(
+                "forward<'long, 'short>(left: &'long i64, right: &'short mut i64) ",
+                "-> &'short i64 where 'long: 'short { left } ",
+                "main() -> { () }"
+            );
+            let input = directory.path().join("reference-lifetimes.glorious");
+            fs::write(&input, source).unwrap();
+            let mut expected = Vec::new();
+            encode_rust_headers(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::headers::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm_path = directory.path().join("vm.bin");
+            let vm_args = vec![vm_path.clone().into_os_string(), input.clone().into_os_string()];
+            let vm = Vm::with_host(
+                verify(phases.artifact.clone()).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vm_args),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM reference contract diverged");
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("self-host-headers.ll");
+            let executable = directory.path().join("self-host-headers");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "{}",
+                String::from_utf8_lossy(&clang.stderr)
+            );
+            let native_path = directory.path().join("native.bin");
+            let native = Command::new(&executable)
+                .arg(&native_path)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(
+                native.status.success(),
+                "native status: {:?}\n{}",
+                native.status,
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_eq!(fs::read(native_path).unwrap(), expected, "native contract diverged");
         })
         .unwrap()
         .join()

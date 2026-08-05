@@ -791,6 +791,10 @@ pub name_use_token(value: &NameUse) -> usize { value.token }
 
 pub type_edge_type(value: &TypeEdge) -> TypeId { value.value }
 
+pub type_tokens(value: &HeaderIndex, id: TypeId) -> HeaderTokenRange {
+    Arena::index(&value.types, id).tokens
+}
+
 pub variant_payloads<'a>(
     value: &'a HeaderIndex,
     variant: &VariantHeader
