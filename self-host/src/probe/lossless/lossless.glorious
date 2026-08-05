@@ -1,0 +1,114 @@
+use super::super::frontend::lossless::{
+    LosslessError,
+    LosslessLexed,
+    LosslessToken
+};
+
+write_token(output: &mut ByteBuf, token: &LosslessToken) {
+    let kind = super::super::frontend::lossless::token_kind(token);
+    ByteBuf::push(
+        output,
+        super::super::frontend::lossless::kind_code(kind)
+    );
+    ByteBuf::push(
+        output,
+        if(super::super::frontend::lossless::kind_is_trivia(kind)) { 1 } else { 0 }
+    );
+    ByteBuf::push(
+        output,
+        if(super::super::frontend::lossless::kind_is_comment(kind)) { 1 } else { 0 }
+    );
+    let span = super::super::frontend::lossless::token_span(token);
+    ByteBuf::write_u64_le(
+        output,
+        wrapping_convert_to_u64(
+            super::super::frontend::lexer::span_start(&span)
+        )
+    );
+    ByteBuf::write_u64_le(
+        output,
+        wrapping_convert_to_u64(
+            super::super::frontend::lexer::span_end(&span)
+        )
+    )
+}
+
+write_success(output: &mut ByteBuf, value: &LosslessLexed) {
+    ByteBuf::push(output, 0);
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::lossless::token_count(value)
+        )
+    );
+    for_range(Range::new(
+        0,
+        super::super::frontend::lossless::token_count(value)
+    ), { current => {
+        let token = handle
+            super::super::frontend::lossless::token_at(value, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_token(output, token)
+    }})
+}
+
+write_error(output: &mut ByteBuf, value: &LosslessError) {
+    ByteBuf::push(output, 1);
+    ByteBuf::push(
+        output,
+        super::super::frontend::lossless::error_code(
+            super::super::frontend::lossless::error_kind(value)
+        )
+    );
+    let span = super::super::frontend::lossless::error_span(value);
+    ByteBuf::write_u64_le(
+        output,
+        wrapping_convert_to_u64(
+            super::super::frontend::lexer::span_start(&span)
+        )
+    );
+    ByteBuf::write_u64_le(
+        output,
+        wrapping_convert_to_u64(
+            super::super::frontend::lexer::span_end(&span)
+        )
+    )
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(output, 2),
+            Result::Ok(source) => handle
+                super::super::frontend::lossless::lex_lossless(&source) {
+                Result::Ok(lexed) => write_success(output, &lexed),
+                Result::Err(error) => write_error(output, &error)
+            }
+        }
+    }})
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let argument_count = Vec::len(&arguments);
+    if(argument_count < 2) {
+        write_diagnostic("usage: grandiose-self-host <output> <input>...")
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            wrapping_convert_to_u32(argument_count - 1)
+        );
+        process_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
+}

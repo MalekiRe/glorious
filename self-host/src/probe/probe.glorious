@@ -2,6 +2,7 @@
 // declare this module, so snapshot protocols cannot acquire host capabilities
 // through frontend phase modules.
 pub mod lexer;
+pub mod lossless;
 pub mod scanner;
 pub mod headers;
 pub mod bodies;

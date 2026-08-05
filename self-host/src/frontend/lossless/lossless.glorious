@@ -1,0 +1,632 @@
+// Raw, source-preserving lexical structure for tooling. Unlike the semantic
+// lexer this scanner retains trivia and never decodes or validates literals.
+
+use super::lexer::Span;
+
+pub enum LosslessKind {
+    Whitespace,
+    LineComment,
+    BlockComment,
+    Identifier,
+    Number,
+    String,
+    Character,
+    ByteString,
+    ByteCharacter,
+    Lifetime,
+    Label,
+    Punctuation
+}
+
+impl Use<[0, *]> for LosslessKind {}
+
+pub struct LosslessToken { kind: LosslessKind, span: Span }
+pub struct LosslessLexed { tokens: Vec<LosslessToken> }
+
+pub enum LosslessErrorKind {
+    UnfinishedComment,
+    UnfinishedString,
+    UnfinishedByteString,
+    UnfinishedByteLiteral,
+    UnfinishedCharacterLiteral,
+    InvalidLifetimeIdentifier
+}
+
+impl Use<[0, *]> for LosslessErrorKind {}
+
+pub struct LosslessError { kind: LosslessErrorKind, span: Span }
+
+pub token_count(value: &LosslessLexed) -> usize { Vec::len(&value.tokens) }
+
+pub token_at<'a>(
+    value: &'a LosslessLexed,
+    index: usize
+) -> Option<&'a LosslessToken> {
+    Vec::get(&value.tokens, index)
+}
+
+pub token_kind(value: &LosslessToken) -> &LosslessKind { &value.kind }
+
+pub kind_is_trivia(value: &LosslessKind) -> Bool {
+    handle *value {
+        LosslessKind::Whitespace => true,
+        LosslessKind::LineComment => true,
+        LosslessKind::BlockComment => true,
+        _ => false
+    }
+}
+
+pub kind_is_comment(value: &LosslessKind) -> Bool {
+    handle *value {
+        LosslessKind::LineComment => true,
+        LosslessKind::BlockComment => true,
+        _ => false
+    }
+}
+
+pub token_span(value: &LosslessToken) -> Span {
+    super::lexer::span(value.span.start, value.span.end)
+}
+
+pub error_kind(value: &LosslessError) -> &LosslessErrorKind { &value.kind }
+
+pub error_span(value: &LosslessError) -> Span {
+    super::lexer::span(value.span.start, value.span.end)
+}
+
+pub kind_code(value: &LosslessKind) -> u8 {
+    handle *value {
+        LosslessKind::Whitespace => 1,
+        LosslessKind::LineComment => 2,
+        LosslessKind::BlockComment => 3,
+        LosslessKind::Identifier => 4,
+        LosslessKind::Number => 5,
+        LosslessKind::String => 6,
+        LosslessKind::Character => 7,
+        LosslessKind::ByteString => 8,
+        LosslessKind::ByteCharacter => 9,
+        LosslessKind::Lifetime => 10,
+        LosslessKind::Label => 11,
+        LosslessKind::Punctuation => 12
+    }
+}
+
+pub error_code(value: &LosslessErrorKind) -> u8 {
+    handle *value {
+        LosslessErrorKind::UnfinishedComment => 1,
+        LosslessErrorKind::UnfinishedString => 2,
+        LosslessErrorKind::UnfinishedByteString => 3,
+        LosslessErrorKind::UnfinishedByteLiteral => 4,
+        LosslessErrorKind::UnfinishedCharacterLiteral => 5,
+        LosslessErrorKind::InvalidLifetimeIdentifier => 6
+    }
+}
+
+struct Scanner {
+    source: String,
+    bytes: Bytes,
+    cursor: usize,
+    tokens: Vec<LosslessToken>
+}
+
+peek(value: &Scanner, offset: usize) -> Option<u8> {
+    handle Bytes::get(&value.bytes, value.cursor + offset) {
+        Result::Ok(found) => Option::Some(found),
+        Result::Err(_) => None
+    }
+}
+
+peek_or_zero(value: &Scanner, offset: usize) -> u8 {
+    handle peek(value, offset) {
+        Result::Ok(found) => found,
+        Result::Err(_) => 0
+    }
+}
+
+byte_value(value: u8) -> u8 { value }
+
+is_digit(value: u8) -> Bool { byte_value(48) <= value and { value <= byte_value(57) } }
+is_lower(value: u8) -> Bool { byte_value(97) <= value and { value <= byte_value(122) } }
+is_upper(value: u8) -> Bool { byte_value(65) <= value and { value <= byte_value(90) } }
+is_alpha(value: u8) -> Bool { is_lower(value) or { is_upper(value) } }
+is_alphanumeric(value: u8) -> Bool { is_alpha(value) or { is_digit(value) } }
+is_word_start(value: u8) -> Bool { is_alpha(value) or { value == byte_value(95) } }
+
+strict_and(left: Bool, right: Bool) -> Bool {
+    if(left) { right } else { false }
+}
+
+is_whitespace(value: u8) -> Bool {
+    value == byte_value(32)
+        or { value == byte_value(9) }
+        or { value == byte_value(10) }
+        or { value == byte_value(13) }
+        or { value == byte_value(11) }
+        or { value == byte_value(12) }
+}
+
+advance(value: &mut Scanner, count: usize) {
+    (*value).cursor = value.cursor + count;
+}
+
+push(value: &mut Scanner, kind: LosslessKind, start: usize) {
+    let end = value.cursor;
+    Vec::push(
+        &mut value.tokens,
+        LosslessToken {
+            kind: kind,
+            span: super::lexer::span(start, end)
+        }
+    )
+}
+
+make_error(
+    kind: LosslessErrorKind,
+    start: usize,
+    end: usize
+) -> LosslessError {
+    LosslessError {
+        kind: kind,
+        span: super::lexer::span(start, end)
+    }
+}
+
+scan_whitespace(value: &mut Scanner) {
+    handle peek(&*value, 0) {
+        Result::Ok(byte) => if(is_whitespace(byte)) {
+            advance(&mut *value, 1);
+            scan_whitespace(value)
+        } else { () },
+        Result::Err(_) => ()
+    }
+}
+
+scan_line_comment(value: &mut Scanner) {
+    handle peek(&*value, 0) {
+        Result::Ok(byte) => if(byte == byte_value(10)) {
+            ()
+        } else {
+            advance(&mut *value, 1);
+            scan_line_comment(value)
+        },
+        Result::Err(_) => ()
+    }
+}
+
+scan_block_comment(
+    value: &mut Scanner,
+    start: usize,
+    depth: usize
+) -> Result<(), LosslessError> {
+    if(depth == 0) {
+        Result::Ok(())
+    } else {
+        if(value.cursor < Bytes::len(&value.bytes)) {
+            if(peek(&*value, 0) is Result::Ok(47)) {
+                if(peek(&*value, 1) is Result::Ok(42)) {
+                    advance(&mut *value, 2);
+                    scan_block_comment(value, start, depth + 1)
+                } else {
+                    advance(&mut *value, 1);
+                    scan_block_comment(value, start, depth)
+                }
+            } else {
+                if(peek(&*value, 0) is Result::Ok(42)) {
+                    if(peek(&*value, 1) is Result::Ok(47)) {
+                        advance(&mut *value, 2);
+                        scan_block_comment(value, start, depth - 1)
+                    } else {
+                        advance(&mut *value, 1);
+                        scan_block_comment(value, start, depth)
+                    }
+                } else {
+                    advance(&mut *value, 1);
+                    scan_block_comment(value, start, depth)
+                }
+            }
+        } else {
+            Result::Err(make_error(
+                LosslessErrorKind::UnfinishedComment,
+                start,
+                Bytes::len(&value.bytes)
+            ))
+        }
+    }
+}
+
+scan_identifier_tail(value: &mut Scanner) {
+    handle peek(&*value, 0) {
+        Result::Ok(byte) => if(is_alphanumeric(byte)) {
+            advance(&mut *value, 1);
+            scan_identifier_tail(value)
+        } else {
+            if(byte == byte_value(95)) {
+                advance(&mut *value, 1);
+                scan_identifier_tail(value)
+            } else {
+                if(byte == byte_value(45)) {
+                    handle peek(&*value, 1) {
+                        Result::Ok(next) => if(is_alphanumeric(next) or { next == byte_value(95) }) {
+                            advance(&mut *value, 2);
+                            scan_identifier_tail(value)
+                        } else { () },
+                        Result::Err(_) => ()
+                    }
+                } else { () }
+            }
+        },
+        Result::Err(_) => ()
+    }
+}
+
+scan_quoted(
+    value: &mut Scanner,
+    start: usize,
+    delimiter: u8,
+    unfinished: LosslessErrorKind
+) -> Result<(), LosslessError> {
+    advance(&mut *value, 1);
+    scan_quoted_tail(value, start, delimiter, unfinished)
+}
+
+scan_quoted_tail(
+    value: &mut Scanner,
+    start: usize,
+    delimiter: u8,
+    unfinished: LosslessErrorKind
+) -> Result<(), LosslessError> {
+    handle peek(&*value, 0) {
+        Result::Err(_) => Result::Err(make_error(
+            unfinished,
+            start,
+            Bytes::len(&value.bytes)
+        )),
+        Result::Ok(byte) => if(byte == delimiter) {
+            advance(&mut *value, 1);
+            Result::Ok(())
+        } else {
+            if(byte == byte_value(92)) {
+                advance(&mut *value, 1);
+                handle peek(&*value, 0) {
+                    Result::Err(_) => Result::Err(make_error(
+                        unfinished,
+                        start,
+                        Bytes::len(&value.bytes)
+                    )),
+                    Result::Ok(_) => {
+                        let bytes = value.bytes;
+                        let cursor = value.cursor;
+                        let decoded = handle char_decode_utf8(&bytes, cursor) {
+                            Result::Ok(found) => found,
+                            Result::Err(_) => unreachable()
+                        };
+                        (*value).cursor = decoded.next;
+                        scan_quoted_tail(value, start, delimiter, unfinished)
+                    }
+                }
+            } else {
+                let bytes = value.bytes;
+                let cursor = value.cursor;
+                let decoded = handle char_decode_utf8(&bytes, cursor) {
+                    Result::Ok(found) => found,
+                    Result::Err(_) => unreachable()
+                };
+                (*value).cursor = decoded.next;
+                scan_quoted_tail(value, start, delimiter, unfinished)
+            }
+        }
+    }
+}
+
+scan_character_or_lifetime(
+    value: &mut Scanner,
+    start: usize
+) -> Result<LosslessKind, LosslessError> {
+    advance(&mut *value, 1);
+    if(peek(&*value, 0) is Result::Ok(92)) {
+        (*value).cursor = start;
+        try(
+            scan_quoted(
+                value,
+                start,
+                byte_value(39),
+                LosslessErrorKind::UnfinishedCharacterLiteral
+            ),
+            @scan_character_or_lifetime
+        );
+        Result::Ok(LosslessKind::Character)
+    } else {
+        if(value.cursor < Bytes::len(&value.bytes)) {
+            let bytes = value.bytes;
+            let cursor = value.cursor;
+            let decoded = handle char_decode_utf8(&bytes, cursor) {
+                Result::Ok(found) => found,
+                Result::Err(_) => unreachable()
+            };
+            if(Bytes::get(&value.bytes, decoded.next) is Result::Ok(39)) {
+                (*value).cursor = decoded.next + 1;
+                Result::Ok(LosslessKind::Character)
+            } else {
+                scan_lifetime_tail(value, start)
+            }
+        } else {
+            Result::Err(make_error(
+                LosslessErrorKind::InvalidLifetimeIdentifier,
+                start,
+                value.cursor
+            ))
+        }
+    }
+}
+
+scan_lifetime_tail(
+    value: &mut Scanner,
+    start: usize
+) -> Result<LosslessKind, LosslessError> {
+    handle peek(&*value, 0) {
+        Result::Ok(byte) => if(is_word_start(byte)) {
+            advance(&mut *value, 1);
+            scan_identifier_tail(value);
+            Result::Ok(LosslessKind::Lifetime)
+        } else {
+            Result::Err(make_error(
+                LosslessErrorKind::InvalidLifetimeIdentifier,
+                start,
+                value.cursor
+            ))
+        },
+        Result::Err(_) => Result::Err(make_error(
+            LosslessErrorKind::InvalidLifetimeIdentifier,
+            start,
+            value.cursor
+        ))
+    }
+}
+
+scan_digits(value: &mut Scanner) {
+    handle peek(&*value, 0) {
+        Result::Ok(byte) => if(is_digit(byte) or { byte == byte_value(95) }) {
+            advance(&mut *value, 1);
+            scan_digits(value)
+        } else { () },
+        Result::Err(_) => ()
+    }
+}
+
+scan_non_decimal_digits(value: &mut Scanner) {
+    handle peek(&*value, 0) {
+        Result::Ok(byte) => if(is_alphanumeric(byte) or { byte == byte_value(95) }) {
+            advance(&mut *value, 1);
+            scan_non_decimal_digits(value)
+        } else { () },
+        Result::Err(_) => ()
+    }
+}
+
+scan_number(value: &mut Scanner) {
+    let first = peek_or_zero(&*value, 0);
+    let second = peek_or_zero(&*value, 1);
+    let non_decimal = handle (first, second) {
+        (48, 98) => true,
+        (48, 111) => true,
+        (48, 120) => true,
+        _ => false
+    };
+    advance(&mut *value, 1);
+    if(non_decimal) {
+        advance(&mut *value, 1);
+        scan_non_decimal_digits(value)
+    } else {
+        scan_digits(value);
+        let fraction_first = peek_or_zero(&*value, 0);
+        let fraction_second = peek_or_zero(&*value, 1);
+        let fraction = handle (fraction_first, fraction_second) {
+            (46, next) => is_digit(next),
+            _ => false
+        };
+        if(fraction) {
+            advance(&mut *value, 1);
+            scan_digits(value)
+        } else { () };
+        let exponent_marker = handle peek(&*value, 0) {
+            Result::Ok(101) => true,
+            Result::Ok(69) => true,
+            _ => false
+        };
+        if(exponent_marker) {
+            advance(&mut *value, 1);
+            let exponent_sign = handle peek(&*value, 0) {
+                Result::Ok(43) => true,
+                Result::Ok(45) => true,
+                _ => false
+            };
+            if(exponent_sign) {
+                advance(&mut *value, 1)
+            } else { () };
+            scan_digits(value)
+        } else { () }
+    }
+}
+
+matches_two(value: &Scanner, first: u8, second: u8) -> Bool {
+    let actual_first = peek_or_zero(value, 0);
+    let actual_second = peek_or_zero(value, 1);
+    strict_and(actual_first == first, actual_second == second)
+}
+
+matches_long_punctuation(value: &Scanner) -> Bool {
+    let first = peek_or_zero(value, 0);
+    let second = peek_or_zero(value, 1);
+    handle (first, second) {
+        (61, 62) => true,
+        (58, 58) => true,
+        (33, 61) => true,
+        (60, 61) => true,
+        (61, 61) => true,
+        (62, 61) => true,
+        (38, 38) => true,
+        (124, 124) => true,
+        (46, 46) => true,
+        _ => false
+    }
+}
+
+scan_punctuation(value: &mut Scanner) {
+    if(matches_two(&*value, byte_value(45), byte_value(62))) {
+        if(peek(&*value, 2) is Result::Ok(33)) {
+            advance(&mut *value, 3)
+        } else {
+            advance(&mut *value, 2)
+        }
+    } else {
+        if(matches_long_punctuation(&*value)) {
+            advance(&mut *value, 2)
+        } else {
+            let bytes = value.bytes;
+            let cursor = value.cursor;
+            let decoded = handle char_decode_utf8(&bytes, cursor) {
+                Result::Ok(found) => found,
+                Result::Err(_) => unreachable()
+            };
+            (*value).cursor = decoded.next;
+        }
+    }
+}
+
+scan_one(value: &mut Scanner) -> Result<(), LosslessError> {
+    let start = value.cursor;
+    let byte = handle peek(&*value, 0) {
+        Result::Ok(found) => found,
+        Result::Err(_) => unreachable()
+    };
+    if(is_whitespace(byte)) {
+        scan_whitespace(value);
+        push(value, LosslessKind::Whitespace, start);
+        Result::Ok(())
+    } else {
+        if(matches_two(&*value, byte_value(47), byte_value(47))) {
+            advance(&mut *value, 2);
+            scan_line_comment(value);
+            push(value, LosslessKind::LineComment, start);
+            Result::Ok(())
+        } else {
+            if(matches_two(&*value, byte_value(47), byte_value(42))) {
+                advance(&mut *value, 2);
+                try(scan_block_comment(value, start, 1), @scan_one);
+                push(value, LosslessKind::BlockComment, start);
+                Result::Ok(())
+            } else {
+                scan_nontrivia(value, start, byte)
+            }
+        }
+    }
+}
+
+scan_nontrivia(
+    value: &mut Scanner,
+    start: usize,
+    byte: u8
+) -> Result<(), LosslessError> {
+    let second = peek_or_zero(&*value, 1);
+    let byte_string = handle (byte, second) {
+        (98, 34) => true,
+        _ => false
+    };
+    if(byte_string) {
+        advance(&mut *value, 1);
+        try(scan_quoted(
+            value,
+            start,
+            byte_value(34),
+            LosslessErrorKind::UnfinishedByteString
+        ), @scan_nontrivia);
+        push(value, LosslessKind::ByteString, start);
+        Result::Ok(())
+    } else {
+        let byte_character = handle (byte, second) {
+            (98, 39) => true,
+            _ => false
+        };
+        if(byte_character) {
+            advance(&mut *value, 1);
+            try(scan_quoted(
+                value,
+                start,
+                byte_value(39),
+                LosslessErrorKind::UnfinishedByteLiteral
+            ), @scan_nontrivia);
+            push(value, LosslessKind::ByteCharacter, start);
+            Result::Ok(())
+        } else {
+            if(byte == byte_value(34)) {
+                try(scan_quoted(
+                    value,
+                    start,
+                    byte_value(34),
+                    LosslessErrorKind::UnfinishedString
+                ), @scan_nontrivia);
+                push(value, LosslessKind::String, start);
+                Result::Ok(())
+            } else {
+                scan_atom(value, start, byte)
+            }
+        }
+    }
+}
+
+scan_atom(
+    value: &mut Scanner,
+    start: usize,
+    byte: u8
+) -> Result<(), LosslessError> {
+    if(byte == byte_value(39)) {
+        let kind = try(scan_character_or_lifetime(value, start), @scan_atom);
+        push(value, kind, start);
+        Result::Ok(())
+    } else {
+        if(byte == byte_value(64)) {
+            advance(&mut *value, 1);
+            scan_identifier_tail(value);
+            push(value, LosslessKind::Label, start);
+            Result::Ok(())
+        } else {
+            if(is_word_start(byte)) {
+                advance(&mut *value, 1);
+                scan_identifier_tail(value);
+                push(value, LosslessKind::Identifier, start);
+                Result::Ok(())
+            } else {
+                if(is_digit(byte)) {
+                    scan_number(value);
+                    push(value, LosslessKind::Number, start);
+                    Result::Ok(())
+                } else {
+                    scan_punctuation(value);
+                    push(value, LosslessKind::Punctuation, start);
+                    Result::Ok(())
+                }
+            }
+        }
+    }
+}
+
+run(value: &mut Scanner) -> Result<(), LosslessError> {
+    if(value.cursor < Bytes::len(&value.bytes)) {
+        try(scan_one(value), @run);
+        run(value)
+    } else {
+        Result::Ok(())
+    }
+}
+
+pub lex_lossless(source: &String) -> Result<LosslessLexed, LosslessError> {
+    let scanner = Scanner {
+        source: *source,
+        bytes: String::as_bytes(source),
+        cursor: 0,
+        tokens: Vec::new()
+    };
+    try(run(&mut scanner), @lex_lossless);
+    let Scanner { source: _, bytes: _, cursor: _, tokens } = scanner;
+    Result::Ok(LosslessLexed { tokens: tokens })
+}

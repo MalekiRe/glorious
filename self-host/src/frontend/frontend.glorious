@@ -1,4 +1,5 @@
 pub mod lexer;
+pub mod lossless;
 
 // Shared source, range, delimiter, and cursor substrate. Keeping this module
 // inline means every existing self-host phase bundle receives it with the

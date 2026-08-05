@@ -39,6 +39,7 @@ fn self_host_bundle() -> SourceBundle {
         paths.into_iter().map(|path| {
             let mut source = fs::read_to_string(&path)
                 .unwrap()
+                .replace("pub mod lossless;\n", "")
                 .replace("pub mod headers;\n", "")
                 .replace("pub mod bodies;\n", "")
                 .replace("pub mod resolution;\n", "")

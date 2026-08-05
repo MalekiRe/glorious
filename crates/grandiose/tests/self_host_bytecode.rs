@@ -631,10 +631,11 @@ fn repository_root() -> PathBuf {
         .to_owned()
 }
 
-fn self_host_module_paths(root: &Path) -> [PathBuf; 16] {
+fn self_host_module_paths(root: &Path) -> [PathBuf; 17] {
     [
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
+        root.join("frontend/lossless/lossless.glorious"),
         root.join("frontend/scanner/scanner.glorious"),
         root.join("frontend/headers/headers.glorious"),
         root.join("frontend/bodies/bodies.glorious"),

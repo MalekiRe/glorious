@@ -43,7 +43,9 @@ fn self_host_bundle_with_main(main: &str) -> SourceBundle {
     SourceBundle::distributed(
         primary,
         paths.into_iter().map(|path| {
-            let mut source = fs::read_to_string(&path).unwrap();
+            let mut source = fs::read_to_string(&path)
+                .unwrap()
+                .replace("pub mod lossless;\n", "");
             if path.ends_with("probe/probe.glorious") {
                 source = source
                     .replace("pub mod lexer;\n", "")
