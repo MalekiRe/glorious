@@ -533,3 +533,31 @@ fn self_host_lexer_numeric_forms_and_spans_match_bootstrap() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn self_host_unit_lexer_malformed_numbers_have_exact_spans() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let sources = [
+                "0b102",
+                "0o9",
+                "12ab",
+                "1__2_ ",
+                "1.5_",
+                "0x",
+                "1e_",
+            ];
+            let mut paths = Vec::new();
+            for (index, source) in sources.into_iter().enumerate() {
+                let path = directory.path().join(format!("malformed-number-{index}.glorious"));
+                fs::write(&path, source).unwrap();
+                paths.push(path);
+            }
+            run_lexer_oracle(directory.path(), &paths);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
