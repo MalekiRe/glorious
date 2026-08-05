@@ -189,7 +189,6 @@ fn encode_pattern(output: &mut Vec<u8>, source: &str, pattern: &Pattern) -> Resu
         PatternKind::Unit => output.push(6),
         PatternKind::Binding(name) => { output.push(1); push_string(output, name); }
         PatternKind::Wildcard => output.push(2),
-        PatternKind::Int(value) => { output.push(3); push_u64(output, *value as u64); }
         PatternKind::Variant { path, fields, rest } => {
             output.push(4);
             push_u32(output, path.segments.len().try_into().map_err(|_| ())?);
@@ -212,7 +211,6 @@ fn encode_pattern(output: &mut Vec<u8>, source: &str, pattern: &Pattern) -> Resu
                 encode_pattern(output, source, &field.pattern)?;
             }
         }
-        _ => return Err(()),
     }
     Ok(())
 }
