@@ -23,7 +23,6 @@ write_string(output: &mut ByteBuf, value: &String) {
 
 write_token_span(
     output: &mut ByteBuf,
-    original: &String,
     source: &LexedSource,
     range: &BodyTokenRange
 ) {
@@ -39,13 +38,16 @@ write_token_span(
     };
     ByteBuf::write_u32_le(
         output,
-        u32_from_usize(super::super::frontend::lexer::span_start(&first))
+        u32_from_usize(
+            super::super::frontend::lexer::span_start(&first) + 1
+        )
     );
     ByteBuf::write_u32_le(
         output,
-        u32_from_usize(super::super::frontend::lexer::span_end(&last))
+        u32_from_usize(
+            super::super::frontend::lexer::span_end(&last) + 1
+        )
     );
-    original;
 }
 
 write_pattern(
@@ -59,14 +61,14 @@ write_pattern(
             let tokens = super::super::frontend::syntax::token_span(token, token + 1);
             ByteBuf::push(output, 1);
             write_string(output, &range_text(original, source, &tokens));
-            write_token_span(output, original, source, &tokens);
+            write_token_span(output, source, &tokens);
             Result::Ok(())
         },
         PatternView::Float(token) => {
             let tokens = super::super::frontend::syntax::token_span(token, token + 1);
             ByteBuf::push(output, 2);
             write_string(output, &range_text(original, source, &tokens));
-            write_token_span(output, original, source, &tokens);
+            write_token_span(output, source, &tokens);
             Result::Ok(())
         },
         PatternView::Text(name, token) => {
@@ -75,27 +77,27 @@ write_pattern(
             try(write_name(output, source, name,
                 token),
                 @write_pattern);
-            write_token_span(output, original, source, &tokens);
+            write_token_span(output, source, &tokens);
             Result::Ok(())
         },
         PatternView::Character(found, token) => {
             let tokens = super::super::frontend::syntax::token_span(token, token + 1);
             ByteBuf::push(output, 4);
             ByteBuf::write_u32_le(output, char_to_u32(found));
-            write_token_span(output, original, source, &tokens);
+            write_token_span(output, source, &tokens);
             Result::Ok(())
         },
         PatternView::Byte(found, token) => {
             let tokens = super::super::frontend::syntax::token_span(token, token + 1);
             ByteBuf::push(output, 5);
             ByteBuf::push(output, found);
-            write_token_span(output, original, source, &tokens);
+            write_token_span(output, source, &tokens);
             Result::Ok(())
         },
         PatternView::Unit(token) => {
             let tokens = super::super::frontend::syntax::token_span(token, token + 2);
             ByteBuf::push(output, 6);
-            write_token_span(output, original, source, &tokens);
+            write_token_span(output, source, &tokens);
             Result::Ok(())
         }
     }

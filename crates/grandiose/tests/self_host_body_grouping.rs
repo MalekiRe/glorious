@@ -678,7 +678,7 @@ fn scalar_literal_pattern_corpus(directory: &Path) -> Vec<PathBuf> {
     .into_iter()
     .enumerate()
     .map(|(index, source)| {
-        let path = directory.path().join(format!("scalar-{index}.glorious"));
+        let path = directory.join(format!("scalar-{index}.glorious"));
         fs::write(&path, source).unwrap();
         path
     })
