@@ -8,6 +8,7 @@ use std::{
 use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
     lexer::{Kw, Token, TokenKind},
+    parser,
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
@@ -22,10 +23,20 @@ fn repository_root() -> PathBuf {
 }
 
 fn self_host_bundle() -> SourceBundle {
+    self_host_bundle_with_entry("application")
+}
+
+fn self_host_recovery_bundle() -> SourceBundle {
+    self_host_bundle_with_entry("recovery_application")
+}
+
+fn self_host_bundle_with_entry(entry: &str) -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary = Segment::new(
         root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::scanner::application) }\n",
+        format!(
+            "mod frontend;\nmod probe;\n\nmain() {{ run_compiler_host(probe::scanner::{entry}) }}\n"
+        ),
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
@@ -628,6 +639,126 @@ fn self_hosted_scanner_matches_rust_in_vm_and_native_execution() {
                     path.display()
                 );
             }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_scanner_recovery_matches_bootstrap() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "struct Good { x: i64 }\nstruct Bad { x: }\nenum Also { }\nbroken( -> { 1 }\nfine() -> i64 { 2 }";
+            let tokens = grandiose::lexer::lex(source).unwrap();
+            let (program, diagnostics) = parser::parse_recovering(tokens);
+            assert!(diagnostics.len() >= 2, "{diagnostics:#?}");
+            assert_eq!(program.structs.len(), 1);
+            assert_eq!(program.structs[0].name, "Good");
+            assert_eq!(program.enums.len(), 1);
+            assert!(program.functions.iter().any(|function| function.name == "fine"));
+            assert!(!program.functions.iter().any(|function| function.name == "broken"));
+
+            let expected_path = tempfile::tempdir().unwrap();
+            let input = expected_path.path().join("recovery.glorious");
+            fs::write(&input, source).unwrap();
+            let output = expected_path.path().join("expected.bin");
+            let vm_output = expected_path.path().join("vm.bin");
+            let native_output = expected_path.path().join("native.bin");
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            expected.push(0);
+            push_u32(&mut expected, 3);
+            let shells = [
+                Shell {
+                    kind: ShellKind::Struct,
+                    public: false,
+                    name: Some("Good".into()),
+                    header: (0, 2),
+                    body: Some((3, 6)),
+                    whole: (0, 7),
+                    parent: None,
+                },
+                Shell {
+                    kind: ShellKind::Enum,
+                    public: false,
+                    name: Some("Also".into()),
+                    header: (13, 15),
+                    body: Some((16, 16)),
+                    whole: (13, 17),
+                    parent: None,
+                },
+                Shell {
+                    kind: ShellKind::Function,
+                    public: false,
+                    name: Some("fine".into()),
+                    header: (23, 28),
+                    body: Some((29, 30)),
+                    whole: (23, 31),
+                    parent: None,
+                },
+            ];
+            for shell in &shells {
+                encode_shell(&mut expected, shell);
+            }
+            push_u32(&mut expected, 2);
+            expected.push(5);
+            push_u32(&mut expected, 11);
+            push_u32(&mut expected, 7);
+            expected.push(5);
+            push_u32(&mut expected, 18);
+            push_u32(&mut expected, 18);
+            fs::write(&output, &expected).unwrap();
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_recovery_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm_args = vec![vm_output.clone().into_os_string(), input.clone().into_os_string()];
+            let vm = Vm::with_host(
+                verify(phases.artifact.clone()).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vm_args),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&vm_output).unwrap(), expected, "VM recovery diverged");
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = expected_path.path().join("recovery.ll");
+            let executable = expected_path.path().join("recovery");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(
+                native.status.success(),
+                "native recovery status: {:?}\n{}",
+                native.status,
+                String::from_utf8_lossy(&native.stderr)
+            );
+            let mut expected_one = Vec::new();
+            push_u32(&mut expected_one, 1);
+            expected_one.extend_from_slice(&expected[4..]);
+            assert_eq!(fs::read(&native_output).unwrap(), expected_one, "native recovery diverged");
         })
         .unwrap()
         .join()

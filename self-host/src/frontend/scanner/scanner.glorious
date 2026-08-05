@@ -89,6 +89,14 @@ pub enum ScanError {
     DeclarationIdExhausted(usize, usize)
 }
 
+pub struct ScanRecovery {
+    index: DeclarationIndex,
+    errors: Vec<ScanError>
+}
+
+pub recovery_index(value: &ScanRecovery) -> &DeclarationIndex { &value.index }
+pub recovery_errors(value: &ScanRecovery) -> &Vec<ScanError> { &value.errors }
+
 pub enum DeclarationStyle {
     Semicolon,
     Braced,
@@ -672,22 +680,60 @@ scan_braced_shell(
     );
     let open = super::syntax::token_start(&bounds);
     let close = super::syntax::token_end(&bounds);
-    let body = super::syntax::token_span(open + 1, close);
-    Result::Ok(ScanStep {
-        next: close + 1,
-        nested: if(kind is DeclarationKind::Module) {
-            Option::Some(body)
-        } else { None },
-        declaration: DeclarationShell {
-            kind: kind,
-            public: public,
-            name: name,
-            header: super::syntax::token_span(start, open),
-            body: Option::Some(body),
-            whole: super::syntax::token_span(start, close + 1),
-            parent: parent
+    let malformed = if(validated_body_kind(kind)) {
+        trailing_field_colon(value, open + 1, close)
+    } else { None };
+    handle malformed {
+        Option::Some(token) => Result::Err(
+            ScanError::IncompleteDeclaration(token, start)
+        ),
+        None => {
+            let body = super::syntax::token_span(open + 1, close);
+            Result::Ok(ScanStep {
+                next: close + 1,
+                nested: if(kind is DeclarationKind::Module) {
+                    Option::Some(body)
+                } else { None },
+                declaration: DeclarationShell {
+                    kind: kind,
+                    public: public,
+                    name: name,
+                    header: super::syntax::token_span(start, open),
+                    body: Option::Some(body),
+                    whole: super::syntax::token_span(start, close + 1),
+                    parent: parent
+                }
+            })
         }
-    })
+    }
+}
+
+validated_body_kind(kind: DeclarationKind) -> Bool {
+    handle kind {
+        DeclarationKind::Struct => true,
+        DeclarationKind::Enum => true,
+        DeclarationKind::Trait => true,
+        DeclarationKind::Effect => true,
+        _ => false
+    }
+}
+
+trailing_field_colon(
+    value: &super::lexer::LexedSource,
+    index: usize,
+    limit: usize
+) -> Option<usize> {
+    if(index >= limit) {
+        None
+    } else if(token_kind_at(value, index) is TokenKind::Colon) {
+        if(token_is_close(value, index + 1)) {
+            Option::Some(index)
+        } else {
+            trailing_field_colon(value, index + 1, limit)
+        }
+    } else {
+        trailing_field_colon(value, index + 1, limit)
+    }
 }
 
 scan_one(
@@ -902,6 +948,187 @@ scan_loop(
     }
 }
 
+recover_boundary(
+    value: &super::lexer::LexedSource,
+    cursor: usize,
+    limit: usize,
+    depth: usize
+) -> usize {
+    if(cursor >= limit) {
+        limit
+    } else if(token_is_eof(value, cursor)) {
+        limit
+    } else if(depth == 0 and { recovery_declaration_start(value, cursor) }) {
+        cursor
+    } else {
+        handle token_kind_at(value, cursor) {
+            TokenKind::LParen =>
+                recover_boundary(value, cursor + 1, limit, depth),
+            TokenKind::LBracket =>
+                recover_boundary(value, cursor + 1, limit, depth),
+            TokenKind::LBrace =>
+                recover_boundary(value, cursor + 1, limit, depth + 1),
+            TokenKind::RBrace =>
+                if(depth <= 1) { cursor + 1 }
+                else { recover_boundary(value, cursor + 1, limit, depth - 1) },
+            TokenKind::Semicolon =>
+                if(depth == 0) { cursor + 1 }
+                else { recover_boundary(value, cursor + 1, limit, depth) },
+            _ => recover_boundary(value, cursor + 1, limit, depth)
+        }
+    }
+}
+
+recovery_declaration_start(
+    value: &super::lexer::LexedSource,
+    cursor: usize
+) -> Bool {
+    if(ident_is(value, cursor, &"pub")) {
+        true
+    } else if(ident_is(value, cursor, &"mod")) {
+        true
+    } else if(ident_is(value, cursor, &"cases")) {
+        true
+    } else if(ident_is(value, cursor, &"use")
+        and { import_declaration(value, cursor) }) {
+        true
+    } else if(fixity_declaration(value, cursor)) {
+        true
+    } else {
+        handle token_kind_at(value, cursor) {
+            TokenKind::Keyword(Keyword::Type) => true,
+            TokenKind::Keyword(Keyword::Let) => true,
+            TokenKind::Keyword(Keyword::Effect) => true,
+            TokenKind::Keyword(Keyword::Struct) => true,
+            TokenKind::Keyword(Keyword::Enum) => true,
+            TokenKind::Keyword(Keyword::Trait) => true,
+            TokenKind::Keyword(Keyword::Impl) => true,
+            TokenKind::Ident(_) =>
+                (token_kind_at(value, cursor + 1) is TokenKind::LParen)
+                    or { token_kind_at(value, cursor + 1) is TokenKind::Lt },
+            _ => false
+        }
+    }
+}
+
+recovery_cursor(
+    value: &super::lexer::LexedSource,
+    start: usize,
+    limit: usize
+) -> usize {
+    if(start >= limit) { limit }
+    else { recover_boundary(value, start + 1, limit, 0) }
+}
+
+finish_recovery(
+    output: IndexVec<ShellTag, DeclarationShell>,
+    delimiters: DelimiterMap,
+    errors: Vec<ScanError>
+) -> ScanRecovery {
+    let names = HashMap::new();
+    let import_shells = Vec::new();
+    index_def_names(&output, 0, &mut names);
+    index_import_shells(&output, 0, &mut import_shells);
+    ScanRecovery {
+        index: DefTable {
+            shells: output,
+            import_shells: import_shells,
+            delimiters: delimiters,
+            names: names
+        },
+        errors: errors
+    }
+}
+
+recover_loop(
+    value: &super::lexer::LexedSource,
+    state: ScanState,
+    errors: Vec<ScanError>
+) -> ScanRecovery {
+    let ScanState {
+        cursor,
+        limit,
+        parent,
+        scopes,
+        output,
+        delimiters
+    } = state;
+    if(cursor >= limit or { token_is_eof(value, cursor) }) {
+        handle Vec::pop(&mut scopes) {
+            Result::Err(_) => finish_recovery(output, delimiters, errors),
+            Result::Ok(scope) => recover_loop(value, ScanState {
+                cursor: scope.cursor,
+                limit: scope.limit,
+                parent: scope.parent,
+                scopes: scopes,
+                output: output,
+                delimiters: delimiters
+            }, errors)
+        }
+    } else {
+        handle scan_one(value, &delimiters, cursor, limit, parent) {
+            Result::Err(error) => {
+                let next = recovery_cursor(value, cursor, limit);
+                let next = if(next <= cursor) { cursor + 1 } else { next };
+                Vec::push(&mut errors, error);
+                recover_loop(value, ScanState {
+                    cursor: next,
+                    limit: limit,
+                    parent: parent,
+                    scopes: scopes,
+                    output: output,
+                    delimiters: delimiters
+                }, errors)
+            },
+            Result::Ok(step) => {
+                let ScanStep { next, nested, declaration } = step;
+                handle IndexVec::push(&mut output, declaration) {
+                    Result::Err(rejected) => {
+                        let token = super::syntax::token_start(&rejected.whole);
+                        Vec::push(
+                            &mut errors,
+                            ScanError::DeclarationIdExhausted(token, token)
+                        );
+                        recover_loop(value, ScanState {
+                            cursor: next,
+                            limit: limit,
+                            parent: parent,
+                            scopes: scopes,
+                            output: output,
+                            delimiters: delimiters
+                        }, errors)
+                    },
+                    Result::Ok(shell) => handle nested {
+                        None => recover_loop(value, ScanState {
+                            cursor: next,
+                            limit: limit,
+                            parent: parent,
+                            scopes: scopes,
+                            output: output,
+                            delimiters: delimiters
+                        }, errors),
+                        Option::Some(span) => {
+                            Vec::push(&mut scopes, ScanScope {
+                                cursor: next,
+                                limit: limit,
+                                parent: parent
+                            });
+                            recover_loop(value, ScanState {
+                                cursor: super::syntax::token_start(&span),
+                                limit: super::syntax::token_end(&span),
+                                parent: Option::Some(shell),
+                                scopes: scopes,
+                                output: output,
+                                delimiters: delimiters
+                            }, errors)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 map_delimiter_error(value: DelimiterError) -> ScanError {
     handle value {
         DelimiterError::UnexpectedClose(token, related) =>
@@ -933,4 +1160,18 @@ pub scan(
         output: IndexVec::new(),
         delimiters: delimiters
     })
+}
+
+pub scan_recovering(
+    value: &super::lexer::LexedSource
+) -> ScanRecovery {
+    let delimiters = super::syntax::build_recovery_delimiter_map(value);
+    recover_loop(value, ScanState {
+        cursor: 0,
+        limit: super::lexer::token_count(value),
+        parent: None,
+        scopes: Vec::new(),
+        output: IndexVec::new(),
+        delimiters: delimiters
+    }, Vec::new())
 }

@@ -227,7 +227,69 @@ pub mod syntax {
         Result::Ok(DelimiterMap { entries: entries })
     }
 
-    // Header parsing owns malformed type delimiters.  Keep an unmatched
+    // Recovery scanning needs partners for the well-formed delimiters that
+    // surround a malformed declaration.  Preserve those partners while
+    // leaving unmatched and mismatched delimiters unpaired so the scanner can
+    // report the declaration and continue at the next boundary.
+    recovery_delimiters(
+        source: &super::lexer::LexedSource,
+        index: usize,
+        sentinel: usize,
+        stack: &mut Vec<OpenDelimiter>,
+        entries: &mut Vec<DelimiterEntry>
+    ) {
+        if(index < sentinel) {
+            handle delimiter_kind(super::lexer::token_kind_at(source, index)) {
+                None => (),
+                Option::Some((kind, opening)) => if(opening) {
+                    Vec::push(&mut *stack, OpenDelimiter {
+                        kind: kind,
+                        token: index
+                    });
+                    set_entry(&mut *entries, index, None, true)
+                } else {
+                    handle Vec::pop(&mut *stack) {
+                        Result::Err(_) => (),
+                        Result::Ok(open) => if(same_delimiter(open.kind, kind)) {
+                            set_entry(
+                                &mut *entries,
+                                open.token,
+                                Option::Some(index),
+                                true
+                            );
+                            set_entry(
+                                &mut *entries,
+                                index,
+                                Option::Some(open.token),
+                                false
+                            )
+                        } else {
+                            // A mismatched close invalidates only the
+                            // innermost candidate. Keep earlier openings so
+                            // a later correctly typed close can still pair
+                            // with its own opener during recovery.
+                            Vec::push(&mut *stack, open)
+                        }
+                    }
+                }
+            };
+            recovery_delimiters(source, index + 1, sentinel, stack, entries)
+        } else { () }
+    }
+
+    pub build_recovery_delimiter_map(
+        source: &super::lexer::LexedSource
+    ) -> DelimiterMap {
+        let count = super::lexer::token_count(source);
+        let sentinel = if(count == 0) { 0 } else { count - 1 };
+        let entries = Vec::new();
+        fill_entries(&mut entries, count);
+        let stack = Vec::new();
+        recovery_delimiters(source, 0, sentinel, &mut stack, &mut entries);
+        DelimiterMap { entries: entries }
+    }
+
+    // Header parsing owns malformed type delimiters. Keep an unmatched
     // opener in the map so declaration scanning can still hand the complete
     // declaration to that parser; mismatched and unexpected closers remain
     // scanner errors.

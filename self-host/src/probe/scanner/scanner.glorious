@@ -158,6 +158,41 @@ encode_scan(
     }
 }
 
+encode_recovery_scan(
+    output: &mut ByteBuf,
+    lexed: super::super::frontend::lexer::LexedSource
+) {
+    let recovery = super::super::frontend::scanner::scan_recovering(&lexed);
+    ByteBuf::push(output, 0);
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::scanner::shell_count(
+                super::super::frontend::scanner::recovery_index(&recovery)
+            )
+        )
+    );
+    write_shells(
+        output,
+        &lexed,
+        super::super::frontend::scanner::recovery_index(&recovery)
+    );
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(Vec::len(
+            super::super::frontend::scanner::recovery_errors(&recovery)
+        ))
+    );
+    Slice::for_each(Vec::as_slice(
+        super::super::frontend::scanner::recovery_errors(&recovery)
+    ), { error => {
+        let (code, token, related) = legacy_scan_error(error);
+        ByteBuf::push(output, code);
+        ByteBuf::write_u32_le(output, wrapping_convert_to_u32(token));
+        ByteBuf::write_u32_le(output, wrapping_convert_to_u32(related));
+    } });
+}
+
 process_inputs(
     arguments: &Vec<String>,
     index: usize,
@@ -172,6 +207,25 @@ process_inputs(
                 handle super::super::frontend::lexer::lex(&source) {
                     Result::Err(_) => ByteBuf::push(output, 1),
                     Result::Ok(lexed) => encode_scan(output, lexed)
+                }
+        }
+    } })
+}
+
+process_recovery_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(output, 1),
+            Result::Ok(source) =>
+                handle super::super::frontend::lexer::lex(&source) {
+                    Result::Err(_) => ByteBuf::push(output, 1),
+                    Result::Ok(lexed) => encode_recovery_scan(output, lexed)
                 }
         }
     } })
@@ -192,6 +246,25 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             wrapping_convert_to_u32(count - 1)
         );
         process_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
+}
+
+pub recovery_application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-scanner-recovery <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            wrapping_convert_to_u32(count - 1)
+        );
+        process_recovery_inputs(&arguments, 1, &mut encoded);
         write_file(output_path, ByteBuf::finish(encoded))
     }
 }
