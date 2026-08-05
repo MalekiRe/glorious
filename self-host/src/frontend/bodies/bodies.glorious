@@ -3750,38 +3750,45 @@ parse_projection_name(
 handler_clause_brace(
     source: &super::lexer::LexedSource,
     cursor: usize,
-    limit: usize,
-    depth: u16
+    limit: usize
 ) -> Bool {
-    if(cursor < limit) {
-        let kind = super::lexer::token_kind_at(source, cursor);
-        if((kind is TokenKind::FatArrow) and { depth == 0 }) {
-            true
-        } else {
-            if((kind is TokenKind::RBrace) and { depth == 0 }) {
-                false
+    let state = fold_range(
+        Range::new(cursor, limit),
+        (cursor - cursor, false, false),
+        { state, index => {
+            let (nesting, found, done) = state;
+            if(done) {
+                (nesting, found, done)
             } else {
-                let next_depth =
-                    if((kind is TokenKind::LParen)
-                        or { (kind is TokenKind::LBrace)
-                        or { kind is TokenKind::LBracket } }) {
-                        if(depth < 65535) { depth + 1 } else { depth }
+                let kind = super::lexer::token_kind_at(source, index);
+                if((kind is TokenKind::FatArrow) and { nesting == 0 }) {
+                    (nesting, true, true)
+                } else {
+                    if((kind is TokenKind::RBrace) and { nesting == 0 }) {
+                        (nesting, false, true)
                     } else {
-                        if((kind is TokenKind::RParen)
-                            or { (kind is TokenKind::RBrace)
-                            or { kind is TokenKind::RBracket } }) {
-                            if(depth == 0) { 0 } else { depth - 1 }
-                        } else { depth }
-                    };
-                handler_clause_brace(
-                    source,
-                    cursor + 1,
-                    limit,
-                    next_depth
-                )
+                        if((kind is TokenKind::LParen)
+                            or { (kind is TokenKind::LBrace)
+                            or { kind is TokenKind::LBracket } }) {
+                            (nesting + 1, found, false)
+                        } else {
+                            if((kind is TokenKind::RParen)
+                                or { (kind is TokenKind::RBrace)
+                                or { kind is TokenKind::RBracket } }) {
+                                (if(nesting > 0) {
+                                    nesting - 1
+                                } else { nesting }, found, false)
+                            } else {
+                                (nesting, found, done)
+                            }
+                        }
+                    }
+                }
             }
         }
-    } else { false }
+    });
+    let (_, found, _) = state;
+    found
 }
 
 append_call_argument(
@@ -3866,8 +3873,7 @@ parse_postfix(
                 TokenKind::LBrace => if(handler_clause_brace(
                     source,
                     value.tokens.position + 1,
-                    value.tokens.limit,
-                    0
+                    value.tokens.limit
                 )) {
                     Result::Ok(callee)
                 } else if(node_is_call(&*value, callee)) {
