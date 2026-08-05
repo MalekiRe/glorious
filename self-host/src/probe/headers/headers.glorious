@@ -296,27 +296,6 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             );
             write_type_edges(output, parsed, arguments)
         },
-        HeaderTypeView::Projection(start, end, subject, trait_ref, item, item_token, arguments) => {
-            ByteBuf::push(output, 7);
-            write_type_node_span(output, parsed, start, end);
-            write_type(output, parsed, subject);
-            write_type(output, parsed, trait_ref);
-            write_name(output, super::super::frontend::headers::parsed_source(parsed), item);
-            let source = super::super::frontend::headers::parsed_source(parsed);
-            let token = super::super::frontend::lexer::token_at(source, item_token);
-            let span = handle token { Result::Err(_) => unreachable(), Result::Ok(found) => super::super::frontend::lexer::token_span(found) };
-            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(super::super::frontend::lexer::span_start(&span)));
-            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(super::super::frontend::lexer::span_end(&span)));
-            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(arguments)));
-            for_range(Range::new(0, Slice::len(arguments)), { current => {
-                let argument = handle Slice::get(arguments, current) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
-                ByteBuf::push(output, super::super::frontend::headers::goal_argument_kind_code(argument));
-                handle super::super::frontend::headers::goal_argument_type(argument) {
-                    Option::Some(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_type(output, parsed, ty) },
-                    None => { ByteBuf::push(output, 0); handle super::super::frontend::headers::goal_argument_name(argument) { None => unreachable(), Option::Some(name) => write_name(output, source, Id::from_u32(name)) } }
-                }
-            }})
-        },
         HeaderTypeView::Never(start, end) => {
             ByteBuf::push(output, 6);
             write_type_node_span(output, parsed, start, end)
@@ -420,16 +399,6 @@ write_where_contract(
                     let binding = handle super::super::frontend::headers::where_goal_binding_at(index, goal, wrapping_convert_to_u32(part)) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
                     write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::name_use_name(super::super::frontend::headers::associated_binding_name(binding)));
                     write_token_span(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::associated_binding_tokens(binding));
-                    let argument_count = super::super::frontend::headers::associated_binding_argument_count(binding);
-                    ByteBuf::write_u32_le(output, argument_count);
-                    for_range(Range::new(0, wrapping_convert_to_usize(argument_count)), { ordinal => {
-                        let argument = handle super::super::frontend::headers::associated_binding_argument_at(index, binding, wrapping_convert_to_u32(ordinal)) { Result::Err(_) => unreachable(), Result::Ok(value) => value };
-                        ByteBuf::push(output, super::super::frontend::headers::goal_argument_kind_code(argument));
-                        handle super::super::frontend::headers::goal_argument_type(argument) {
-                            Option::Some(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_type(output, parsed, ty) },
-                            None => { ByteBuf::push(output, 0); handle super::super::frontend::headers::goal_argument_name(argument) { None => unreachable(), Option::Some(name) => write_name(output, super::super::frontend::headers::parsed_source(parsed), Id::from_u32(name)) } }
-                        }
-                    }});
                     handle super::super::frontend::headers::associated_binding_value(binding) {
                         super::super::frontend::headers::AssociatedBindingValue::Type(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_type(output, parsed, ty) },
                         super::super::frontend::headers::AssociatedBindingValue::EffectRow(row) => { ByteBuf::push(output, 2); write_effect_row(output, parsed, &row) }

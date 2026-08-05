@@ -24,7 +24,6 @@ enum HeaderTypeKind {
     UniqueReference(Option<NameUse>, TypeId),
     Tuple(HeaderRange),
     Application(TypeId, HeaderRange, HeaderRange),
-    Projection(TypeId, TypeId, NameUse, HeaderRange),
     Never
 }
 
@@ -43,7 +42,6 @@ pub enum HeaderTypeView<'a> {
     UniqueReference(usize, usize, Option<usize>, TypeId),
     Tuple(usize, usize, Slice<'a, TypeEdge>),
     Application(usize, usize, TypeId, Slice<'a, NameUse>, Slice<'a, TypeEdge>),
-    Projection(usize, usize, TypeId, TypeId, Id<String>, usize, Slice<'a, GoalArgument>),
     Never(usize, usize)
 }
 
@@ -1005,16 +1003,6 @@ pub header_type_view<'a>(
             lifetime_arguments(value, &lifetimes),
             type_edges(value, &children)
         ),
-        HeaderTypeKind::Projection(subject, trait_ref, item, arguments) =>
-            HeaderTypeView::Projection(
-            token,
-            end,
-            subject,
-            trait_ref,
-            item.name,
-            item.token,
-            header_slice(&value.associated_arguments, &arguments)
-        ),
         HeaderTypeKind::Never => HeaderTypeView::Never(token, end)
     }
 }
@@ -1704,22 +1692,6 @@ push_type(
     }
 }
 
-push_type_to_end(
-    value: &mut Parser,
-    kind: HeaderTypeKind,
-    start: usize,
-    related: usize,
-    end: usize
-) -> Result<TypeId, HeaderError> {
-    handle Arena::alloc(
-        &mut value.output.types,
-        TypeNode { kind: kind, tokens: token_range(start, end) }
-    ) {
-        Result::Err(_) => Result::Err(HeaderError::TypeArenaExhausted(start, related)),
-        Result::Ok(id) => Result::Ok(id)
-    }
-}
-
 copy_type_kind(
     types: &Arena<TypeTag, TypeNode>,
     id: TypeId
@@ -1734,8 +1706,6 @@ copy_type_kind(
         HeaderTypeKind::Tuple(elements) => HeaderTypeKind::Tuple(elements),
         HeaderTypeKind::Application(constructor, lifetimes, arguments) =>
             HeaderTypeKind::Application(constructor, lifetimes, arguments),
-        HeaderTypeKind::Projection(subject, trait_ref, item, arguments) =>
-            HeaderTypeKind::Projection(subject, trait_ref, item, arguments),
         HeaderTypeKind::Never => HeaderTypeKind::Never
     }
 }
@@ -2062,64 +2032,13 @@ finish_tuple(
 
 parse_type(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
     let start = value.tokens.position;
-    if(eat_token(value, TokenPattern::Lt)) { parse_projection(value, related, start) } else { if(eat_token(value, TokenPattern::Amp)) { parse_reference(value, related, start) } else { if(eat_token(value, TokenPattern::LParen)) { parse_tuple(value, related, start) } else { if(eat_token(value, TokenPattern::Bang)) { push_type(
+    if(eat_token(value, TokenPattern::Amp)) { parse_reference(value, related, start) } else { if(eat_token(value, TokenPattern::LParen)) { parse_tuple(value, related, start) } else { if(eat_token(value, TokenPattern::Bang)) { push_type(
                     value,
                     HeaderTypeKind::Never,
                     start,
                     related
-                ) } else { parse_path(value, related) } } } }
+                ) } else { parse_path(value, related) } } }
 }
-
-parse_projection(
-    value: &mut Parser,
-    related: usize,
-    start: usize
-) -> Result<TypeId, HeaderError> {
-    let subject = try(parse_type(value, related), @parse_projection);
-    if(not(at_ident(&*value, &"as"))) {
-        Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related))
-    } else {
-        value.tokens.position = value.tokens.position + 1;
-        let trait_ref = try(parse_type(value, related), @parse_projection);
-        try(expect_right_angle(value, related), @parse_projection);
-        if(not(eat_token(value, TokenPattern::DoubleColon))) {
-            Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related))
-        } else {
-        let item = try(ident(value, related), @parse_projection);
-        let argument_start = Vec::len(&value.output.associated_arguments);
-        let projection_end = try(if(eat_token(value, TokenPattern::Lt)) {
-            handle take_lifetime(value) {
-                Result::Err(_) => Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related)),
-                Result::Ok(lifetime) => {
-                    Vec::push(&mut value.output.associated_arguments, GoalArgument::Lifetime(lifetime));
-                    if(not(eat_token(value, TokenPattern::Comma))) {
-                        Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related))
-                    } else {
-                        let argument = try(parse_type(value, related), @parse_projection);
-                        Vec::push(&mut value.output.associated_arguments, GoalArgument::Type(argument));
-                        try(expect_right_angle(value, related), @parse_projection);
-                        Result::Ok(value.tokens.position - 1)
-                    }
-                }
-            }
-        } else { Result::Ok(value.tokens.position) }, @parse_projection);
-        let argument_end = Vec::len(&value.output.associated_arguments);
-        push_type_to_end(
-            value,
-            HeaderTypeKind::Projection(
-                subject,
-                trait_ref,
-                item,
-                header_range(argument_start, argument_end)
-            ),
-            start,
-            related,
-            projection_end
-        )
-        }
-    }
-}
-
 
 parse_generics(value: &mut Parser, related: usize) -> Result<HeaderRange, HeaderError> {
     let start = super::syntax::range_mark(&value.output.generic_params);

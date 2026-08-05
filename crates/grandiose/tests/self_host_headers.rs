@@ -7,7 +7,7 @@ use std::{
 
 use grandiose::{
     ast::{
-        self, AssociatedArgumentSyntax, EffectDecl, EffectRowSyntax, FieldVisibility, Function, GenericParamKind,
+        self, EffectDecl, EffectRowSyntax, FieldVisibility, Function, GenericParamKind,
         GenericParams, StructDecl, TypeSyntax, TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
@@ -112,47 +112,6 @@ fn encode_optional_lifetime(output: &mut Vec<u8>, lifetime: Option<&str>) {
     }
 }
 
-fn encode_trait_ref(
-    output: &mut Vec<u8>,
-    source: &str,
-    trait_ref: &ast::TraitRefSyntax,
-) -> Result<(), ()> {
-    let first = trait_ref.path.first().ok_or(())?;
-    let last = trait_ref.path.last().ok_or(())?;
-    output.push(5);
-    push_u32(output, trait_ref.span.start.try_into().unwrap());
-    push_u32(output, trait_ref.span.end.try_into().unwrap());
-    output.push(1);
-    push_u32(output, first.span.start.try_into().unwrap());
-    push_u32(output, last.span.end.try_into().unwrap());
-    push_u32(output, trait_ref.path.len().try_into().unwrap());
-    for segment in &trait_ref.path {
-        push_string(output, &segment.name);
-        push_u32(output, segment.span.start.try_into().unwrap());
-        push_u32(output, segment.span.end.try_into().unwrap());
-    }
-    let mut lifetimes = Vec::new();
-    let mut types = Vec::new();
-    for argument in &trait_ref.arguments {
-        match argument {
-            ast::GoalArgument::Lifetime { name, span } => lifetimes.push((name, *span)),
-            ast::GoalArgument::Type(ty) => types.push(ty),
-            _ => return Err(()),
-        }
-    }
-    push_u32(output, lifetimes.len().try_into().unwrap());
-    for (name, span) in lifetimes {
-        push_string(output, name);
-        push_u32(output, span.start.try_into().unwrap());
-        push_u32(output, span.end.try_into().unwrap());
-    }
-    push_u32(output, types.len().try_into().unwrap());
-    for ty in types {
-        encode_type(output, source, ty)?;
-    }
-    Ok(())
-}
-
 fn encode_type(output: &mut Vec<u8>, _source: &str, ty: &TypeSyntax) -> Result<(), ()> {
     match &ty.kind {
         TypeSyntaxKind::Path(segments) => {
@@ -214,38 +173,7 @@ fn encode_type(output: &mut Vec<u8>, _source: &str, ty: &TypeSyntax) -> Result<(
             push_u32(output, ty.span.start.try_into().unwrap());
             push_u32(output, ty.span.end.try_into().unwrap());
         }
-        TypeSyntaxKind::Projection {
-            subject,
-            trait_ref,
-            item,
-            arguments,
-            ..
-        } => {
-            output.push(7);
-            push_u32(output, ty.span.start.try_into().unwrap());
-            push_u32(output, ty.span.end.try_into().unwrap());
-            encode_type(output, _source, subject)?;
-            encode_trait_ref(output, _source, trait_ref)?;
-            push_string(output, &item.name);
-            push_u32(output, item.span.start.try_into().unwrap());
-            push_u32(output, item.span.end.try_into().unwrap());
-            push_u32(output, arguments.len().try_into().unwrap());
-            for argument in arguments {
-                match argument {
-                    AssociatedArgumentSyntax::Lifetime { name, .. } => {
-                        output.push(2);
-                        output.push(0);
-                        push_string(output, name);
-                    }
-                    AssociatedArgumentSyntax::Type(argument) => {
-                        output.push(1);
-                        output.push(1);
-                        push_span(output, argument.span);
-                        encode_type(output, _source, argument)?;
-                    }
-                }
-            }
-        }
+        TypeSyntaxKind::Projection { .. } => return Err(()),
     }
     Ok(())
 }
@@ -352,22 +280,6 @@ fn encode_where_contract(
         for binding in &goal.relation.bindings {
             push_string(output, &binding.name);
             push_span(output, binding.span);
-            push_u32(output, binding.arguments.len().try_into().unwrap());
-            for argument in &binding.arguments {
-                match argument {
-                    ast::AssociatedArgumentSyntax::Lifetime { name, .. } => {
-                        output.push(2);
-                        output.push(0);
-                        push_string(output, name);
-                    }
-                    ast::AssociatedArgumentSyntax::Type(ty) => {
-                        output.push(1);
-                        output.push(1);
-                        push_span(output, ty.span);
-                        encode_type(output, source, ty).unwrap();
-                    }
-                }
-            }
             match &binding.value {
                 ast::AssociatedBindingValue::Type(ty) => {
                     output.push(1);
@@ -1104,64 +1016,6 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
                     path.display()
                 );
             }
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
-fn self_host_unit_associated_types_and_gats() {
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let directory = tempfile::tempdir().unwrap();
-            let source = "trait Family<C> { type Member<'a, T>; } struct Box<S>{value:S} struct Triple<A,B,C>{first:A,second:B,third:C} impl<S,C> Family<C> for Box<S> { type Member<'scope, T> = Triple<S,C,T>; } read(value:<Box<i64> as Family<Text>>::Member<'static, u16>)->u16 where Box<i64>: Family<Text, Member<'static, u16> = Triple<i64,Text,u16>> { 0 } main()->{()}";
-            let input = directory.path().join("associated-types-and-gats.glorious");
-            fs::write(&input, source).unwrap();
-
-            let mut expected = Vec::new();
-            push_u32(&mut expected, 1);
-            encode_rust_headers(&mut expected, source);
-
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle("probe::headers::application"),
-                CompileOptions { optimization_level: OptimizationLevel::O2 },
-            )
-            .unwrap();
-            let entry = phases.artifact.entry_function.unwrap();
-            let vm_output = directory.path().join("vm.bin");
-            let vm = Vm::with_host(
-                verify(phases.artifact.clone()).unwrap(),
-                ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(vec![vm_output.clone().into_os_string(), input.clone().into_os_string()]),
-            )
-            .unwrap();
-            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            assert_wire_eq(&fs::read(&vm_output).unwrap(), &expected, "VM associated GAT headers diverged");
-
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-headers.ll");
-            let executable = directory.path().join("self-host-headers");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
-            let native_output = directory.path().join("native.bin");
-            let native = Command::new(&executable)
-                .arg(&native_output)
-                .arg(&input)
-                .output()
-                .unwrap();
-            assert!(native.status.success(), "native status: {:?}\n{}", native.status, String::from_utf8_lossy(&native.stderr));
-            assert_wire_eq(&fs::read(native_output).unwrap(), &expected, "native associated GAT headers diverged");
         })
         .unwrap()
         .join()
