@@ -162,6 +162,41 @@ write_name_token(
     }
 }
 
+write_label(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    label: super::super::frontend::bodies::LabelSyntax
+) -> Result<(), BodyError> {
+    try(write_name(
+        output,
+        source,
+        super::super::frontend::bodies::label_name(&label),
+        super::super::frontend::bodies::label_token(&label)
+    ), @write_label);
+    let token = super::super::frontend::lexer::token_at(
+        source,
+        super::super::frontend::bodies::label_token(&label)
+    );
+    handle token {
+        None => Result::Err(BodyError::MissingEncodedName(
+            super::super::frontend::bodies::label_token(&label),
+            super::super::frontend::bodies::label_token(&label)
+        )),
+        Option::Some(found) => {
+            let span = super::super::frontend::lexer::token_span(found);
+            ByteBuf::write_u32_le(
+                output,
+                u32_from_usize(super::super::frontend::lexer::span_start(&span) + 1)
+            );
+            ByteBuf::write_u32_le(
+                output,
+                u32_from_usize(super::super::frontend::lexer::span_end(&span) + 1)
+            );
+            Result::Ok(())
+        }
+    }
+}
+
 range_text(
     original: &String,
     source: &LexedSource,
@@ -596,9 +631,25 @@ write_expression_kind(
             ), @write_expression_kind);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arms)));
             write_handle_arms(output, original, source, value, arms)
-            }
+        },
+        BodyExpressionView::LabelReference(label) => {
+            ByteBuf::push(output, 16);
+            write_label(output, source, label)
+        },
+        BodyExpressionView::LabelDestination(label, ty, body) => {
+            ByteBuf::push(output, 17);
+            try(write_label(output, source, label), @write_expression_kind);
+            handle ty {
+                None => ByteBuf::push(output, 0),
+                Option::Some(found) => {
+                    ByteBuf::push(output, 1);
+                    try(write_body_type(output, original, source, value, found), @write_expression_kind)
+                }
+            };
+            write_expression(output, original, source, value, Id::to_u32(body))
         }
     }
+}
 
 function_count(
     declarations: &super::super::frontend::scanner::DeclarationIndex

@@ -117,6 +117,10 @@ pub struct EffectOperationSyntax {
 
 impl Use<[0, *]> for EffectOperationSyntax {}
 
+pub struct LabelSyntax { name: Id<String>, token: usize }
+
+impl Use<[0, *]> for LabelSyntax {}
+
 enum ExpressionName {
     Identifier(Id<String>, usize),
     TupleField(u32, usize)
@@ -141,7 +145,9 @@ enum ExprKind {
     Construction(ExpressionNameRange, ExprEdgeRange),
     Projection(ExprId, ExpressionNameRange),
     Closure(ClosureParameterRange, ExprId),
-    Handle(ExprId, HandleArmRange)
+    Handle(ExprId, HandleArmRange),
+    LabelReference(LabelSyntax),
+    LabelDestination(LabelSyntax, Option<BodyTypeId>, ExprId)
 }
 
 impl Use<[0, *]> for ExprKind {}
@@ -203,7 +209,9 @@ pub enum BodyExpressionView<'a> {
     Construction(ExpressionNameView, Slice<'a, ExprEdge>),
     Projection(ExprId, ExpressionNameView),
     Closure(Slice<'a, ClosureParameter>, ExprId),
-    Handle(ExprId, Slice<'a, HandleArm>)
+    Handle(ExprId, Slice<'a, HandleArm>),
+    LabelReference(LabelSyntax),
+    LabelDestination(LabelSyntax, Option<BodyTypeId>, ExprId)
 }
 
 impl<'a> Use<[0, *]> for BodyExpressionView<'a> {}
@@ -429,6 +437,8 @@ expression_child_set(
         ExprKind::Is(subject, pattern) => if(child == 0) {
             ExprKind::Is(replacement, pattern)
         } else { ExprKind::Is(subject, pattern) },
+        ExprKind::LabelDestination(label, ty, _) =>
+            ExprKind::LabelDestination(label, ty, replacement),
         other => { replacement; other }
     };
     expr_node_set_kind(
@@ -1148,6 +1158,9 @@ pub effect_operation_token(value: &EffectOperationSyntax) -> usize {
     value.operation_token
 }
 
+pub label_name(value: &LabelSyntax) -> Id<String> { value.name }
+pub label_token(value: &LabelSyntax) -> usize { value.token }
+
 node_name_range(value: &ExprNode) -> ExpressionNameRange {
     handle value.kind {
         ExprKind::Identifier(range) => range,
@@ -1362,7 +1375,9 @@ pub expression_child_count_at(
         BodyExpressionView::Projection(_, _) => 1,
         BodyExpressionView::Closure(_, _) => 1,
         BodyExpressionView::Handle(_, arms) =>
-            u32_from_usize(Slice::len(arms)) + 1
+            u32_from_usize(Slice::len(arms)) + 1,
+        BodyExpressionView::LabelReference(_) => 0,
+        BodyExpressionView::LabelDestination(_, _, _) => 1
     }
 }
 
@@ -1424,6 +1439,7 @@ pub expression_child_at(
                 Result::Ok(found) => found
             }))
         },
+        BodyExpressionView::LabelDestination(_, _, body) => Id::to_u32(body),
         _ => unreachable()
     }
 }
@@ -1544,7 +1560,10 @@ pub expression_view<'a>(
         ExprKind::Handle(subject, arms) => BodyExpressionView::Handle(
             subject,
             slice_handle_arms(value, arms)
-        )
+        ),
+        ExprKind::LabelReference(label) => BodyExpressionView::LabelReference(label),
+        ExprKind::LabelDestination(label, ty, body) =>
+            BodyExpressionView::LabelDestination(label, ty, body)
     }
 }
 
@@ -3253,6 +3272,65 @@ parse_perform(
     ))
 }
 
+parse_label_type(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser,
+    related: usize
+) -> Result<Option<BodyTypeId>, BodyError> {
+    if(value.tokens.position < value.tokens.limit
+        and { super::lexer::token_matches_at(
+            source, value.tokens.position, TokenPattern::LBrace
+        ) }) {
+        Result::Ok(None)
+    } else {
+        handle parse_body_type(source, value, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(parsed) => Result::Ok(Option::Some(parsed))
+        }
+    }
+}
+
+parse_label(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize
+) -> Result<ExprId, BodyError> {
+    let name = handle super::lexer::token_kind_at(source, start) {
+        TokenKind::Label(found) => found,
+        _ => unreachable()
+    };
+    let label = LabelSyntax { name: name, token: start };
+    if(start + 1 < value.tokens.limit
+        and { super::lexer::token_matches_at(source, start + 1, TokenPattern::Colon) }) {
+        value.tokens.position = start + 2;
+        let ty = try(parse_label_type(source, value, start), @parse_label);
+        let open = value.tokens.position;
+        if(open >= value.tokens.limit
+            or { not(super::lexer::token_matches_at(source, open, TokenPattern::LBrace)) }) {
+            @parse_label(Result::Err(BodyError::ExpectedBlockClose(open, start)))
+        } else { () };
+        value.tokens.position = open + 1;
+        let statements = Vec::new();
+        let body = try(parse_block_contents(
+            original, source, declarations, nominal, value, owner,
+            depth + 1, open, true, &mut statements
+        ), @parse_label);
+        Result::Ok(push_node(
+            value,
+            ExprKind::LabelDestination(label, ty, body),
+            token_range(start, node_tokens(&*value, body).end)
+        ))
+    } else {
+        value.tokens.position = start + 1;
+        Result::Ok(push_leaf(value, ExprKind::LabelReference(label), start, start + 1))
+    }
+}
+
 compact_closure_ahead(
     source: &super::lexer::LexedSource,
     value: &BodyParser,
@@ -3363,7 +3441,39 @@ parse_atom(
                 depth,
                 start
             ),
-            TokenKind::Ident(_) => parse_identifier(source, value, start),
+            TokenKind::Label(_) => parse_label(
+                original, source, declarations, nominal, value, owner, depth, start
+            ),
+            TokenKind::Ident(name) => {
+                let next = start + 1;
+                let next_is_label = if(next < value.tokens.limit) {
+                    super::lexer::token_kind_at(source, next) is TokenKind::Label(_)
+                } else { false };
+                let trailing_binder = if(next + 1 < value.tokens.limit) {
+                    if(super::lexer::token_kind_at(source, next) is TokenKind::Label(_)) {
+                        super::lexer::token_matches_at(
+                            source, next + 1, TokenPattern::Colon
+                        )
+                    } else { false }
+                } else { false };
+                let control = handle super::lexer::lexeme(source, name) {
+                    None => 0,
+                    Option::Some(text) => if(String::eq(text, &"label")
+                        or { String::eq(text, &"leave") }) {
+                        1
+                    } else if(String::eq(text, &"loop")
+                        or { String::eq(text, &"while")
+                        or { String::eq(text, &"until") } }) {
+                        2
+                    } else { 0 }
+                };
+                if((control == 1 and { next_is_label })
+                    or { control == 2 and { trailing_binder } }) {
+                    Result::Err(BodyError::ExpectedExpression(start, start))
+                } else {
+                    parse_identifier(source, value, start)
+                }
+            },
             TokenKind::Dollar => parse_callable_reference(source, value, start),
             TokenKind::Number(_) => {
                 value.tokens.position = start + 1;

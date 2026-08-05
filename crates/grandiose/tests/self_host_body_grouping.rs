@@ -403,6 +403,26 @@ fn encode_expression(
         return encode_effect_handle(output, program, source, computation, clauses);
     }
     match &expression.kind {
+        ExprKind::LabelReference(label) => {
+            output.push(16);
+            push_string(output, &label.name);
+            push_u32(output, label.span.start as u32);
+            push_u32(output, label.span.end as u32);
+        }
+        ExprKind::LabelDestination { label, ty, body } => {
+            output.push(17);
+            push_string(output, &label.name);
+            push_u32(output, label.span.start as u32);
+            push_u32(output, label.span.end as u32);
+            match ty {
+                None => output.push(0),
+                Some(ty) => {
+                    output.push(1);
+                    encode_effect_type(output, source, ty)?;
+                }
+            }
+            encode_expression(output, program, source, body)?;
+        }
         ExprKind::Variable(path) => {
             output.push(1);
             push_string(
@@ -1129,7 +1149,6 @@ fn self_host_body_whitespace_calls_match_bootstrap_ast() {
                 "sum-three(a: i64, b: i64, c: i64) -> i64 { a } \
                  main() -> { let callable = $sum-three; sum-three 1, 2, nested(3) }";
             fs::write(&input, source).unwrap();
-
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
                 CompileOptions {
@@ -1149,11 +1168,89 @@ fn self_host_body_whitespace_calls_match_bootstrap_ast() {
             )
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-
             let mut expected = Vec::new();
             push_u32(&mut expected, 1);
             encode_rust_grouping(&mut expected, source);
             assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_body_labels_match_bootstrap_ast() {
+    // The component probe is intentionally independent of the full compiler.
+    // Its source bundle stays frontend-only.
+    // Label serialization remains byte-for-byte compared with the bootstrap.
+    // The protocol also retains malformed-input status.
+    // Keep this assertion in the focused body-grouping integration target.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let sources = [
+                "main() { @outer: { () } }",
+                "main() { @done: i64 { @done(42) } }",
+                "main() { @outer: { @done(42); @outer(1) } }",
+                "main() { retry(@outer) }",
+                "main() { label @done: i64 { 1 } }",
+                "main() { leave@done(42) }",
+                "main() { loop @outer: { 1 } }",
+            ];
+            let mut inputs = Vec::new();
+            let mut expected = Vec::new();
+            push_u32(&mut expected, sources.len() as u32);
+            for (index, source) in sources.iter().enumerate() {
+                let path = directory.path().join(format!("label-{index}.glorious"));
+                fs::write(&path, source).unwrap();
+                inputs.push(path);
+                encode_rust_grouping(&mut expected, source);
+            }
+            let output_path = directory.path().join("vm.bin");
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(
+                    std::iter::once(output_path.clone().into_os_string())
+                        .chain(inputs.iter().cloned().map(|path| path.into_os_string()))
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&output_path).unwrap(), expected);
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("labels.ll");
+            let executable = directory.path().join("labels");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let native_output = directory.path().join("native.bin");
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .args(&inputs)
+                .output()
+                .unwrap();
+            assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+            assert_eq!(fs::read(native_output).unwrap(), expected);
         })
         .unwrap()
         .join()
