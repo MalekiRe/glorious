@@ -1480,6 +1480,24 @@ push_type(
     }
 }
 
+copy_type_kind(
+    types: &Arena<TypeTag, TypeNode>,
+    id: TypeId
+) -> HeaderTypeKind {
+    let node = Arena::index(types, id);
+    handle node.kind {
+        HeaderTypeKind::Path(names) => HeaderTypeKind::Path(names),
+        HeaderTypeKind::SharedReference(lifetime, referent) =>
+            HeaderTypeKind::SharedReference(lifetime, referent),
+        HeaderTypeKind::UniqueReference(lifetime, referent) =>
+            HeaderTypeKind::UniqueReference(lifetime, referent),
+        HeaderTypeKind::Tuple(elements) => HeaderTypeKind::Tuple(elements),
+        HeaderTypeKind::Application(constructor, lifetimes, arguments) =>
+            HeaderTypeKind::Application(constructor, lifetimes, arguments),
+        HeaderTypeKind::Never => HeaderTypeKind::Never
+    }
+}
+
 append_edges(
     output: &mut Vec<TypeEdge>,
     values: &Vec<TypeId>,
@@ -1734,7 +1752,8 @@ parse_tuple(
             finish_tuple(value, start, related, elements)
         } else {
             try(expect_right_parenthesis(value, related), @parse_tuple);
-            Result::Ok(first)
+            let kind = copy_type_kind(&value.output.types, first);
+            push_type(value, kind, start, related)
         }
     }
 }
