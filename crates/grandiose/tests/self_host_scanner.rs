@@ -669,6 +669,50 @@ fn self_hosted_scanner_matches_rust_in_vm_and_native_execution() {
 }
 
 #[test]
+fn self_host_scanner_module_items_match_bootstrap() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("module.glorious");
+            let source = fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/module_frontend_conformance.glorious"),
+            )
+            .unwrap();
+            fs::write(&input, &source).unwrap();
+
+            let output = directory.path().join("scan.bin");
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_scan(&mut expected, &source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_scanner_recovery_matches_bootstrap() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
