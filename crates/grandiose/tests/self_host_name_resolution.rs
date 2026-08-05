@@ -1061,3 +1061,60 @@ fn self_host_unit_missing_or_orphan_external_modules_are_errors() {
     assert_eq!(orphan_diagnostics[0].0, 2);
     assert_eq!(orphan_diagnostics[0].1, 0);
 }
+
+#[test]
+fn self_host_unit_resolved_occurrence_keys_have_exact_path_spans() {
+    let source = r#"
+        mod api { pub answer() -> i64 { 42 } }
+        use crate::api::answer as chosen;
+        probe() -> i64 { chosen() }
+        main() -> { () }
+        "#;
+    let bootstrap_bundle = raw_source_bundle(source);
+    let bootstrap_program = grandiose::modules::parse_bundle(&bootstrap_bundle).unwrap();
+    let bootstrap_resolved =
+        grandiose::modules::resolve_program(&bootstrap_bundle, bootstrap_program).unwrap();
+    let bootstrap_base = bootstrap_bundle.segments()[1].global_range().start;
+    let bootstrap_spans = bootstrap_resolved
+        .resolution
+        .resolved_paths
+        .keys()
+        .map(|(start, end)| (start - bootstrap_base, end - bootstrap_base))
+        .collect::<BTreeSet<_>>();
+    let bootstrap_occurrences = bootstrap_spans
+        .iter()
+        .map(|(start, end)| &source[*start..*end])
+        .collect::<Vec<_>>();
+    assert!(bootstrap_occurrences.contains(&"chosen"), "{bootstrap_occurrences:#?}");
+    assert!(bootstrap_occurrences.iter().all(|occurrence| {
+        !occurrence.contains('(') && !occurrence.contains('{') && !occurrence.contains('<')
+    }), "{bootstrap_occurrences:#?}");
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("occurrence-spans.glorious");
+    let output = directory.path().join("occurrence-spans.bin");
+    fs::write(&input, source).unwrap();
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact.clone()).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+
+    let encoded = fs::read(output).unwrap();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_resolution(&mut expected, source);
+    assert_eq!(encoded, expected);
+    assert_eq!(bootstrap_spans.len(), 1);
+}
