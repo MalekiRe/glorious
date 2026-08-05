@@ -359,7 +359,7 @@ fn assert_self_host_matches_bootstrap(sources: Vec<&'static str>) {
 }
 
 #[test]
-fn self_host_lossless_lexer_comments_and_multibyte_spans_match_bootstrap() {
+fn self_host_unit_lossless_stream_is_gap_free_round_trip() {
     let sources = fixtures();
     let mut expected = Vec::new();
     push_u32(&mut expected, sources.len().try_into().unwrap());
