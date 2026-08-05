@@ -371,7 +371,16 @@ fn run_lexer_oracle(directory: &Path, corpus: &[PathBuf]) {
 }
 
 #[test]
+fn self_host_lexer_string_escapes_match_bootstrap() {
+    run_self_host_lexer_oracle();
+}
+
+#[test]
 fn self_hosted_lexer_matches_rust_in_vm_and_native_execution() {
+    run_self_host_lexer_oracle();
+}
+
+fn run_self_host_lexer_oracle() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
