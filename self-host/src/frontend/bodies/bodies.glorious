@@ -1996,6 +1996,21 @@ node_is_call(value: &BodyParser, id: ExprId) -> Bool {
     Arena::index(&value.nodes, id).kind is ExprKind::Call(_, _)
 }
 
+node_is_library_control(
+    source: &super::lexer::LexedSource,
+    value: &BodyParser,
+    id: ExprId
+) -> Bool {
+    node_is_identifier(value, id)
+        and { node_name_count(value, id) == 1 }
+        and {
+            let token = node_tokens(value, id).start;
+            token_is_contextual_ident(source, token, &"loop")
+                or { token_is_contextual_ident(source, token, &"while")
+                or { token_is_contextual_ident(source, token, &"until") } }
+        }
+}
+
 call_callee(value: &BodyParser, id: ExprId) -> ExprId {
     handle Arena::index(&value.nodes, id).kind {
         ExprKind::Call(callee, _) => callee,
@@ -5009,6 +5024,39 @@ parse_postfix(
                     value.tokens.limit
                 )) {
                     Result::Ok(callee)
+                } else if(node_is_library_control(source, &*value, callee)) {
+                    let block = try(parse_contextual_block(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth + 1
+                    ), @parse_postfix);
+                    let start = node_tokens(&*value, callee).start;
+                    let end = value.tokens.position;
+                    let arguments = Vec::new();
+                    Vec::push(&mut arguments, block);
+                    let call = push_call_or_perform(
+                        declarations,
+                        value,
+                        owner,
+                        callee,
+                        &arguments,
+                        start,
+                        end
+                    );
+                    parse_postfix(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth + 1,
+                        call
+                    )
                 } else if(node_is_call(&*value, callee)) {
                     let block = try(parse_contextual_block(
                         original,

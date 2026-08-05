@@ -1138,6 +1138,49 @@ fn self_host_body_contextual_blocks_match_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_body_library_loop_trailing_blocks_match_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("library-loop-trailing-blocks.glorious");
+            let output = directory.path().join("library-loop-trailing-blocks.bin");
+            let source = "probe_while() { while { true } }\nprobe_loop() { loop { () } { () } }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            encode_rust_grouping(&mut expected, source);
+            assert_eq!(expected.first().copied(), Some(0));
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact.clone()).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.clone().into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            let mut expected_one = Vec::new();
+            push_u32(&mut expected_one, 1);
+            expected_one.extend(&expected);
+            assert_eq!(fs::read(output).unwrap(), expected_one);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
