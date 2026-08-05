@@ -75,6 +75,13 @@ fn push_bytes(output: &mut Vec<u8>, value: &[u8]) {
     output.extend(value);
 }
 
+fn read_u32(input: &[u8], cursor: &mut usize) -> u32 {
+    let end = *cursor + 4;
+    let value = u32::from_le_bytes(input[*cursor..end].try_into().unwrap());
+    *cursor = end;
+    value
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShellKind {
     Module = 1,

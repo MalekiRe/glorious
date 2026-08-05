@@ -599,6 +599,8 @@ find_module_style(
             Result::Ok(DeclarationStyle::Semicolon)
         } else if(token_is_brace_open(value, index)) {
             Result::Ok(DeclarationStyle::Braced)
+        } else if(index > start and { recovery_declaration_start(value, index) }) {
+            Result::Err(ScanError::IncompleteDeclaration(index, start))
         } else if(token_is_close(value, index)) {
             Result::Err(ScanError::UnexpectedClosingDelimiter(
                 index,
@@ -622,12 +624,55 @@ scan_semicolon_shell(
     classification: Classification,
     parent: Option<ShellId>
 ) -> Result<ScanStep, ScanError> {
-    let Classification { kind, name, style: _ } = classification;
     let end = try(
         find_semicolon(value, delimiters, cursor, limit, start),
         @scan_semicolon_shell
     );
+    if(classification.kind is DeclarationKind::Import) {
+        handle malformed_import(value, cursor, end) {
+            Option::Some(token) => Result::Err(
+                ScanError::IncompleteDeclaration(token, start)
+            ),
+            None => scan_semicolon_shell_complete(
+                value,
+                delimiters,
+                start,
+                cursor,
+                limit,
+                public,
+                classification,
+                parent,
+                end
+            )
+        }
+    } else {
+        scan_semicolon_shell_complete(
+            value,
+            delimiters,
+            start,
+            cursor,
+            limit,
+            public,
+            classification,
+            parent,
+            end
+        )
+    }
+}
+
+scan_semicolon_shell_complete(
+    value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
+    start: usize,
+    cursor: usize,
+    limit: usize,
+    public: Bool,
+    classification: Classification,
+    parent: Option<ShellId>,
+    end: usize
+) -> Result<ScanStep, ScanError> {
     let whole = super::syntax::token_span(start, end + 1);
+    let Classification { kind, name, style: _ } = classification;
     if(kind is DeclarationKind::Global) {
         handle find_top_level_eq(value, delimiters, cursor, end) {
             None => Result::Err(ScanError::IncompleteDeclaration(end, start)),
@@ -659,6 +704,24 @@ scan_semicolon_shell(
                 parent: parent
             }
         })
+    }
+}
+
+malformed_import(
+    value: &super::lexer::LexedSource,
+    index: usize,
+    end: usize
+) -> Option<usize> {
+    if(index >= end) {
+        None
+    } else if(ident_is(value, index, &"as")) {
+        if(token_ident(value, index + 1) is Option::Some(_)) {
+            malformed_import(value, index + 1, end)
+        } else {
+            Option::Some(index)
+        }
+    } else {
+        malformed_import(value, index + 1, end)
     }
 }
 

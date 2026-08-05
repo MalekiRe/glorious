@@ -137,11 +137,7 @@ fn pub_is_contextual_and_applies_to_every_supported_item_header() {
 
 #[test]
 fn malformed_module_and_use_items_recover_to_following_declarations() {
-    let source = r#"
-        mod missing
-        use crate::{Thing as, *};
-        main() -> { () }
-    "#;
+    let source = include_str!("fixtures/malformed-modules-and-uses.glorious");
     let tokens = lexer::lex(source).unwrap();
     let (program, diagnostics) = parser::parse_recovering(tokens);
     assert!(diagnostics.len() >= 2, "{diagnostics:#?}");
