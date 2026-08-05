@@ -359,6 +359,35 @@ write_block_statements<'a>(
     })
 }
 
+write_expression_span(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    tokens: BodyTokenRange
+) {
+    let first = handle super::super::frontend::lexer::token_at(
+        source,
+        super::super::frontend::syntax::token_start(&tokens)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    let last = handle super::super::frontend::lexer::token_at(
+        source,
+        super::super::frontend::syntax::token_end(&tokens) - 1
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::lexer::span_start(&first) + 1)
+    );
+    ByteBuf::write_u32_le(
+        output,
+        u32_from_usize(super::super::frontend::lexer::span_end(&last) + 1)
+    )
+}
+
 write_expression(
     output: &mut ByteBuf,
     original: &String,
@@ -467,6 +496,12 @@ write_expression(
         },
         BodyExpressionView::Block(statements) => {
             ByteBuf::push(output, 8);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(statements)));
+            write_block_statements(output, original, source, value, statements)
+        },
+        BodyExpressionView::ContextBlock(statements) => {
+            ByteBuf::push(output, 16);
+            write_expression_span(output, source, super::super::frontend::bodies::expression_tokens(value, expression));
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(statements)));
             write_block_statements(output, original, source, value, statements)
         },

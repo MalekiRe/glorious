@@ -136,6 +136,7 @@ enum ExprKind {
     Call(ExprId, ExprEdgeRange),
     Perform(EffectOperationSyntax, ExprEdgeRange),
     Block(ExprEdgeRange),
+    ContextBlock(ExprEdgeRange),
     Tuple(ExprEdgeRange),
     Construction(ExpressionNameRange, ExprEdgeRange),
     Projection(ExprId, ExpressionNameRange),
@@ -197,6 +198,7 @@ pub enum BodyExpressionView<'a> {
     Call(ExprId, Slice<'a, ExprEdge>),
     Perform(EffectOperationSyntax, Slice<'a, ExprEdge>),
     Block(Slice<'a, ExprEdge>),
+    ContextBlock(Slice<'a, ExprEdge>),
     Tuple(Slice<'a, ExprEdge>),
     Construction(ExpressionNameView, Slice<'a, ExprEdge>),
     Projection(ExprId, ExpressionNameView),
@@ -1350,6 +1352,8 @@ pub expression_child_count_at(
             u32_from_usize(Slice::len(arguments)),
         BodyExpressionView::Block(children) =>
             u32_from_usize(Slice::len(children)),
+        BodyExpressionView::ContextBlock(children) =>
+            u32_from_usize(Slice::len(children)),
         BodyExpressionView::Tuple(children) =>
             u32_from_usize(Slice::len(children)),
         BodyExpressionView::Construction(_, children) =>
@@ -1387,6 +1391,11 @@ pub expression_child_at(
                 usize_from_u32(child)
             ))),
         BodyExpressionView::Block(children) =>
+            Id::to_u32(expression_edge_value(edge_in_slice(
+                children,
+                usize_from_u32(child)
+            ))),
+        BodyExpressionView::ContextBlock(children) =>
             Id::to_u32(expression_edge_value(edge_in_slice(
                 children,
                 usize_from_u32(child)
@@ -1482,6 +1491,10 @@ pub pattern_view(value: &ParsedBody, pattern: PatternId) -> PatternView {
     }
 }
 
+pub expression_tokens(value: &ParsedBody, expression: u32) -> BodyTokenRange {
+    arena_node_at_raw(&value.nodes, expression).tokens
+}
+
 pub expression_view<'a>(
     value: &'a ParsedBody,
     expression: u32
@@ -1511,6 +1524,8 @@ pub expression_view<'a>(
         ),
         ExprKind::Block(children) =>
             BodyExpressionView::Block(expression_edges(value, children)),
+        ExprKind::ContextBlock(children) =>
+            BodyExpressionView::ContextBlock(expression_edges(value, children)),
         ExprKind::Tuple(children) =>
             BodyExpressionView::Tuple(expression_edges(value, children)),
         ExprKind::Construction(_, children) => BodyExpressionView::Construction(
@@ -1649,6 +1664,34 @@ node_tokens(value: &BodyParser, id: ExprId) -> BodyTokenRange {
 
 node_is_identifier(value: &BodyParser, id: ExprId) -> Bool {
     Arena::index(&value.nodes, id).kind is ExprKind::Identifier(_)
+}
+
+node_is_call(value: &BodyParser, id: ExprId) -> Bool {
+    Arena::index(&value.nodes, id).kind is ExprKind::Call(_, _)
+}
+
+call_callee(value: &BodyParser, id: ExprId) -> ExprId {
+    handle Arena::index(&value.nodes, id).kind {
+        ExprKind::Call(callee, _) => callee,
+        _ => unreachable()
+    }
+}
+
+call_arguments(value: &BodyParser, id: ExprId) -> Vec<ExprId> {
+    handle Arena::index(&value.nodes, id).kind {
+        ExprKind::Call(_, range) => {
+            let arguments = Vec::new();
+            for_range(Range::new(0, usize_from_u32(range.count)), { index => {
+                let edge = Vec::index(
+                    &value.edges,
+                    usize_from_u32(range.start) + index
+                );
+                Vec::push(&mut arguments, edge.value)
+            }});
+            arguments
+        },
+        _ => unreachable()
+    }
 }
 
 push_node(
@@ -2108,6 +2151,55 @@ push_block(
         ExprKind::Block(edges),
         token_range(start, end)
     )
+}
+
+push_context_block(
+    value: &mut BodyParser,
+    statements: &Vec<PendingStatement>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let edge_start = super::syntax::range_mark(&value.edges);
+    push_statement_edges(value, statements, 0);
+    let edge_end = Vec::len(&value.edges);
+    let edges = edge_range(edge_start, edge_end);
+    push_node(
+        value,
+        ExprKind::ContextBlock(edges),
+        token_range(start, end)
+    )
+}
+
+parse_contextual_block(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16
+) -> Result<ExprId, BodyError> {
+    let start = value.tokens.position;
+    value.tokens.position = start + 1;
+    let statements = Vec::new();
+    try(parse_block_contents(
+        original,
+        source,
+        declarations,
+        nominal,
+        value,
+        owner,
+        depth + 1,
+        start,
+        true,
+        &mut statements
+    ), @parse_contextual_block);
+    Result::Ok(push_context_block(
+        value,
+        &statements,
+        start,
+        value.tokens.position
+    ))
 }
 
 shell_owner(
@@ -3692,6 +3784,29 @@ handler_clause_brace(
     } else { false }
 }
 
+append_call_argument(
+    declarations: &super::scanner::DeclarationIndex,
+    value: &mut BodyParser,
+    module: Option<ShellId>,
+    call: ExprId,
+    argument: ExprId,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let callee = call_callee(&*value, call);
+    let arguments = call_arguments(&*value, call);
+    Vec::push(&mut arguments, argument);
+    push_call_or_perform(
+        declarations,
+        value,
+        module,
+        callee,
+        &arguments,
+        start,
+        end
+    )
+}
+
 parse_postfix(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3755,6 +3870,37 @@ parse_postfix(
                     0
                 )) {
                     Result::Ok(callee)
+                } else if(node_is_call(&*value, callee)) {
+                    let block = try(parse_contextual_block(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth + 1
+                    ), @parse_postfix);
+                    let start = node_tokens(&*value, callee).start;
+                    let end = value.tokens.position;
+                    let found = append_call_argument(
+                        declarations,
+                        value,
+                        owner,
+                        callee,
+                        block,
+                        start,
+                        end
+                    );
+                    parse_postfix(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth + 1,
+                        found
+                    )
                 } else {
                     let start = node_tokens(&*value, callee).start;
                     if(node_is_identifier(&*value, callee)) {
@@ -3861,6 +4007,38 @@ infix_separated(
         }
 }
 
+parse_operand(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16
+) -> Result<ExprId, BodyError> {
+    if(at_token(&*value, source, TokenPattern::LBrace)) {
+        parse_contextual_block(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            depth
+        )
+    } else {
+        parse_primary(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            depth
+        )
+    }
+}
+
 parse_chain(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3893,7 +4071,7 @@ parse_chain(
                     if(infix_separated(source, &*value, left, operator)) {
                         value.tokens.position = operator.end;
                             let operand = try(
-                                parse_primary(
+                                parse_operand(
                                     original,
                                     source,
                                     declarations,

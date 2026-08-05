@@ -488,6 +488,15 @@ fn encode_expression(
                 encode_statement(output, program, source, statement)?;
             }
         }
+        ExprKind::ContextBlock(statements) => {
+            output.push(16);
+            push_u32(output, expression.span.start.try_into().map_err(|_| ())?);
+            push_u32(output, expression.span.end.try_into().map_err(|_| ())?);
+            push_u32(output, statements.len().try_into().map_err(|_| ())?);
+            for statement in statements.iter() {
+                encode_statement(output, program, source, statement)?;
+            }
+        }
         ExprKind::Closure { params, body } => {
             output.push(15);
             push_u32(output, params.len().try_into().map_err(|_| ())?);
@@ -613,6 +622,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_statements() { prepare(); work(1); done }",
         "probe_nested_block() { let x = { let y = 1; y }; x }",
         "probe_block_argument() { consume({ let x = 1; x }) }",
+        "probe_contextual_trailing() { select() { 1 } }",
+        "infixr 1 else; probe_contextual_operand() { compute() else { 0 } }",
+        "probe_eager_block() { let x = { 1 }; x }",
         "probe_single_tuple() { (value,) }",
         "probe_tuple() { (first, second, third) }",
         "probe_struct() { Pair { right: second, left: first } }",
@@ -785,6 +797,80 @@ fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
                 fs::read(directory.path().join("native.bin")).unwrap(),
                 expected
             );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_body_contextual_blocks_match_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("contextual-blocks.glorious");
+            let vm_output = directory.path().join("contextual-blocks-vm.bin");
+            let native_output = directory.path().join("contextual-blocks-native.bin");
+            let source = "probe_trailing() { select() { 1 } }\ninfixr 1 else; probe_operand() { compute() else { 0 } }\nprobe_eager() { let x = { 1 }; x }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            encode_rust_grouping(&mut expected, source);
+            assert_eq!(expected.first().copied(), Some(0));
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact.clone()).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    vm_output.clone().into_os_string(),
+                    input.clone().into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            let mut expected_one = Vec::new();
+            push_u32(&mut expected_one, 1);
+            expected_one.extend(&expected);
+            assert_eq!(fs::read(&vm_output).unwrap(), expected_one);
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("contextual-blocks.ll");
+            let executable = directory.path().join("contextual-blocks");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "{}",
+                String::from_utf8_lossy(&clang.stderr)
+            );
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(
+                native.status.success(),
+                "{}",
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_eq!(fs::read(&native_output).unwrap(), expected_one);
         })
         .unwrap()
         .join()
