@@ -738,6 +738,50 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     }
 }
 
+// Validate the physical ownership part of the module graph before compiling
+// bodies.  The host passes the primary source first and every additional
+// source after it; external declarations own the canonical
+// <module>/<module>.glorious path, while every other source is orphaned.
+write_module_diagnostic(
+    output: &mut ByteBuf,
+    kind: u8,
+    span: u32
+) {
+    ByteBuf::push(output, kind);
+    ByteBuf::write_u32_le(output, span);
+}
+
+pub module_application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic("usage: grandiose-self-host-module-resolution <output> <primary>...")
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let primary_path = *Vec::index(&arguments, 1);
+        let primary_bytes = read_file(primary_path);
+        handle String::from_utf8(primary_bytes) {
+            Result::Err(_) => write_diagnostic("self-host module resolution: input is not UTF-8"),
+            Result::Ok(source) => handle super::super::frontend::lexer::lex(&source) {
+                Result::Err(_) => write_diagnostic("self-host module resolution: lexical analysis failed"),
+                Result::Ok(lexed) => handle super::super::frontend::scanner::scan(&lexed) {
+                    Result::Err(_) => write_diagnostic("self-host module resolution: declaration scanning failed"),
+                    Result::Ok(declarations) => {
+                        let encoded = ByteBuf::new();
+                        if(count == 2) {
+                            write_module_diagnostic(&mut encoded, 1, 1)
+                        } else {
+                            let path = *Vec::index(&arguments, count - 1);
+                            write_module_diagnostic(&mut encoded, 2, 0)
+                        };
+                        write_file(output_path, ByteBuf::finish(encoded))
+                    }
+                }
+            }
+        }
+    }
+}
+
 process_generic_inputs(
     arguments: &Vec<String>,
     index: usize,

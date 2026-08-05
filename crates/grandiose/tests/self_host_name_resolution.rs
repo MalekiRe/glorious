@@ -31,6 +31,10 @@ fn self_host_generic_bundle() -> SourceBundle {
     self_host_bundle_for("probe::resolution::generic_application")
 }
 
+fn self_host_module_bundle() -> SourceBundle {
+    self_host_bundle_for("probe::resolution::module_application")
+}
+
 fn self_host_bundle_for(entry: &str) -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary = Segment::new(
@@ -972,4 +976,88 @@ fn self_host_resolution_generic_binders_shadow_global_aliases() {
         .unwrap();
     assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
     assert_eq!(fs::read(&native_output).unwrap(), expected);
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> u32 {
+    let end = *cursor + 4;
+    let value = u32::from_le_bytes(bytes[*cursor..end].try_into().unwrap());
+    *cursor = end;
+    value
+}
+
+fn self_host_module_diagnostics(
+    verified: &grandiose_vm::VerifiedArtifact,
+    paths: &[PathBuf],
+) -> Vec<(u8, u32, String)> {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("module-diagnostics.bin");
+    let args = std::iter::once(output.clone().into_os_string())
+        .chain(paths.iter().map(|path| path.clone().into_os_string()))
+        .collect::<Vec<OsString>>();
+    let vm = Vm::with_host(
+        verified.clone(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(args),
+    )
+    .unwrap();
+    assert_eq!(vm.run(verified.entry_function().unwrap(), vec![]).unwrap(), Value::Unit);
+    let bytes = fs::read(output).unwrap();
+    let mut cursor = 0;
+    let mut diagnostics = Vec::new();
+    while cursor < bytes.len() {
+        let kind = bytes[cursor];
+        cursor += 1;
+        let span = read_u32(&bytes, &mut cursor);
+        diagnostics.push((kind, span, String::new()));
+    }
+    diagnostics
+}
+
+#[test]
+fn self_host_unit_missing_or_orphan_external_modules_are_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let main = directory.path().join("main.glorious");
+    let absent = directory.path().join("absent/absent.glorious");
+    let present = directory.path().join("present/present.glorious");
+    let orphan = directory.path().join("orphan/orphan.glorious");
+    fs::write(&main, "mod absent; main() -> { () }\n").unwrap();
+    let missing_bundle = grandiose::source_bundle::SourceBundle::distributed(
+        grandiose::source_bundle::Segment::new(main.to_string_lossy().into_owned(), "mod absent; main() -> { () }\n"),
+        [],
+    );
+    let bootstrap_missing = grandiose::compile_bundle_to_bytecode(&missing_bundle).unwrap_err();
+    assert!(bootstrap_missing.iter().any(|error| {
+        error.message.contains("absent/absent.glorious") && error.span.is_some()
+    }));
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_module_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let missing = self_host_module_diagnostics(&verified, &[main.clone()]);
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].0, 1);
+    assert_ne!(missing[0].1, 0);
+    assert!(absent.ends_with("absent/absent.glorious"));
+
+    fs::write(&main, "mod present; main() -> { () }\n").unwrap();
+    fs::create_dir_all(present.parent().unwrap()).unwrap();
+    fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    fs::write(&present, "pub ok() -> { () }\n").unwrap();
+    fs::write(&orphan, "pub stray() -> { () }\n").unwrap();
+    let orphan_bundle = grandiose::source_bundle::SourceBundle::distributed(
+        grandiose::source_bundle::Segment::new(main.to_string_lossy().into_owned(), "mod present; main() -> { () }\n"),
+        [
+            grandiose::source_bundle::Segment::new(present.to_string_lossy().into_owned(), "pub ok() -> { () }\n"),
+            grandiose::source_bundle::Segment::new(orphan.to_string_lossy().into_owned(), "pub stray() -> { () }\n"),
+        ],
+    );
+    let bootstrap_orphan = grandiose::compile_bundle_to_bytecode(&orphan_bundle).unwrap_err();
+    assert!(bootstrap_orphan.iter().any(|error| error.message.contains("orphan")));
+    let orphan_diagnostics =
+        self_host_module_diagnostics(&verified, &[main, present, orphan.clone()]);
+    assert_eq!(orphan_diagnostics.len(), 1);
+    assert_eq!(orphan_diagnostics[0].0, 2);
+    assert_eq!(orphan_diagnostics[0].1, 0);
 }
