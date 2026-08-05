@@ -177,6 +177,11 @@ impl Use<[0, *]> for ExpressionName {}
 enum ExprKind {
     Identifier(ExpressionNameRange),
     Number,
+    Float,
+    Text(Id<String>),
+    Character(char),
+    Byte(u8),
+    ByteString(Bytes),
     Is(ExprId, PatternId),
     Unit,
     Grouping(ExprId),
@@ -220,6 +225,11 @@ pub struct ParsedBody {
 pub enum BodyExpressionView<'a> {
     Identifier(BodyTokenRange),
     Number(BodyTokenRange),
+    Float(BodyTokenRange),
+    Text(Id<String>, usize),
+    Character(char, usize),
+    Byte(u8, usize),
+    ByteString(Bytes, BodyTokenRange),
     Is(ExprId, PatternId),
     Unit(BodyTokenRange),
     Grouping(ExprId),
@@ -1506,6 +1516,11 @@ pub expression_child_count_at(
     handle expression_view(value, expression) {
         BodyExpressionView::Identifier(_) => 0,
         BodyExpressionView::Number(_) => 0,
+        BodyExpressionView::Float(_) => 0,
+        BodyExpressionView::Text(_, _) => 0,
+        BodyExpressionView::Character(_, _) => 0,
+        BodyExpressionView::Byte(_, _) => 0,
+        BodyExpressionView::ByteString(_, _) => 0,
         BodyExpressionView::Is(_, _) => 1,
         BodyExpressionView::Unit(_) => 0,
         BodyExpressionView::Grouping(_) => 1,
@@ -1653,6 +1668,11 @@ pub expression_view<'a>(
     handle node.kind {
         ExprKind::Identifier(_) => BodyExpressionView::Identifier(node.tokens),
         ExprKind::Number => BodyExpressionView::Number(node.tokens),
+        ExprKind::Float => BodyExpressionView::Float(node.tokens),
+        ExprKind::Text(name) => BodyExpressionView::Text(name, node.tokens.start),
+        ExprKind::Character(found) => BodyExpressionView::Character(found, node.tokens.start),
+        ExprKind::Byte(found) => BodyExpressionView::Byte(found, node.tokens.start),
+        ExprKind::ByteString(bytes) => BodyExpressionView::ByteString(bytes, node.tokens),
         ExprKind::Is(subject, pattern) => BodyExpressionView::Is(
             subject,
             pattern
@@ -3873,14 +3893,32 @@ parse_atom(
                 }
             },
             TokenKind::Dollar => parse_callable_reference(source, value, start),
-            TokenKind::Number(_) => {
+            TokenKind::Number(number) => {
                 value.tokens.position = start + 1;
                 Result::Ok(push_leaf(
                     value,
-                    ExprKind::Number,
+                    if(super::lexer::number_is_float(&number)) {
+                        ExprKind::Float
+                    } else { ExprKind::Number },
                     start,
                     value.tokens.position
                 ))
+            },
+            TokenKind::String(name) => {
+                value.tokens.position = start + 1;
+                Result::Ok(push_leaf(value, ExprKind::Text(name), start, value.tokens.position))
+            },
+            TokenKind::Char(found) => {
+                value.tokens.position = start + 1;
+                Result::Ok(push_leaf(value, ExprKind::Character(found), start, value.tokens.position))
+            },
+            TokenKind::Byte(found) => {
+                value.tokens.position = start + 1;
+                Result::Ok(push_leaf(value, ExprKind::Byte(found), start, value.tokens.position))
+            },
+            TokenKind::ByteString(bytes) => {
+                value.tokens.position = start + 1;
+                Result::Ok(push_leaf(value, ExprKind::ByteString(bytes), start, value.tokens.position))
             },
             TokenKind::LParen => if(typed_closure_ahead(source, start, value.tokens.limit)) {
                 parse_typed_closure(

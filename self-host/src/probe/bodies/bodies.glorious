@@ -880,6 +880,32 @@ write_expression_kind(
                 }
             }
         },
+        BodyExpressionView::Float(tokens) => {
+            ByteBuf::push(output, 4);
+            write_string(output, &range_text(original, source, &tokens));
+            Result::Ok(())
+        },
+        BodyExpressionView::Text(name, token) => {
+            ByteBuf::push(output, 19);
+            write_name(output, source, name, token);
+            Result::Ok(())
+        },
+        BodyExpressionView::Character(found, _) => {
+            ByteBuf::push(output, 20);
+            ByteBuf::write_u32_le(output, char_to_u32(found));
+            Result::Ok(())
+        },
+        BodyExpressionView::Byte(found, _) => {
+            ByteBuf::push(output, 21);
+            ByteBuf::push(output, found);
+            Result::Ok(())
+        },
+        BodyExpressionView::ByteString(bytes, _) => {
+            ByteBuf::push(output, 22);
+            ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
+            ByteBuf::append_bytes(output, &bytes);
+            Result::Ok(())
+        },
         BodyExpressionView::Unit(_) => {
             ByteBuf::push(output, 3);
             Result::Ok(())

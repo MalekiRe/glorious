@@ -10113,6 +10113,11 @@ elaborate_expression(
             expression,
             expected
         ),
+        super::bodies::BodyExpressionView::Float(_) => unreachable(),
+        super::bodies::BodyExpressionView::Text(_, _) => unreachable(),
+        super::bodies::BodyExpressionView::Character(_, _) => unreachable(),
+        super::bodies::BodyExpressionView::Byte(_, _) => unreachable(),
+        super::bodies::BodyExpressionView::ByteString(_, _) => unreachable(),
         super::bodies::BodyExpressionView::Unit(_) => {
             let token = super::bodies::expression_token_start_at(
                 body,

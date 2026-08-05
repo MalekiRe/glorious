@@ -1938,6 +1938,11 @@ resolve_expression(
             module
         ),
         super::bodies::BodyExpressionView::Number(_) => Result::Ok(()),
+        super::bodies::BodyExpressionView::Float(_) => Result::Ok(()),
+        super::bodies::BodyExpressionView::Text(_, _) => Result::Ok(()),
+        super::bodies::BodyExpressionView::Character(_, _) => Result::Ok(()),
+        super::bodies::BodyExpressionView::Byte(_, _) => Result::Ok(()),
+        super::bodies::BodyExpressionView::ByteString(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::Unit(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Grouping(child) =>
             resolve_expression(

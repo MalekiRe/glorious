@@ -460,6 +460,27 @@ fn encode_expression(
             output.push(2);
             push_u64(output, value);
         }
+        ExprKind::Float(_) => {
+            output.push(4);
+            push_string(output, &source[expression.span.range()]);
+        }
+        ExprKind::String(value) => {
+            output.push(19);
+            push_string(output, value);
+        }
+        ExprKind::Char(value) => {
+            output.push(20);
+            push_u32(output, *value as u32);
+        }
+        ExprKind::Byte(value) => {
+            output.push(21);
+            output.push(*value);
+        }
+        ExprKind::ByteString(value) => {
+            output.push(22);
+            push_u32(output, value.len().try_into().map_err(|_| ())?);
+            output.extend(value.iter().copied());
+        }
         ExprKind::Unit => output.push(3),
         ExprKind::Call(callee, arguments)
             if call_operator(program, source, expression, callee, arguments.len()).is_some() =>
@@ -862,6 +883,66 @@ fn rust_body_grouping_oracle_classifies_and_encodes_the_focused_corpus() {
             path.display()
         );
     }
+}
+
+fn literal_expression_corpus(directory: &Path) -> Vec<PathBuf> {
+    [
+        "probe_float() { 2.5 }",
+        "probe_character() { 'a' }",
+        "probe_byte() { b'A' }",
+        "probe_byte_string() { b\"ok\" }",
+        "probe_text() { \"hello\" }",
+        "probe_nested() { wrap(1.25, 'z', b'!', b\"xy\", \"text\") }",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, source)| {
+        let path = directory.join(format!("literal-expression-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        path
+    })
+    .collect()
+}
+
+#[test]
+fn self_host_body_new_literal_nodes_and_spans_match_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let corpus = literal_expression_corpus(directory.path());
+            let expected_path = directory.path().join("expected.bin");
+            let vm_path = directory.path().join("vm.bin");
+            let mut expected = Vec::new();
+            push_u32(&mut expected, corpus.len().try_into().unwrap());
+            for path in &corpus {
+                encode_rust_grouping(&mut expected, &fs::read_to_string(path).unwrap());
+            }
+            fs::write(&expected_path, &expected).unwrap();
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(
+                    std::iter::once(vm_path.clone().into_os_string())
+                        .chain(corpus.iter().map(|path| path.clone().into_os_string()))
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(&vm_path).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
