@@ -1803,6 +1803,47 @@ fn self_host_body_is_patterns_match_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_unit_pattern_binders_and_remainders_are_validated() {
+    let directory = tempfile::tempdir().unwrap();
+    let sources = [
+        "main() -> { x is Shape::Pair(a, (b, a)) }",
+        "main() -> { x is (a, .., b, ..) }",
+        "main() -> { x is Point { .., y } }",
+        "main() -> { x is Point { y: 1, y: 2 } }",
+        "main() -> { x is Shape::Circle(first, .., last) }",
+        "main() -> { x is Shape::Circle(a, .., b, ..) }",
+    ];
+    let mut inputs = Vec::new();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, sources.len() as u32);
+    for (index, source) in sources.iter().enumerate() {
+        let input = directory.path().join(format!("pattern-{index}.glorious"));
+        fs::write(&input, source).unwrap();
+        inputs.push(input);
+        encode_rust_grouping(&mut expected, source);
+    }
+
+    let output = directory.path().join("pattern-validation.bin");
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let args = std::iter::once(output.clone().into_os_string())
+        .chain(inputs.into_iter().map(|path| path.into_os_string()))
+        .collect::<Vec<_>>();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(args),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap(), expected);
+}
+
+#[test]
 fn self_host_body_typed_closures_match_bootstrap_ast() {
     // The focused contract includes typed, grouped, and tuple body identities, spans, and effects.
     let source = "infixl 30 +; typed() { (x: i64, y: i64) -> i64 { x + y } } \

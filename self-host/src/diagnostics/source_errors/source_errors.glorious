@@ -396,6 +396,9 @@ body_local_code(error: &BodyError) -> u32 {
         BodyError::ExpectedExpression(_, _) => 1,
         BodyError::ExpectedGroupingClose(_, _) => 2,
         BodyError::DuplicatePatternBinder(_, _) => 8,
+        BodyError::DuplicatePatternRemainder(_, _) => 19,
+        BodyError::MisplacedPatternRemainder(_, _) => 20,
+        BodyError::DuplicateStructPatternField(_, _) => 21,
         BodyError::IncompatibleAssociativity(_, _) => 3,
         BodyError::NonAssociativeChain(_, _) => 4,
         BodyError::ConflictingFixity(_, _) => 5,
@@ -431,6 +434,27 @@ body_shape(error: &BodyError) -> DiagnosticShape {
             0
         ),
         BodyError::DuplicatePatternBinder(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::DuplicatePatternRemainder(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::MisplacedPatternRemainder(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::DuplicateStructPatternField(token, related) => token_pair_shape(
             DiagnosticClass::Syntax,
             token,
             related,

@@ -600,6 +600,9 @@ pub enum BodyError {
     ExpectedExpression(usize, usize),
     ExpectedGroupingClose(usize, usize),
     DuplicatePatternBinder(usize, usize),
+    DuplicatePatternRemainder(usize, usize),
+    MisplacedPatternRemainder(usize, usize),
+    DuplicateStructPatternField(usize, usize),
     IncompatibleAssociativity(usize, usize),
     NonAssociativeChain(usize, usize),
     ConflictingFixity(usize, usize),
@@ -3061,6 +3064,23 @@ pattern_binder_named(
     } else { false }
 }
 
+register_pattern_binding(
+    value: &mut BodyParser,
+    name: Id<String>,
+    token: usize,
+    related: usize
+) -> Result<(), BodyError> {
+    if(pattern_binder_named(&value.pattern_binders, name, 0)) {
+        Result::Err(BodyError::DuplicatePatternBinder(token, related))
+    } else {
+        Vec::push(
+            &mut value.pattern_binders,
+            PatternBinder::Binding(name, token)
+        );
+        Result::Ok(())
+    }
+}
+
 parse_pattern_binder(
     source: &super::lexer::LexedSource,
     value: &mut BodyParser,
@@ -4728,7 +4748,7 @@ pattern_append_children(
     } else { () }
 }
 
-struct PatternSequence { rest: Bool, saw_comma: Bool }
+struct PatternSequence { rest: Bool, saw_comma: Bool, rest_token: usize }
 
 parse_pattern_sequence(
     source: &super::lexer::LexedSource,
@@ -4737,16 +4757,44 @@ parse_pattern_sequence(
     children: &mut Vec<PatternId>
 ) -> Result<PatternSequence, BodyError> {
     if(at_token(&*value, source, TokenPattern::RParen)) {
-        Result::Ok(PatternSequence { rest: false, saw_comma: false })
-    } else if(eat_token(value, source, TokenPattern::DotDot)) {
-        Result::Ok(PatternSequence { rest: true, saw_comma: false })
+        Result::Ok(PatternSequence { rest: false, saw_comma: false, rest_token: 0 })
+    } else if(at_token(&*value, source, TokenPattern::DotDot)) {
+        let rest = value.tokens.position;
+        value.tokens.position = rest + 1;
+        if(eat_token(value, source, TokenPattern::Comma)) {
+            if(at_token(&*value, source, TokenPattern::DotDot)) {
+                Result::Err(BodyError::DuplicatePatternRemainder(
+                    value.tokens.position, rest
+                ))
+            } else if(at_token(&*value, source, TokenPattern::RParen)) {
+                Result::Ok(PatternSequence { rest: true, saw_comma: true, rest_token: rest })
+            } else {
+                let next = try(
+                    parse_pattern_sequence(source, value, related, children),
+                    @parse_pattern_sequence
+                );
+                if(next.rest) {
+                    Result::Err(BodyError::DuplicatePatternRemainder(
+                        next.rest_token, rest
+                    ))
+                } else {
+                    Result::Ok(PatternSequence { rest: true, saw_comma: true, rest_token: rest })
+                }
+            }
+        } else {
+            Result::Ok(PatternSequence { rest: true, saw_comma: false, rest_token: rest })
+        }
     } else {
         Vec::push(&mut *children, try(parse_pattern(source, value, related), @parse_pattern_sequence));
         if(eat_token(value, source, TokenPattern::Comma)) {
             let next = try(parse_pattern_sequence(source, value, related, children), @parse_pattern_sequence);
-            Result::Ok(PatternSequence { rest: next.rest, saw_comma: true })
+            Result::Ok(PatternSequence {
+                rest: next.rest,
+                saw_comma: true,
+                rest_token: next.rest_token
+            })
         } else {
-            Result::Ok(PatternSequence { rest: false, saw_comma: false })
+            Result::Ok(PatternSequence { rest: false, saw_comma: false, rest_token: 0 })
         }
     }
 }
@@ -4754,20 +4802,45 @@ parse_pattern_sequence(
 parse_struct_pattern_fields(
     source: &super::lexer::LexedSource,
     value: &mut BodyParser,
-    related: usize
+    related: usize,
+    field_start: usize
 ) -> Result<Bool, BodyError> {
     if(at_token(&*value, source, TokenPattern::RBrace)) {
         Result::Ok(false)
     } else if(eat_token(value, source, TokenPattern::DotDot)) {
-        if(eat_token(value, source, TokenPattern::Comma)) { () } else { () };
-        Result::Ok(true)
+        let remainder = value.tokens.position - 1;
+        if(eat_token(value, source, TokenPattern::Comma)) {
+            if(at_token(&*value, source, TokenPattern::DotDot)) {
+                Result::Err(BodyError::DuplicatePatternRemainder(
+                    value.tokens.position, remainder
+                ))
+            } else if(not(at_token(&*value, source, TokenPattern::RBrace))) {
+                Result::Err(BodyError::MisplacedPatternRemainder(
+                    remainder, value.tokens.position
+                ))
+            } else { Result::Ok(true) }
+        } else { Result::Ok(true) }
     } else {
         let field_token = value.tokens.position;
         let field_name = try(identifier_name(source, field_token, related), @parse_struct_pattern_fields);
+        if(pattern_field_named(&value.pattern_fields, field_name, field_start)) {
+            Result::Err(BodyError::DuplicateStructPatternField(
+                field_token, related
+            ))
+        } else {
         value.tokens.position = field_token + 1;
         let field_pattern = if(eat_token(value, source, TokenPattern::Colon)) {
             try(parse_pattern(source, value, field_token), @parse_struct_pattern_fields)
         } else {
+            try(register_pattern_binding(
+                value,
+                handle super::lexer::token_kind_at(source, field_token) {
+                    TokenKind::Ident(found) => found,
+                    _ => unreachable()
+                },
+                field_token,
+                related
+            ), @parse_struct_pattern_fields);
             pattern_alloc(value, PatternNode {
                 kind: PatternKind::Binding(
                     handle super::lexer::token_kind_at(source, field_token) {
@@ -4783,9 +4856,23 @@ parse_struct_pattern_fields(
             name: field_name, token: field_token, pattern: field_pattern
         });
         if(eat_token(value, source, TokenPattern::Comma)) {
-            parse_struct_pattern_fields(source, value, related)
+            parse_struct_pattern_fields(source, value, related, field_start)
         } else { Result::Ok(false) }
+        }
     }
+}
+
+pattern_field_named(
+    value: &Vec<PatternField>,
+    name: Id<String>,
+    index: usize
+) -> Bool {
+    if(index < Vec::len(value)) {
+        let field = Vec::index(value, index);
+        if(field.name == name) { true } else {
+            pattern_field_named(value, name, index + 1)
+        }
+    } else { false }
 }
 
 parse_pattern_path_tail(
@@ -4890,7 +4977,9 @@ parse_pattern(
                     and { at_token(&*value, source, TokenPattern::LBrace) }) {
                     value.tokens.position = value.tokens.position + 1;
                     let fields_start = super::syntax::range_mark(&value.pattern_fields);
-                    let rest = try(parse_struct_pattern_fields(source, value, start), @parse_pattern);
+                    let rest = try(parse_struct_pattern_fields(
+                        source, value, start, fields_start
+                    ), @parse_pattern);
                     if(not(eat_token(value, source, TokenPattern::RBrace))) {
                         @parse_pattern(Result::Err(BodyError::InvalidStructField(value.tokens.position, start)))
                     } else { () };
@@ -4923,6 +5012,9 @@ parse_pattern(
                             tokens: token_range(start, value.tokens.position)
                         }))
                     } else {
+                        try(register_pattern_binding(
+                            value, name, start, related
+                        ), @parse_pattern);
                         Result::Ok(pattern_alloc(value, PatternNode {
                             kind: PatternKind::Binding(name, start),
                             tokens: token_range(start, value.tokens.position)
@@ -5471,10 +5563,12 @@ parse_expression(
         ) is TokenKind::Keyword(Keyword::Is) }) {
         let is_token = value.tokens.position;
         value.tokens.position = is_token + 1;
+        let binder_start = Vec::len(&value.pattern_binders);
         let pattern = try(
             parse_pattern(source, value, is_token),
             @parse_expression
         );
+        Vec::truncate(&mut value.pattern_binders, binder_start);
         if(value.tokens.position < value.tokens.limit
             and { super::lexer::token_kind_at(
                 source, value.tokens.position
