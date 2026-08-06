@@ -1498,6 +1498,65 @@ fn self_hosted_effect_interfaces_match_rust_semantics_and_rejections() {
 }
 
 #[test]
+// Header/interface-only parity probe. Body execution, handlers, resumptions,
+// and outward-call metadata remain outside this focused partial corpus.
+fn self_hosted_effect_control_headers_match_rust_oracle() {
+    // These declarations are distilled from the effect-control integration
+    // suites.  Keep both accepted rows and stable header rejections here: the
+    // probe must agree with the bootstrap parser/validator, not merely parse
+    // a happy-path effect.
+    let corpus = [
+        (
+            "effect Ask { [1,1] ask() -> i64 }\nanswer() -> i64 / {Ask} { perform Ask::ask() }",
+            true,
+        ),
+        (
+            "effect Pick<const N: u32> { pick() -> ! }\nselected() -> / {Pick<1>} { () }",
+            true,
+        ),
+        (
+            "effect Fail<E> { fail(error: E) -> ! }\nselected() -> / {Fail<i64>} { () }",
+            true,
+        ),
+        (
+            "effect Bad<T, T> { stop() -> ! }",
+            false,
+        ),
+        (
+            "effect Bad { first() -> ! first(value: u8) -> ! }",
+            false,
+        ),
+        (
+            "effect Bad { [2,1] stop() -> u8 }",
+            false,
+        ),
+    ];
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_effect_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":effect_interface_bytes");
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    for (source, accepted) in corpus {
+        let rust = grandiose::lexer::lex(source)
+            .ok()
+            .and_then(|tokens| grandiose::parser::parse(tokens).ok())
+            .and_then(|program| grandiose::validate::validate(&program).ok())
+            .is_some();
+        assert_eq!(rust, accepted, "bad Rust-oracle fixture: {source}");
+        let value = vm.run(function, vec![Value::Text(source.into())]).unwrap();
+        let Value::Bytes(bytes) = value else { panic!("effect probe returned non-bytes"); };
+        assert_eq!(bytes.first().copied() == Some(0), accepted, "source: {source}");
+    }
+}
+
+#[test]
 fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
