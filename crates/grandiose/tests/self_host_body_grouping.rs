@@ -2000,3 +2000,44 @@ fn self_host_unit_declaration_only_programs_parse() {
         .join()
         .unwrap();
 }
+
+
+/// Focused corpus copied from `literal_lowering.rs`: each source exercises
+/// literal syntax that reaches the self-host body parser (including escapes,
+/// contextual float/byte forms, and literal handler patterns). The expected
+/// bytes are produced independently by the Rust parser oracle.
+#[test]
+fn self_host_literal_lowering_fixture_corpus_matches_rust_oracle() {
+    let sources = [
+        "answer() -> f64 { 4.5 }",
+        "answer() -> f32 { 1.5 }",
+        "ascii() -> Char { 'A' } escaped() -> Char { '\\n' } unicode() -> Char { '\\u{1F600}' }",
+        "letter() -> u8 { b'A' } floor() -> u8 { b'\\x00' } ceiling() -> u8 { b'\\xff' }",
+        "payload() -> Bytes { b\"ab\\x00\\xff\\n\" } empty() -> Bytes { b\"\" }",
+        "effect Inspect { inspect(value: f64) -> ! } probe(value: f64) -> i64 { handle perform Inspect::inspect(value) { Inspect::inspect(4.5) => 1, Inspect::inspect(other) => 0 } }",
+    ];
+    let mut expected = Vec::new();
+    push_u32(&mut expected, sources.len() as u32);
+    for source in sources {
+        encode_rust_grouping(&mut expected, source);
+    }
+    assert_eq!(self_host_body_output(&sources), expected);
+}
+
+/// Syntax-core parity entry point for the parser conformance corpus.
+/// The body probe serializes the Rust parser AST and compares it byte-for-byte.
+#[test]
+fn self_host_parser_conformance_syntax_core_matches_rust_oracle() {
+    self_host_body_parser_arbitrary_sources_terminate();
+    self_host_body_whitespace_calls_match_bootstrap_ast();
+    self_host_body_is_patterns_match_bootstrap_ast();
+    self_host_unit_pattern_binders_and_remainders_are_validated();
+}
+
+/// Numeric source spellings are compared before contextual lowering, preserving
+/// the Rust oracle's exact token spans and payloads.
+#[test]
+fn self_host_source_numeric_literals_syntax_core_match_rust_oracle() {
+    self_host_body_numeric_source_payloads_match_bootstrap_ast();
+}
+

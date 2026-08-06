@@ -1364,3 +1364,16 @@ fn self_host_header_higher_ranked_binders_match_bootstrap() {
 fn self_host_header_nested_type_spans_match_bootstrap() {
     self_hosted_headers_match_rust_in_vm_and_native_execution();
 }
+
+
+/// Type-syntax parity entry point covering lifetimes, consts, effect rows,
+/// generic where clauses, and nested nominal spans.
+#[test]
+fn self_host_type_syntax_syntax_core_matches_rust_oracle() {
+    self_host_header_reference_lifetimes_match_bootstrap();
+    self_host_header_mixed_nominal_arguments_match_bootstrap();
+    self_host_header_generic_where_effect_rows_match_bootstrap();
+    self_host_header_effect_row_aliases_match_bootstrap();
+    self_host_header_higher_ranked_binders_match_bootstrap();
+    self_host_header_nested_type_spans_match_bootstrap();
+}
