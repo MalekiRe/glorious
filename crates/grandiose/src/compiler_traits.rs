@@ -3532,6 +3532,7 @@ fn lower_impl(
                 constructor: Box::new(target_constructor.clone()),
                 arguments: arguments.clone(),
                 lifetime_arguments: vec![],
+                const_arguments: vec![],
             },
             span: syntax.span,
         };
@@ -3606,6 +3607,7 @@ fn lower_impl(
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 for argument in lifetime_arguments {
                     record(&argument.lifetime.name, binders, found);
@@ -4890,6 +4892,7 @@ fn pattern_with_const_arguments(
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } => {
             let Some(name) = constructor.simple_name() else {
                 return Err(error(

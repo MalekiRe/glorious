@@ -3502,8 +3502,11 @@ impl Parser {
                 constructor: Box::new(base),
                 arguments,
                 lifetime_arguments,
+                const_arguments: const_arguments.clone(),
             },
         };
+        // Kept temporarily for consumers that still query Program by span.
+        // The application itself is now the canonical owner of these values.
         if !const_arguments.is_empty() {
             self.type_const_arguments
                 .push(crate::ast::TypeConstApplicationSyntax {
@@ -3850,8 +3853,11 @@ impl Parser {
                     constructor: Box::new(ty),
                     arguments,
                     lifetime_arguments,
+                    const_arguments: const_arguments.clone(),
                 },
             };
+            // Kept temporarily for consumers that still query Program by span.
+            // The application itself is now the canonical owner of these values.
             if !const_arguments.is_empty() {
                 self.type_const_arguments
                     .push(crate::ast::TypeConstApplicationSyntax {

@@ -152,6 +152,7 @@ fn encode_type(output: &mut Vec<u8>, _source: &str, ty: &TypeSyntax) -> Result<(
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } => {
             output.push(5);
             push_u32(output, ty.span.start.try_into().unwrap());

@@ -10620,6 +10620,7 @@ fn normalize_ground_projections(
                         .map(|argument| from_type_with_names(argument, span, symbolic_names))
                         .collect(),
                     lifetime_arguments: vec![],
+                    const_arguments: vec![],
                 }
             }
             typeck::ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference {
@@ -11204,6 +11205,7 @@ fn normalize_ground_projections(
                                             })
                                             .collect(),
                                         lifetime_arguments: vec![],
+                    const_arguments: vec![],
                                     },
                                     span: member.span,
                                 }
@@ -11424,6 +11426,7 @@ fn normalize_ground_projections(
                                             })
                                             .collect(),
                                         lifetime_arguments: vec![],
+                                        const_arguments: vec![],
                                     },
                                     span: effect.span,
                                 }
@@ -15251,6 +15254,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 lower_const_defaults_and_fixed_arrays(
                     constructor,
@@ -15509,6 +15513,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             constructor,
             arguments,
             lifetime_arguments,
+            const_arguments,
         } = &syntax.kind
         else {
             return Ok(syntax.clone());
@@ -15538,6 +15543,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 constructor: constructor.clone(),
                 arguments: expanded_arguments,
                 lifetime_arguments: lifetime_arguments.clone(),
+                const_arguments: const_arguments.clone(),
             };
             return Ok(syntax);
         };
@@ -17694,6 +17700,7 @@ fn instantiate_ground_nominals(
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 let name = constructor.simple_name()?;
                 generic_heads.contains(name).then_some(())?;
@@ -18166,6 +18173,7 @@ fn instantiate_ground_nominals(
                             .map(|argument| ground_type_syntax(argument, span))
                             .collect::<Option<Vec<_>>>()?,
                         lifetime_arguments: vec![],
+                        const_arguments: vec![],
                     }
                 }
             }
@@ -18737,6 +18745,7 @@ fn instantiate_ground_nominals(
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 found.extend(
                     lifetime_arguments
@@ -19598,6 +19607,7 @@ fn instantiate_ground_nominals(
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } = &declaration.target.kind
             else {
                 errors.push(type_error(
@@ -19984,6 +19994,7 @@ fn instantiate_ground_nominals(
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } = &declaration.target_type.kind
         else {
             errors.push(type_error(
@@ -21049,6 +21060,7 @@ fn resolve_aliases(
                     constructor,
                     arguments,
                     lifetime_arguments,
+                    ..
                 } => {
                     let Some(head) = constructor.simple_name() else {
                         return Err(unsupported(
@@ -21507,6 +21519,7 @@ fn resolve_effects(
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 let Some(name) = constructor.simple_name() else {
                     return Err(type_error(
@@ -32606,6 +32619,7 @@ impl<'a> CoreLowerer<'a> {
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } if lifetime_arguments.is_empty()
                 && constructor.simple_name() == self.runtime_bindings.array_name()
                 && arguments.len() == 1 =>
@@ -32629,6 +32643,7 @@ impl<'a> CoreLowerer<'a> {
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } = &syntax.kind
         else {
             return None;
@@ -32912,6 +32927,7 @@ impl<'a> CoreLowerer<'a> {
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } if arguments.is_empty() && lifetime_arguments.is_empty() => {
                 self.monomorphic_source_type(constructor)
             }

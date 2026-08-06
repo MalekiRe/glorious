@@ -133,6 +133,7 @@ fn mixed_nominal_arguments_retain_lifetime_positions_without_treating_regions_as
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } = &syntax.kind
         else {
             panic!("expected a mixed nominal application: {syntax:#?}");
@@ -518,16 +519,30 @@ fn ordinary_type_applications_preserve_structural_const_literal_positions() {
     let source = "struct Token<T>{marker:i64} inspect(a:Token<7>,b:Token<[1,infinity]>)->(){()} main()->{()}";
     let program = parse(source);
     assert_eq!(program.type_const_arguments.len(), 2);
-    let first = &program.type_const_arguments[0];
-    assert_eq!(first.arguments[0].position, 0);
-    let grandiose::ast::ConstArgumentValueSyntax::U32 { value, span } = &first.arguments[0].value
+    // The Program side table is a temporary compatibility index; each type
+    // application owns the canonical value so cloned/substituted syntax cannot
+    // lose it by span lookup.
+    let TypeSyntaxKind::Application {
+        const_arguments, ..
+    } = &program.functions[0].params[0].ty.kind
+    else {
+        panic!("expected Token<7> application")
+    };
+    assert_eq!(const_arguments.len(), 1);
+    assert_eq!(const_arguments[0].position, 0);
+    let grandiose::ast::ConstArgumentValueSyntax::U32 { value, span } = &const_arguments[0].value
     else {
         panic!("expected u32 const argument")
     };
     assert_eq!(*value, 7);
     assert_eq!(&source[span.range()], "7");
-    let grandiose::ast::ConstArgumentValueSyntax::Quantity(quantity) =
-        &program.type_const_arguments[1].arguments[0].value
+    let TypeSyntaxKind::Application {
+        const_arguments, ..
+    } = &program.functions[0].params[1].ty.kind
+    else {
+        panic!("expected Token<[1,infinity]> application")
+    };
+    let grandiose::ast::ConstArgumentValueSyntax::Quantity(quantity) = &const_arguments[0].value
     else {
         panic!("expected quantity const argument")
     };

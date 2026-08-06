@@ -127,10 +127,12 @@ pub(crate) fn fold_type<F: TypeSyntaxFolder + ?Sized>(
             constructor,
             arguments,
             lifetime_arguments,
+            const_arguments,
         } => TypeSyntaxKind::Application {
             constructor: Box::new(folder.fold_type(*constructor)?),
             arguments: fold_types(folder, arguments)?,
             lifetime_arguments,
+            const_arguments,
         },
         TypeSyntaxKind::Projection {
             subject,

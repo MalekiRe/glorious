@@ -1013,6 +1013,7 @@ pub(crate) fn normalize_projection_placeholders(
                         .map(syntax)
                         .collect::<Option<Vec<_>>>()?,
                     lifetime_arguments: vec![],
+                    const_arguments: vec![],
                 }
             }
             ProvisionalType::Tuple(elements) => {

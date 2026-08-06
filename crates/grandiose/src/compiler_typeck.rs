@@ -172,6 +172,7 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 if let Some(variances) = constructor
                     .simple_name()
@@ -307,6 +308,7 @@ pub(crate) fn type_lifetime_variance(
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 let variances = constructor
                     .simple_name()

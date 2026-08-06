@@ -603,6 +603,73 @@ fn validate_trait_methods(
         binders.get(name).copied().unwrap_or(name)
     }
 
+    fn same_const_argument(
+        template: &crate::ast::ConstAssociatedArgumentSyntax,
+        actual: &crate::ast::ConstAssociatedArgumentSyntax,
+        binders: &HashMap<&str, &str>,
+    ) -> bool {
+        fn same_expression(
+            template: &crate::ast::ConstExprSyntax,
+            actual: &crate::ast::ConstExprSyntax,
+            binders: &HashMap<&str, &str>,
+        ) -> bool {
+            use crate::ast::ConstExprSyntaxKind;
+            match (&template.kind, &actual.kind) {
+                (ConstExprSyntaxKind::U32(left), ConstExprSyntaxKind::U32(right)) => left == right,
+                (ConstExprSyntaxKind::Quantity(left), ConstExprSyntaxKind::Quantity(right)) => {
+                    left.lower == right.lower && left.upper == right.upper
+                }
+                (ConstExprSyntaxKind::Path(left), ConstExprSyntaxKind::Path(right)) => left
+                    .iter()
+                    .map(|segment| {
+                        binders
+                            .get(segment.name.as_str())
+                            .copied()
+                            .unwrap_or(&segment.name)
+                    })
+                    .eq(right.iter().map(|segment| &segment.name)),
+                (ConstExprSyntaxKind::Neg(left), ConstExprSyntaxKind::Neg(right)) => {
+                    same_expression(left, right, binders)
+                }
+                (
+                    ConstExprSyntaxKind::Binary {
+                        op: left_op,
+                        lhs: left_lhs,
+                        rhs: left_rhs,
+                    },
+                    ConstExprSyntaxKind::Binary {
+                        op: right_op,
+                        lhs: right_lhs,
+                        rhs: right_rhs,
+                    },
+                ) => {
+                    left_op == right_op
+                        && same_expression(left_lhs, right_lhs, binders)
+                        && same_expression(left_rhs, right_rhs, binders)
+                }
+                _ => false,
+            }
+        }
+
+        use crate::ast::ConstArgumentValueSyntax;
+        template.position == actual.position
+            && match (&template.value, &actual.value) {
+                (
+                    ConstArgumentValueSyntax::U32 { value: left, .. },
+                    ConstArgumentValueSyntax::U32 { value: right, .. },
+                ) => left == right,
+                (
+                    ConstArgumentValueSyntax::Quantity(left),
+                    ConstArgumentValueSyntax::Quantity(right),
+                ) => left.lower == right.lower && left.upper == right.upper,
+                (
+                    ConstArgumentValueSyntax::Expression(left),
+                    ConstArgumentValueSyntax::Expression(right),
+                ) => same_expression(left, right, binders),
+                _ => false,
+            }
+    }
+
     fn same_type(
         template: &TypeSyntax,
         actual: &TypeSyntax,
@@ -649,11 +716,13 @@ fn validate_trait_methods(
                 TypeSyntaxKind::Application {
                     constructor: left_constructor,
                     arguments: left,
+                    const_arguments: left_consts,
                     ..
                 },
                 TypeSyntaxKind::Application {
                     constructor: right_constructor,
                     arguments: right,
+                    const_arguments: right_consts,
                     ..
                 },
             ) => {
@@ -667,6 +736,11 @@ fn validate_trait_methods(
                     && left.iter().zip(right).all(|(left, right)| {
                         same_type(left, right, self_ty, binders, trait_arguments)
                     })
+                    && left_consts.len() == right_consts.len()
+                    && left_consts
+                        .iter()
+                        .zip(right_consts)
+                        .all(|(left, right)| same_const_argument(left, right, binders))
             }
             _ => false,
         }
@@ -1292,6 +1366,7 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 if let Some(name) = constructor.simple_name()
                     && let Some(Some(declared)) = nominals.get(name)
@@ -1591,6 +1666,7 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                 constructor,
                 arguments,
                 lifetime_arguments,
+                ..
             } => {
                 reject_const_binder_in_type_position(
                     constructor,

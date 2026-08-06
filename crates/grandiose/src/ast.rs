@@ -642,6 +642,11 @@ pub enum TypeSyntaxKind {
         /// `Slice<'a, T>` do not turn regions into runtime type identity.
         arguments: Vec<TypeSyntax>,
         lifetime_arguments: Vec<GenericLifetimeArgumentSyntax>,
+        /// Structural const arguments, retained at their source positions so
+        /// they remain part of a type's identity through rewriting and
+        /// substitution. Type and lifetime arguments keep their compact
+        /// compatibility vectors; `position` reconstructs source order.
+        const_arguments: Vec<ConstAssociatedArgumentSyntax>,
     },
     Projection {
         subject: Box<TypeSyntax>,

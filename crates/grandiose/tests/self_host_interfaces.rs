@@ -146,6 +146,7 @@ fn encode_type(
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } => {
             output.push(5);
             encode_type(output, program, constructor)?;

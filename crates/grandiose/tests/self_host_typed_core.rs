@@ -353,6 +353,7 @@ fn encode_effect_signature_type(
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } if constructor.simple_name() == Some("Array") && lifetime_arguments.is_empty() => {
             assert_eq!(arguments.len(), 1);
             output.push(9);

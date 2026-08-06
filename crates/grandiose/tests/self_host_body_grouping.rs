@@ -78,6 +78,7 @@ fn encode_effect_type(output: &mut Vec<u8>, source: &str, ty: &TypeSyntax) -> Re
             constructor,
             arguments,
             lifetime_arguments,
+            ..
         } if lifetime_arguments.is_empty() => {
             output.push(2);
             encode_effect_type(output, source, constructor)?;
