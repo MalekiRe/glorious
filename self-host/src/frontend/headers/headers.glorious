@@ -47,7 +47,7 @@ pub enum HeaderTypeView<'a> {
 
 impl<'a> Use<[0, *]> for HeaderTypeView<'a> {}
 
-enum GenericParamKind { Type, Lifetime, EffectRow }
+enum GenericParamKind { Type, Lifetime, EffectRow, Const }
 
 impl Use<[0, *]> for GenericParamKind {}
 
@@ -831,7 +831,8 @@ pub generic_param_kind_code(value: &GenericParam) -> u8 {
     handle value.kind {
         GenericParamKind::Type => 1,
         GenericParamKind::Lifetime => 2,
-        GenericParamKind::EffectRow => 3
+        GenericParamKind::EffectRow => 3,
+        GenericParamKind::Const => 4
     }
 }
 
@@ -2080,31 +2081,50 @@ parse_one_generic(
             })
         },
         _ => {
-            let name = try(ident(value, related), @parse_one_generic);
-            if(eat_token(value, TokenPattern::Colon)) {
-                if(at_ident(&*value, &"EffectRow")) {
-                    value.tokens.position = value.tokens.position + 1;
+            if(at_ident(&*value, &"const")) {
+                value.tokens.position = value.tokens.position + 1;
+                let name = try(ident(value, related), @parse_one_generic);
+                if(eat_token(value, TokenPattern::Colon)) {
+                    try(parse_type(value, related), @parse_one_generic);
                     Result::Ok(GenericParam {
                         name: name.name,
-                        kind: GenericParamKind::EffectRow,
+                        kind: GenericParamKind::Const,
                         tokens: token_range(token, value.tokens.position)
                     })
                 } else {
-                    Result::Err(
-                    HeaderError::UnsupportedGenericParameterKind(
+                    Result::Err(HeaderError::UnsupportedGenericParameterKind(
                         value.tokens.position,
                         related
-                    )
-                    )
+                    ))
                 }
             } else {
-                Result::Ok(GenericParam {
-                    name: name.name,
-                    kind: GenericParamKind::Type,
-                    tokens: token_range(token, value.tokens.position)
-                })
+                let name = try(ident(value, related), @parse_one_generic);
+                if(eat_token(value, TokenPattern::Colon)) {
+                    if(at_ident(&*value, &"EffectRow")) {
+                        value.tokens.position = value.tokens.position + 1;
+                        Result::Ok(GenericParam {
+                            name: name.name,
+                            kind: GenericParamKind::EffectRow,
+                            tokens: token_range(token, value.tokens.position)
+                        })
+                    } else {
+                        Result::Err(
+                        HeaderError::UnsupportedGenericParameterKind(
+                            value.tokens.position,
+                            related
+                        )
+                        )
+                    }
+                } else {
+                    Result::Ok(GenericParam {
+                        name: name.name,
+                        kind: GenericParamKind::Type,
+                        tokens: token_range(token, value.tokens.position)
+                    })
+                }
             }
         }
+
     }
 }
 

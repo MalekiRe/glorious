@@ -172,7 +172,7 @@ fn encode_generics(output: &mut Vec<u8>, generics: Option<&GenericParams>) -> Re
             GenericParamKind::Type => 1,
             GenericParamKind::Lifetime => 2,
             GenericParamKind::EffectRow => 3,
-            GenericParamKind::Const(_) => return Err(()),
+            GenericParamKind::Const(_) => 4,
         };
         output.push(kind);
         push_string(output, &parameter.name);
@@ -488,6 +488,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "mod fixities { pub infixr 1 otherwise; infixl 40 <*>; pub type Local = u8; } prefix 90 not;",
         "mod left { infixl 5 join; } mod right { pub infixl 5 join; }",
         "pub prefix 255 negate; pub infixr 0 choose; private_name() { () }",
+        "struct Unsupported<const N: u32> { value: u8 }",
+        "enum ConstEnum<const N: u32> { One }",
+        "const_generic<const Q: Quantity>() -> () { () }",
     ];
     let malformed = [
         "type Missing = ;",
@@ -497,7 +500,6 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "struct Bad trailing {}",
         "enum Bad { Some(Vec<>) }",
         "enum Bad { Variant { value: u8 } }",
-        "struct Unsupported<const N: u32> { value: u8 }",
         "type UnsupportedArray = [u8; 4];",
         "infixl 256 too_high;",
         "infixr 1.5 fractional;",
