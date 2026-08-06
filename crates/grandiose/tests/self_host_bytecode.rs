@@ -1177,7 +1177,7 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let bundle = self_host_effect_backend_bundle();
-            let phases = grandiose::compile_bundle_to_phases_with_options(
+            let artifact = grandiose::compile_bundle_to_bytecode_with_options(
                 &bundle,
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
@@ -1200,11 +1200,23 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
                 }
                 panic!("{errors:#?}")
             });
-            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            let terminal_artifact = function_id(&artifact, "effect_backend_terminal_artifact");
+            let nonterminal_artifact = function_id(&artifact, "effect_backend_nonterminal_artifact");
+            let invalid_terminal = function_id(&artifact, "effect_backend_invalid_terminal_reason");
+            let invalid_resumption = function_id(&artifact, "effect_backend_invalid_resumption_reasons");
+            let compiler_bytes = artifact.encode();
+            drop(artifact);
+            let compiler = load_verified(&compiler_bytes).unwrap();
+            drop(compiler_bytes);
             let run = |name: &str| {
-                Vm::new(compiler.clone())
-                    .run(function_id(&phases.artifact, name), vec![])
-                    .unwrap()
+                let function = match name {
+                    "effect_backend_terminal_artifact" => terminal_artifact,
+                    "effect_backend_nonterminal_artifact" => nonterminal_artifact,
+                    "effect_backend_invalid_terminal_reason" => invalid_terminal,
+                    "effect_backend_invalid_resumption_reasons" => invalid_resumption,
+                    _ => unreachable!("unknown effect-backend probe {name}"),
+                };
+                Vm::new(compiler.clone()).run(function, vec![]).unwrap()
             };
 
             let Value::Bytes(bytes) = run("effect_backend_terminal_artifact") else {
