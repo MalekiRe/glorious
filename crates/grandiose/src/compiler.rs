@@ -24354,7 +24354,6 @@ fn provisional_tables(
             };
             (
                 decode_nominal_instance(name)
-                    .map(|instance| canonical_nominal_instance(&instance))
                     .unwrap_or_else(|| typeck::NominalInstanceKey::monomorphic(name.clone())),
                 shape,
             )
