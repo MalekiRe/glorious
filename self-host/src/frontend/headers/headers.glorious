@@ -4430,6 +4430,38 @@ parse_shells(
     } else { Result::Ok(finish_parser( parser,  nominal)) }
 }
 
+// The declaration kind is selected before the header parser consumes its
+// generic parameters.  Inspect through a balanced generic list so built-in
+// Drop and Use implementations take the same path whether or not they are
+// generic.
+impl_dispatch_head_is(
+    value: &Parser,
+    cursor: usize,
+    depth: usize,
+    expected: &String
+) -> Bool {
+    if(cursor < value.tokens.limit) {
+        handle super::lexer::token_kind_at(&value.source, cursor) {
+            TokenKind::Lt => impl_dispatch_head_is(
+                value, cursor + 1, depth + 1, expected
+            ),
+            TokenKind::Gt => if(depth == 1) {
+                if(cursor + 1 < value.tokens.limit) {
+                    handle super::lexer::token_kind_at(&value.source, cursor + 1) {
+                        TokenKind::Ident(name) => if(super::lexer::lexeme(
+                            &value.source, name
+                        ) is Result::Ok(found)) { *found == *expected } else { false },
+                        _ => false
+                    }
+                } else { false }
+            } else if(depth == 0) { false } else {
+                impl_dispatch_head_is(value, cursor + 1, depth - 1, expected)
+            },
+            _ => impl_dispatch_head_is(value, cursor + 1, depth, expected)
+        }
+    } else { false }
+}
+
 parse_impl_dispatch(
     original: &String,
     value: &mut Parser,
@@ -4444,9 +4476,10 @@ parse_impl_dispatch(
 ) -> Result<(), HeaderError> {
     value.tokens.position = start + 1;
     value.tokens.limit = header_end;
-    if(at_ident(&*value, &"Drop") or {
-        at_ident(&*value, &"Use")
-    }) {
+    if(at_ident(&*value, &"Drop")
+        or { at_ident(&*value, &"Use") }
+        or { impl_dispatch_head_is(&*value, start + 1, 0, &"Drop") }
+        or { impl_dispatch_head_is(&*value, start + 1, 0, &"Use") }) {
         parse_impl_header(original, value, drops, uses, order, shell, start, header_end, whole_end)
     } else {
         value.tokens.position = start + 1;
