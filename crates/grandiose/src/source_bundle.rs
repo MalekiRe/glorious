@@ -1,4 +1,4 @@
-use std::{io, ops::Range};
+use std::{io, ops::Range, sync::Arc};
 
 use crate::{diagnostic::Diagnostic, span::Span};
 
@@ -25,7 +25,7 @@ enum SegmentRole {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Segment {
     name: String,
-    source: String,
+    source: Arc<str>,
     global_range: Range<usize>,
     id: Option<SegmentId>,
     role: SegmentRole,
@@ -34,7 +34,7 @@ pub struct Segment {
 
 impl Segment {
     pub fn new(name: impl Into<String>, source: impl Into<String>) -> Self {
-        let source = source.into();
+        let source: Arc<str> = source.into().into_boxed_str().into();
         Self {
             name: name.into(),
             global_range: 0..source.len(),
@@ -56,7 +56,7 @@ impl Segment {
     fn distributed_standard() -> Self {
         Self {
             name: DISTRIBUTED_STANDARD_LIBRARY_NAME.into(),
-            source: DISTRIBUTED_STANDARD_LIBRARY_SOURCE.into(),
+            source: Arc::from(DISTRIBUTED_STANDARD_LIBRARY_SOURCE),
             global_range: 0..DISTRIBUTED_STANDARD_LIBRARY_SOURCE.len(),
             id: None,
             role: SegmentRole::TrustedDistributedStandard,
@@ -69,7 +69,7 @@ impl Segment {
     }
 
     pub fn source(&self) -> &str {
-        &self.source
+        &self.source[self.global_range.clone()]
     }
 
     pub fn global_range(&self) -> Range<usize> {
@@ -88,7 +88,7 @@ impl Segment {
 /// The canonical generation-1 compilation stream and its diagnostic map.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceBundle {
-    source: String,
+    source: Arc<str>,
     segments: Vec<Segment>,
     canonical_distribution: bool,
 }
@@ -167,6 +167,15 @@ impl SourceBundle {
             source.push_str(&segment.source);
             segment.global_range = start..source.len();
         }
+        // Share one immutable allocation backing both the monolithic stream
+        // and every segment. Each segment resolves its original bytes by
+        // slicing the shared text with its `global_range`, so a segment's
+        // source is no longer copied per segment in addition to the full
+        // bundle stream.
+        let source: Arc<str> = source.into_boxed_str().into();
+        for segment in segments.iter_mut() {
+            segment.source = source.clone();
+        }
         Self {
             source,
             segments,
@@ -196,7 +205,7 @@ impl SourceBundle {
     }
 
     pub fn source(&self) -> &str {
-        &self.source
+        &self.source[..]
     }
 
     pub fn segments(&self) -> &[Segment] {
@@ -307,7 +316,7 @@ impl SourceBundle {
 
         let mut localized = diagnostic.clone();
         localized.source_name = primary.segment.name.clone();
-        localized.embedded_source = Some(primary.segment.source.clone());
+        localized.embedded_source = Some(primary.segment.source().to_owned());
         localized.span = Some(primary.span);
         localized.related = diagnostic
             .related
