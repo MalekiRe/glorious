@@ -24,7 +24,7 @@ fn self_host_semantic_control_acceptance_and_rejection_match_rust_oracle() {
         "enum Choice { Yes(i64), No } answer() -> Bool { Choice::Yes(1) is Choice::Maybe } main() { () }",
     ];
     let dir=tempfile::tempdir().unwrap(); let mut paths=Vec::new(); let mut expected=Vec::new();
-    for (i, source) in corpus.iter().enumerate() { let path=dir.path().join(format!("{i}.glorious")); fs::write(&path,source).unwrap(); paths.push(path); expected.push(compile_source_to_phases_with_options(format!("{i}.glorious"),source,CompileOptions::default()).is_ok()); }
+    for (i, source) in corpus.iter().enumerate() { let name = format!("{i}.glorious"); let path=dir.path().join(&name); fs::write(&path,source).unwrap(); paths.push(path); expected.push(compile_source_to_phases_with_options(&name,source,CompileOptions::default()).is_ok()); }
     let phases=grandiose::compile_bundle_to_phases_with_options(&bundle(),CompileOptions::default()).unwrap();
     let entry=phases.artifact.entry_function.unwrap();
     for (i, (path, ok)) in paths.into_iter().zip(expected).enumerate() {
