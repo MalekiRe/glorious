@@ -1155,42 +1155,41 @@ write_value_expression(
                     body,
                     constant_id
                 );
-            let low0 =
+            // Core retains integer constants as four little-endian words.  The
+            // probe wire format must retain all four too: rejecting nonzero
+            // high words made valid u128/i128 literals look like elaboration
+            // failures even though the bootstrap compiler accepts them.
+            ByteBuf::push(output, 1);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(
+                output,
                 super::super::frontend::elaboration::integer_constant_view_word(
                     &constant,
                     0
-                );
-            let low1 =
+                )
+            );
+            ByteBuf::write_u32_le(
+                output,
                 super::super::frontend::elaboration::integer_constant_view_word(
                     &constant,
                     1
-                );
-            let high0 =
+                )
+            );
+            ByteBuf::write_u32_le(
+                output,
                 super::super::frontend::elaboration::integer_constant_view_word(
                     &constant,
                     2
-                );
-            let high1 =
+                )
+            );
+            ByteBuf::write_u32_le(
+                output,
                 super::super::frontend::elaboration::integer_constant_view_word(
                     &constant,
                     3
-                );
-            let ty_word = Id::to_u32(ty);
-            if(high0 != 0 or { high1 != 0 }) {
-                Result::Err(ElaborationError::IntegerEncodingOverflow(
-                    Id::to_usize(constant_id) * 4,
-                    ty_word
-                ))
-            } else {
-                ByteBuf::push(output, 1);
-                write_type_id(output, ty_word);
-                ByteBuf::write_u64_le(
-                    output,
-                    wrapping_convert_to_u64(low0)
-                        + shift_left(wrapping_convert_to_u64(low1), 32)
-                );
-                Result::Ok(())
-            }
+                )
+            );
+            Result::Ok(())
         },
         CoreValueView::Local(ty, local_id, copy, _) => {
             let local = Id::to_u32(local_id);

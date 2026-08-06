@@ -12,7 +12,7 @@ use grandiose::{
     modules::{ModuleResolution, ResolvedProgram},
     source_bundle::{Segment, SourceBundle},
 };
-use grandiose_vm::{Constant, I64, SystemHost, Type, TypeId, U64, UNIT, Value, Vm, verify};
+use grandiose_vm::{Constant, SystemHost, Type, TypeId, UNIT, Value, Vm, verify};
 
 const INPUT_NAME: &str = "typed-core-input.glorious";
 const WRAPPER: &str = "\nmain() { () }\n";
@@ -114,10 +114,6 @@ fn inspect_self_host_interface_type_metadata() {
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
-    output.extend(value.to_le_bytes());
-}
-
-fn push_u64(output: &mut Vec<u8>, value: u64) {
     output.extend(value.to_le_bytes());
 }
 
@@ -534,9 +530,7 @@ const NORMALIZED_AGGREGATE_TYPE_BASE: u32 = 0x8000_0000;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum NormalizedType {
-    Unit,
-    U64,
-    I64,
+    Scalar(u32),
     Tuple(Vec<NormalizedType>),
     Struct(String),
     Enum(String),
@@ -582,11 +576,11 @@ impl<'a> TypeEncoder<'a> {
     }
 
     fn key(types: &[Type], ty: TypeId) -> Result<NormalizedType, String> {
-        match ty {
-            UNIT => return Ok(NormalizedType::Unit),
-            U64 => return Ok(NormalizedType::U64),
-            I64 => return Ok(NormalizedType::I64),
-            _ => {}
+        // The self-host type wire reserves 0..19 for its predeclared
+        // scalar ABI (Unit through Char); only user aggregates are
+        // normalized into the high-bit namespace.
+        if ty < 19 {
+            return Ok(NormalizedType::Scalar(ty));
         }
         let descriptor = Self::descriptor(types, ty)?;
         if !descriptor.claimed_duplicable() {
@@ -628,7 +622,7 @@ impl<'a> TypeEncoder<'a> {
         ty: TypeId,
         output: &mut BTreeSet<NormalizedType>,
     ) -> Result<(), String> {
-        if matches!(ty, UNIT | U64 | I64) {
+        if ty < 19 {
             return Ok(());
         }
         let key = Self::key(types, ty)?;
@@ -697,7 +691,7 @@ impl<'a> TypeEncoder<'a> {
     }
 
     fn id(&self, ty: TypeId) -> Result<u32, String> {
-        if matches!(ty, UNIT | U64 | I64) {
+        if ty < 19 {
             return Ok(ty);
         }
         let key = Self::key(self.types, ty)?;
@@ -763,17 +757,30 @@ impl Encoder<'_> {
             ExprKind::Constant(value) => {
                 output.push(1);
                 self.write_type(output, expression.ty)?;
-                match value {
-                    Constant::U64(value) if expression.ty == U64 => push_u64(output, *value),
-                    Constant::I64(value) if expression.ty == I64 => {
-                        output.extend(value.to_le_bytes())
-                    }
+                let raw = match value {
+                    Constant::U8(value) => u128::from(*value),
+                    Constant::U16(value) => u128::from(*value),
+                    Constant::U32(value) => u128::from(*value),
+                    Constant::U64(value) => u128::from(*value),
+                    Constant::U128(value) => *value,
+                    Constant::I8(value) => *value as u128,
+                    Constant::I16(value) => *value as u128,
+                    Constant::I32(value) => *value as u128,
+                    Constant::I64(value) => *value as u128,
+                    Constant::I128(value) => *value as u128,
+                    Constant::Usize(value) => u128::from(*value),
+                    Constant::Isize(value) => *value as u128,
                     _ => {
                         return Err(format!(
                             "unsupported constant in focused typed-Core corpus: {value:?}:t{}",
                             expression.ty
                         ));
                     }
+                };
+                // Match the self-host probe's four little-endian Core words,
+                // rather than truncating every integer to the old u64 wire slot.
+                for word in 0..4 {
+                    push_u32(output, (raw >> (word * 32)) as u32);
                 }
             }
             ExprKind::Local { local, copy } => {
@@ -1138,6 +1145,10 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     let valid = [
         "probe_unit() { () }",
         "probe_i64() -> i64 { 7 } probe_u64() -> u64 { 7 }",
+        // Full-width integer literals exercise the fourth Core word.  Before
+        // the probe's 128-bit wire correction this valid native-oracle case
+        // was rejected as `IntegerEncodingOverflow`.
+        "probe_u128_max() -> u128 { 340282366920938463463374607431768211455 }",
         "probe_param(value: i64) -> i64 { value }",
         "probe_target(value: i64) -> i64 { value } \
          probe_forward(value: i64) -> i64 { probe_target(value) }",
