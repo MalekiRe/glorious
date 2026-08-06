@@ -1446,6 +1446,36 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 );
             }
 
+            // The VM-only measurement never emits LLVM IR from `phases`, so once
+            // the frontend probes have read their function IDs and the GRBC has
+            // been decoded into the VM image, neither the bootstrap
+            // compile-phase graph (`phases` holds the whole artifact, core, MIR,
+            // and provisional buffer) nor the encoded byte buffer is needed
+            // again. Release both *before* starting the VM so the VM-only peak
+            // does not retain large compile-phase / encoded-byte data
+            // simultaneously with the running VM image. This branch always
+            // returns, so the full (LLVM/native) path below still sees `phases`
+            // as live.
+            let vm_only = std::env::var_os("G1_SELF_HOST_BYTECODE_VM_ONLY").is_some();
+            if vm_only {
+                drop(phases);
+                drop(compiler_bytes);
+                let vm_output = directory.path().join("vm.grbc");
+                let vm = Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        vm_output.clone().into_os_string(),
+                        input.clone().into_os_string(),
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(vm.run(compiler_entry, vec![]).unwrap(), Value::Unit);
+                let vm_bytes = fs::read(&vm_output).unwrap();
+                assert_compiled_artifact(&vm_bytes);
+                return;
+            }
+
             let vm_output = directory.path().join("vm.grbc");
             let vm = Vm::with_host(
                 compiler,
@@ -1459,10 +1489,6 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             assert_eq!(vm.run(compiler_entry, vec![]).unwrap(), Value::Unit);
             let vm_bytes = fs::read(&vm_output).unwrap();
             assert_compiled_artifact(&vm_bytes);
-
-            if std::env::var_os("G1_SELF_HOST_BYTECODE_VM_ONLY").is_some() {
-                return;
-            }
 
             let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
             let llvm = directory.path().join("self-host-bytecode.ll");
