@@ -376,16 +376,14 @@ impl PartialEq for SlotHandle {
 #[derive(Debug)]
 struct ObjectIdentity<T> {
     store_id: u64,
-    arena: Rc<RefCell<Arena<T>>>,
-    handle: Handle<T>,
+    generation: u32,
+    object: RefCell<Option<T>>,
     self_weak: RefCell<Weak<ObjectIdentity<T>>>,
 }
 
 impl<T: RuntimeEdges> ReclaimNode for ObjectIdentity<T> {
     fn identity(&self) -> u128 {
-        (u128::from(self.store_id) << 64)
-            | (u128::from(self.handle.generation()) << 32)
-            | u128::from(self.handle.index())
+        (u128::from(self.store_id) << 64) | (u128::from(self.generation) << 32)
     }
 
     fn strong_count(&self) -> usize {
@@ -394,8 +392,8 @@ impl<T: RuntimeEdges> ReclaimNode for ObjectIdentity<T> {
 
     fn edge_identities(&self) -> Vec<u128> {
         let mut edges = Vec::new();
-        if let Ok(value) = self.arena.try_borrow()
-            && let Ok(value) = value.get(self.handle)
+        if let Ok(object) = self.object.try_borrow()
+            && let Some(value) = object.as_ref()
         {
             value.edge_identities(&mut edges);
         }
@@ -403,19 +401,21 @@ impl<T: RuntimeEdges> ReclaimNode for ObjectIdentity<T> {
     }
 
     fn clear_edges(&self) {
-        if let Ok(mut arena) = self.arena.try_borrow_mut()
-            && let Ok(value) = arena.get_mut(self.handle)
+        if let Ok(mut object) = self.object.try_borrow_mut()
+            && let Some(value) = object.as_mut()
         {
             value.clear_edges();
         }
     }
 }
 
-/// Arena-backed shared handle for runtime heap objects.
+/// Inline-backed shared handle for runtime heap objects.
 ///
-/// Clones share one logical lease. [`ArenaObject::try_unwrap`] succeeds only
-/// for the last lease, matching the ownership boundary previously supplied by
-/// `Rc::try_unwrap`, and then deterministically reclaims the arena entry.
+/// Each object owns a single inline `RefCell<Option<T>>` slot rather than a
+/// whole single-entry arena. Clones share one logical lease.
+/// [`ArenaObject::try_unwrap`] succeeds only for the last lease, matching the
+/// ownership boundary previously supplied by `Rc::try_unwrap`, and then
+/// deterministically reclaims the inline slot.
 pub struct ArenaObject<T> {
     identity: Rc<ObjectIdentity<T>>,
 }
@@ -429,15 +429,11 @@ pub enum ObjectBorrowError {
 
 impl<T> ArenaObject<T> {
     pub fn new(value: T) -> Self {
-        let mut arena = Arena::new();
-        let handle = arena
-            .insert(value)
-            .expect("fresh object arena has capacity");
         Self {
             identity: Rc::new_cyclic(|weak| ObjectIdentity {
                 store_id: next_store_id(),
-                arena: Rc::new(RefCell::new(arena)),
-                handle,
+                generation: 0,
+                object: RefCell::new(Some(value)),
                 self_weak: RefCell::new(weak.clone()),
             }),
         }
@@ -452,8 +448,7 @@ impl<T> ArenaObject<T> {
 
     pub fn identity(&self) -> u128 {
         (u128::from(self.identity.store_id) << 64)
-            | (u128::from(self.identity.handle.generation()) << 32)
-            | u128::from(self.identity.handle.index())
+            | (u128::from(self.identity.generation) << 32)
     }
 
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
@@ -461,46 +456,41 @@ impl<T> ArenaObject<T> {
     }
 
     pub fn borrow(&self) -> Ref<'_, T> {
-        Ref::filter_map(self.identity.arena.borrow(), |arena| {
-            arena.get(self.identity.handle).ok()
-        })
-        .unwrap_or_else(|_| panic!("stale arena object handle {:?}", self.identity.handle))
+        Ref::filter_map(self.identity.object.borrow(), |object| object.as_ref())
+            .unwrap_or_else(|_| panic!("stale inline object identity {:?}", self.identity()))
     }
 
     pub fn borrow_mut(&self) -> RefMut<'_, T> {
-        RefMut::filter_map(self.identity.arena.borrow_mut(), |arena| {
-            arena.get_mut(self.identity.handle).ok()
-        })
-        .unwrap_or_else(|_| panic!("stale arena object handle {:?}", self.identity.handle))
+        RefMut::filter_map(self.identity.object.borrow_mut(), |object| object.as_mut())
+            .unwrap_or_else(|_| panic!("stale inline object identity {:?}", self.identity()))
     }
 
     pub fn try_borrow(&self) -> Result<Ref<'_, T>, ObjectBorrowError> {
-        let arena = self
+        let object = self
             .identity
-            .arena
+            .object
             .try_borrow()
             .map_err(|_| ObjectBorrowError::Conflict)?;
-        Ref::filter_map(arena, |arena| arena.get(self.identity.handle).ok())
+        Ref::filter_map(object, |object| object.as_ref())
             .map_err(|_| ObjectBorrowError::Stale)
     }
 
     pub fn try_borrow_mut(&self) -> Result<RefMut<'_, T>, ObjectBorrowError> {
-        let arena = self
+        let object = self
             .identity
-            .arena
+            .object
             .try_borrow_mut()
             .map_err(|_| ObjectBorrowError::Conflict)?;
-        RefMut::filter_map(arena, |arena| arena.get_mut(self.identity.handle).ok())
+        RefMut::filter_map(object, |object| object.as_mut())
             .map_err(|_| ObjectBorrowError::Stale)
     }
 
     pub fn try_unwrap(self) -> Result<T, Self> {
         match Rc::try_unwrap(self.identity) {
             Ok(identity) => Ok(identity
-                .arena
-                .borrow_mut()
-                .remove(identity.handle)
-                .expect("unique arena object handle must be live")),
+                .object
+                .into_inner()
+                .expect("unique inline object must be live")),
             Err(identity) => Err(Self { identity }),
         }
     }
@@ -508,9 +498,9 @@ impl<T> ArenaObject<T> {
     #[cfg(test)]
     fn reclaim_for_test(&self) {
         self.identity
-            .arena
+            .object
             .borrow_mut()
-            .remove(self.identity.handle)
+            .take()
             .expect("test object must be live");
     }
 }
@@ -1235,6 +1225,54 @@ mod slot_tests {
         });
         assert!(!ArenaObject::ptr_eq(&first, &second));
         assert_ne!(first.identity(), second.identity());
+    }
+
+    #[test]
+    fn inline_storage_preserves_store_identity_across_reclamation() {
+        let array = ArenaObject::new(ArrayValue {
+            element_type: 1,
+            slots: vec![Some(Value::I64(5))],
+            logical_capacity: 1,
+        });
+        let other = ArenaObject::new(ArrayValue {
+            element_type: 2,
+            slots: vec![Some(Value::I64(6))],
+            logical_capacity: 1,
+        });
+        let identity = array.identity();
+        // The identity layout mirrors the former single-entry arena handle:
+        // the store id occupies the high 64 bits while the inline slot keeps a
+        // zero generation+index in the low 32 bits, so stores never collide.
+        assert_eq!(identity & u32::MAX as u128, 0);
+        assert_eq!(other.identity() & u32::MAX as u128, 0);
+        assert_ne!(identity, other.identity());
+
+        let alias = array.clone();
+        array.reclaim_for_test();
+
+        // Reclamation staleness every alias but leaves its identity stable.
+        assert!(matches!(alias.try_borrow(), Err(ObjectBorrowError::Stale)));
+        assert_eq!(alias.identity(), identity);
+    }
+
+    #[test]
+    fn inline_object_exclusive_borrow_reports_conflict() {
+        let aggregate = ArenaObject::new(AggregateValue {
+            ty: 2,
+            variant: None,
+            fields: vec![],
+        });
+        let guard = aggregate.borrow_mut();
+        assert!(matches!(
+            aggregate.try_borrow(),
+            Err(ObjectBorrowError::Conflict)
+        ));
+        assert!(matches!(
+            aggregate.try_borrow_mut(),
+            Err(ObjectBorrowError::Conflict)
+        ));
+        drop(guard);
+        assert_eq!(aggregate.try_borrow().map(|f| f.ty), Ok(2));
     }
 
     #[test]
