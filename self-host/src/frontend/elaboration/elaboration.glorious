@@ -9499,9 +9499,10 @@ elaborate_handle_arms(
             ordinal
         );
         let arm = super::resolution::resolved_handle_arm(map, arm_id);
-        let variant_index = Id::to_u32(
-            super::resolution::resolved_handle_variant(arm)
-        );
+        let variant_index = handle super::resolution::resolved_handle_variant(arm) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => Id::to_u32(found)
+        };
         let token = super::bodies::handle_arm_variant_token(source_arm);
         if(usize_from_u32(variant_index) < interface_variant_count(
             &*interfaces
