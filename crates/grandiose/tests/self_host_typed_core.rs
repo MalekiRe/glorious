@@ -1557,6 +1557,98 @@ fn self_hosted_effect_control_headers_match_rust_oracle() {
 }
 
 #[test]
+// Resumption-quantity interface parity distilled from the finite-resumption,
+// multishot, quantity-breadth, nested-handler, and late-resumption integration
+// suites. The self-host frontend currently elaborates effect interfaces
+// (operation resumption bounds and terminal shape) but not yet effect bodies
+// (`perform`/`resume`/`cancel`), so the positive corpus here is header-only and
+// this suite remains `partial`: body execution and under/over-resumption
+// rejections are intentionally outside this focused oracle.
+fn self_hosted_resumption_quantity_interfaces_match_rust_oracle() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_effect_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":effect_interface_bytes");
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+
+    // Strong positive: the operation bound (lower/upper) and terminal shape are
+    // normalized to identical bytes by the bootstrap oracle and the self-host
+    // probe for a finite-bounded, multi-shot effect operation set.
+    let positive = concat!(
+        "effect Control { ",
+        "[1,1] once(value: i64) -> i64; ",
+        "[2,2] twice() -> i64; ",
+        "[0,2] optional(value: i64) -> i64; ",
+        "[4,4] four() -> i64; ",
+        "stop(reason: Text) -> !; ",
+        "}",
+    );
+    let expected = encode_rust_effect_interfaces(positive);
+    let value = vm
+        .run(function, vec![Value::Text(positive.to_owned().into())])
+        .unwrap();
+    let Value::Bytes(actual) = value else {
+        panic!("effect probe returned {value:?}");
+    };
+    assert_eq!(
+        actual.as_ref(),
+        expected.as_slice(),
+        "finite resumption-quantity interface bytes diverged"
+    );
+
+    // Finite-bound declarations drawn from the assigned suites, plus stable
+    // header rejections. Acceptance matches the bootstrap parser/validator.
+    let corpus = [
+        // finite_resumption_quantities.rs
+        ("effect Choose { [4,4] choose() -> i64 }", true),
+        // multishot_effects.rs
+        ("effect Choose { [2,2] choose() -> i64 }", true),
+        // resumption_quantity_breadth.rs
+        ("effect Choice { [0,2] choose() -> i64 }", true),
+        ("effect Choice { [1,2] choose() -> i64 }", true),
+        ("effect Choice { [1,1] choose() -> i64 }", true),
+        // late_resumption_regressions.rs / nested_captured_handlers.rs
+        ("effect Ask { [1,1] ask() -> i64 }", true),
+        ("effect Stop { stop() -> ! }", true),
+        // Present in the breadth suite; rejected only at the later bytecode
+        // phase, so the shared header/interface oracle accepts it like the
+        // bootstrap validator.
+        ("effect Choice { [1,infinity] choose() -> i64 }", true),
+        // Invalid interval and terminal-with-quantity rejections.
+        ("effect Bad { [2, 1] stop() -> u8 }", false),
+        ("effect Bad { [0, 1] stop() -> ! }", false),
+    ];
+    for (source, accepted) in corpus {
+        let rust = grandiose::lexer::lex(source)
+            .ok()
+            .and_then(|tokens| grandiose::parser::parse(tokens).ok())
+            .and_then(|program| grandiose::validate::validate(&program).ok())
+            .is_some();
+        assert_eq!(rust, accepted, "fixture Rust-oracle outcome: {source}");
+        let value = vm
+            .run(function, vec![Value::Text(source.to_owned().into())])
+            .unwrap();
+        let Value::Bytes(bytes) = value else {
+            panic!("effect probe returned {value:?}");
+        };
+        assert_eq!(
+            bytes.first().copied() == Some(0),
+            accepted,
+            "self-host probe status: {source}"
+        );
+    }
+}
+
+#[test]
 fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
