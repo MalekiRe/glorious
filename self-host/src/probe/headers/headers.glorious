@@ -936,80 +936,76 @@ write_fixity(
     write_string(output, &spelling)
 }
 
+interface_kind_supported(kind: u8) -> Bool {
+    handle kind {
+        3 => true,
+        6 => true,
+        7 => true,
+        8 => true,
+        9 => true,
+        12 => true,
+        _ => false
+    }
+}
+
+write_interfaces_at(
+    output: &mut ByteBuf,
+    original: &String,
+    parsed: &ParsedHeaders,
+    include_field_spans: Bool,
+    current: usize
+) -> Bool {
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    if(current < super::super::frontend::headers::header_count(nominal)) {
+        let kind = super::super::frontend::headers::header_kind(nominal, current);
+        if(interface_kind_supported(kind)) {
+            let index = super::super::frontend::headers::parsed_index(parsed);
+            let declaration = wrapping_convert_to_usize(
+                super::super::frontend::headers::header_index(nominal, current)
+            );
+            ByteBuf::push(output, kind);
+            handle kind {
+                3 => write_alias(output, parsed, handle
+                    super::super::frontend::headers::alias_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                6 => write_fixity(output, original, parsed, handle
+                    super::super::frontend::headers::fixity_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                7 => write_effect(output, parsed, handle
+                    super::super::frontend::headers::effect_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                8 => write_struct(output, parsed, handle
+                    super::super::frontend::headers::struct_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }, include_field_spans),
+                9 => write_enum(output, parsed, handle
+                    super::super::frontend::headers::enum_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                12 => write_callable(output, parsed, handle
+                    super::super::frontend::headers::callable_at(index, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                _ => unreachable()
+            };
+            write_interfaces_at(output, original, parsed, include_field_spans, current + 1)
+        } else {
+            write_interfaces_at(output, original, parsed, include_field_spans, current + 1)
+        }
+    } else { true }
+}
+
 write_interfaces(
     output: &mut ByteBuf,
     original: &String,
     parsed: &ParsedHeaders,
     include_field_spans: Bool
 ) {
-    let nominal = super::super::frontend::headers::nominal_index(parsed);
-    let index = super::super::frontend::headers::parsed_index(parsed);
-    for_range(Range::new(
-        0,
-        super::super::frontend::headers::header_count(nominal)
-    ), { current => {
-        let kind = super::super::frontend::headers::header_kind(nominal, current);
-        let declaration = wrapping_convert_to_usize(
-            super::super::frontend::headers::header_index(nominal, current)
-        );
-        ByteBuf::push(output, kind);
-        handle kind {
-            3 => write_alias(output, parsed, handle
-                super::super::frontend::headers::alias_at(nominal, declaration) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            }),
-            4 => write_effect_row_alias(output, parsed, handle
-                super::super::frontend::headers::effect_row_alias_at(nominal, declaration) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            }),
-            6 => write_fixity(output, original, parsed, handle
-                super::super::frontend::headers::fixity_at(nominal, declaration) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            }),
-            7 => write_effect(output, parsed, handle
-                super::super::frontend::headers::effect_at(nominal, declaration) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            }),
-            8 => write_struct(output, parsed, handle
-                super::super::frontend::headers::struct_at(nominal, declaration) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            }, include_field_spans),
-            9 => write_enum(output, parsed, handle
-                super::super::frontend::headers::enum_at(nominal, declaration) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            }),
-            12 => write_callable(output, parsed, handle
-                super::super::frontend::headers::callable_at(index, declaration) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            }),
-            13 => write_drop(output, parsed, handle
-                super::super::frontend::headers::drop_at(nominal, declaration) {
-                Result::Err(_) => unreachable(), Result::Ok(found) => found
-            }),
-            14 => write_use(output, parsed, handle
-                super::super::frontend::headers::use_at(nominal, declaration) {
-                Result::Err(_) => unreachable(), Result::Ok(found) => found
-            }),
-            15 => write_trait(output, parsed, handle
-                super::super::frontend::headers::trait_at(nominal, declaration) {
-                Result::Err(_) => unreachable(), Result::Ok(found) => found
-            }),
-            16 => write_impl(output, parsed, handle
-                super::super::frontend::headers::impl_at(nominal, declaration) {
-                Result::Err(_) => unreachable(), Result::Ok(found) => found
-            }),
-            _ => unreachable()
-        }
-    }})
+    let completed = write_interfaces_at(output, original, parsed, include_field_spans, 0);
 }
-
 
 interface_callables_supported(parsed: &ParsedHeaders, ordinal: usize) -> Bool {
     let index = super::super::frontend::headers::parsed_index(parsed);
@@ -1063,10 +1059,18 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                         ByteBuf::write_u32_le(
                             output,
                             wrapping_convert_to_u32(
-                                super::super::frontend::headers::header_count(
-                                    super::super::frontend::headers::nominal_index(
-                                        &parsed
-                                    )
+                                super::super::frontend::headers::alias_count(
+                                    super::super::frontend::headers::nominal_index(&parsed)
+                                ) + super::super::frontend::headers::fixity_count(
+                                    super::super::frontend::headers::nominal_index(&parsed)
+                                ) + super::super::frontend::headers::effect_count(
+                                    super::super::frontend::headers::nominal_index(&parsed)
+                                ) + super::super::frontend::headers::struct_count(
+                                    super::super::frontend::headers::nominal_index(&parsed)
+                                ) + super::super::frontend::headers::enum_count(
+                                    super::super::frontend::headers::nominal_index(&parsed)
+                                ) + super::super::frontend::headers::callable_count(
+                                    super::super::frontend::headers::parsed_index(&parsed)
                                 )
                             )
                         );
