@@ -157,7 +157,7 @@ source is not in the name-resolution corpus, so the row stays `unported`.
 
 ## 6. How to validate
 Run the focused gates under the repository memory limiter (once a RAM slot admits):
-  /tmp/grandiose-ram-gate.sh test -p grandiose --test self_host_typed_core self_hosted_effect_control_headers_match_rust_oracle
-  /tmp/grandiose-ram-gate.sh test -p grandiose --test parity_manifest
+  ./tooling/ram-gate.sh cargo test -p grandiose --test self_host_typed_core self_hosted_effect_control_headers_match_rust_oracle
+  ./tooling/ram-gate.sh cargo test -p grandiose --test parity_manifest
 Each newly-touched `.glorious` source is already proven accepted by the existing corpus of
 the same gate, so the additions are parity-consistent with the current self-host layer.

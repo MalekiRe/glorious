@@ -11,7 +11,7 @@ discovering missing language features.
 2. Make lexer, scanner, header, resolution, Typed Core, MIR, bytecode, and
    diagnostic results agree at every layer the feature reaches.
 3. Run the relevant ordinary bootstrap tests and self-host parity tests with
-   the repository memory limiter.
+   the repository memory limiter (`./tooling/ram-gate.sh cargo test ...`).
 4. Keep the feature in the cumulative self-host conformance corpus.
 5. Attempt stage 1 -> stage 2 -> stage 3 only after the cumulative parity gate
    is green.

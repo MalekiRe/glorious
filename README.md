@@ -464,14 +464,25 @@ return continuation and consumes its complete caller frame.
 Set `G1_VM_ERROR_TRACE=1` while running bytecode to attach the executing
 function, program counter, and instruction to a returned VM runtime error.
 
-```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+### Local command RAM gate
 
-cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
-cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
-cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
+Use `tooling/ram-gate.sh` for every local command that executes more than
+`cargo check`. It applies the repository's 8 GiB virtual-memory cap and uses
+three shared `/tmp/grandiose-ram-gate/slot-*.lock` `flock` slots, so at most
+three capped commands run across all worktrees. The wrapper sets
+`G1_TEST_MEMORY_CAPPED=1`, allowing memory-capped LLVM tests to avoid ASAN's
+large virtual-address reservation. `cargo check` is deliberately passed through
+without taking a slot.
+
+```sh
+cargo check --workspace
+./tooling/ram-gate.sh cargo fmt --all -- --check
+./tooling/ram-gate.sh cargo clippy --workspace --all-targets -- -D warnings
+./tooling/ram-gate.sh cargo test --workspace --all-targets
+
+./tooling/ram-gate.sh cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
+./tooling/ram-gate.sh cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
+./tooling/ram-gate.sh cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
 ```
 
 Useful design references:
