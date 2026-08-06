@@ -625,8 +625,9 @@ scan_word(value: &mut Lexer) {
     handle keyword(&text) {
         Result::Ok(found) => push_keyword( value,  found, start),
         Result::Err(_) => {
-            let end = value.cursor;
-            let id = intern_slice(&mut *value, start, end);
+            // `text` is already the token-range slice used for keyword
+            // recognition; reuse it for interning instead of slicing again.
+            let id = intern_text(&mut *value, text);
             push(value, TokenKind::Ident(id), start)
         }
     }
