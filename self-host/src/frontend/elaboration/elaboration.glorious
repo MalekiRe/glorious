@@ -8076,6 +8076,43 @@ finish_value(
     }
 }
 
+// A label invocation is a control transfer, not an ordinary callable value.
+// Its payload supplies the value observed at the destination, so preserving
+// the expected result type here also keeps the ownership/type discipline used
+// for ordinary return paths.  The compact Core currently represents this
+// terminal transfer by its payload computation; no continuation is serialized
+// after a tail-position label invocation.
+elaborate_label_call(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    let found_count = super::bodies::expression_child_count_at(body, expression)
+        - 1;
+    if(found_count == 1) {
+        elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            super::bodies::expression_child_at(body, expression, 1),
+            expected
+        )
+    } else { Result::Err(ElaborationError::ArgumentCountMismatch(
+        token, 1, found_count
+    )) }
+}
+
 elaborate_call(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -10201,17 +10238,32 @@ elaborate_expression(
                     expected
                 )
             },
-        super::bodies::BodyExpressionView::Call(_, _) => elaborate_call(
-            original,
-            headers,
-            declarations,
-            interfaces,
-            body,
-            map,
-            value,
-            expression,
-            expected
-        ),
+        super::bodies::BodyExpressionView::Call(callee, _) =>
+            handle super::bodies::expression_view(body, Id::to_u32(callee)) {
+                super::bodies::BodyExpressionView::LabelReference(_) =>
+                    elaborate_label_call(
+                        original,
+                        headers,
+                        declarations,
+                        interfaces,
+                        body,
+                        map,
+                        value,
+                        expression,
+                        expected
+                    ),
+                _ => elaborate_call(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    map,
+                    value,
+                    expression,
+                    expected
+                )
+            },
         super::bodies::BodyExpressionView::Block(_) => elaborate_block(
             original,
             headers,
