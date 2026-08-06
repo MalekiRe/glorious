@@ -245,6 +245,7 @@ pub struct TraitHeader {
     name: Id<String>,
     public: Bool,
     generics: HeaderRange,
+    methods: HeaderRange,
     tokens: HeaderTokenRange
 }
 
@@ -255,6 +256,7 @@ pub struct ImplHeader {
     self_ty: TypeId,
     where_tokens: HeaderTokenRange,
     where_clause: Option<WhereClause>,
+    methods: HeaderRange,
     tokens: HeaderTokenRange
 }
 
@@ -656,6 +658,7 @@ pub impl_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a ImplHeader>
 pub trait_name(value: &TraitHeader) -> Id<String> { value.name }
 pub trait_public(value: &TraitHeader) -> Bool { value.public }
 pub trait_generics(value: &TraitHeader) -> &HeaderRange { &value.generics }
+pub trait_methods(value: &TraitHeader) -> &HeaderRange { &value.methods }
 pub trait_tokens(value: &TraitHeader) -> &HeaderTokenRange { &value.tokens }
 pub impl_generics(value: &ImplHeader) -> &HeaderRange { &value.generics }
 pub impl_trait_path(value: &ImplHeader) -> &HeaderRange { &value.trait_path }
@@ -666,6 +669,7 @@ pub impl_trait_path_name(value: &HeaderIndex, value_impl: &ImplHeader, index: us
 }
 pub impl_self_type(value: &ImplHeader) -> TypeId { value.self_ty }
 pub impl_where_clause(value: &ImplHeader) -> &Option<WhereClause> { &value.where_clause }
+pub impl_methods(value: &ImplHeader) -> &HeaderRange { &value.methods }
 pub impl_tokens(value: &ImplHeader) -> &HeaderTokenRange { &value.tokens }
 
 pub drop_generics(value: &DropHeader) -> &HeaderRange { &value.generics }
@@ -4200,6 +4204,71 @@ parse_impl_header(
     } else { Result::Err(HeaderError::UnexpectedTrailingHeaderToken(value.tokens.position, start)) }
 }
 
+// Trait and implementation members share the callable header arena. Their
+// ranges retain ownership in the enclosing nominal interface while preserving
+// the ordinary structured parameter/type/where representation.
+trait_method_semicolon(value: &Parser, current: usize, limit: usize) -> usize {
+    if(current < limit) {
+        if(super::lexer::token_matches_at(
+            &value.source, current, TokenPattern::Semicolon
+        )) { current } else { trait_method_semicolon(value, current + 1, limit) }
+    } else { limit }
+}
+
+parse_trait_methods(
+    original: &String,
+    value: &mut Parser,
+    shell: ShellId,
+    current: usize,
+    limit: usize,
+    start: usize
+) -> Result<HeaderRange, HeaderError> {
+    if(current < limit) {
+        let end = trait_method_semicolon(&*value, current, limit);
+        value.tokens.position = current;
+        value.tokens.limit = end;
+        try(parse_callable(original, value, shell, false, current), @parse_trait_methods);
+        parse_trait_methods(original, value, shell, end + 1, limit, start)
+    } else { Result::Ok(header_range(start, Vec::len(&value.output.callables))) }
+}
+
+impl_method_body_open(value: &Parser, current: usize, limit: usize) -> Option<usize> {
+    if(current < limit) {
+        if(super::lexer::token_matches_at(&value.source, current, TokenPattern::LBrace)) {
+            Option::Some(current)
+        } else { impl_method_body_open(value, current + 1, limit) }
+    } else { None }
+}
+
+parse_impl_methods(
+    original: &String,
+    declarations: &super::scanner::DeclarationIndex,
+    value: &mut Parser,
+    shell: ShellId,
+    current: usize,
+    limit: usize,
+    start: usize
+) -> Result<HeaderRange, HeaderError> {
+    if(current < limit) {
+        handle impl_method_body_open(&*value, current, limit) {
+            None => Result::Err(HeaderError::UnexpectedTrailingHeaderToken(current, current)),
+            Option::Some(open) => {
+                value.tokens.position = current;
+                value.tokens.limit = open;
+                try(parse_callable(original, value, shell, false, current), @parse_impl_methods);
+                handle super::syntax::delimiter_partner(
+                    super::scanner::delimiter_map(declarations), open
+                ) {
+                    None => Result::Err(HeaderError::ExpectedRightBrace(open, current)),
+                    Option::Some(close) => parse_impl_methods(
+                        original, declarations, value, shell, close + 1, limit, start
+                    )
+                }
+            }
+        }
+    } else { Result::Ok(header_range(start, Vec::len(&value.output.callables))) }
+}
+
 // Trait bodies are not otherwise parsed by this header pass. Preserve the
 // declaration-level terminator rule so a trailing trait signature is not
 // mistaken for a complete interface.
@@ -4219,6 +4288,8 @@ validate_trait_body_terminator(
 }
 
 parse_trait_header(
+    original: &String,
+    declarations: &super::scanner::DeclarationIndex,
     value: &mut Parser,
     traits: &mut TraitArena,
     order: &mut ParsedDefTable,
@@ -4237,9 +4308,13 @@ parse_trait_header(
     let name = try(ident(value, start), @parse_trait_header);
     let generics = try(parse_generics(value, start), @parse_trait_header);
     if(value.tokens.position == header_end) {
+        let method_start = Vec::len(&value.output.callables);
+        let methods = try(parse_trait_methods(
+            original, value, shell, header_end + 1, whole_end - 1, method_start
+        ), @parse_trait_header);
         Vec::push(&mut traits.values, TraitHeader {
             shell: shell, name: name.name, public: public, generics: generics,
-            tokens: token_range(start, whole_end)
+            methods: methods, tokens: token_range(start, whole_end)
         });
         record_header(order, shell, HeaderOrder::Trait(typed_header_id(Vec::len(&traits.values) - 1)));
         Result::Ok(())
@@ -4248,6 +4323,7 @@ parse_trait_header(
 
 parse_trait_impl_header(
     original: &String,
+    declarations: &super::scanner::DeclarationIndex,
     value: &mut Parser,
     impls: &mut ImplArena,
     order: &mut ParsedDefTable,
@@ -4271,9 +4347,13 @@ parse_trait_impl_header(
         let self_ty = try(parse_type(value, start), @parse_trait_impl_header);
         let where_tokens = try(parse_bounded_where_clause(value, start, header_end), @parse_trait_impl_header);
         let where_clause = try(parse_structured_where_clause(original, value, start, where_tokens), @parse_trait_impl_header);
+        let method_start = Vec::len(&value.output.callables);
+        let methods = try(parse_impl_methods(
+            original, declarations, value, shell, header_end + 1, whole_end - 1, method_start
+        ), @parse_trait_impl_header);
         Vec::push(&mut impls.values, ImplHeader {
             shell: shell, generics: generics, trait_path: trait_path, self_ty: self_ty,
-            where_tokens: where_tokens, where_clause: where_clause,
+            where_tokens: where_tokens, where_clause: where_clause, methods: methods,
             tokens: token_range(start, whole_end)
         });
         record_header(order, shell, HeaderOrder::Impl(typed_header_id(Vec::len(&impls.values) - 1)));
@@ -4394,6 +4474,8 @@ parse_shells(
                         whole_end
                     ),
                     super::scanner::DeclarationKind::Trait => parse_trait_header(
+                        original,
+                        declarations,
                         &mut next,
                         &mut nominal.traits,
                         &mut nominal.definitions,
@@ -4405,6 +4487,7 @@ parse_shells(
                     ),
                     super::scanner::DeclarationKind::Impl => parse_impl_dispatch(
                         original,
+                        declarations,
                         &mut next,
                         &mut nominal.impls,
                         &mut nominal.drops,
@@ -4464,6 +4547,7 @@ impl_dispatch_head_is(
 
 parse_impl_dispatch(
     original: &String,
+    declarations: &super::scanner::DeclarationIndex,
     value: &mut Parser,
     impls: &mut ImplArena,
     drops: &mut DropArena,
@@ -4483,7 +4567,7 @@ parse_impl_dispatch(
         parse_impl_header(original, value, drops, uses, order, shell, start, header_end, whole_end)
     } else {
         value.tokens.position = start + 1;
-        parse_trait_impl_header(original, value, impls, order, shell, start, header_end, whole_end)
+        parse_trait_impl_header(original, declarations, value, impls, order, shell, start, header_end, whole_end)
     }
 }
 

@@ -8,7 +8,7 @@ use std::{
 use grandiose::{
     ast::{
         self, EffectDecl, EffectRowSyntax, FieldVisibility, Function, GenericParamKind,
-        GenericParams, StructDecl, TypeSyntax, TypeSyntaxKind, Visibility,
+        GenericParams, StructDecl, TraitMethod, TypeSyntax, TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
     CompileOptions, LlvmOptions, OptimizationLevel,
@@ -356,6 +356,43 @@ fn encode_callable(
     Ok(())
 }
 
+fn encode_trait_method(
+    output: &mut Vec<u8>,
+    source: &str,
+    declaration: &TraitMethod,
+) -> Result<(), ()> {
+    output.push(0);
+    push_string(output, &declaration.name);
+    encode_generics(output, declaration.generics.as_ref())?;
+    if let Some(generics) = declaration.generics.as_ref() {
+        push_span(output, generics.span);
+    } else {
+        push_u64(output, 0);
+        push_u64(output, 0);
+    }
+    push_u32(output, declaration.params.len().try_into().unwrap());
+    for parameter in &declaration.params {
+        push_string(output, &parameter.name);
+        encode_type(output, source, &parameter.ty)?;
+    }
+    match &declaration.return_type {
+        Some(return_type) => {
+            output.push(1);
+            encode_type(output, source, return_type)?;
+        }
+        None => output.push(0),
+    }
+    match &declaration.outward_effects {
+        Some(effects) => {
+            output.push(1);
+            encode_effect_row(output, source, effects)?;
+        }
+        None => output.push(0),
+    }
+    encode_where_contract(output, source, declaration.where_clause.as_ref());
+    Ok(())
+}
+
 fn encode_effect(
     output: &mut Vec<u8>,
     source: &str,
@@ -576,6 +613,10 @@ fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
                 push_string(output, &declaration.name);
                 encode_generics(output, declaration.generics.as_ref()).unwrap();
                 push_span(output, declaration.span);
+                push_u32(output, declaration.methods.len().try_into().unwrap());
+                for method in &declaration.methods {
+                    encode_trait_method(output, source, method).unwrap();
+                }
             }
             Item::Struct(index) => {
                 output.push(8);
@@ -600,6 +641,10 @@ fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
                 encode_type(output, source, &declaration.self_ty).unwrap();
                 encode_where_contract(output, source, declaration.where_clause.as_ref());
                 push_span(output, declaration.span);
+                push_u32(output, declaration.methods.len().try_into().unwrap());
+                for method in &declaration.methods {
+                    encode_trait_method(output, source, method).unwrap();
+                }
             }
             Item::Function(index) => {
                 output.push(12);
@@ -794,9 +839,9 @@ fn self_host_unit_unit_and_never_results_are_retained() {
 }
 
 #[test]
-fn self_host_unit_empty_marker_traits_and_positive_impls() {
+fn self_host_trait_and_impl_method_headers_match_bootstrap() {
     let directory = tempfile::tempdir().unwrap();
-    let source = "trait Marker {} struct Box<T> { value: T } impl Marker for i64 {} impl<T> Marker for Box<T> where T: Marker {} main() -> { () }";
+    let source = "trait Describe { describe(self: &Self) -> Text; } struct Item { value: Text } impl Describe for Item { describe(self: &Item) -> Text { self.value } } main() -> { () }";
     let input = directory.path().join("marker.glorious");
     let output = directory.path().join("headers.bin");
     fs::write(&input, source).unwrap();
@@ -816,7 +861,7 @@ fn self_host_unit_empty_marker_traits_and_positive_impls() {
         SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
     ).unwrap();
     assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-    assert_wire_eq(&fs::read(&output).unwrap(), &expected, "marker trait interfaces diverged");
+    assert_wire_eq(&fs::read(&output).unwrap(), &expected, "trait and implementation method interfaces diverged");
 }
 
 #[test]
