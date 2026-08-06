@@ -1047,35 +1047,6 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     assert_eq!(variants[2].fields[0].ty, I64);
     assert_eq!(variants[2].fields[1].name, "1");
     assert_eq!(variants[2].fields[1].ty, U64);
-    let verified = load_verified(bytes).expect("self-hosted GRBC must verify");
-    assert_eq!(
-        Vm::new(verified.clone()).run(answer, vec![]).unwrap(),
-        Value::I64(7)
-    );
-    assert_eq!(
-        Vm::new(verified.clone()).run(first, vec![]).unwrap(),
-        Value::I64(7)
-    );
-    assert_eq!(
-        Vm::new(verified.clone())
-            .run(struct_answer, vec![])
-            .unwrap(),
-        Value::I64(11)
-    );
-    assert_eq!(
-        Vm::new(verified.clone()).run(empty_choice, vec![]).unwrap(),
-        Value::aggregate_with_variant(choice, Some(0), [])
-    );
-    assert_eq!(
-        Vm::new(verified.clone())
-            .run(number_choice, vec![])
-            .unwrap(),
-        Value::aggregate_with_variant(choice, Some(1), [Value::I64(13)])
-    );
-    assert_eq!(
-        Vm::new(verified.clone()).run(pair_choice, vec![]).unwrap(),
-        Value::aggregate_with_variant(choice, Some(2), [Value::I64(7), Value::U64(9)])
-    );
     assert!(
         decoded
             .code
@@ -1114,6 +1085,36 @@ fn assert_compiled_artifact(bytes: &[u8]) {
             .count()
             >= 7,
         "CFG-final uses in the subject and every arm must lower as moves"
+    );
+    drop(decoded);
+    let verified = load_verified(bytes).expect("self-hosted GRBC must verify");
+    assert_eq!(
+        Vm::new(verified.clone()).run(answer, vec![]).unwrap(),
+        Value::I64(7)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(first, vec![]).unwrap(),
+        Value::I64(7)
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(struct_answer, vec![])
+            .unwrap(),
+        Value::I64(11)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(empty_choice, vec![]).unwrap(),
+        Value::aggregate_with_variant(choice, Some(0), [])
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(number_choice, vec![])
+            .unwrap(),
+        Value::aggregate_with_variant(choice, Some(1), [Value::I64(13)])
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(pair_choice, vec![]).unwrap(),
+        Value::aggregate_with_variant(choice, Some(2), [Value::I64(7), Value::U64(9)])
     );
     assert_eq!(
         Vm::new(verified.clone())
