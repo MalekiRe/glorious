@@ -339,7 +339,16 @@ find_semicolon(
             Result::Ok(index)
         } else if(super::syntax::delimiter_is_open(delimiters, index)) {
             handle super::syntax::delimiter_partner(delimiters, index) {
-                None => Result::Err(ScanError::UnclosedDelimiter(limit, index)),
+                // An unclosed tuple/quantity delimiter can occur inside a
+                // declaration header. Keep scanning to its semicolon so the
+                // header parser owns the precise malformed-type diagnostic.
+                None => handle token_kind_at(value, index) {
+                    TokenKind::LParen =>
+                        find_semicolon(value, delimiters, index + 1, limit, start),
+                    TokenKind::LBracket =>
+                        find_semicolon(value, delimiters, index + 1, limit, start),
+                    _ => Result::Err(ScanError::UnclosedDelimiter(limit, index))
+                },
                 Option::Some(close) =>
                     find_semicolon(value, delimiters, close + 1, limit, start)
             }
