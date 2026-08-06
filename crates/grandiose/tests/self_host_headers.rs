@@ -507,6 +507,7 @@ fn bootstrap_header_error_code(source: &str, error: &grandiose::diagnostic::Diag
         ("invalid resumption quantity", message)
             if message.contains("upper bound") => 20,
         ("duplicate associated binding", _) => 26,
+        ("duplicate generic parameter", _) => 27,
         (_, _) if prefix.ends_with("where") => 23,
         (_, message) if message.contains("expected `{`") || message == "expected a block" => 9,
         ("expected a name", _) => 1,
@@ -724,6 +725,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "bad(value: Vec<>) { () }",
         "bad(value: T) trailing { () }",
         "bad<T>(value: T) -> T where { value }",
+        "duplicate<T, T>(value: T) { () }",
         "pub effect Control<'a, T, E: EffectRow> where T: Marker { [0, infinity] choose<U>(input: &'a T, fallback: U) -> Result<T, U> where U: Marker; [2, 4] repeat(value: T) -> T; stop(reason: String) -> !; unit() ->; implicit() }",
         "effect Adjacent { first() second(value: u8) -> u8 third() -> ! }",
         "effect AdjacentWhere<T> { first(value: T) -> T where T: Marker second<U>(value: U) -> U }",
@@ -751,6 +753,36 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     fs::write(&path, deep).unwrap();
     paths.push(path);
     paths
+}
+
+#[test]
+fn self_host_header_duplicate_generic_parameter_matches_rust_oracle() {
+    let source = "duplicate<T, T>(value: T) { () }";
+    let diagnostic = grandiose::parser::parse(grandiose::lexer::lex(source).unwrap()).unwrap_err();
+    assert_eq!(diagnostic.title, "duplicate generic parameter");
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("duplicate-generic.glorious");
+    let output = directory.path().join("duplicate-generic.bin");
+    fs::write(&input, source).unwrap();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_headers(&mut expected, source);
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle("probe::headers::application"),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap(), expected);
 }
 
 #[test]

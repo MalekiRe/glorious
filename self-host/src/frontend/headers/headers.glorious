@@ -416,6 +416,7 @@ pub enum HeaderError {
     InvalidWhereGoal(usize, usize),
     InvalidWhereQuantity(usize, usize),
     DuplicateAssociatedBinding(usize, usize),
+    DuplicateGenericParameter(usize, usize),
     TypeArenaExhausted(usize, usize)
 }
 
@@ -448,6 +449,7 @@ pub header_error_code(error: &HeaderError) -> u32 {
         HeaderError::InvalidWhereGoal(_, _) => 24,
         HeaderError::InvalidWhereQuantity(_, _) => 25,
         HeaderError::DuplicateAssociatedBinding(_, _) => 26,
+        HeaderError::DuplicateGenericParameter(_, _) => 27,
         HeaderError::TypeArenaExhausted(_, _) => 14
     }
 }
@@ -479,6 +481,7 @@ pub header_error_token(error: &HeaderError) -> usize {
         HeaderError::InvalidWhereGoal(token, _) => token,
         HeaderError::InvalidWhereQuantity(token, _) => token,
         HeaderError::DuplicateAssociatedBinding(token, _) => token,
+        HeaderError::DuplicateGenericParameter(token, _) => token,
         HeaderError::TypeArenaExhausted(token, _) => token
     }
 }
@@ -2078,6 +2081,15 @@ parse_generic_items(
         )
     } else {
         let found = try(parse_one_generic(value, related), @parse_generic_items);
+        let duplicate = find_duplicate_generic_parameter(
+            &value.output, start, found.name
+        );
+        handle duplicate {
+            None => (),
+            Option::Some(previous) => @parse_generic_items(Result::Err(
+                HeaderError::DuplicateGenericParameter(found.tokens.start, previous)
+            ))
+        };
         Vec::push(&mut value.output.generic_params, found);
         if(eat_token(value, TokenPattern::Comma)) { if(at_token(&*value, TokenPattern::Gt)) { finish_generics(value, related, start) } else { parse_generic_items(
                     value,
@@ -2085,6 +2097,21 @@ parse_generic_items(
                     start
                 ) } } else { finish_generics(value, related, start) }
     }
+}
+
+find_duplicate_generic_parameter(
+    value: &HeaderIndex,
+    start: usize,
+    name: Id<String>
+) -> Option<usize> {
+    if(start < Vec::len(&value.generic_params)) {
+        let existing = Vec::index(&value.generic_params, start);
+        if(existing.name == name) {
+            Option::Some(existing.tokens.start)
+        } else {
+            find_duplicate_generic_parameter(value, start + 1, name)
+        }
+    } else { None }
 }
 
 parse_one_generic(
