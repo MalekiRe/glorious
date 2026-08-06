@@ -1430,15 +1430,26 @@ compile_session<'a>(
     let types = lowering::mir_types();
     let type_map = lowering::artifact_type_map();
     let type_names = Vec::new();
-    seed_concrete_callables(&mut session, 0);
-    try(lower_functions(
-        &mut session,
-        &mut type_map,
-        &mut types,
-        &mut type_names,
-        0,
-        &mut functions
-    ), @compile_session);
+    // Move the frontend session (CompilerSession and its whole frontend graph:
+    // parsed headers, declaration and resolution indices, and the typed
+    // interface arena) into a nested scope. Its ownership therefore ends as
+    // soon as lowering finishes, before finish_program and emission allocate
+    // the artifact. The `&mut session` reborrows are scoped to this block, so
+    // binding it here (rather than merely wrapping the calls lexically) lets
+    // the whole graph be dropped right away instead of lingering until the end
+    // of compile_session.
+    try({
+        let session = session;
+        seed_concrete_callables(&mut session, 0);
+        lower_functions(
+            &mut session,
+            &mut type_map,
+            &mut types,
+            &mut type_names,
+            0,
+            &mut functions
+        )
+    }, @compile_session);
     let program = lowering::finish_program(
         functions,
         types,
