@@ -25,11 +25,15 @@ fn self_host_semantic_control_acceptance_and_rejection_match_rust_oracle() {
     ];
     let dir=tempfile::tempdir().unwrap(); let mut paths=Vec::new(); let mut expected=Vec::new();
     for (i, source) in corpus.iter().enumerate() { let path=dir.path().join(format!("{i}.glorious")); fs::write(&path,source).unwrap(); paths.push(path); expected.push(compile_source_to_phases_with_options(format!("{i}.glorious"),source,CompileOptions::default()).is_ok()); }
-    let output=dir.path().join("out.bin");
     let phases=grandiose::compile_bundle_to_phases_with_options(&bundle(),CompileOptions::default()).unwrap();
-    let entry=phases.artifact.entry_function.unwrap(); let args=std::iter::once(output.clone().into_os_string()).chain(paths.into_iter().map(|p|p.into_os_string())).collect();
-    let vm=Vm::with_host(verify(phases.artifact).unwrap(),["process.args","fs.read","fs.write","diagnostic"],SystemHost::new(args)).unwrap(); assert_eq!(vm.run(entry,vec![]).unwrap(),Value::Unit);
-    let bytes=fs::read(output).unwrap(); assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()),corpus.len() as u32);
-    // Probe emits status 0 for successful elaboration and nonzero for rejected input.
-    for (i, ok) in expected.into_iter().enumerate() { assert_eq!(bytes[4+i]==0,ok,"semantic status diverged for corpus case {i}"); }
+    let entry=phases.artifact.entry_function.unwrap();
+    for (i, (path, ok)) in paths.into_iter().zip(expected).enumerate() {
+        let output=dir.path().join(format!("out-{i}.bin"));
+        let args=vec![output.clone().into_os_string(),path.into_os_string()];
+        let vm=Vm::with_host(verify(phases.artifact.clone()).unwrap(),["process.args","fs.read","fs.write","diagnostic"],SystemHost::new(args)).unwrap();
+        assert_eq!(vm.run(entry,vec![]).unwrap(),Value::Unit);
+        let bytes=fs::read(output).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()),1);
+        assert_eq!(bytes[4]==0,ok,"semantic status diverged for corpus case {i}");
+    }
 }
