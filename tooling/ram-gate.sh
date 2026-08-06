@@ -7,9 +7,11 @@ usage() {
     cat >&2 <<'USAGE'
 usage: tooling/ram-gate.sh <command> [args...]
 
-Run a non-`cargo check` command with an 8 GiB virtual-memory limit. At most
-three such commands may run concurrently across Grandiose worktrees. `cargo
-check` is intentionally passed through without taking a slot.
+Serialize non-`cargo check` commands across at most three shared slots. Direct
+commands get an 8 GiB virtual-memory limit. Cargo commands are deliberately
+not virtual-memory-capped: `cargo test` and `cargo build` must let rustc finish
+compilation before the produced test binary can be measured/capped separately.
+`cargo check` is intentionally passed through without taking a slot.
 USAGE
     exit 2
 }
@@ -38,7 +40,13 @@ while :; do
             # keep Rust's in-process test harness serial unless a caller has
             # explicitly measured and overridden it.
             export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
-            ulimit -v "$ram_kib"
+            # Do not cap cargo itself: rustc can require more virtual address
+            # space while building a test than the test process needs at run
+            # time.  The gate still serializes it.  Direct commands remain
+            # capped for measured runtime enforcement.
+            if [[ $1 != cargo ]]; then
+                ulimit -v "$ram_kib"
+            fi
             exec "$@"
         fi
         eval "exec ${lock_fd}>&-"
