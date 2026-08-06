@@ -17,7 +17,7 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel, compile_bundle_to_bytecode_with_options,
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
@@ -174,15 +174,15 @@ fn self_hosted_compiler_pipeline_accept_reject_matches_rust_in_vm() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let phases = grandiose::compile_bundle_to_phases_with_options(
+            let artifact = compile_bundle_to_bytecode_with_options(
                 &self_host_compiler_pipeline_bundle(),
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
             )
             .unwrap();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
-            let verified = verify(phases.artifact).unwrap();
+            let classify = function_id(&artifact, "classify_compile_error");
+            let verified = verify(artifact).unwrap();
 
             for (index, source) in corpus().into_iter().enumerate() {
                 let oracle_accepted =
