@@ -1244,6 +1244,92 @@ write_interfaces(
     let completed = write_interfaces_at(output, original, parsed, include_field_spans, 0);
 }
 
+// The header regression probe retains the spanful source-order interface
+// protocol, including traits and implementations. It is intentionally separate
+// from the compact interface application above.
+legacy_interface_kind_supported(kind: u8) -> Bool {
+    handle kind {
+        3 => true,
+        6 => true,
+        7 => true,
+        8 => true,
+        9 => true,
+        12 => true,
+        15 => true,
+        16 => true,
+        _ => false
+    }
+}
+
+legacy_interface_count_at(parsed: &ParsedHeaders, current: usize) -> usize {
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    if(current < super::super::frontend::headers::header_count(nominal)) {
+        let count = if(legacy_interface_kind_supported(super::super::frontend::headers::header_kind(nominal, current))) { 1 } else { 0 };
+        count + legacy_interface_count_at(parsed, current + 1)
+    } else { 0 }
+}
+
+write_legacy_interfaces_at(
+    output: &mut ByteBuf,
+    original: &String,
+    parsed: &ParsedHeaders,
+    current: usize
+) -> Bool {
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    if(current < super::super::frontend::headers::header_count(nominal)) {
+        let kind = super::super::frontend::headers::header_kind(nominal, current);
+        if(legacy_interface_kind_supported(kind)) {
+            let index = super::super::frontend::headers::parsed_index(parsed);
+            let declaration = wrapping_convert_to_usize(
+                super::super::frontend::headers::header_index(nominal, current)
+            );
+            ByteBuf::push(output, kind);
+            handle kind {
+                3 => write_alias(output, parsed, handle
+                    super::super::frontend::headers::alias_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                6 => write_fixity(output, original, parsed, handle
+                    super::super::frontend::headers::fixity_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                7 => write_effect(output, parsed, handle
+                    super::super::frontend::headers::effect_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                8 => write_struct(output, parsed, handle
+                    super::super::frontend::headers::struct_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }, false),
+                9 => write_enum(output, parsed, handle
+                    super::super::frontend::headers::enum_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                12 => write_callable(output, parsed, handle
+                    super::super::frontend::headers::callable_at(index, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                15 => write_trait(output, parsed, handle
+                    super::super::frontend::headers::trait_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                16 => write_impl(output, parsed, handle
+                    super::super::frontend::headers::impl_at(nominal, declaration) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                }),
+                _ => unreachable()
+            };
+            write_legacy_interfaces_at(output, original, parsed, current + 1)
+        } else {
+            write_legacy_interfaces_at(output, original, parsed, current + 1)
+        }
+    } else { true }
+}
+
+write_legacy_interfaces(output: &mut ByteBuf, original: &String, parsed: &ParsedHeaders) {
+    let completed = write_legacy_interfaces_at(output, original, parsed, 0);
+}
+
 interface_callables_supported(parsed: &ParsedHeaders, ordinal: usize) -> Bool {
     let index = super::super::frontend::headers::parsed_index(parsed);
     if(ordinal < super::super::frontend::headers::callable_count(index)) {
@@ -1260,7 +1346,7 @@ interface_callables_supported(parsed: &ParsedHeaders, ordinal: usize) -> Bool {
     } else { true }
 }
 
-encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
+encode_source(output: &mut ByteBuf, source: String, interfaces: Bool, legacy_interfaces: Bool) {
     handle super::super::frontend::lexer::lex(&source) {
         Result::Err(_) => ByteBuf::push(output, 1),
         Result::Ok(lexed) =>
@@ -1293,11 +1379,19 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                         handle interface_callables_supported(&parsed, 0) {
                             true => {
                     ByteBuf::push(output, 0);
-                        ByteBuf::write_u32_le(
-                            output,
-                            wrapping_convert_to_u32(interface_count_at(&parsed, 0))
-                        );
-                        write_interfaces(output, &source, &parsed, false)
+                        if(legacy_interfaces) {
+                            ByteBuf::write_u32_le(
+                                output,
+                                wrapping_convert_to_u32(legacy_interface_count_at(&parsed, 0))
+                            );
+                            write_legacy_interfaces(output, &source, &parsed)
+                        } else {
+                            ByteBuf::write_u32_le(
+                                output,
+                                wrapping_convert_to_u32(interface_count_at(&parsed, 0))
+                            );
+                            write_interfaces(output, &source, &parsed, false)
+                        }
                             },
                             false => ByteBuf::push(output, 3)
                         }
@@ -1405,19 +1499,20 @@ process_inputs(
     arguments: &Vec<String>,
     index: usize,
     output: &mut ByteBuf,
-    interfaces: Bool
+    interfaces: Bool,
+    legacy_interfaces: Bool
 ) / FileRead {
     for_range(Range::new(index, Vec::len(arguments)), { current => {
         let path = *Vec::index(arguments, current);
         let bytes = read_file(path);
         handle String::from_utf8(bytes) {
             Result::Err(_) => ByteBuf::push(output, 1),
-            Result::Ok(source) => encode_source(output, source, interfaces)
+            Result::Ok(source) => encode_source(output, source, interfaces, legacy_interfaces)
         }
     }})
 }
 
-run_application(interfaces: Bool) / {
+run_application(interfaces: Bool, legacy_interfaces: Bool) / {
     ProcessArgs,
     FileRead,
     FileWrite,
@@ -1442,13 +1537,13 @@ run_application(interfaces: Bool) / {
             &mut encoded,
             wrapping_convert_to_u32(count - 1)
         );
-        process_inputs(&arguments, 1, &mut encoded, interfaces);
+        process_inputs(&arguments, 1, &mut encoded, interfaces, legacy_interfaces);
         write_file(output_path, ByteBuf::finish(encoded))
     }
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
-    run_application(false)
+    run_application(false, false)
 }
 
 pub interface_application() / {
@@ -1457,5 +1552,14 @@ pub interface_application() / {
     FileWrite,
     Diagnostic
 } {
-    run_application(true)
+    run_application(true, false)
+}
+
+pub legacy_interface_application() / {
+    ProcessArgs,
+    FileRead,
+    FileWrite,
+    Diagnostic
+} {
+    run_application(true, true)
 }

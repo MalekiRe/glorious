@@ -806,7 +806,7 @@ fn self_host_unit_empty_marker_traits_and_positive_impls() {
     encode_rust_trait_impl_interfaces(&mut expected, source);
 
     let phases = grandiose::compile_bundle_to_phases_with_options(
-        &self_host_bundle("probe::headers::interface_application"),
+        &self_host_bundle("probe::headers::legacy_interface_application"),
         CompileOptions { optimization_level: OptimizationLevel::O2 },
     ).unwrap();
     let entry = phases.artifact.entry_function.unwrap();
