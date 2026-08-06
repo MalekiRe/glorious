@@ -574,17 +574,7 @@ fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
                 let declaration = &program.traits[index];
                 output.push(u8::from(program.visibility(declaration.span) == Visibility::Public));
                 push_string(output, &declaration.name);
-                if let Some(generics) = declaration.generics.as_ref() {
-                    for parameter in &generics.params {
-                        output.push(match parameter.kind {
-                            GenericParamKind::Type => 1,
-                            GenericParamKind::Lifetime => 2,
-                            GenericParamKind::EffectRow => 3,
-                            GenericParamKind::Const(_) => 0,
-                        });
-                        push_string(output, &parameter.name);
-                    }
-                }
+                encode_generics(output, declaration.generics.as_ref()).unwrap();
                 push_span(output, declaration.span);
             }
             Item::Struct(index) => {
@@ -603,17 +593,7 @@ fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
             Item::Impl(index) => {
                 output.push(16);
                 let declaration = &program.impls[index];
-                if let Some(generics) = declaration.generics.as_ref() {
-                    for parameter in &generics.params {
-                        output.push(match parameter.kind {
-                            GenericParamKind::Type => 1,
-                            GenericParamKind::Lifetime => 2,
-                            GenericParamKind::EffectRow => 3,
-                            GenericParamKind::Const(_) => 0,
-                        });
-                        push_string(output, &parameter.name);
-                    }
-                }
+                encode_generics(output, declaration.generics.as_ref()).unwrap();
                 push_u32(output, declaration.trait_ref.path.len().try_into().unwrap());
                 for segment in &declaration.trait_ref.path { push_string(output, &segment.name); }
                 push_span(output, declaration.self_ty.span);
