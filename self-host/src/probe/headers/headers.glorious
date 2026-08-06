@@ -1048,8 +1048,12 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                     &declarations
                 ) {
                 Result::Err(error) => {
-                    ByteBuf::push(output, 3);
-                    write_header_error(output, &diagnostic_lexed, &error)
+                    if(interfaces) {
+                        ByteBuf::push(output, 3)
+                    } else {
+                        ByteBuf::push(output, 3);
+                        write_header_error(output, &diagnostic_lexed, &error)
+                    }
                 },
                 Result::Ok(parsed) => {
                     if(interfaces) {
