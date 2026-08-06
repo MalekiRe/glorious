@@ -4516,7 +4516,8 @@ resolve_signature_type(
             _,
             constructor,
             lifetimes,
-            arguments
+            arguments,
+            const_arguments
         ) => {
             let resolved = Vec::new();
             try(resolve_signature_arguments(
@@ -4561,7 +4562,7 @@ resolve_signature_type(
                     scope
                 ), @resolve_signature_type);
                 if(Vec::is_empty(&resolved)) {
-                    if(Slice::is_empty(lifetimes)) {
+                    if(Slice::is_empty(lifetimes) and { const_arguments == 0 }) {
                         Result::Err(
                             ElaborationError::InvalidSignatureType(token)
                         )

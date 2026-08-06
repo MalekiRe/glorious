@@ -1561,13 +1561,17 @@ fn self_hosted_effect_control_headers_match_rust_oracle() {
     )
     .unwrap();
     for (source, accepted) in corpus {
-        let rust = grandiose::lexer::lex(source)
+        // These are deliberately header-focused fixtures, but the bootstrap
+        // validator only accepts complete programs. Add a neutral entry point
+        // before asking either compiler for the accept/reject result.
+        let source = format!("{source}\nmain() -> {{ () }}");
+        let rust = grandiose::lexer::lex(&source)
             .ok()
             .and_then(|tokens| grandiose::parser::parse(tokens).ok())
             .and_then(|program| grandiose::validate::validate(&program).ok())
             .is_some();
         assert_eq!(rust, accepted, "bad Rust-oracle fixture: {source}");
-        let value = vm.run(function, vec![Value::Text(source.into())]).unwrap();
+        let value = vm.run(function, vec![Value::Text(source.clone().into())]).unwrap();
         let Value::Bytes(bytes) = value else { panic!("effect probe returned non-bytes"); };
         assert_eq!(bytes.first().copied() == Some(0), accepted, "source: {source}");
     }

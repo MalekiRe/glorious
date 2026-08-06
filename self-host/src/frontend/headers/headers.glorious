@@ -23,7 +23,7 @@ enum HeaderTypeKind {
     SharedReference(Option<NameUse>, TypeId),
     UniqueReference(Option<NameUse>, TypeId),
     Tuple(HeaderRange),
-    Application(TypeId, HeaderRange, HeaderRange),
+    Application(TypeId, HeaderRange, HeaderRange, u32),
     Never
 }
 
@@ -41,7 +41,7 @@ pub enum HeaderTypeView<'a> {
     SharedReference(usize, usize, Option<usize>, TypeId),
     UniqueReference(usize, usize, Option<usize>, TypeId),
     Tuple(usize, usize, Slice<'a, TypeEdge>),
-    Application(usize, usize, TypeId, Slice<'a, NameUse>, Slice<'a, TypeEdge>),
+    Application(usize, usize, TypeId, Slice<'a, NameUse>, Slice<'a, TypeEdge>, u32),
     Never(usize, usize)
 }
 
@@ -996,13 +996,14 @@ pub header_type_view<'a>(
             end,
             type_edges(value, &children)
         ),
-        HeaderTypeKind::Application(constructor, lifetimes, children) =>
+        HeaderTypeKind::Application(constructor, lifetimes, children, const_arguments) =>
             HeaderTypeView::Application(
             token,
             end,
             constructor,
             lifetime_arguments(value, &lifetimes),
-            type_edges(value, &children)
+            type_edges(value, &children),
+            const_arguments
         ),
         HeaderTypeKind::Never => HeaderTypeView::Never(token, end)
     }
@@ -1705,8 +1706,8 @@ copy_type_kind(
         HeaderTypeKind::UniqueReference(lifetime, referent) =>
             HeaderTypeKind::UniqueReference(lifetime, referent),
         HeaderTypeKind::Tuple(elements) => HeaderTypeKind::Tuple(elements),
-        HeaderTypeKind::Application(constructor, lifetimes, arguments) =>
-            HeaderTypeKind::Application(constructor, lifetimes, arguments),
+        HeaderTypeKind::Application(constructor, lifetimes, arguments, const_arguments) =>
+            HeaderTypeKind::Application(constructor, lifetimes, arguments, const_arguments),
         HeaderTypeKind::Never => HeaderTypeKind::Never
     }
 }
@@ -1765,17 +1766,28 @@ parse_application_arguments(
     related: usize,
     lifetimes: &mut Vec<NameUse>,
     types: &mut Vec<TypeEdge>,
+    const_arguments: &mut u32,
     position: u32
 ) -> Result<(), HeaderError> {
     if(at_token(&*value, closing)) {
         Result::Ok(())
     } else {
+        let token = value.tokens.position;
+        handle super::lexer::token_kind_at(&value.source, token) {
+            TokenKind::Number(number) => if(integer_number(&number)) {
+                value.tokens.position = token + 1;
+                *const_arguments = *const_arguments + 1;
+                parse_application_argument_separator(
+                    value, closing, related, lifetimes, types, const_arguments, position + 1
+                )
+            } else { Result::Err(HeaderError::ExpectedIdentifier(token, related)) },
+            _ => {
         let lifetime = take_lifetime(value);
         handle lifetime {
             Result::Ok(found) => {
                 Vec::push(lifetimes, found);
                 parse_application_argument_separator(
-                    value, closing, related, lifetimes, types, position + 1
+                    value, closing, related, lifetimes, types, const_arguments, position + 1
                 )
             },
             Result::Err(_) => {
@@ -1785,8 +1797,10 @@ parse_application_arguments(
                     TypeEdge { value: ty, position: position }
                 );
                 parse_application_argument_separator(
-                    value, closing, related, lifetimes, types, position + 1
+                    value, closing, related, lifetimes, types, const_arguments, position + 1
                 )
+            }
+        }
             }
         }
     }
@@ -1798,11 +1812,12 @@ parse_application_argument_separator(
     related: usize,
     lifetimes: &mut Vec<NameUse>,
     types: &mut Vec<TypeEdge>,
+    const_arguments: &mut u32,
     position: u32
 ) -> Result<(), HeaderError> {
     if(eat_token(value, TokenPattern::Comma)) {
         parse_application_arguments(
-            value, closing, related, lifetimes, types, position
+            value, closing, related, lifetimes, types, const_arguments, position
         )
     } else { Result::Ok(()) }
 }
@@ -1872,6 +1887,7 @@ parse_application(
             ) } else {
         let lifetime_values = Vec::new();
         let arguments = Vec::new();
+        let const_arguments = 0;
         try(
             parse_application_arguments(
                 value,
@@ -1879,6 +1895,7 @@ parse_application(
                 related,
                 &mut lifetime_values,
                 &mut arguments,
+                &mut const_arguments,
                 0
             ),
             @parse_application
@@ -1905,7 +1922,7 @@ parse_application(
         let arguments = header_range(edge_start, edge_end);
         push_type(
             value,
-            HeaderTypeKind::Application(constructor, lifetimes, arguments),
+            HeaderTypeKind::Application(constructor, lifetimes, arguments, const_arguments),
             start,
             related
         )
@@ -3468,17 +3485,17 @@ same_header_type(
             _ => false
         },
         HeaderTypeKind::Application(
-            left_constructor, left_lifetimes, left_types
+            left_constructor, left_lifetimes, left_types, left_const_arguments
         ) => handle right_node.kind {
             HeaderTypeKind::Application(
-                right_constructor, right_lifetimes, right_types
-            ) => same_header_type(
+                right_constructor, right_lifetimes, right_types, right_const_arguments
+            ) => left_const_arguments == right_const_arguments and { same_header_type(
                 value, left_constructor, right_constructor
             ) and { same_lifetime_range(
                 value, left_lifetimes, right_lifetimes, 0
             ) } and { same_type_edge_range(
                 value, left_types, right_types, 0
-            ) },
+            ) } },
             _ => false
         }
     }
