@@ -268,28 +268,6 @@ pub mapped_type_copyable(
     *Vec::index(&value.copyable, Id::to_usize(semantic))
 }
 
-copy_type_map_entries(
-    source: &ArtifactTypeMap,
-    entries: &mut Vec<Option<ArtifactTypeId>>,
-    copyable: &mut Vec<Bool>,
-    index: usize
-) {
-    if(index < Vec::len(&source.entries)) {
-        Vec::push(&mut *entries, *Vec::index(&source.entries, index));
-        Vec::push(&mut *copyable, *Vec::index(&source.copyable, index));
-        copy_type_map_entries(
-            source, entries, copyable, index + 1
-        )
-    } else { () }
-}
-
-copy_artifact_type_map(source: &ArtifactTypeMap) -> ArtifactTypeMap {
-    let entries = Vec::new();
-    let copyable = Vec::new();
-    copy_type_map_entries(source, &mut entries, &mut copyable, 0);
-    ArtifactTypeMap { entries: entries, copyable: copyable }
-}
-
 pub enum MirVariantView<'a> {
     Variant(
         u32,
@@ -837,8 +815,8 @@ struct PlaceFlowFacts {
     matches: Vec<MatchFlow>
 }
 
-struct MirBuilder {
-    type_map: ArtifactTypeMap,
+struct MirBuilder<'a> {
+    type_map: &'a ArtifactTypeMap,
     locals: Vec<Option<RegisterId>>,
     place_flow: PlaceFlowFacts,
     live_order: Vec<RegisterId>,
@@ -2141,7 +2119,7 @@ reverse_registers(
     })
 }
 
-record_cleanup(value: &mut MirBuilder) {
+record_cleanup<'a>(value: &mut MirBuilder<'a>) {
     let instruction = checked_u32(Vec::len(&value.instructions));
     let registers = Vec::new();
     reverse_registers(
@@ -2156,14 +2134,14 @@ record_cleanup(value: &mut MirBuilder) {
     })
 }
 
-alloc_register(value: &mut MirBuilder) -> RegisterId {
+alloc_register<'a>(value: &mut MirBuilder<'a>) -> RegisterId {
     let found = value.register_count;
     value.register_count = found + 1;
     Id::from_u32(found)
 }
 
-alloc_register_pack(
-    value: &mut MirBuilder,
+alloc_register_pack<'a>(
+    value: &mut MirBuilder<'a>,
     registers: Vec<RegisterId>
 ) -> RegisterPackId {
     handle Arena::alloc(
@@ -2175,21 +2153,21 @@ alloc_register_pack(
     }
 }
 
-alloc_block(value: &mut MirBuilder) -> MirBlockId {
+alloc_block<'a>(value: &mut MirBuilder<'a>) -> MirBlockId {
     handle Arena::alloc(&mut value.blocks, None) {
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
     }
 }
 
-bind_block(value: &mut MirBuilder, id: MirBlockId) {
+bind_block<'a>(value: &mut MirBuilder<'a>, id: MirBlockId) {
     *Arena::index_mut(&mut value.blocks, id) =
         Option::Some(checked_u32(Vec::len(&value.instructions)));
     ()
 }
 
-alloc_switch_pack(
-    value: &mut MirBuilder,
+alloc_switch_pack<'a>(
+    value: &mut MirBuilder<'a>,
     cases: Vec<MirSwitchCase>
 ) -> MirSwitchPackId {
     handle Arena::alloc(
@@ -2215,8 +2193,8 @@ find_live(
     } else { None }
 }
 
-move_live(
-    value: &mut MirBuilder,
+move_live<'a>(
+    value: &mut MirBuilder<'a>,
     source: RegisterId,
     target: RegisterId
 ) {
@@ -2229,7 +2207,7 @@ move_live(
     }
 }
 
-consume_live(value: &mut MirBuilder, register: RegisterId) {
+consume_live<'a>(value: &mut MirBuilder<'a>, register: RegisterId) {
     handle find_live(&value.live_order, register, 0) {
         Result::Err(_) => unreachable(),
         Result::Ok(index) => {
@@ -2239,7 +2217,7 @@ consume_live(value: &mut MirBuilder, register: RegisterId) {
     }
 }
 
-emit_const(value: &mut MirBuilder, target: RegisterId, key: Bytes) {
+emit_const<'a>(value: &mut MirBuilder<'a>, target: RegisterId, key: Bytes) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Const(
         target,
@@ -2248,8 +2226,8 @@ emit_const(value: &mut MirBuilder, target: RegisterId, key: Bytes) {
     Vec::push(&mut value.live_order, target)
 }
 
-emit_move(
-    value: &mut MirBuilder,
+emit_move<'a>(
+    value: &mut MirBuilder<'a>,
     target: RegisterId,
     source: RegisterId
 ) {
@@ -2261,8 +2239,8 @@ emit_move(
     move_live(value, source, target)
 }
 
-emit_copy(
-    value: &mut MirBuilder,
+emit_copy<'a>(
+    value: &mut MirBuilder<'a>,
     target: RegisterId,
     source: RegisterId
 ) {
@@ -2274,8 +2252,8 @@ emit_copy(
     Vec::push(&mut value.live_order, target)
 }
 
-emit_construct(
-    value: &mut MirBuilder,
+emit_construct<'a>(
+    value: &mut MirBuilder<'a>,
     target: RegisterId,
     ty: ArtifactTypeId,
     variant: Option<u32>,
@@ -2293,8 +2271,8 @@ emit_construct(
     Vec::push(&mut value.live_order, target)
 }
 
-emit_project_move(
-    value: &mut MirBuilder,
+emit_project_move<'a>(
+    value: &mut MirBuilder<'a>,
     target: RegisterId,
     source: RegisterId,
     field: u32
@@ -2308,8 +2286,8 @@ emit_project_move(
     Vec::push(&mut value.live_order, target)
 }
 
-emit_project_copy(
-    value: &mut MirBuilder,
+emit_project_copy<'a>(
+    value: &mut MirBuilder<'a>,
     target: RegisterId,
     source: RegisterId,
     field: u32
@@ -2323,8 +2301,8 @@ emit_project_copy(
     Vec::push(&mut value.live_order, target)
 }
 
-emit_enum_tag(
-    value: &mut MirBuilder,
+emit_enum_tag<'a>(
+    value: &mut MirBuilder<'a>,
     target: RegisterId,
     source: RegisterId
 ) {
@@ -2336,13 +2314,13 @@ emit_enum_tag(
     Vec::push(&mut value.live_order, target)
 }
 
-emit_drop(value: &mut MirBuilder, register: RegisterId) {
+emit_drop<'a>(value: &mut MirBuilder<'a>, register: RegisterId) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Drop(register));
     consume_live(value, register)
 }
 
-emit_deconstruct(value: &mut MirBuilder, register: RegisterId) {
+emit_deconstruct<'a>(value: &mut MirBuilder<'a>, register: RegisterId) {
     record_cleanup(value);
     Vec::push(
         &mut value.instructions,
@@ -2351,8 +2329,8 @@ emit_deconstruct(value: &mut MirBuilder, register: RegisterId) {
     consume_live(value, register)
 }
 
-emit_primitive(
-    value: &mut MirBuilder,
+emit_primitive<'a>(
+    value: &mut MirBuilder<'a>,
     target: RegisterId,
     primitive: u32,
     arguments: Vec<RegisterId>
@@ -2368,8 +2346,8 @@ emit_primitive(
     Vec::push(&mut value.live_order, target)
 }
 
-emit_host_call(
-    value: &mut MirBuilder,
+emit_host_call<'a>(
+    value: &mut MirBuilder<'a>,
     target: Option<RegisterId>,
     import: u32,
     arguments: Vec<RegisterId>
@@ -2388,13 +2366,13 @@ emit_host_call(
     }
 }
 
-emit_jump(value: &mut MirBuilder, target: MirBlockId) {
+emit_jump<'a>(value: &mut MirBuilder<'a>, target: MirBlockId) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Jump(target))
 }
 
-emit_switch(
-    value: &mut MirBuilder,
+emit_switch<'a>(
+    value: &mut MirBuilder<'a>,
     discriminant: RegisterId,
     cases: Vec<MirSwitchCase>,
     otherwise: MirBlockId
@@ -2408,8 +2386,8 @@ emit_switch(
     ))
 }
 
-consume_arguments(
-    value: &mut MirBuilder,
+consume_arguments<'a>(
+    value: &mut MirBuilder<'a>,
     arguments: &Vec<RegisterId>,
     index: usize
 ) {
@@ -2418,8 +2396,8 @@ consume_arguments(
     })
 }
 
-emit_call(
-    value: &mut MirBuilder,
+emit_call<'a>(
+    value: &mut MirBuilder<'a>,
     target: Option<RegisterId>,
     function: MirFunctionId,
     arguments: Vec<RegisterId>
@@ -2438,25 +2416,25 @@ emit_call(
     } else { () }
 }
 
-emit_unreachable(value: &mut MirBuilder) {
+emit_unreachable<'a>(value: &mut MirBuilder<'a>) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Unreachable)
 }
 
-emit_return(value: &mut MirBuilder, source: Option<RegisterId>) {
+emit_return<'a>(value: &mut MirBuilder<'a>, source: Option<RegisterId>) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Return(source))
 }
 
-local_register(
-    value: &MirBuilder,
+local_register<'a>(
+    value: &MirBuilder<'a>,
     local: CoreLocalId
 ) -> Option<RegisterId> {
     *Vec::index(&value.locals, Id::to_usize(local))
 }
 
-set_local(
-    value: &mut MirBuilder,
+set_local<'a>(
+    value: &mut MirBuilder<'a>,
     local: CoreLocalId,
     register: Option<RegisterId>
 ) {
@@ -2464,11 +2442,11 @@ set_local(
     ()
 }
 
-lower_value(
+lower_value<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     id: CoreValueId
 ) -> Result<Option<RegisterId>, LoweringError> {
     handle super::super::frontend::elaboration::typed_body_value_at(
@@ -2543,8 +2521,8 @@ lower_value(
 lower_arguments<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     operands: Slice<'a, CoreValueId>,
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
@@ -2585,20 +2563,20 @@ append_registers(
     })
 }
 
-snapshot_locals(value: &MirBuilder) -> Vec<Option<RegisterId>> {
+snapshot_locals<'a>(value: &MirBuilder<'a>) -> Vec<Option<RegisterId>> {
     let output = Vec::new();
     append_optional_registers(&value.locals, &mut output, 0);
     output
 }
 
-snapshot_live(value: &MirBuilder) -> Vec<RegisterId> {
+snapshot_live<'a>(value: &MirBuilder<'a>) -> Vec<RegisterId> {
     let output = Vec::new();
     append_registers(&value.live_order, &mut output, 0);
     output
 }
 
-restore_match_state(
-    value: &mut MirBuilder,
+restore_match_state<'a>(
+    value: &mut MirBuilder<'a>,
     locals: &Vec<Option<RegisterId>>,
     live: &Vec<RegisterId>
 ) {
@@ -2639,8 +2617,8 @@ registers_equal(
     } else { false }
 }
 
-alloc_match_blocks(
-    value: &mut MirBuilder,
+alloc_match_blocks<'a>(
+    value: &mut MirBuilder<'a>,
     count: usize,
     index: usize,
     output: &mut Vec<MirBlockId>
@@ -2673,7 +2651,7 @@ build_match_switch_cases<'a>(
 }
 
 project_match_fields<'a>(
-    value: &mut MirBuilder,
+    value: &mut MirBuilder<'a>,
     subject: RegisterId,
     bindings: Slice<'a, CoreMatchBinding>,
     index: usize,
@@ -2702,7 +2680,7 @@ project_match_fields<'a>(
 }
 
 install_match_bindings_reverse<'a>(
-    value: &mut MirBuilder,
+    value: &mut MirBuilder<'a>,
     bindings: Slice<'a, CoreMatchBinding>,
     registers: &Vec<RegisterId>,
     remaining: usize
@@ -2731,7 +2709,7 @@ install_match_bindings_reverse<'a>(
 }
 
 drop_match_locals_reverse<'a>(
-    value: &mut MirBuilder,
+    value: &mut MirBuilder<'a>,
     bindings: Slice<'a, CoreMatchBinding>,
     remaining: usize
 ) {
@@ -2800,8 +2778,8 @@ next_variant_block<'a>(
 }
 
 lower_match_binding_tests<'a>(
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     subject: RegisterId,
     bindings: Slice<'a, CoreMatchBinding>,
     failure: MirBlockId,
@@ -2868,8 +2846,8 @@ match_flow_index(
     } else { None }
 }
 
-retire_dead_match_locals(
-    value: &mut MirBuilder,
+retire_dead_match_locals<'a>(
+    value: &mut MirBuilder<'a>,
     baseline: &Vec<Option<RegisterId>>,
     live_out: &Vec<Bool>,
     index: usize
@@ -2902,8 +2880,8 @@ retire_dead_match_locals(
 lower_match_arms<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     arms: Slice<'a, CoreMatchArm>,
     blocks: &Vec<MirBlockId>,
     subject: RegisterId,
@@ -3113,8 +3091,8 @@ match_has_returning_arm<'a>(
 lower_match<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     computation: CoreComputationId,
     subject: CoreValueId,
     arms: Slice<'a, CoreMatchArm>
@@ -3224,8 +3202,8 @@ lower_match<'a>(
 lower_nominal_construct<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     type_id: TypeId,
     nominal: u32,
     flavor: ConstructionFlavor,
@@ -3276,11 +3254,11 @@ lower_nominal_construct<'a>(
     }
 }
 
-lower_computation(
+lower_computation<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     id: CoreComputationId
 ) -> Result<Option<RegisterId>, LoweringError> {
     handle
@@ -3419,8 +3397,8 @@ lower_computation(
 lower_aggregate<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     type_id: TypeId,
     variant: Option<u32>,
     fields: Slice<'a, ConstructionField>,
@@ -3439,7 +3417,7 @@ lower_aggregate<'a>(
             emit_construct(
                 value,
                 target,
-                handle mapped_artifact_type(&value.type_map, type_id) {
+                handle mapped_artifact_type(value.type_map, type_id) {
                     None => unreachable(),
                     Option::Some(found) => found
                 },
@@ -3459,8 +3437,8 @@ lower_aggregate<'a>(
 lower_product_fields<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
-    value: &mut MirBuilder,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
     fields: Slice<'a, ConstructionField>,
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
@@ -3550,8 +3528,8 @@ instance_parameter_types(
     })
 }
 
-validate_mir_register(
-    value: &MirBuilder,
+validate_mir_register<'a>(
+    value: &MirBuilder<'a>,
     register: RegisterId
 ) -> Result<(), LoweringError> {
     if(Id::to_u32(register) < value.register_count) {
@@ -3561,8 +3539,8 @@ validate_mir_register(
     }
 }
 
-validate_optional_mir_register(
-    value: &MirBuilder,
+validate_optional_mir_register<'a>(
+    value: &MirBuilder<'a>,
     register: Option<RegisterId>
 ) -> Result<(), LoweringError> {
     handle register {
@@ -3571,8 +3549,8 @@ validate_optional_mir_register(
     }
 }
 
-validate_mir_register_pack(
-    value: &MirBuilder,
+validate_mir_register_pack<'a>(
+    value: &MirBuilder<'a>,
     pack: RegisterPackId,
     index: usize
 ) -> Result<(), LoweringError> {
@@ -3592,8 +3570,8 @@ validate_mir_register_pack(
     }
 }
 
-validate_mir_block(
-    value: &MirBuilder,
+validate_mir_block<'a>(
+    value: &MirBuilder<'a>,
     block: MirBlockId
 ) -> Result<(), LoweringError> {
     if(Id::to_usize(block) < Arena::len(&value.blocks)) {
@@ -3612,8 +3590,8 @@ validate_mir_block(
     }
 }
 
-validate_mir_switch_pack(
-    value: &MirBuilder,
+validate_mir_switch_pack<'a>(
+    value: &MirBuilder<'a>,
     pack: MirSwitchPackId,
     index: usize
 ) -> Result<(), LoweringError> {
@@ -3633,8 +3611,8 @@ validate_mir_switch_pack(
     }
 }
 
-validate_mir_instruction(
-    value: &MirBuilder,
+validate_mir_instruction<'a>(
+    value: &MirBuilder<'a>,
     interfaces: &super::super::frontend::elaboration::TypedInterfaces,
     instruction: &MirInstruction
 ) -> Result<(), LoweringError> {
@@ -3735,8 +3713,8 @@ validate_mir_instruction(
     }
 }
 
-validate_mir_instructions(
-    value: &MirBuilder,
+validate_mir_instructions<'a>(
+    value: &MirBuilder<'a>,
     interfaces: &super::super::frontend::elaboration::TypedInterfaces,
     index: usize
 ) -> Result<(), LoweringError> {
@@ -3752,8 +3730,8 @@ validate_mir_instructions(
     }
 }
 
-validate_mir_cleanup_registers(
-    value: &MirBuilder,
+validate_mir_cleanup_registers<'a>(
+    value: &MirBuilder<'a>,
     cleanup: &MirCleanup,
     index: usize
 ) -> Result<(), LoweringError> {
@@ -3768,8 +3746,8 @@ validate_mir_cleanup_registers(
     }
 }
 
-validate_mir_cleanups(
-    value: &MirBuilder,
+validate_mir_cleanups<'a>(
+    value: &MirBuilder<'a>,
     index: usize
 ) -> Result<(), LoweringError> {
     if(index < Vec::len(&value.cleanups)) {
@@ -3792,8 +3770,8 @@ validate_mir_cleanups(
     }
 }
 
-validate_mir_blocks(
-    value: &MirBuilder,
+validate_mir_blocks<'a>(
+    value: &MirBuilder<'a>,
     index: usize
 ) -> Result<(), LoweringError> {
     if(index < Arena::len(&value.blocks)) {
@@ -3807,8 +3785,8 @@ validate_mir_blocks(
     }
 }
 
-validate_mir_builder(
-    value: &MirBuilder,
+validate_mir_builder<'a>(
+    value: &MirBuilder<'a>,
     interfaces: &super::super::frontend::elaboration::TypedInterfaces
 ) -> Result<(), LoweringError> {
     let instruction_count = Vec::len(&value.instructions);
@@ -3829,13 +3807,13 @@ validate_mir_builder(
     }
 }
 
-pub lower_function(
+pub lower_function<'a>(
     name: String,
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    body: &super::super::frontend::elaboration::TypedBody,
+    body: &'a super::super::frontend::elaboration::TypedBody,
     instance: super::super::frontend::elaboration::CallableInstanceId,
-    type_map: &ArtifactTypeMap
+    type_map: &'a ArtifactTypeMap
 ) -> Result<MirFunction, LoweringError> {
     let parameter_count =
         super::super::frontend::elaboration::
@@ -3853,7 +3831,7 @@ pub lower_function(
         super::super::frontend::elaboration::typed_body_local_count(body);
     let place_flow = analyze_place_flow(body);
     let builder = MirBuilder {
-        type_map: copy_artifact_type_map(type_map),
+        type_map: type_map,
         locals: Vec::new(),
         place_flow: place_flow,
         live_order: Vec::new(),
@@ -3939,13 +3917,13 @@ pub lower_function(
     }
 }
 
-pub lower_primitive_function(
+pub lower_primitive_function<'a>(
     name: String,
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     instance: super::super::frontend::elaboration::CallableInstanceId,
     primitive: u32,
-    type_map: &ArtifactTypeMap
+    type_map: &'a ArtifactTypeMap
 ) -> Result<MirFunction, LoweringError> {
     let parameter_count =
         super::super::frontend::elaboration::
@@ -3960,7 +3938,7 @@ pub lower_primitive_function(
         &mut parameters
     );
     let builder = MirBuilder {
-        type_map: copy_artifact_type_map(type_map),
+        type_map: type_map,
         locals: Vec::new(),
         place_flow: PlaceFlowFacts {
             final_transfers: IndexVec::new(),
@@ -4068,13 +4046,13 @@ pub lower_abort_function(
     Result::Ok(output)
 }
 
-pub lower_host_function(
+pub lower_host_function<'a>(
     name: String,
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     instance: super::super::frontend::elaboration::CallableInstanceId,
     import: u32,
-    type_map: &ArtifactTypeMap
+    type_map: &'a ArtifactTypeMap
 ) -> Result<MirFunction, LoweringError> {
     let parameter_count =
         super::super::frontend::elaboration::
@@ -4094,7 +4072,7 @@ pub lower_host_function(
             instance
         );
     let builder = MirBuilder {
-        type_map: copy_artifact_type_map(type_map),
+        type_map: type_map,
         locals: Vec::new(),
         place_flow: PlaceFlowFacts {
             final_transfers: IndexVec::new(),
