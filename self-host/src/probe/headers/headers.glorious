@@ -67,6 +67,36 @@ write_name(output: &mut ByteBuf, source: &LexedSource, name: Id<String>) {
     }
 }
 
+write_name_token_span(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    token: usize
+) {
+    let found = handle super::super::frontend::lexer::token_at(source, token) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(value) => value
+    };
+    let span = super::super::frontend::lexer::token_span(found);
+    ByteBuf::write_u32_le(output, wrapping_convert_to_u32(
+        super::super::frontend::lexer::span_start(&span)
+    ));
+    ByteBuf::write_u32_le(output, wrapping_convert_to_u32(
+        super::super::frontend::lexer::span_end(&span)
+    ))
+}
+
+write_name_use_span(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    name: &super::super::frontend::headers::NameUse
+) {
+    write_name_token_span(
+        output,
+        source,
+        super::super::frontend::headers::name_use_token(name)
+    )
+}
+
 write_optional_name(
     output: &mut ByteBuf,
     source: &LexedSource,
@@ -180,76 +210,53 @@ write_type_edges<'a>(
 
 write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
     let index = super::super::frontend::headers::parsed_index(parsed);
+    let source = super::super::frontend::headers::parsed_source(parsed);
     handle super::super::frontend::headers::header_type_view(index, id) {
         HeaderTypeView::Path(_, _, names) => {
             ByteBuf::push(output, 1);
-            ByteBuf::write_u32_le(
-                output,
-                wrapping_convert_to_u32(Slice::len(names))
-            );
+            write_type_node_span(output, parsed, super::super::frontend::headers::token_range_start(super::super::frontend::headers::type_tokens(index, id)), super::super::frontend::headers::token_range_end(super::super::frontend::headers::type_tokens(index, id)));
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(names)));
             for_range(Range::new(0, Slice::len(names)), { current => {
-                let name = handle Slice::get(names, current) {
-                    Result::Err(_) => unreachable(),
-                    Result::Ok(found) => found
-                };
-                write_name(
-                    output,
-                    super::super::frontend::headers::parsed_source(parsed),
-                    super::super::frontend::headers::name_use_name(name)
-                )
+                let name = handle Slice::get(names, current) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+                write_name(output, source, super::super::frontend::headers::name_use_name(name));
+                write_name_use_span(output, source, name)
             }})
         },
         HeaderTypeView::SharedReference(_, _, lifetime, child) => {
             ByteBuf::push(output, 2);
-            write_optional_name_token(
-                output,
-                super::super::frontend::headers::parsed_source(parsed),
-                lifetime
-            );
+            write_type_node_span(output, parsed, super::super::frontend::headers::token_range_start(super::super::frontend::headers::type_tokens(index, id)), super::super::frontend::headers::token_range_end(super::super::frontend::headers::type_tokens(index, id)));
+            write_optional_name_token(output, source, lifetime);
             write_type(output, parsed, child)
         },
         HeaderTypeView::UniqueReference(_, _, lifetime, child) => {
             ByteBuf::push(output, 3);
-            write_optional_name_token(
-                output,
-                super::super::frontend::headers::parsed_source(parsed),
-                lifetime
-            );
+            write_type_node_span(output, parsed, super::super::frontend::headers::token_range_start(super::super::frontend::headers::type_tokens(index, id)), super::super::frontend::headers::token_range_end(super::super::frontend::headers::type_tokens(index, id)));
+            write_optional_name_token(output, source, lifetime);
             write_type(output, parsed, child)
         },
         HeaderTypeView::Tuple(_, _, children) => {
             ByteBuf::push(output, 4);
-            ByteBuf::write_u32_le(
-                output,
-                wrapping_convert_to_u32(Slice::len(children))
-            );
+            write_type_node_span(output, parsed, super::super::frontend::headers::token_range_start(super::super::frontend::headers::type_tokens(index, id)), super::super::frontend::headers::token_range_end(super::super::frontend::headers::type_tokens(index, id)));
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(children)));
             write_type_edges(output, parsed, children)
         },
         HeaderTypeView::Application(_, _, constructor, lifetimes, arguments, _) => {
             ByteBuf::push(output, 5);
+            write_type_node_span(output, parsed, super::super::frontend::headers::token_range_start(super::super::frontend::headers::type_tokens(index, id)), super::super::frontend::headers::token_range_end(super::super::frontend::headers::type_tokens(index, id)));
             write_type(output, parsed, constructor);
-            ByteBuf::write_u32_le(
-                output,
-                wrapping_convert_to_u32(Slice::len(lifetimes))
-            );
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(lifetimes)));
             for_range(Range::new(0, Slice::len(lifetimes)), { current => {
-                let lifetime = handle Slice::get(lifetimes, current) {
-                    Result::Err(_) => unreachable(),
-                    Result::Ok(found) => found
-                };
-                write_name(
-                    output,
-                    super::super::frontend::headers::parsed_source(parsed),
-                    super::super::frontend::headers::name_use_name(lifetime)
-                )
+                let lifetime = handle Slice::get(lifetimes, current) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+                write_name(output, source, super::super::frontend::headers::name_use_name(lifetime));
+                write_name_use_span(output, source, lifetime)
             }});
-            ByteBuf::write_u32_le(
-                output,
-                wrapping_convert_to_u32(Slice::len(arguments))
-            );
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(arguments)));
             write_type_edges(output, parsed, arguments)
         },
-        HeaderTypeView::Never(_, _) => ByteBuf::push(output, 6)
+        HeaderTypeView::Never(_, _) => {
+            ByteBuf::push(output, 6);
+            write_type_node_span(output, parsed, super::super::frontend::headers::token_range_start(super::super::frontend::headers::type_tokens(index, id)), super::super::frontend::headers::token_range_end(super::super::frontend::headers::type_tokens(index, id)))
+        }
     }
 }
 
@@ -540,13 +547,15 @@ write_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) 
             Result::Ok(found) => found
         };
         let ty = super::super::frontend::headers::type_edge_type(edge);
+        write_wide_type_span(output, parsed, ty);
         write_type(output, parsed, ty)
     }});
-    write_optional_name(
+    write_token_span(
         output,
         super::super::frontend::headers::parsed_source(parsed),
-        super::super::frontend::headers::effect_row_tail(row)
-    )
+        super::super::frontend::headers::effect_row_tokens(row)
+    );
+    write_optional_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::effect_row_tail(row))
 }
 
 write_callable(
@@ -569,6 +578,11 @@ write_callable(
         super::super::frontend::headers::range_count(generics)
     );
     write_generics(output, parsed, generics);
+    write_token_span(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::callable_generic_tokens(value)
+    );
     let parameters = super::super::frontend::headers::callable_parameters(value);
     ByteBuf::write_u32_le(
         output,
@@ -590,7 +604,12 @@ write_callable(
             ByteBuf::push(output, 1);
             write_effect_row(output, parsed, row)
         }
-    }
+    };
+    write_where_contract(
+        output,
+        parsed,
+        super::super::frontend::headers::callable_where_clause(value)
+    )
 }
 
 write_callables(output: &mut ByteBuf, parsed: &ParsedHeaders) {
