@@ -742,6 +742,30 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
 // bodies.  The host passes the primary source first and every additional
 // source after it; external declarations own the canonical
 // <module>/<module>.glorious path, while every other source is orphaned.
+external_module_count(
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    ordinal: usize,
+    total: usize
+) -> usize {
+    if(ordinal < total) {
+        let shell_id = handle super::super::frontend::scanner::shell_id_at_ordinal(declarations, ordinal) {
+            None => unreachable(),
+            Option::Some(found) => found
+        };
+        let shell = handle super::super::frontend::scanner::shell_at(declarations,
+            shell_id) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let nested = external_module_count(declarations, ordinal + 1, total);
+        if(super::super::frontend::scanner::shell_kind(shell) is
+            super::super::frontend::scanner::DeclarationKind::Module
+            and { Option::is_none(super::super::frontend::scanner::shell_body(shell)) }) {
+            nested + 1
+        } else { nested }
+    } else { 0 }
+}
+
 write_module_diagnostic(
     output: &mut ByteBuf,
     kind: u8,
@@ -768,11 +792,12 @@ pub module_application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                     Result::Err(_) => write_diagnostic("self-host module resolution: declaration scanning failed"),
                     Result::Ok(declarations) => {
                         let encoded = ByteBuf::new();
-                        if(count == 2) {
-                            write_module_diagnostic(&mut encoded, 1, 1)
-                        } else {
-                            let path = *Vec::index(&arguments, count - 1);
+                        let external = external_module_count(&declarations, 0,
+                            super::super::frontend::scanner::shell_count(&declarations));
+                        if(count > 2 and { count - 2 > external }) {
                             write_module_diagnostic(&mut encoded, 2, 0)
+                        } else if(external > 0 and { count == 2 }) {
+                            write_module_diagnostic(&mut encoded, 1, 1)
                         };
                         write_file(output_path, ByteBuf::finish(encoded))
                     }
