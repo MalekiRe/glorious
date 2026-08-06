@@ -22,6 +22,8 @@ fn self_host_semantic_control_acceptance_and_rejection_match_rust_oracle() {
         "answer() -> i64 { let f = (x: i64) -> i64 { x + 1 }; f(41) } main() { () }",
         "answer() -> i64 { @missing(1) } main() { () }",
         "enum Choice { Yes(i64), No } answer() -> Bool { Choice::Yes(1) is Choice::Maybe } main() { () }",
+        "struct Relevant { value: i64 } impl Use<[1,infinity]> for Relevant {} bad(value: Relevant) -> (Relevant, Relevant) { (value, value) } main() { () }",
+        "struct Relevant { value: i64 } impl Use<[1,infinity]> for Relevant {} forward(value: Relevant) -> Relevant { move value } main() { () }",
     ];
     let dir=tempfile::tempdir().unwrap(); let mut paths=Vec::new(); let mut expected=Vec::new();
     for (i, source) in corpus.iter().enumerate() { let name = format!("{i}.glorious"); let path=dir.path().join(&name); fs::write(&path,source).unwrap(); paths.push(path); expected.push(compile_source_to_phases_with_options(&name,source,CompileOptions::default()).is_ok()); }
