@@ -1010,6 +1010,23 @@ write_interfaces(
     }})
 }
 
+
+interface_callables_supported(parsed: &ParsedHeaders, ordinal: usize) -> Bool {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    if(ordinal < super::super::frontend::headers::callable_count(index)) {
+        let callable = handle super::super::frontend::headers::callable_at(index, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        handle Option::as_ref(
+            super::super::frontend::headers::callable_where_clause(callable)
+        ) {
+            Result::Err(_) => interface_callables_supported(parsed, ordinal + 1),
+            Result::Ok(_) => false
+        }
+    } else { true }
+}
+
 encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
     handle super::super::frontend::lexer::lex(&source) {
         Result::Err(_) => ByteBuf::push(output, 1),
@@ -1035,8 +1052,10 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                     write_header_error(output, &diagnostic_lexed, &error)
                 },
                 Result::Ok(parsed) => {
-                    ByteBuf::push(output, 0);
                     if(interfaces) {
+                        handle interface_callables_supported(&parsed, 0) {
+                            true => {
+                    ByteBuf::push(output, 0);
                         ByteBuf::write_u32_le(
                             output,
                             wrapping_convert_to_u32(
@@ -1048,7 +1067,11 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                             )
                         );
                         write_interfaces(output, &source, &parsed, false)
+                            },
+                            false => ByteBuf::push(output, 3)
+                        }
                     } else {
+                        ByteBuf::push(output, 0);
                         ByteBuf::write_u32_le(
                             output,
                             wrapping_convert_to_u32(
