@@ -911,17 +911,21 @@ fn self_hosted_effect_path_syntax_and_name_resolution_match_rust_in_vm_and_nativ
 
 #[test]
 fn self_host_resolution_generic_binders_shadow_global_aliases() {
+    // Exact source from `generic_alias_shadowing.rs`: each generic binder must
+    // resolve as a local type parameter rather than the same-named alias.
     let source = r#"
         type A = Text;
         type E = Text;
         type F = Text;
-        cases R = {};
 
-        choose<A, E, F, R: EffectRow>(answer: A, evidence: E, fallback: F) -> A / {|R} {
+        choose<A, E, F>(answer: A, evidence: E, fallback: F) -> A {
+            evidence;
+            fallback;
             answer
         }
 
-        main() { () }
+        answer() -> i64 { choose(42, "evidence", ()) }
+        main() -> () { () }
     "#;
     let expected_one = {
         let mut output = Vec::new();

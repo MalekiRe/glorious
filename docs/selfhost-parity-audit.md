@@ -9,12 +9,14 @@ bootstrap integration suite (`crates/grandiose/tests/*.rs`). After this commit:
 
 | Status | Count | Notes |
 | --- | --- | --- |
-| unported | 99 | no self-host oracle comparison |
-| partial | 34 | some cases / infrastructure linked to a named `#[test]` |
+| unported | 98 | no self-host oracle comparison |
+| partial | 35 | some cases / infrastructure linked to a named `#[test]` |
 | covered | 10 | a Rust-oracle/self-host comparison executes for the suite |
 
-This commit ports three effects_control suites alignment: 102 -> 99 unported,
-31 -> 34 partial (all counts derived from the current master inventory).
+The audit baseline ported three `effects_control` suites: 102 -> 99 unported,
+31 -> 34 partial. This follow-up ports the exact `generic_alias_shadowing` source
+through the resolution comparison: 99 -> 98 unported and 34 -> 35 partial (all
+counts derived from the current master inventory).
 
 Unported by family: standard_library 23, compiler_pipeline 18,
 types_traits_generics 15, ownership_lifetimes 13, effects_control 12,
@@ -119,18 +121,18 @@ heads + where-const binder support must be distilled in before the suite may be 
 `partial`.
 Ledger status: `unported` (unchanged this commit).
 
-### P5 — generic_alias_shadowing (types_traits_generics, 23 lines)
-Exact Rust case: `type A = Text; type E = Text; type F = Text;`
-`choose<A, E, F>(answer: A, evidence: E, fallback: F) -> A { evidence; fallback; answer }`.
+### P5 (PARTIAL in this commit) — generic_alias_shadowing (types_traits_generics, 23 lines)
+Exact Rust source: `type A = Text; type E = Text; type F = Text;`
+`choose<A, E, F>(answer: A, evidence: E, fallback: F) -> A { evidence; fallback; answer }`,
+followed by `answer() -> i64 { choose(42, "evidence", ()) }`.
 Self-host files: `frontend/resolution/resolution.glorious` (generic binder shadowing of
 global type aliases), `probe/resolution/resolution.glorious`.
 Probe shape: `self_host_name_resolution.rs#self_host_resolution_generic_binders_shadow_global_aliases`
-already resolves `choose<A,E,F>` (with an added effect-row binder `R`). Completion = assert
-the exact suite source's binder/shadwed-alias resolution and the acceptance of `answer()
--> i64 { choose(42, "evidence", ()) }` (needs body/type inference, which the probe does not
-currently exercise) so full `covered` requires the typed-core call the probe already emits.
-Ledger status: `unported` — the exact `choose<A, E, F>` + `answer() -> i64 { choose(...) }`
-source is not in the name-resolution corpus, so the row stays `unported`.
+now supplies that exact source to the Rust resolution oracle and the self-host generic-header
+resolution probe in both VM and native execution. The suite is therefore `partial`: the probe
+compares the relevant generic-binder resolution, but does not elaborate/type-check the generic
+call in `answer`; typed-core call/inference parity is still required for `covered`.
+Ledger status: `partial` — linked to that executable resolution comparison.
 
 ## 4. Why these five are smallest/high-leverage
 - All five are in the two most frontend-amenable families (`effects_control`,
