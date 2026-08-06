@@ -4183,6 +4183,24 @@ parse_impl_header(
     } else { Result::Err(HeaderError::UnexpectedTrailingHeaderToken(value.tokens.position, start)) }
 }
 
+// Trait bodies are not otherwise parsed by this header pass. Preserve the
+// declaration-level terminator rule so a trailing trait signature is not
+// mistaken for a complete interface.
+validate_trait_body_terminator(
+    value: &Parser,
+    header_end: usize,
+    whole_end: usize,
+    related: usize
+) -> Result<(), HeaderError> {
+    if(header_end + 2 < whole_end) {
+        let terminal = whole_end - 2;
+        if(super::lexer::token_kind_at(&value.source, terminal)
+            is TokenKind::Semicolon) {
+            Result::Ok(())
+        } else { Result::Err(HeaderError::ExpectedSemicolon(terminal, related)) }
+    } else { Result::Ok(()) }
+}
+
 parse_trait_header(
     value: &mut Parser,
     traits: &mut TraitArena,
@@ -4193,6 +4211,9 @@ parse_trait_header(
     header_end: usize,
     whole_end: usize
 ) -> Result<(), HeaderError> {
+    try(validate_trait_body_terminator(
+        &*value, header_end, whole_end, start
+    ), @parse_trait_header);
     value.tokens.position = start;
     if(public) { value.tokens.position = value.tokens.position + 1; } else { () };
     value.tokens.position = value.tokens.position + 1;
