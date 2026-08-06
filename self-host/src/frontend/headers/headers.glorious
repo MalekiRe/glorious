@@ -875,6 +875,9 @@ pub callable_where_clause(value: &CallableHeader) -> &Option<WhereClause> {
     &value.where_clause
 }
 
+// Impl-member body parsing starts immediately after this structured header.
+pub callable_tokens(value: &CallableHeader) -> &HeaderTokenRange { &value.tokens }
+
 pub callable_has_where_clause(value: &CallableHeader) -> Bool {
     not(super::syntax::token_is_empty(&value.where_tokens))
 }

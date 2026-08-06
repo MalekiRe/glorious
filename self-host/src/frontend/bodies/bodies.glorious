@@ -5970,6 +5970,102 @@ pub parse_function_body(
     }
 }
 
+// Impl methods are not scanner shells. Their headers identify the opening body
+// delimiter, so parse the bounded body through the same expression parser.
+pub parse_impl_method_body(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    method: usize
+) -> Result<ParsedBody, BodyError> {
+    let index = super::headers::parsed_index(headers);
+    handle super::headers::callable_at(index, method) {
+        Result::Err(_) => Result::Err(BodyError::MissingBodyShell(Id::from_u32(0))),
+        Result::Ok(callable) => {
+            let open = super::syntax::token_end(
+                super::headers::callable_tokens(callable)
+            );
+            handle super::syntax::delimiter_partner(
+                super::scanner::delimiter_map(declarations), open
+            ) {
+                None => Result::Err(BodyError::MissingBodyShell(
+                    super::headers::callable_shell(callable)
+                )),
+                Option::Some(body_end) => {
+                    let body_start = open + 1;
+                    let parser = BodyParser {
+                        tokens: super::syntax::cursor(body_start, body_end + 1),
+                        nodes: Arena::new(),
+                        edges: Vec::new(),
+                        names: Vec::new(),
+                        types: Arena::new(),
+                        type_arguments: Vec::new(),
+                        closure_parameters: Vec::new(),
+                        handle_arms: Vec::new(),
+                        pattern_binders: Vec::new(),
+                        in_whitespace_argument: false,
+                        patterns: Arena::new(),
+                        pattern_children: Vec::new(),
+                        pattern_fields: Vec::new()
+                    };
+                    let source = super::headers::parsed_source(headers);
+                    let nominal = super::headers::nominal_index(headers);
+                    let statements = Vec::new();
+                    let root = try(
+                        parse_block_contents(
+                            original,
+                            source,
+                            declarations,
+                            nominal,
+                            &mut parser,
+                            shell_owner(declarations, super::headers::callable_shell(callable)),
+                            0,
+                            body_start - 1,
+                            true,
+                            &mut statements
+                        ),
+                        @parse_impl_method_body
+                    );
+                    let BodyParser {
+                        tokens: _,
+                        nodes,
+                        edges,
+                        names,
+                        types,
+                        type_arguments,
+                        closure_parameters,
+                        handle_arms,
+                        pattern_binders,
+                        in_whitespace_argument: _,
+                        patterns,
+                        pattern_children,
+                        pattern_fields
+                    } = parser;
+                    let output = ParsedBody {
+                        shell: super::headers::callable_shell(callable),
+                        root: root,
+                        nodes: nodes,
+                        edges: edges,
+                        names: names,
+                        types: types,
+                        type_arguments: type_arguments,
+                        closure_parameters: closure_parameters,
+                        handle_arms: handle_arms,
+                        pattern_binders: pattern_binders,
+                        patterns: patterns,
+                        pattern_children: pattern_children,
+                        pattern_fields: pattern_fields
+                    };
+                    Result::Ok(__g1_identity_rewrite_expr(
+                        move output,
+                        @parse_impl_method_body
+                    ))
+                }
+            }
+        }
+    }
+}
+
 
 u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32( value) }
 

@@ -707,12 +707,28 @@ fn encode_rust_grouping(output: &mut Vec<u8>, source: &str) {
     };
     let mut functions = program.functions.iter().collect::<Vec<_>>();
     functions.sort_by_key(|function| function.span.start);
+    let implementation_methods = program
+        .impls
+        .iter()
+        .flat_map(|implementation| implementation.methods.iter())
+        .filter_map(|method| method.body.as_ref().map(|body| (&method.name, body)))
+        .collect::<Vec<_>>();
 
     let mut encoded = Vec::new();
-    push_u32(&mut encoded, functions.len().try_into().unwrap());
+    push_u32(
+        &mut encoded,
+        (functions.len() + implementation_methods.len()).try_into().unwrap(),
+    );
     for function in functions {
         push_string(&mut encoded, &function.name);
         if encode_expression(&mut encoded, &program, bundle.source(), &function.body).is_err() {
+            output.push(3);
+            return;
+        }
+    }
+    for (name, body) in implementation_methods {
+        push_string(&mut encoded, name);
+        if encode_expression(&mut encoded, &program, bundle.source(), body).is_err() {
             output.push(3);
             return;
         }
@@ -2018,6 +2034,18 @@ fn self_host_literal_lowering_fixture_corpus_matches_rust_oracle() {
         encode_rust_grouping(&mut expected, source);
     }
     assert_eq!(self_host_body_output(&sources), expected);
+}
+
+#[test]
+fn self_host_impl_method_bodies_match_rust_oracle() {
+    // Header serialization alone does not parse this body: the method is
+    // nested under the impl shell and must be selected through its method
+    // header before ordinary expression lowering can run.
+    let source = "trait Answer { answer() -> i64; } impl Answer for i64 { answer() -> i64 { 42 } } main() -> () { () }";
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_grouping(&mut expected, source);
+    assert_eq!(self_host_body_output(&[source]), expected);
 }
 
 /// Syntax-core parity entry point for the parser conformance corpus.

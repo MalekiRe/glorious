@@ -1099,12 +1099,30 @@ write_expression_kind(
 }
 }
 
+impl_method_count(
+    nominal: &super::super::frontend::headers::NominalIndex,
+    index: usize
+) -> usize {
+    if(index < super::super::frontend::headers::impl_count(nominal)) {
+        let declaration = handle super::super::frontend::headers::impl_at(nominal, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        wrapping_convert_to_usize(
+            super::super::frontend::headers::range_count(
+                super::super::frontend::headers::impl_methods(declaration)
+            )
+        ) + impl_method_count(nominal, index + 1)
+    } else { 0 }
+}
+
 function_count(
+    headers: &super::super::frontend::headers::ParsedHeaders,
     declarations: &super::super::frontend::scanner::DeclarationIndex
 ) -> usize {
     super::super::frontend::scanner::fold_shells(
         declarations,
-        0,
+        impl_method_count(super::super::frontend::headers::nominal_index(headers), 0),
         { count, _, shell =>
             if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
                 count + 1
@@ -1113,48 +1131,95 @@ function_count(
     )
 }
 
+write_impl_methods(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    implementation: usize,
+    method: u32,
+    count: u32
+) -> Result<(), BodyError> {
+    if(method < count) {
+        let nominal = super::super::frontend::headers::nominal_index(headers);
+        let declaration = handle super::super::frontend::headers::impl_at(nominal, implementation) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let global = wrapping_convert_to_usize(
+            super::super::frontend::headers::range_start(
+                super::super::frontend::headers::impl_methods(declaration)
+            ) + method
+        );
+        let index = super::super::frontend::headers::parsed_index(headers);
+        let callable = handle super::super::frontend::headers::callable_at(index, global) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let body = try(super::super::frontend::bodies::parse_impl_method_body(
+            original, headers, declarations, global
+        ), @write_impl_methods);
+        let source = super::super::frontend::headers::parsed_source(headers);
+        handle super::super::frontend::lexer::lexeme(
+            source, super::super::frontend::headers::callable_name(callable)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(name) => write_string(output, name)
+        };
+        try(write_expression(output, original, source, &body,
+            super::super::frontend::bodies::body_root_index(&body)), @write_impl_methods);
+        write_impl_methods(output, original, headers, declarations,
+            implementation, method + 1, count)
+    } else { Result::Ok(()) }
+}
+
+write_all_impl_methods(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    implementation: usize
+) -> Result<(), BodyError> {
+    let nominal = super::super::frontend::headers::nominal_index(headers);
+    if(implementation < super::super::frontend::headers::impl_count(nominal)) {
+        let declaration = handle super::super::frontend::headers::impl_at(nominal, implementation) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        let count = super::super::frontend::headers::range_count(
+            super::super::frontend::headers::impl_methods(declaration)
+        );
+        try(write_impl_methods(output, original, headers, declarations,
+            implementation, 0, count), @write_all_impl_methods);
+        write_all_impl_methods(output, original, headers, declarations,
+            implementation + 1)
+    } else { Result::Ok(()) }
+}
+
 write_functions(
     output: &mut ByteBuf,
     original: &String,
     headers: &super::super::frontend::headers::ParsedHeaders,
     declarations: &super::super::frontend::scanner::DeclarationIndex
 ) -> Result<(), BodyError> {
-    super::super::frontend::scanner::try_for_each_shell(
+    try(super::super::frontend::scanner::try_for_each_shell(
         declarations,
         { id, shell => {
             if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
-                let body = try(
-                    super::super::frontend::bodies::parse_function_body(
-                        original,
-                        headers,
-                        declarations,
-                        id
-                    ),
-                    @write_functions
-                );
-                let source =
-                    super::super::frontend::headers::parsed_source(headers);
+                let body = try(super::super::frontend::bodies::parse_function_body(
+                    original, headers, declarations, id), @write_functions);
+                let source = super::super::frontend::headers::parsed_source(headers);
                 let name = handle Option::as_ref(
                     super::super::frontend::scanner::shell_name(shell)
-                ) {
-                    Result::Err(_) => unreachable(),
-                    Result::Ok(found) => *found
-                };
+                ) { Result::Err(_) => unreachable(), Result::Ok(found) => *found };
                 handle super::super::frontend::lexer::lexeme(source, name) {
-                    Result::Err(_) => unreachable(),
-                    Result::Ok(text) => write_string(output, text)
+                    Result::Err(_) => unreachable(), Result::Ok(text) => write_string(output, text)
                 };
-                try(write_expression(
-                    output,
-                    original,
-                    source,
-                    &body,
-                    super::super::frontend::bodies::body_root_index(&body)
-                ), @write_functions)
+                try(write_expression(output, original, source, &body,
+                    super::super::frontend::bodies::body_root_index(&body)), @write_functions)
             } else { () };
             Result::Ok(())
-        }}
-    )
+        }}), @write_functions);
+    write_all_impl_methods(output, original, headers, declarations, 0)
 }
 
 encode_source(output: &mut ByteBuf, source_text_value: String) {
@@ -1174,7 +1239,7 @@ encode_source(output: &mut ByteBuf, source_text_value: String) {
                     let encoded = ByteBuf::new();
                     ByteBuf::write_u32_le(
                         &mut encoded,
-                        u32_from_usize(function_count(&declarations))
+                        u32_from_usize(function_count(&headers, &declarations))
                     );
                     handle write_functions(
                         &mut encoded,
