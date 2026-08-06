@@ -395,7 +395,6 @@ pub error_span(value: &LexError) -> Span {
 }
 
 struct Lexer {
-    source: String,
     bytes: Bytes,
     cursor: usize,
     tokens: Vec<Token>,
@@ -530,7 +529,14 @@ pub text_slice(source: &String, start: usize, end: usize) -> String {
 }
 
 source_slice(value: &Lexer, start: usize, end: usize) -> String {
-    text_slice(&value.source, start, end)
+    let bytes = handle Bytes::slice(&value.bytes, start, end) {
+        Result::Ok(slice) =>  slice,
+        Result::Err(_) => unreachable()
+    };
+    handle String::from_utf8(bytes) {
+        Result::Ok(text) =>  text,
+        Result::Err(_) => unreachable()
+    }
 }
 
 intern_slice(value: &mut Lexer, start: usize, end: usize) -> Id<String> {
@@ -1788,7 +1794,6 @@ pub lex(source: &String) -> Result<LexedSource, LexError> {
         ),
         Result::Ok(_) => {
             let lexer = Lexer {
-                source: *source,
                 bytes: bytes,
                 cursor: 0,
                 tokens: Vec::new(),
@@ -1814,7 +1819,6 @@ run(value: Lexer) -> Result<LexedSource, LexError> {
             };
             Vec::push(&mut value.tokens, eof);
             let Lexer {
-                source: _,
                 bytes: _,
                 cursor: _,
                 tokens,
