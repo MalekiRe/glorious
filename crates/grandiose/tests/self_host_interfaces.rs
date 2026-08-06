@@ -470,6 +470,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "struct Separators { first: u8,; second: u16 third: u32; } enum VariantSeparators { A,; B C; }",
         "type Commented<T,> = Vec</* element */ T,>; struct CommentBox<T,> { /* before */ private value: Commented<T>, } enum CommentMaybe<T,> { None, Some(/* payload */ T,), }",
         "read<T, E: EffectRow>(value: T) -> Result<T, !> / {Console, Io<T> | E} { value }",
+        "invoke<F, R>(body: F) -> R where F: Fn<(), Output=R> { body() }",
+        "trait Marker<T> where T: Bound {}",
+        "trait Read { read(self: &Self) -> i64; } struct Item { value: i64 } impl Read for Item { read(self: &Item) -> i64 { self.value } }",
         "mod outer { pub type A = u8; pub struct S { private x: u8 } pub enum E { V } pub f() { () } }",
         "type Borrowed<'a, T, E: EffectRow> = &'a T; type Double = ((u8)); enum GroupedPayload { V((u8), ((u16))) }",
         "type View<'a, T> = core::View<'a, T>; borrow<'a, T>(value: &'a T) -> View<'a, T> { unreachable() }",
@@ -510,6 +513,8 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "effect BadParameter { choose(value u8) -> u8; }",
         "effect BadWhere where { choose() -> u8; }",
         "effect BadOperationWhere { choose() -> u8 where; }",
+        "invoke<F: NotAParameterKind>(body: F) -> F { body }",
+        "trait Read { read(self: &Self) -> i64 }",
     ];
     let mut paths = Vec::new();
     for (index, source) in valid.into_iter().enumerate() {
