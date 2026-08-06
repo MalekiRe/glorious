@@ -896,14 +896,32 @@ fn self_host_bundle() -> SourceBundle {
     )
 }
 
+// The effect-backend probes construct MIR directly.  Lowering still names the
+// Core data types, so retain its frontend dependency closure, but avoid loading
+// compiler/diagnostic modules and frontend phases (lossless/header parsing)
+// that no probe can reach.  This keeps the test's backend wire-format coverage
+// while preventing unrelated self-host compiler graphs from sharing its peak.
+fn self_host_effect_backend_module_paths(root: &Path) -> [PathBuf; 10] {
+    [
+        root.join("frontend/frontend.glorious"),
+        root.join("frontend/lexer/lexer.glorious"),
+        root.join("frontend/scanner/scanner.glorious"),
+        root.join("frontend/bodies/bodies.glorious"),
+        root.join("frontend/resolution/resolution.glorious"),
+        root.join("frontend/elaboration/elaboration.glorious"),
+        root.join("backend/backend.glorious"),
+        root.join("backend/artifact/artifact.glorious"),
+        root.join("backend/lowering/lowering.glorious"),
+        root.join("backend/emission/emission.glorious"),
+    ]
+}
+
 fn self_host_effect_backend_bundle() -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary_source = [
         r#"
             mod frontend;
             mod backend;
-            mod compiler;
-            mod diagnostics;
         "#,
         EFFECT_BACKEND_PROBES,
         r#"
@@ -914,10 +932,20 @@ fn self_host_effect_backend_bundle() -> SourceBundle {
     let primary = Segment::new(root.join("main.glorious").to_string_lossy(), primary_source);
     SourceBundle::distributed(
         primary,
-        self_host_module_paths(&root).into_iter().map(|path| {
-            let source = fs::read_to_string(&path).unwrap();
-            Segment::new(path.to_string_lossy(), source)
-        }),
+        self_host_effect_backend_module_paths(&root)
+            .into_iter()
+            .map(|path| {
+                let mut source = fs::read_to_string(&path).unwrap();
+                if path == root.join("frontend/frontend.glorious") {
+                    // The production root declares every frontend phase.  The
+                    // direct MIR test needs lexer/scanner/body/resolution/
+                    // elaboration only; omit unreachable sibling modules.
+                    source = source
+                        .replace("pub mod lossless;\n", "")
+                        .replace("pub mod headers;\n", "");
+                }
+                Segment::new(path.to_string_lossy(), source)
+            }),
     )
 }
 
