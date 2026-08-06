@@ -1518,6 +1518,23 @@ fn self_hosted_effect_control_headers_match_rust_oracle() {
             "effect Fail<E> { fail(error: E) -> ! }\nselected() -> / {Fail<i64>} { () }",
             true,
         ),
+        // shared_handler_resumption_quantities.rs: shared terminal/resumptive
+        // alternatives carry [0,1], [1,1], or [2,2] resumption quantities plus
+        // multi-operation terminal-only Gate heads.
+        ("effect Carry { [0,1] take() -> i64 }", true),
+        ("effect Carry { [1,1] take() -> i64 }", true),
+        ("effect Carry { [2,2] take() -> i64 }", true),
+        ("effect Gate { left() -> ! right() -> ! }", true),
+        ("effect Gate { stop() -> ! [1,1] inspect() -> i64 }", true),
+        // resumption_closure_capture.rs: exact/optional captures hand an
+        // effectful closure one resumable quantity.
+        ("effect Pick { [2,2] choose() -> i64 }", true),
+        ("effect Stop { [0,1] stop() -> i64 }", true),
+        // tail_resumption_acceptance.rs: tail is only legal for terminal,
+        // finite one-shot continuations, so the accepted heads are one-shot.
+        ("effect Ask { [1,1] ask() -> i64 }", true),
+        ("effect Maybe { [0,1] ask() -> i64 }", true),
+        ("effect Replay { [2,2] replay() -> i64 }", true),
         (
             "effect Bad<T, T> { stop() -> ! }",
             false,
