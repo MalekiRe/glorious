@@ -5993,9 +5993,19 @@ predeclared_nominal(
             Result::Ok(PredeclaredNominal::Skip),
         super::headers::HeaderOrder::Alias(_) =>
             Result::Ok(PredeclaredNominal::Skip),
+        super::headers::HeaderOrder::EffectRowAlias(_) =>
+            Result::Ok(PredeclaredNominal::Skip),
         super::headers::HeaderOrder::Fixity(_) =>
             Result::Ok(PredeclaredNominal::Skip),
         super::headers::HeaderOrder::Effect(_) =>
+            Result::Ok(PredeclaredNominal::Skip),
+        super::headers::HeaderOrder::Drop(_) =>
+            Result::Ok(PredeclaredNominal::Skip),
+        super::headers::HeaderOrder::Use(_) =>
+            Result::Ok(PredeclaredNominal::Skip),
+        super::headers::HeaderOrder::Trait(_) =>
+            Result::Ok(PredeclaredNominal::Skip),
+        super::headers::HeaderOrder::Impl(_) =>
             Result::Ok(PredeclaredNominal::Skip)
     }
 }
