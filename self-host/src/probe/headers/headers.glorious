@@ -540,14 +540,8 @@ write_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) 
             Result::Ok(found) => found
         };
         let ty = super::super::frontend::headers::type_edge_type(edge);
-        write_wide_type_span(output, parsed, ty);
         write_type(output, parsed, ty)
     }});
-    write_token_span(
-        output,
-        super::super::frontend::headers::parsed_source(parsed),
-        super::super::frontend::headers::effect_row_tokens(row)
-    );
     write_optional_name(
         output,
         super::super::frontend::headers::parsed_source(parsed),
@@ -575,11 +569,6 @@ write_callable(
         super::super::frontend::headers::range_count(generics)
     );
     write_generics(output, parsed, generics);
-    write_token_span(
-        output,
-        super::super::frontend::headers::parsed_source(parsed),
-        super::super::frontend::headers::callable_generic_tokens(value)
-    );
     let parameters = super::super::frontend::headers::callable_parameters(value);
     ByteBuf::write_u32_le(
         output,
@@ -601,12 +590,7 @@ write_callable(
             ByteBuf::push(output, 1);
             write_effect_row(output, parsed, row)
         }
-    };
-    write_where_contract(
-        output,
-        parsed,
-        super::super::frontend::headers::callable_where_clause(value)
-    )
+    }
 }
 
 write_callables(output: &mut ByteBuf, parsed: &ParsedHeaders) {
