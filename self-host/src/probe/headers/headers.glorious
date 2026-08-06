@@ -162,7 +162,7 @@ write_narrow_token_span(
 }
 
 
-write_type_edges<'a>(
+write_header_type_edges<'a>(
     output: &mut ByteBuf,
     parsed: &ParsedHeaders,
     edges: Slice<'a, super::super::frontend::headers::TypeEdge>
@@ -172,7 +172,7 @@ write_type_edges<'a>(
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
-        write_type(
+        write_header_type(
             output,
             parsed,
             super::super::frontend::headers::type_edge_type(edge)
@@ -202,7 +202,7 @@ write_type_node_span(
     ))
 }
 
-write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
+write_header_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
     let index = super::super::frontend::headers::parsed_index(parsed);
     let source = super::super::frontend::headers::parsed_source(parsed);
     handle super::super::frontend::headers::header_type_view(index, id) {
@@ -234,7 +234,7 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                 super::super::frontend::headers::parsed_source(parsed),
                 lifetime
             );
-            write_type(output, parsed, child)
+            write_header_type(output, parsed, child)
         },
         HeaderTypeView::UniqueReference(start, end, lifetime, child) => {
             ByteBuf::push(output, 3);
@@ -244,7 +244,7 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                 super::super::frontend::headers::parsed_source(parsed),
                 lifetime
             );
-            write_type(output, parsed, child)
+            write_header_type(output, parsed, child)
         },
         HeaderTypeView::Tuple(start, end, children) => {
             ByteBuf::push(output, 4);
@@ -253,12 +253,12 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                 output,
                 wrapping_convert_to_u32(Slice::len(children))
             );
-            write_type_edges(output, parsed, children)
+            write_header_type_edges(output, parsed, children)
         },
         HeaderTypeView::Application(start, end, constructor, lifetimes, arguments, _) => {
             ByteBuf::push(output, 5);
             write_type_node_span(output, source, start, end);
-            write_type(output, parsed, constructor);
+            write_header_type(output, parsed, constructor);
             ByteBuf::write_u32_le(
                 output,
                 wrapping_convert_to_u32(Slice::len(lifetimes))
@@ -279,12 +279,82 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                 output,
                 wrapping_convert_to_u32(Slice::len(arguments))
             );
-            write_type_edges(output, parsed, arguments)
+            write_header_type_edges(output, parsed, arguments)
         },
         HeaderTypeView::Never(start, end) => {
             ByteBuf::push(output, 6);
             write_type_node_span(output, source, start, end)
         }
+    }
+}
+
+
+// The interface application predates source-provenance serialization. Keep its
+// wire contract compact: type nodes contain only their structural payload.
+// Header probes below continue to use `write_header_type`, which retains the
+// exact source spans required by the full header protocol.
+write_interface_type_edges<'a>(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    edges: Slice<'a, super::super::frontend::headers::TypeEdge>
+) {
+    for_range(Range::new(0, Slice::len(edges)), { current => {
+        let edge = handle Slice::get(edges, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_interface_type(
+            output,
+            parsed,
+            super::super::frontend::headers::type_edge_type(edge)
+        )
+    }})
+}
+
+write_interface_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    handle super::super::frontend::headers::header_type_view(index, id) {
+        HeaderTypeView::Path(_, _, names) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(names)));
+            for_range(Range::new(0, Slice::len(names)), { current => {
+                let name = handle Slice::get(names, current) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                };
+                write_name(output, super::super::frontend::headers::parsed_source(parsed),
+                    super::super::frontend::headers::name_use_name(name))
+            }})
+        },
+        HeaderTypeView::SharedReference(_, _, lifetime, child) => {
+            ByteBuf::push(output, 2);
+            write_optional_name_token(output, super::super::frontend::headers::parsed_source(parsed), lifetime);
+            write_interface_type(output, parsed, child)
+        },
+        HeaderTypeView::UniqueReference(_, _, lifetime, child) => {
+            ByteBuf::push(output, 3);
+            write_optional_name_token(output, super::super::frontend::headers::parsed_source(parsed), lifetime);
+            write_interface_type(output, parsed, child)
+        },
+        HeaderTypeView::Tuple(_, _, children) => {
+            ByteBuf::push(output, 4);
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(children)));
+            write_interface_type_edges(output, parsed, children)
+        },
+        HeaderTypeView::Application(_, _, constructor, lifetimes, arguments, _) => {
+            ByteBuf::push(output, 5);
+            write_interface_type(output, parsed, constructor);
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(lifetimes)));
+            for_range(Range::new(0, Slice::len(lifetimes)), { current => {
+                let lifetime = handle Slice::get(lifetimes, current) {
+                    Result::Err(_) => unreachable(), Result::Ok(found) => found
+                };
+                write_name(output, super::super::frontend::headers::parsed_source(parsed),
+                    super::super::frontend::headers::name_use_name(lifetime))
+            }});
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(arguments)));
+            write_interface_type_edges(output, parsed, arguments)
+        },
+        HeaderTypeView::Never(_, _) => ByteBuf::push(output, 6)
     }
 }
 
@@ -362,7 +432,7 @@ write_where_contract(
                 );
                 write_generics(output, parsed, higher);
                 write_wide_type_span(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
-                write_type(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
+                write_header_type(output, parsed, super::super::frontend::headers::where_goal_subject(goal));
                 ByteBuf::push(output, bool_code(super::super::frontend::headers::where_goal_is_negative(goal)));
                 let relation = super::super::frontend::headers::where_goal_relation(index, goal);
                 ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(relation)));
@@ -376,7 +446,7 @@ write_where_contract(
                     ByteBuf::push(output, super::super::frontend::headers::goal_argument_kind_code(argument));
                     handle super::super::frontend::headers::goal_argument_type(argument) {
                         None => { ByteBuf::push(output, 0) },
-                        Option::Some(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_type(output, parsed, ty) }
+                        Option::Some(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_header_type(output, parsed, ty) }
                     }
                 }});
                 ByteBuf::write_u32_le(output, super::super::frontend::headers::where_goal_binding_count(goal));
@@ -385,7 +455,7 @@ write_where_contract(
                     write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::name_use_name(super::super::frontend::headers::associated_binding_name(binding)));
                     write_token_span(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::associated_binding_tokens(binding));
                     handle super::super::frontend::headers::associated_binding_value(binding) {
-                        super::super::frontend::headers::AssociatedBindingValue::Type(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_type(output, parsed, ty) },
+                        super::super::frontend::headers::AssociatedBindingValue::Type(ty) => { ByteBuf::push(output, 1); write_wide_type_span(output, parsed, ty); write_header_type(output, parsed, ty) },
                         super::super::frontend::headers::AssociatedBindingValue::EffectRow(row) => { ByteBuf::push(output, 2); write_effect_row(output, parsed, &row) }
                     }
                 }})
@@ -464,7 +534,7 @@ write_parameters(
             super::super::frontend::headers::parsed_source(parsed),
             super::super::frontend::headers::parameter_name(parameter)
         );
-        write_type(
+        write_header_type(
             output,
             parsed,
             super::super::frontend::headers::parameter_type(parameter)
@@ -525,7 +595,7 @@ write_impl(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &super::super::f
         write_name(output, source, super::super::frontend::headers::impl_trait_path_name(index, value, current));
     }});
     write_wide_type_span(output, parsed, super::super::frontend::headers::impl_self_type(value));
-    write_type(output, parsed, super::super::frontend::headers::impl_self_type(value));
+    write_header_type(output, parsed, super::super::frontend::headers::impl_self_type(value));
     write_where_contract(output, parsed, super::super::frontend::headers::impl_where_clause(value));
     write_token_span(output, source, super::super::frontend::headers::impl_tokens(value));
 }
@@ -582,7 +652,7 @@ write_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) 
         };
         let ty = super::super::frontend::headers::type_edge_type(edge);
         write_wide_type_span(output, parsed, ty);
-        write_type(output, parsed, ty)
+        write_header_type(output, parsed, ty)
     }});
     write_token_span(
         output,
@@ -627,7 +697,7 @@ write_callable(
         None => ByteBuf::push(output, 0),
         Option::Some(result) => {
             ByteBuf::push(output, 1);
-            write_type(output, parsed, result)
+            write_header_type(output, parsed, result)
         }
     };
     handle Option::as_ref(
@@ -693,7 +763,7 @@ write_alias(
         super::super::frontend::headers::alias_name(value),
         super::super::frontend::headers::alias_generics(value)
     );
-    write_type(
+    write_header_type(
         output,
         parsed,
         *super::super::frontend::headers::alias_target(value)
@@ -769,7 +839,7 @@ write_struct(
             super::super::frontend::headers::parsed_source(parsed),
             super::super::frontend::headers::field_name(field)
         );
-        write_type(
+        write_header_type(
             output,
             parsed,
             *super::super::frontend::headers::field_type(field)
@@ -811,7 +881,7 @@ write_drop(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &DropHeader) {
     ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(super::super::frontend::headers::drop_generics(value)));
     write_generics(output, parsed, super::super::frontend::headers::drop_generics(value));
     write_wide_type_span(output, parsed, super::super::frontend::headers::drop_target(value));
-    write_type(output, parsed, super::super::frontend::headers::drop_target(value));
+    write_header_type(output, parsed, super::super::frontend::headers::drop_target(value));
     write_where_contract(output, parsed, super::super::frontend::headers::drop_where_clause(value));
 }
 
@@ -825,7 +895,7 @@ write_use(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &UseHeader) {
         Option::Some(upper) => { ByteBuf::push(output, 1); ByteBuf::write_u64_le(output, wrapping_convert_to_u64(upper)) }
     };
     write_wide_type_span(output, parsed, super::super::frontend::headers::use_target(value));
-    write_type(output, parsed, super::super::frontend::headers::use_target(value));
+    write_header_type(output, parsed, super::super::frontend::headers::use_target(value));
     write_where_contract(output, parsed, super::super::frontend::headers::use_where_clause(value));
 }
 
@@ -868,7 +938,7 @@ write_enum(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EnumHeader) {
             output,
             super::super::frontend::headers::range_count(fields)
         );
-        write_type_edges(
+        write_header_type_edges(
             output,
             parsed,
             super::super::frontend::headers::type_edge_range(index, fields)
@@ -896,7 +966,7 @@ write_effect_operation(
         None => ByteBuf::push(output, 0),
         Option::Some(result) => {
             ByteBuf::push(output, 1);
-            write_type(output, parsed, result)
+            write_header_type(output, parsed, result)
         }
     };
     ByteBuf::push(output, bool_code(
@@ -989,6 +1059,112 @@ write_fixity(
     write_string(output, &spelling)
 }
 
+// Compact declaration writers are deliberately separate from the header
+// writers above. Adding provenance to headers must not silently version the
+// interface-application wire format.
+write_interface_parameters(output: &mut ByteBuf, parsed: &ParsedHeaders, range: &HeaderRange) {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    for_range(Range::new(0, wrapping_convert_to_usize(super::super::frontend::headers::range_count(range))), { current => {
+        let ordinal = wrapping_convert_to_usize(super::super::frontend::headers::range_start(range)) + current;
+        let parameter = handle super::super::frontend::headers::parameter_at(index, ordinal) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::parameter_name(parameter));
+        write_interface_type(output, parsed, super::super::frontend::headers::parameter_type(parameter))
+    }})
+}
+
+write_interface_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) {
+    let range = super::super::frontend::headers::effect_row_effects(row);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(range));
+    let edges = super::super::frontend::headers::type_edge_range(super::super::frontend::headers::parsed_index(parsed), range);
+    write_interface_type_edges(output, parsed, edges);
+    write_optional_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::effect_row_tail(row))
+}
+
+write_interface_alias(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &TypeAliasHeader) {
+    write_common(output, parsed, super::super::frontend::headers::alias_is_public(value), super::super::frontend::headers::alias_name(value), super::super::frontend::headers::alias_generics(value));
+    write_interface_type(output, parsed, *super::super::frontend::headers::alias_target(value))
+}
+
+write_interface_struct(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &StructHeader) {
+    write_common(output, parsed, super::super::frontend::headers::struct_is_public(value), super::super::frontend::headers::struct_name(value), super::super::frontend::headers::struct_generics(value));
+    let fields = super::super::frontend::headers::struct_fields(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(fields));
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    for_range(Range::new(0, wrapping_convert_to_usize(super::super::frontend::headers::range_count(fields))), { current => {
+        let field = handle super::super::frontend::headers::field_at(nominal, wrapping_convert_to_usize(super::super::frontend::headers::range_start(fields)) + current) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        ByteBuf::push(output, if(super::super::frontend::headers::field_is_private(field)) { 0 } else { 1 });
+        write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::field_name(field));
+        write_interface_type(output, parsed, *super::super::frontend::headers::field_type(field))
+    }})
+}
+
+write_interface_enum(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EnumHeader) {
+    write_common(output, parsed, super::super::frontend::headers::enum_is_public(value), super::super::frontend::headers::enum_name(value), super::super::frontend::headers::enum_generics(value));
+    let variants = super::super::frontend::headers::enum_variants(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(variants));
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    for_range(Range::new(0, wrapping_convert_to_usize(super::super::frontend::headers::range_count(variants))), { current => {
+        let variant = handle super::super::frontend::headers::variant_at(nominal, wrapping_convert_to_usize(super::super::frontend::headers::range_start(variants)) + current) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::variant_name(variant));
+        let fields = super::super::frontend::headers::variant_fields(variant);
+        ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(fields));
+        write_interface_type_edges(output, parsed, super::super::frontend::headers::type_edge_range(index, fields))
+    }})
+}
+
+write_interface_effect_operation(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EffectOperationHeader) {
+    write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::effect_operation_name(value));
+    let generics = super::super::frontend::headers::effect_operation_generics(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(generics));
+    write_generics(output, parsed, generics);
+    let parameters = super::super::frontend::headers::effect_operation_parameters(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(parameters));
+    write_interface_parameters(output, parsed, parameters);
+    handle super::super::frontend::headers::effect_operation_result(value) {
+        None => ByteBuf::push(output, 0),
+        Option::Some(result) => { ByteBuf::push(output, 1); write_interface_type(output, parsed, result) }
+    };
+    ByteBuf::push(output, bool_code(super::super::frontend::headers::effect_operation_is_terminal(value)));
+    ByteBuf::write_u64_le(output, wrapping_convert_to_u64(super::super::frontend::headers::effect_operation_resumption_lower(value)));
+    handle super::super::frontend::headers::effect_operation_resumption_upper(value) {
+        None => ByteBuf::push(output, 0), Option::Some(upper) => { ByteBuf::push(output, 1); ByteBuf::write_u64_le(output, wrapping_convert_to_u64(upper)) }
+    };
+    ByteBuf::push(output, bool_code(super::super::frontend::headers::effect_operation_has_resumption_quantity(value)));
+    ByteBuf::push(output, bool_code(not(super::super::frontend::syntax::token_is_empty(super::super::frontend::headers::effect_operation_where_tokens(value)))))
+}
+
+write_interface_effect(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EffectHeader) {
+    write_common(output, parsed, super::super::frontend::headers::effect_is_public(value), super::super::frontend::headers::effect_name(value), super::super::frontend::headers::effect_generics(value));
+    ByteBuf::push(output, bool_code(not(super::super::frontend::syntax::token_is_empty(super::super::frontend::headers::effect_where_tokens(value)))));
+    let operations = super::super::frontend::headers::effect_operations(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(operations));
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    for_range(Range::new(0, wrapping_convert_to_usize(super::super::frontend::headers::range_count(operations))), { ordinal => {
+        let operation = handle super::super::frontend::headers::effect_operation_by_id(nominal, super::super::frontend::headers::effect_operation_id_at(value, ordinal)) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        write_interface_effect_operation(output, parsed, operation)
+    }})
+}
+
+write_interface_callable(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &CallableHeader) {
+    ByteBuf::push(output, bool_code(super::super::frontend::headers::callable_is_public(value)));
+    write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::callable_name(value));
+    let generics = super::super::frontend::headers::callable_generics(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(generics));
+    write_generics(output, parsed, generics);
+    let parameters = super::super::frontend::headers::callable_parameters(value);
+    ByteBuf::write_u32_le(output, super::super::frontend::headers::range_count(parameters));
+    write_interface_parameters(output, parsed, parameters);
+    handle super::super::frontend::headers::callable_result(value) {
+        None => ByteBuf::push(output, 0), Option::Some(result) => { ByteBuf::push(output, 1); write_interface_type(output, parsed, result) }
+    };
+    handle Option::as_ref(super::super::frontend::headers::callable_effects(value)) {
+        Result::Err(_) => ByteBuf::push(output, 0), Result::Ok(row) => { ByteBuf::push(output, 1); write_interface_effect_row(output, parsed, row) }
+    }
+}
+
 interface_kind_supported(kind: u8) -> Bool {
     handle kind {
         3 => true,
@@ -997,10 +1173,16 @@ interface_kind_supported(kind: u8) -> Bool {
         8 => true,
         9 => true,
         12 => true,
-        15 => true,
-        16 => true,
         _ => false
     }
+}
+
+interface_count_at(parsed: &ParsedHeaders, current: usize) -> usize {
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    if(current < super::super::frontend::headers::header_count(nominal)) {
+        let count = if(interface_kind_supported(super::super::frontend::headers::header_kind(nominal, current))) { 1 } else { 0 };
+        count + interface_count_at(parsed, current + 1)
+    } else { 0 }
 }
 
 write_interfaces_at(
@@ -1020,7 +1202,7 @@ write_interfaces_at(
             );
             ByteBuf::push(output, kind);
             handle kind {
-                3 => write_alias(output, parsed, handle
+                3 => write_interface_alias(output, parsed, handle
                     super::super::frontend::headers::alias_at(nominal, declaration) {
                     Result::Err(_) => unreachable(), Result::Ok(found) => found
                 }),
@@ -1028,28 +1210,20 @@ write_interfaces_at(
                     super::super::frontend::headers::fixity_at(nominal, declaration) {
                     Result::Err(_) => unreachable(), Result::Ok(found) => found
                 }),
-                7 => write_effect(output, parsed, handle
+                7 => write_interface_effect(output, parsed, handle
                     super::super::frontend::headers::effect_at(nominal, declaration) {
                     Result::Err(_) => unreachable(), Result::Ok(found) => found
                 }),
-                8 => write_struct(output, parsed, handle
+                8 => write_interface_struct(output, parsed, handle
                     super::super::frontend::headers::struct_at(nominal, declaration) {
                     Result::Err(_) => unreachable(), Result::Ok(found) => found
-                }, include_field_spans),
-                9 => write_enum(output, parsed, handle
+                }),
+                9 => write_interface_enum(output, parsed, handle
                     super::super::frontend::headers::enum_at(nominal, declaration) {
                     Result::Err(_) => unreachable(), Result::Ok(found) => found
                 }),
-                12 => write_callable(output, parsed, handle
+                12 => write_interface_callable(output, parsed, handle
                     super::super::frontend::headers::callable_at(index, declaration) {
-                    Result::Err(_) => unreachable(), Result::Ok(found) => found
-                }),
-                15 => write_trait(output, parsed, handle
-                    super::super::frontend::headers::trait_at(nominal, declaration) {
-                    Result::Err(_) => unreachable(), Result::Ok(found) => found
-                }),
-                16 => write_impl(output, parsed, handle
-                    super::super::frontend::headers::impl_at(nominal, declaration) {
                     Result::Err(_) => unreachable(), Result::Ok(found) => found
                 }),
                 _ => unreachable()
@@ -1121,25 +1295,7 @@ encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
                     ByteBuf::push(output, 0);
                         ByteBuf::write_u32_le(
                             output,
-                            wrapping_convert_to_u32(
-                                super::super::frontend::headers::alias_count(
-                                    super::super::frontend::headers::nominal_index(&parsed)
-                                ) + super::super::frontend::headers::fixity_count(
-                                    super::super::frontend::headers::nominal_index(&parsed)
-                                ) + super::super::frontend::headers::effect_count(
-                                    super::super::frontend::headers::nominal_index(&parsed)
-                                ) + super::super::frontend::headers::struct_count(
-                                    super::super::frontend::headers::nominal_index(&parsed)
-                                ) + super::super::frontend::headers::enum_count(
-                                    super::super::frontend::headers::nominal_index(&parsed)
-                                ) + super::super::frontend::headers::trait_count(
-                                    super::super::frontend::headers::nominal_index(&parsed)
-                                ) + super::super::frontend::headers::impl_count(
-                                    super::super::frontend::headers::nominal_index(&parsed)
-                                ) + super::super::frontend::headers::callable_count(
-                                    super::super::frontend::headers::parsed_index(&parsed)
-                                )
-                            )
+                            wrapping_convert_to_u32(interface_count_at(&parsed, 0))
                         );
                         write_interfaces(output, &source, &parsed, false)
                             },
