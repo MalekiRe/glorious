@@ -1649,14 +1649,17 @@ fn self_hosted_resumption_quantity_interfaces_match_rust_oracle() {
         ("effect Bad { [0, 1] stop() -> ! }", false),
     ];
     for (source, accepted) in corpus {
-        let rust = grandiose::lexer::lex(source)
+        // Keep the corpus header-focused while validating complete programs in
+        // the bootstrap oracle and the self-host probe alike.
+        let source = format!("{source}\nmain() -> {{ () }}");
+        let rust = grandiose::lexer::lex(&source)
             .ok()
             .and_then(|tokens| grandiose::parser::parse(tokens).ok())
             .and_then(|program| grandiose::validate::validate(&program).ok())
             .is_some();
         assert_eq!(rust, accepted, "fixture Rust-oracle outcome: {source}");
         let value = vm
-            .run(function, vec![Value::Text(source.to_owned().into())])
+            .run(function, vec![Value::Text(source.clone().into())])
             .unwrap();
         let Value::Bytes(bytes) = value else {
             panic!("effect probe returned {value:?}");

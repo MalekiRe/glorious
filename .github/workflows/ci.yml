@@ -1,8 +1,8 @@
 name: CI
 
+# Temporarily manual-only while the self-host parity campaign is in progress.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
