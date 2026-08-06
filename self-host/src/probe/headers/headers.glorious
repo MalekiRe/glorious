@@ -271,9 +271,17 @@ write_header_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                 write_name(
                     output,
                     super::super::frontend::headers::parsed_source(parsed),
-                    super::super::frontend::headers::name_use_name(lifetime)
+                    super::super::frontend::headers::lifetime_argument_name(lifetime)
                 );
-                write_name_use_span(output, source, lifetime)
+                write_name_token_span(
+                    output,
+                    source,
+                    super::super::frontend::headers::lifetime_argument_token(lifetime)
+                );
+                ByteBuf::write_u32_le(
+                    output,
+                    super::super::frontend::headers::lifetime_argument_position(lifetime)
+                )
             }});
             ByteBuf::write_u32_le(
                 output,
@@ -349,7 +357,9 @@ write_interface_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
                     Result::Err(_) => unreachable(), Result::Ok(found) => found
                 };
                 write_name(output, super::super::frontend::headers::parsed_source(parsed),
-                    super::super::frontend::headers::name_use_name(lifetime))
+                    super::super::frontend::headers::lifetime_argument_name(lifetime));
+                ByteBuf::write_u32_le(output,
+                    super::super::frontend::headers::lifetime_argument_position(lifetime))
             }});
             ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(arguments)));
             write_interface_type_edges(output, parsed, arguments)

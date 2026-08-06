@@ -162,6 +162,7 @@ fn encode_type(output: &mut Vec<u8>, _source: &str, ty: &TypeSyntax) -> Result<(
                 push_string(output, &lifetime.lifetime.name);
                 push_u32(output, lifetime.lifetime.span.start.try_into().unwrap());
                 push_u32(output, lifetime.lifetime.span.end.try_into().unwrap());
+                push_u32(output, lifetime.position.try_into().unwrap());
             }
             push_u32(output, arguments.len().try_into().unwrap());
             for argument in arguments {
@@ -1159,7 +1160,7 @@ fn self_host_header_mixed_nominal_arguments_match_bootstrap() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
-            let source = "struct View<T, 'a> { value: &'a T } pass<'scope, U>(value: View<U, 'scope>) -> View<U, 'scope> { move value } main() -> { () }";
+            let source = "struct View<'left, T, 'right, U> { value: &'left T } pass<'long, 'short, V, W>(value: View<'long, V, 'short, W>) -> View<'long, V, 'short, W> { move value } main() -> { () }";
             let input = directory.path().join("mixed-nominal-arguments.glorious");
             fs::write(&input, source).unwrap();
 

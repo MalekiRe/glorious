@@ -152,6 +152,7 @@ fn encode_type(
             push_u32(output, lifetime_arguments.len().try_into().unwrap());
             for lifetime in lifetime_arguments {
                 push_string(output, &lifetime.lifetime.name);
+                push_u32(output, lifetime.position.try_into().unwrap());
             }
             push_u32(output, arguments.len().try_into().unwrap());
             for argument in arguments {
