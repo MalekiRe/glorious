@@ -10660,3 +10660,17 @@ fn borrowed_vec_does_not_grant_the_multishot_snapshot_owner_exemption() {
         "{errors:#?}"
     );
 }
+
+
+#[test]
+fn generic_nominal_struct_field_projection_is_not_enum_payload() {
+    let source = r#"
+struct Tag {}
+struct Id<T> { private raw: u32 }
+fn to_u32<T>(value: Id<T>) -> u32 { value.raw }
+fn main() -> () { () }
+"#;
+    let errors = compile_source_to_bytecode("generic-id-projection.glorious", source)
+        .expect_err("generic nominal field projection must reach the concrete projection checker");
+    assert!(errors.iter().all(|error| error.code.as_deref() != Some("G1BC002")), "unexpected enum-payload classification: {errors:#?}");
+}
