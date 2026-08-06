@@ -471,8 +471,10 @@ Use `tooling/ram-gate.sh` for every local command that executes more than
 three shared `/tmp/grandiose-ram-gate/slot-*.lock` `flock` slots, so at most
 three capped commands run across all worktrees. The wrapper sets
 `G1_TEST_MEMORY_CAPPED=1`, allowing memory-capped LLVM tests to avoid ASAN's
-large virtual-address reservation. `cargo check` is deliberately passed through
-without taking a slot.
+large virtual-address reservation, and defaults Rust test executables to one
+in-process test thread; set `RUST_TEST_THREADS` explicitly only after measuring
+the suite's memory use. `cargo check` is deliberately passed through without
+taking a slot.
 
 ```sh
 cargo check --workspace

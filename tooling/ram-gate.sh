@@ -34,6 +34,10 @@ while :; do
         exec {lock_fd}>"$lock_file"
         if flock -n "$lock_fd"; then
             export G1_TEST_MEMORY_CAPPED=1
+            # A single self-host integration test can approach the 8 GiB cap;
+            # keep Rust's in-process test harness serial unless a caller has
+            # explicitly measured and overridden it.
+            export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
             ulimit -v "$ram_kib"
             exec "$@"
         fi
