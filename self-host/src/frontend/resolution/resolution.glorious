@@ -2116,7 +2116,15 @@ resolve_expression(
             target,
             arms,
             module
-        )
+        ),
+        // Labels are resolved structurally by the control-flow lowering pass;
+        // unlike identifiers they do not enter lexical name resolution.
+        super::bodies::BodyExpressionView::LabelReference(_) => Result::Ok(()),
+        super::bodies::BodyExpressionView::LabelDestination(_, _, child) =>
+            resolve_expression(
+                headers, index, declarations, body, bindings, output,
+                Id::to_u32(child), module
+            )
     }
 }
 
