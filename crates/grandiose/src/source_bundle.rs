@@ -156,7 +156,7 @@ impl SourceBundle {
         }
         let content_len = segments
             .iter()
-            .map(|segment| segment.source.len())
+            .map(|segment| segment.source().len())
             .sum::<usize>();
         let mut source = String::with_capacity(content_len + segments.len().saturating_sub(1));
         for (index, segment) in segments.iter_mut().enumerate() {
@@ -164,7 +164,7 @@ impl SourceBundle {
                 source.push('\n');
             }
             let start = source.len();
-            source.push_str(&segment.source);
+            source.push_str(segment.source());
             segment.global_range = start..source.len();
         }
         // Share one immutable allocation backing both the monolithic stream
