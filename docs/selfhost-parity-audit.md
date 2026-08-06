@@ -9,13 +9,17 @@ bootstrap integration suite (`crates/grandiose/tests/*.rs`). After this commit:
 
 | Status | Count | Notes |
 | --- | --- | --- |
-| unported | 95 | no self-host oracle comparison |
-| partial | 38 | some cases / infrastructure linked to a named `#[test]` |
+| unported | 99 | no self-host oracle comparison |
+| partial | 34 | some cases / infrastructure linked to a named `#[test]` |
 | covered | 10 | a Rust-oracle/self-host comparison executes for the suite |
 
-Unported by family: standard_library 23, compiler_pipeline 18, ownership_lifetimes 13,
-effects_control 12, types_traits_generics 11, backend_runtime 4, mir_lowering 4,
-optimization_specialization 4, modules_cli_sessions 3, syntax_frontend 3.
+This commit ports three effects_control suites alignment: 102 -> 99 unported,
+31 -> 34 partial (all counts derived from the current master inventory).
+
+Unported by family: standard_library 23, compiler_pipeline 18,
+types_traits_generics 15, ownership_lifetimes 13, effects_control 12,
+backend_runtime 4, mir_lowering 4, optimization_specialization 4,
+modules_cli_sessions 3, syntax_frontend 3.
 
 The eight self-host layers and their live gates (all exercising the `.glorious`
 sources under `self-host/src/{frontend,probe}` in both the VM and the native LLVM
@@ -39,6 +43,12 @@ A "port" of a suite S moves S from `unported` to `partial`/`covered` by:
    `parity_manifest_is_complete_and_truthful` stays green.
 4. Never substituting a manifest relabel, a wrapper, or an unsupported fallback
    for real behavior — a `covered` row must point to an executable comparison.
+
+Manifest accuracy rule (verified against prior review feedback): a suite may only
+be moved to `partial` once its *exact distilled Rust cases* are present in the
+linked probe corpus. The mere existence of an adjacent probe that exercises similar
+syntax is not enough; a `partial`/`covered` row must name a comparison that actually
+runs that suite's cases.
 
 ## 3. The five smallest high-leverage ports (prioritized)
 
@@ -78,6 +88,8 @@ for the accept case; extend `self_host_semantic_control.rs` accept/reject rows w
 three rejection sources so `compile_source_to_phases` acceptance matches. The rejection
 arm needs the self-host elaboration to classify binder kind / arity / unbound region
 the same way; that is the frontier work.
+Ledger status: `unported` — the exact `Brand<'a, T>` / wrong-kind / wrong-arity /
+unbound-region cases above must be distilled into the named probes before any relabel.
 
 ### P3 — hrtb_universes (types_traits_generics, 164 lines)
 Exact Rust cases: `impl Universal for Witness where for<T, 'a> Text: Every<T, 'a> {}`,
@@ -91,6 +103,8 @@ Probe shape: two layers — header parity via
 `#self_host_header_generic_where_effect_rows_match_bootstrap` for `for<T,'a>`/effect-row
 binders; const HRT binders need a span-parity row (currently `encode_where_contract`
 early-returns on `Const` binder — see P5 note).
+Ledger status: `unported` — the exact `for<T, 'a>` / `for<const N>` / `for<r: EffectRow>`
+goals above are not yet in any probe corpus, so the row stays `unported`.
 
 ### P4 — const_nominals (types_traits_generics, 527 lines)
 Exact Rust cases (header/interface slice): `struct Unsupported<const N: u32> { value: u8 }`,
@@ -100,8 +114,10 @@ Self-host files: `frontend/headers/headers.glorious` (const generic parameters �
 landed for structural_consts), `frontend/elaboration/*.glorious` (const numeric type
 checking), `probe/headers/headers.glorious`.
 Probe shape: `self_host_interfaces.rs#self_hosted_interfaces_match_rust_in_vm_and_native_execution`
-already carries const-nominal rows in its corpus; extend with the remaining
-`const_nominals` nominal heads + where-const binder support (a real gap).
+has *adjacent* const rows (from structural_consts); `const_nominals`' own exact nominal
+heads + where-const binder support must be distilled in before the suite may be marked
+`partial`.
+Ledger status: `unported` (unchanged this commit).
 
 ### P5 — generic_alias_shadowing (types_traits_generics, 23 lines)
 Exact Rust case: `type A = Text; type E = Text; type F = Text;`
@@ -113,6 +129,8 @@ already resolves `choose<A,E,F>` (with an added effect-row binder `R`). Completi
 the exact suite source's binder/shadwed-alias resolution and the acceptance of `answer()
 -> i64 { choose(42, "evidence", ()) }` (needs body/type inference, which the probe does not
 currently exercise) so full `covered` requires the typed-core call the probe already emits.
+Ledger status: `unported` — the exact `choose<A, E, F>` + `answer() -> i64 { choose(...) }`
+source is not in the name-resolution corpus, so the row stays `unported`.
 
 ## 4. Why these five are smallest/high-leverage
 - All five are in the two most frontend-amenable families (`effects_control`,
