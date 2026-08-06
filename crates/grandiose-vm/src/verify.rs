@@ -145,7 +145,7 @@ impl<'a> VerifiedFunction<'a> {
         })
     }
 
-    pub(crate) fn instruction(&self, pc: VerifiedPc) -> Instruction {
+    pub(crate) fn instruction(&self, pc: VerifiedPc) -> &'a Instruction {
         assert_eq!(
             pc.function, self.function,
             "verified PC used with wrong function"
@@ -158,7 +158,6 @@ impl<'a> VerifiedFunction<'a> {
             })
             .get(pc.offset as usize)
             .expect("verified PC has a decoded instruction")
-            .clone()
     }
 
     pub(crate) fn cleanup_registers(&self, pc: VerifiedPc) -> &'a [u32] {

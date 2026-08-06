@@ -710,6 +710,7 @@ impl Vm {
             match ins {
                 Instruction::Nop => frame.pc += 1,
                 Instruction::Const { dst, constant } => {
+                    let (dst, constant) = (*dst, *constant);
                     let constant = a
                         .checked_constant(constant)
                         .ok_or(RuntimeError::TypeConfusion)?;
@@ -717,6 +718,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Move { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     // MOVE relocates storage identity as well as its value.
                     // A register materialized as `Place` may still be the
                     // target of references transported by the same verified
@@ -731,12 +733,14 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Copy { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let value = get(frame, src)?;
                     let v = copy_value(a, fun.register_types[src as usize], &value)?;
                     put(frame, dst, v)?;
                     frame.pc += 1;
                 }
                 Instruction::BorrowShared { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let target = whole_place(&self.slots, frame, src)?;
                     let referent_type = fun.register_types[src as usize];
                     put(
@@ -751,6 +755,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::BorrowUnique { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let target = whole_place(&self.slots, frame, src)?;
                     let referent_type = fun.register_types[src as usize];
                     put(
@@ -765,12 +770,14 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::EndBorrow { reference } => {
+                    let reference = *reference;
                     let Value::Reference { .. } = take(frame, reference)? else {
                         return Err(RuntimeError::TypeConfusion);
                     };
                     frame.pc += 1;
                 }
                 Instruction::DerefCopy { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let (referent_type, target) = match get(frame, src)? {
                         Value::Reference {
                             referent_type,
@@ -785,6 +792,7 @@ impl Vm {
                 }
                 Instruction::DerefReborrowShared { dst, src }
                 | Instruction::DerefReborrowUnique { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let requested_unique = matches!(ins, Instruction::DerefReborrowUnique { .. });
                     let (outer_unique, outer_target) = match get(frame, src)? {
                         Value::Reference { unique, target, .. } => (unique, target),
@@ -814,6 +822,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::DerefMove { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let target = match get(frame, src)? {
                         Value::Reference {
                             unique: true,
@@ -827,6 +836,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::DerefStore { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let target = match get(frame, dst)? {
                         Value::Reference {
                             unique: true,
@@ -845,9 +855,10 @@ impl Vm {
                     variant,
                     fields,
                 } => {
+                    let (dst, ty, variant) = (*dst, *ty, *variant);
                     let values = fields
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     put(
                         frame,
@@ -857,6 +868,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::ProjectMove { dst, src, field } => {
+                    let (dst, src, field) = (*dst, *src, *field);
                     let value = get(frame, src)?;
                     let aggregate = aggregate_place(&value, true)?;
                     let field = runtime_field_index(a, &aggregate.borrow(), field)?;
@@ -870,6 +882,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::ProjectCopy { dst, src, field } => {
+                    let (dst, src, field) = (*dst, *src, *field);
                     let value = get(frame, src)?;
                     let aggregate = aggregate_place(&value, false)?;
                     let field = runtime_field_index(a, &aggregate.borrow(), field)?;
@@ -885,6 +898,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::ReborrowShared { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let (referent_type, target) = match get(frame, src)? {
                         Value::Reference {
                             referent_type,
@@ -905,6 +919,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::ReborrowUnique { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let (referent_type, target) = match get(frame, src)? {
                         Value::Reference {
                             referent_type,
@@ -926,6 +941,7 @@ impl Vm {
                 }
                 Instruction::ProjectBorrowShared { dst, src, field }
                 | Instruction::ProjectBorrowUnique { dst, src, field } => {
+                    let (dst, src, field) = (*dst, *src, *field);
                     let unique = matches!(ins, Instruction::ProjectBorrowUnique { .. });
                     let value = get(frame, src)?;
                     let aggregate = aggregate_place(&value, unique)?;
@@ -983,6 +999,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::EnumTag { dst, src } => {
+                    let (dst, src) = (*dst, *src);
                     let tag = match get(frame, src)? {
                         Value::Aggregate(aggregate) => aggregate
                             .borrow()
@@ -995,6 +1012,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Drop { register } => {
+                    let register = *register;
                     let value = match frame.registers[register as usize].take() {
                         Some(Value::Place(slot)) => slot
                             .take_and_reclaim_if_initialized()
@@ -1009,6 +1027,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Deconstruct { src } => {
+                    let src = *src;
                     let shell = take(frame, src)?;
                     if trace_errors {
                         match &shell {
@@ -1040,13 +1059,14 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Primitive { dst, op, args } => {
+                    let (dst, op) = (*dst, *op);
                     let arg_types = args
                         .iter()
                         .map(|register| fun.register_types[*register as usize])
                         .collect::<Vec<_>>();
                     let values = args
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     let v = primitive_typed(
                         a,
@@ -1058,20 +1078,21 @@ impl Vm {
                     put(frame, dst, v)?;
                     frame.pc += 1;
                 }
-                Instruction::Jump { target } => frame.pc = target,
+                Instruction::Jump { target } => frame.pc = *target,
                 Instruction::Switch {
                     discr,
                     cases,
                     otherwise,
                 } => {
+                    let (discr, otherwise) = (*discr, *otherwise);
                     let value = get(frame, discr)?;
                     let mut target = otherwise;
                     for (constant, case_target) in cases {
                         let constant = a
-                            .checked_constant(constant)
+                            .checked_constant(*constant)
                             .ok_or(RuntimeError::TypeConfusion)?;
                         if constant_eq(&value, constant) {
-                            target = case_target;
+                            target = *case_target;
                             break;
                         }
                     }
@@ -1082,17 +1103,19 @@ impl Vm {
                     function,
                     args,
                 } => {
+                    let (dst, function) = (*dst, *function);
                     let values = args
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
                     stack.push(make_verified_frame(a, function, values, Value::Unit, dst)?);
                 }
                 Instruction::TailCall { function, args } => {
+                    let function = *function;
                     let values = args
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
                     let mut replacement =
@@ -1106,12 +1129,13 @@ impl Vm {
                     *frame = replacement;
                 }
                 Instruction::CallSelf { dst, args } => {
+                    let dst = *dst;
                     if !matches!(fun.receiver_mode, Some(0 | 1)) {
                         return Err(RuntimeError::TypeConfusion);
                     }
                     let values = args
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     let receiver = get(frame, 0)?.clone();
                     let function = frame.function;
@@ -1123,8 +1147,8 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     }
                     let values = args
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     let receiver = take(frame, 0)?;
                     let function = frame.function;
@@ -1145,6 +1169,7 @@ impl Vm {
                     receiver,
                     args,
                 } => {
+                    let (dst, function, receiver) = (*dst, *function, *receiver);
                     let callee = a
                         .functions
                         .get(function as usize)
@@ -1154,8 +1179,8 @@ impl Vm {
                     }
                     let receiver = get(frame, receiver)?.clone();
                     let values = args
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
                     stack.push(make_verified_frame(a, function, values, receiver, dst)?);
@@ -1165,6 +1190,7 @@ impl Vm {
                     receiver,
                     args,
                 } => {
+                    let (function, receiver) = (*function, *receiver);
                     let callee = a
                         .functions
                         .get(function as usize)
@@ -1174,8 +1200,8 @@ impl Vm {
                     }
                     let receiver = get(frame, receiver)?.clone();
                     let values = args
-                        .into_iter()
-                        .map(|r| take(frame, r))
+                        .iter()
+                        .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
                     let mut replacement =
@@ -1194,6 +1220,7 @@ impl Vm {
                     function,
                     captures,
                 } => {
+                    let (dst, callable_type, function) = (*dst, *callable_type, *function);
                     if fun.register_types[dst as usize] != callable_type {
                         return Err(RuntimeError::TypeConfusion);
                     }
@@ -1205,8 +1232,8 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     };
                     let values = captures
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     let capture = if *capture_type == crate::bytecode::UNIT {
                         if !values.is_empty() {
@@ -1232,10 +1259,11 @@ impl Vm {
                     handler_def,
                     clauses,
                 } => {
+                    let (dst, handler_def) = (*dst, *handler_def);
                     let handler_type = fun.register_types[dst as usize];
                     let values = clauses
-                        .into_iter()
-                        .map(|register| take(frame, register).map(Some))
+                        .iter()
+                        .map(|register| take(frame, *register).map(Some))
                         .collect::<Result<Vec<_>, _>>()?;
                     let definition = a
                         .checked_handler_def(handler_def)
@@ -1270,6 +1298,7 @@ impl Vm {
                     functions,
                     captures,
                 } => {
+                    let (dst, handler_def) = (*dst, *handler_def);
                     let handler_type = fun.register_types[dst as usize];
                     let Type::Handler {
                         capture_type: clause_tuple,
@@ -1302,8 +1331,8 @@ impl Vm {
                     };
                     let environment_type = *environment_type;
                     let values = captures
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     let environment = if environment_type == crate::bytecode::UNIT {
                         if !values.is_empty() {
@@ -1315,7 +1344,8 @@ impl Vm {
                     };
                     let shared = ArenaObject::new_tracked(Some(environment));
                     let clauses = functions
-                        .into_iter()
+                        .iter()
+                        .copied()
                         .zip(clause_types)
                         .map(|(function, callable_type)| {
                             Some(Value::Callable(ControlHandle::new(CallableValue {
@@ -1341,9 +1371,10 @@ impl Vm {
                     binding_type,
                     payloads,
                 } => {
+                    let (dst, binding_type) = (*dst, *binding_type);
                     let values = payloads
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     put(frame, dst, Value::aggregate(binding_type, values))?;
                     frame.pc += 1;
@@ -1354,11 +1385,12 @@ impl Vm {
                     receiver_mode,
                     args,
                 } => {
+                    let (dst, callable, receiver_mode) = (*dst, *callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
                     let values = args
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
                     let mut callee = make_verified_frame(a, function, values, receiver, dst)?;
@@ -1372,11 +1404,12 @@ impl Vm {
                     receiver_mode,
                     args,
                 } => {
+                    let (callable, receiver_mode) = (*callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
                     let values = args
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
                     let mut replacement =
@@ -1398,12 +1431,13 @@ impl Vm {
                     body,
                     args,
                 } => {
+                    let (dst, handler, body) = (*dst, *handler, *body);
                     let handler = take(frame, handler)?;
                     let body = take(frame, body)?;
                     let (function, receiver) = owned_callable_receiver(a, body, 2)?;
                     let values = args
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
                     let mut body_frame =
@@ -1417,9 +1451,10 @@ impl Vm {
                     operation,
                     payloads,
                 } => {
+                    let (protocol, operation) = (*protocol, *operation);
                     let values = payloads
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     let selected = select_handler_clause(a, &mut stack, protocol, operation)?;
                     let delimiter = selected.delimiter;
@@ -1439,9 +1474,10 @@ impl Vm {
                     operation,
                     payloads,
                 } => {
+                    let (protocol, operation) = (*protocol, *operation);
                     let mut values = payloads
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
                     let selected = select_handler_clause(a, &mut stack, protocol, operation)?;
@@ -1497,6 +1533,8 @@ impl Vm {
                     receiver_mode,
                     value,
                 } => {
+                    let (dst, resumption, receiver_mode, value) =
+                        (*dst, *resumption, *receiver_mode, *value);
                     let expected_resumption_type = fun.register_types[resumption as usize];
                     let Type::Resumption { upper_uses, .. } = a
                         .checked_type(expected_resumption_type)
@@ -1559,7 +1597,7 @@ impl Vm {
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
-                    put(last, perform_dst, value)?;
+                    put(last, *perform_dst, value)?;
                     stack.extend(captured.frames);
                 }
                 Instruction::TailResume {
@@ -1567,6 +1605,7 @@ impl Vm {
                     receiver_mode,
                     value,
                 } => {
+                    let (resumption, receiver_mode, value) = (*resumption, *receiver_mode, *value);
                     let expected_resumption_type = fun.register_types[resumption as usize];
                     let Type::Resumption { upper_uses, .. } = a
                         .checked_type(expected_resumption_type)
@@ -1633,7 +1672,7 @@ impl Vm {
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
-                    put(last, perform_dst, value)?;
+                    put(last, *perform_dst, value)?;
                     transfer_tail_resume_deferred_frames(frame, last);
 
                     let mut resumed = captured.frames.into_iter();
@@ -1643,6 +1682,7 @@ impl Vm {
                     stack.extend(resumed);
                 }
                 Instruction::Cancel { dst, resumption } => {
+                    let (dst, resumption) = (*dst, *resumption);
                     let Value::Resumption(resumption) = take(frame, resumption)? else {
                         return Err(RuntimeError::TypeConfusion);
                     };
@@ -1657,9 +1697,10 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::HostCall { dst, import, args } => {
+                    let (dst, import) = (*dst, *import);
                     let arguments = args
-                        .into_iter()
-                        .map(|register| take(frame, register))
+                        .iter()
+                        .map(|register| take(frame, *register))
                         .collect::<Result<Vec<_>, _>>()?;
                     let host = self.host.as_deref().ok_or_else(|| {
                         let capability = a
@@ -1684,6 +1725,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Return { src } => {
+                    let src = *src;
                     let value = match src {
                         Some(src) => take(frame, src)?,
                         None => Value::Unit,
@@ -1715,6 +1757,7 @@ impl Vm {
                     result_register,
                     target,
                 } => {
+                    let (slot, result_register, target) = (*slot, *result_register, *target);
                     frame
                         .labels
                         .try_reserve(1)
@@ -1727,6 +1770,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::LabelPop { slot } => {
+                    let slot = *slot;
                     if frame.labels.last().map(|entry| entry.slot) != Some(slot) {
                         return Err(RuntimeError::TypeConfusion);
                     }
@@ -1734,6 +1778,7 @@ impl Vm {
                     frame.pc += 1;
                 }
                 Instruction::Leave { slot, value } => {
+                    let (slot, value) = (*slot, *value);
                     let index = frame
                         .labels
                         .iter()
@@ -1771,7 +1816,7 @@ impl Vm {
                     let message = a
                         .abort_message((fun.code_start + frame.pc) as usize)
                         .map(str::to_owned)
-                        .or(message);
+                        .or(message.clone());
                     if trace_errors {
                         eprintln!("g1-vm-error stack-begin depth={}", stack.len());
                         for (depth, traced) in stack.iter().rev().enumerate() {
