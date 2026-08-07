@@ -788,6 +788,58 @@ fn self_host_header_duplicate_generic_parameter_matches_rust_oracle() {
 }
 
 #[test]
+fn self_host_header_operator_named_trait_methods_match_bootstrap() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            // Exact regression: operator-named trait/impl method headers
+            // (`+(self: ...)`, `==(self: ...)`) must parse identically to the Rust
+            // bootstrap oracle via the self-host trait/impl interface application.
+            // These are the constructs that blocked stage-2 full self-compilation
+            // (the self-host header parser previously rejected any non-Ident name).
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::headers::legacy_interface_application"),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact).unwrap();
+            for source in [
+                "trait Add { +(self: Self, other: Self) -> Self; } main() { () }",
+                "trait Equal { ==(self: Self, other: Self) -> Bool; } main() { () }",
+                "struct Item { value: i64 } impl Equal for Item { ==(self: Item, other: Item) -> Bool { false } } main() { () }",
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let input = directory.path().join("operator-method.glorious");
+                let output = directory.path().join("operator-method.bin");
+                fs::write(&input, source).unwrap();
+                let mut expected = Vec::new();
+                push_u32(&mut expected, 1);
+                expected.push(0);
+                encode_rust_trait_impl_interfaces(&mut expected, source);
+                let vm = Vm::with_host(
+                    verified.clone(),
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        output.clone().into_os_string(),
+                        input.into_os_string(),
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+                assert_wire_eq(
+                    &fs::read(&output).unwrap(),
+                    &expected,
+                    "operator method header mismatch for {source:?}",
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_header_struct_visibility_matches_bootstrap() {
     self_hosted_headers_match_rust_in_vm_and_native_execution();
 }

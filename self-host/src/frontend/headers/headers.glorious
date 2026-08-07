@@ -1664,6 +1664,31 @@ ident(value: &mut Parser, related: usize) -> Result<NameUse, HeaderError> {
         }
 }
 
+// A trait/impl method header may name its method with a run of operator
+// tokens (`+(self: Self, ...)`, `==(self: ...)`, `<(...)`, ...), matching the
+// native method_name which falls back to joined_operator_name when the leading
+// token is not an identifier. Free function declarations keep requiring an
+// identifier name.
+method_name(
+    original: &String,
+    value: &mut Parser,
+    related: usize
+) -> Result<NameUse, HeaderError> {
+    let start = value.tokens.position;
+    if(start < value.tokens.limit) { handle super::lexer::token_kind_at(&value.source, start) {
+        TokenKind::Ident(_) => ident(value, related),
+        _ => if(operator_symbol(&*value, start)) {
+            let range = try(take_operator(value, start), @method_name);
+            let name = fixity_name(original, &*value, &range);
+            Result::Ok(NameUse { name: name, token: start })
+        } else {
+            Result::Err(HeaderError::ExpectedIdentifier(start, related))
+        }
+    } } else {
+        Result::Err(HeaderError::ExpectedIdentifier(start, related))
+    }
+}
+
 at_ident(value: &Parser, expected: &String) -> Bool {
     if(value.tokens.position < value.tokens.limit) {
         handle super::lexer::token_kind_at(
@@ -2323,13 +2348,18 @@ parse_callable(
     value: &mut Parser,
     shell: ShellId,
     public: Bool,
+    methods: Bool,
     start: usize
 ) -> Result<(), HeaderError> {
     value.tokens.position = start;
     if(public) {
         value.tokens.position = value.tokens.position + 1;
     } else { () };
-    let name = try(ident(value, start), @parse_callable);
+    let name = if(methods) {
+        try(method_name(original, value, start), @parse_callable)
+    } else {
+        try(ident(value, start), @parse_callable)
+    };
     let generic_token_start = value.tokens.position;
     let generics = try(parse_generics(value, start, false), @parse_callable);
     let generic_tokens = token_range(generic_token_start, value.tokens.position);
@@ -4277,7 +4307,7 @@ parse_trait_methods(
         let end = trait_method_semicolon(&*value, current, limit);
         value.tokens.position = current;
         value.tokens.limit = end;
-        try(parse_callable(original, value, shell, false, current), @parse_trait_methods);
+        try(parse_callable(original, value, shell, false, true, current), @parse_trait_methods);
         parse_trait_methods(original, value, shell, end + 1, limit, start)
     } else { Result::Ok(header_range(start, Vec::len(&value.output.callables))) }
 }
@@ -4305,7 +4335,7 @@ parse_impl_methods(
             Option::Some(open) => {
                 value.tokens.position = current;
                 value.tokens.limit = open;
-                try(parse_callable(original, value, shell, false, current), @parse_impl_methods);
+                try(parse_callable(original, value, shell, false, true, current), @parse_impl_methods);
                 handle super::syntax::delimiter_partner(
                     super::scanner::delimiter_map(declarations), open
                 ) {
@@ -4457,6 +4487,7 @@ parse_shells(
                             &mut next,
                             shell_id,
                             super::scanner::shell_is_public(shell),
+                            false,
                             start
                         )
                     },
