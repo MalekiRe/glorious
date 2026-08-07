@@ -375,3 +375,33 @@ fn self_host_lossless_lexer_malformed_delimiter_spans_match_bootstrap() {
     let sources = vec!["prefix /* open", "prefix \"open", "prefix b\"open"];
     assert_self_host_matches_bootstrap(sources);
 }
+
+/// Every lossless error kind (unfinished comment/string/byte-string/byte-literal/
+/// character-literal and invalid-lifetime) is encoded byte-for-byte identically
+/// by the self-hosted scanner and the native Rust oracle. This pins the full
+/// malformed-recovery span corpus, not just the three delimiter cases.
+#[test]
+fn self_host_lossless_lexer_all_error_kinds_match_bootstrap() {
+    let sources = vec![
+        "prefix /* open",
+        "prefix \"open",
+        "prefix b\"open",
+        "prefix b'x",
+        "prefix '\\",
+        "prefix '1",
+    ];
+    assert_self_host_matches_bootstrap(sources);
+}
+
+/// Additional gap-free sources (lifetimes, byte/unicode character literals,
+/// multiline and nested comments, mixed operators) must be tokenized with exact
+/// spans by the self-hosted scanner exactly as the native oracle does.
+#[test]
+fn self_host_lossless_lexer_extended_gap_free_sources_match_bootstrap() {
+    let sources = vec![
+        "fn main() -> i64 { 'a 'b 'c 0x1F b'A' '\u{1F600}' }",
+        "// leading\n/* block\n span */ tail @l1 @l2",
+        "a b c  123 1.5e3 \"str\" b\"bytes\" +-*/<>",
+    ];
+    assert_self_host_matches_bootstrap(sources);
+}
