@@ -31,6 +31,14 @@ const FIXTURE: &str = r#"
     enum Inner { One(i64), None }
     enum ScalarBranch { Select(u32) }
 
+    enum Tagged { Alpha = 1, Beta = 5 }
+    tagged_alpha() -> i64 {
+        handle Tagged::Alpha { Tagged::Alpha => 10, Tagged::Beta => 20 }
+    }
+    tagged_beta() -> i64 {
+        handle Tagged::Beta { Tagged::Alpha => 10, Tagged::Beta => 20 }
+    }
+
     __g1_bool_from_u32(value: u32) -> TestBool { TestBool::True }
     let test_true = TestBool::True;
 
@@ -1038,6 +1046,8 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     let branch_final_pair = function_id(&decoded, "branch_final_pair");
     let matched_scalar_zero = function_id(&decoded, "matched_scalar_zero");
     let matched_scalar_other = function_id(&decoded, "matched_scalar_other");
+    let tagged_alpha = function_id(&decoded, "tagged_alpha");
+    let tagged_beta = function_id(&decoded, "tagged_beta");
     let main = function_id(&decoded, "main");
     assert!(decoded.types.iter().any(|ty| matches!(
         ty.representation(),
@@ -1114,6 +1124,30 @@ fn assert_compiled_artifact(bytes: &[u8]) {
             .count()
             >= 7,
         "CFG-final uses in the subject and every arm must lower as moves"
+    );
+    // Explicit `= <const-expr>` discriminants must be emitted as REAL runtime
+    // tags (1 and 5), not the index-derived values or the no-discriminant
+    // sentinel, matching the Rust-bootstrap emitter byte-for-byte.
+    let tagged = decoded
+        .types
+        .iter()
+        .position(|ty| {
+            matches!(
+                ty.representation(),
+                Type::Enum { name, .. } if name == "Tagged"
+            )
+        })
+        .expect("self-hosted artifact must contain Tagged") as u32;
+    let Type::Enum { variants, .. } = decoded.types[tagged as usize].representation() else {
+        unreachable!()
+    };
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| (variant.name.as_str(), variant.tag))
+            .collect::<Vec<_>>(),
+        vec![("Alpha", Some(1)), ("Beta", Some(5))],
+        "self-hosted emitter must carry explicit enum discriminants as real tags"
     );
     drop(decoded);
     let verified = load_verified(bytes).expect("self-hosted GRBC must verify");
@@ -1196,6 +1230,16 @@ fn assert_compiled_artifact(bytes: &[u8]) {
             .run(matched_scalar_other, vec![])
             .unwrap(),
         Value::I64(37)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(tagged_alpha, vec![]).unwrap(),
+        Value::I64(10),
+        "self-hosted dispatch must resolve the Alpha real tag to the Alpha arm"
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(tagged_beta, vec![]).unwrap(),
+        Value::I64(20),
+        "self-hosted dispatch must resolve the Beta real tag to the Beta arm"
     );
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);
 }

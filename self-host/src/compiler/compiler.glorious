@@ -749,7 +749,11 @@ collect_enum_variants<'a>(
             lowering::enum_variant(
                 name_index,
                 field_names,
-                field_types
+                field_types,
+                elaboration::interface_variant_tag_at(
+                    &session.interfaces,
+                    variant
+                )
             )
         );
         Result::Ok(())
@@ -1102,7 +1106,15 @@ lower_concrete_enum_variants<'a>(
         ), @lower_concrete_enum_variants);
         Vec::push(
             &mut *output,
-            lowering::enum_variant(name_index, field_names, fields)
+            lowering::enum_variant(
+                name_index,
+                field_names,
+                fields,
+                elaboration::interface_variant_tag_at(
+                    &session.interfaces,
+                    index
+                )
+            )
         );
         let following = try(lower_concrete_enum_variants(
             session,
@@ -1314,10 +1326,10 @@ lower_concrete_type<'a>(
                     let variants = Vec::new();
                     let ok_name = checked_u32(Vec::len(&*type_names));
                     Vec::push(&mut *type_names, ordinal_name(0));
-                    Vec::push(&mut variants, lowering::enum_variant(ok_name, Vec::new(), Vec::new()));
+                    Vec::push(&mut variants, lowering::enum_variant(ok_name, Vec::new(), Vec::new(), None));
                     let err_name = checked_u32(Vec::len(&*type_names));
                     Vec::push(&mut *type_names, ordinal_name(1));
-                    Vec::push(&mut variants, lowering::enum_variant(err_name, Vec::new(), Vec::new()));
+                    Vec::push(&mut variants, lowering::enum_variant(err_name, Vec::new(), Vec::new(), None));
                     let bool_name = checked_u32(Vec::len(&*type_names));
                     Vec::push(&mut *type_names, ordinal_name(2));
                     lowering::set_enum_type(types, reserved, bool_name, variants, 1);

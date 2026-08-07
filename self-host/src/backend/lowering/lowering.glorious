@@ -153,7 +153,8 @@ pub struct MirSwitchPack { cases: Vec<MirSwitchCase> }
 pub struct MirVariant {
     name_index: u32,
     field_names: Vec<u32>,
-    fields: Vec<ArtifactTypeId>
+    fields: Vec<ArtifactTypeId>,
+    tag: Option<u32>
 }
 
 pub enum MirTypeKind {
@@ -1264,12 +1265,14 @@ pub push_struct_type(
 pub enum_variant(
     name_index: u32,
     field_names: Vec<u32>,
-    fields: Vec<ArtifactTypeId>
+    fields: Vec<ArtifactTypeId>,
+    tag: Option<u32>
 ) -> MirVariant {
     MirVariant {
         name_index: name_index,
         field_names: field_names,
-        fields: fields
+        fields: fields,
+        tag: tag
     }
 }
 
@@ -1429,6 +1432,10 @@ pub mir_variant_view<'a>(
         Vec::as_slice(&value.field_names),
         Vec::as_slice(&value.fields)
     )
+}
+
+pub mir_variant_tag(value: &MirVariant) -> Option<u32> {
+    value.tag
 }
 
 pub mir_function_name(value: &MirFunction) -> &String { &value.name }
@@ -2651,7 +2658,7 @@ build_match_switch_cases<'a>(
         Vec::push(&mut *output, MirSwitchCase {
             key: u32_constant_key(
                 super::super::frontend::elaboration::
-                    core_match_arm_variant(arm)
+                    core_match_arm_tag(arm)
             ),
             target: *Vec::index(blocks, current)
         })

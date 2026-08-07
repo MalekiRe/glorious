@@ -246,7 +246,8 @@ struct InterfaceVariant {
     owner: InterfaceNominalId,
     name: u32,
     payloads: VariantPayloadRange,
-    name_token: usize
+    name_token: usize,
+    tag: Option<u32>
 }
 
 impl Use<[0, *]> for InterfaceVariant {}
@@ -413,7 +414,8 @@ impl Use<[0, *]> for ConstructionField {}
 pub struct CoreMatchArm {
     variant: u32,
     bindings: MatchBindingRange,
-    body: CoreComputationId
+    body: CoreComputationId,
+    tag: u32
 }
 
 impl Use<[0, *]> for CoreMatchArm {}
@@ -2541,6 +2543,17 @@ pub interface_variant_name_at(
     variant.name
 }
 
+pub interface_variant_tag_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> Option<u32> {
+    let variant = interface_variant_at(
+        value,
+        interface_variant_id_from_usize(index)
+    );
+    variant.tag
+}
+
 pub interface_variant_payloads_at<'a>(
     value: &'a TypedInterfaces,
     index: usize
@@ -2752,6 +2765,10 @@ pub core_handler_clause_body(
 
 pub core_match_arm_variant(value: &CoreMatchArm) -> u32 {
     value.variant
+}
+
+pub core_match_arm_tag(value: &CoreMatchArm) -> u32 {
+    value.tag
 }
 
 pub core_match_arm_body(value: &CoreMatchArm) -> CoreComputationId {
@@ -3036,7 +3053,8 @@ append_match_arms_rebased(
                     binding_base + arm.bindings.start + arm.bindings.count
                 )
             ),
-            body: arm.body
+            body: arm.body,
+            tag: arm.tag
         })
     }})
 }
@@ -6410,6 +6428,117 @@ collect_variant_payloads<'a>(
     }})
 }
 
+collect_variant_discriminants<'a>(
+    headers: &super::headers::ParsedHeaders,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    output: &mut Vec<Option<u32>>
+) {
+    if(ordinal < count) {
+        let index = usize_from_u32(start + ordinal);
+        handle super::headers::variant_at(
+            super::headers::nominal_index(headers),
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(variant) => {
+                Vec::push(
+                    &mut *output,
+                    super::headers::variant_discriminant(variant)
+                );
+                collect_variant_discriminants(
+                    headers,
+                    start,
+                    count,
+                    ordinal + 1,
+                    output
+                )
+            }
+        }
+    } else { () }
+}
+
+enum_has_any_explicit_discriminant(
+    discriminants: &Vec<Option<u32>>,
+    index: usize
+) -> Bool {
+    if(index < Vec::len(discriminants)) {
+        handle *Vec::index(discriminants, index) {
+            Option::Some(_) => true,
+            None => enum_has_any_explicit_discriminant(
+                discriminants,
+                index + 1
+            )
+        }
+    } else { false }
+}
+
+fill_none_tags(
+    count: u32,
+    ordinal: u32,
+    output: &mut Vec<Option<u32>>
+) {
+    if(ordinal < count) {
+        Vec::push(&mut *output, None);
+        fill_none_tags(count, ordinal + 1, output)
+    } else { () }
+}
+
+compute_running_tags<'a>(
+    discriminants: &Vec<Option<u32>>,
+    index: usize,
+    last: u32,
+    output: &mut Vec<Option<u32>>
+) {
+    if(index < Vec::len(discriminants)) {
+        let tag = handle *Vec::index(discriminants, index) {
+            Option::Some(value) => Option::Some(value),
+            None => if(index == 0) {
+                Option::Some(0)
+            } else {
+                Option::Some(last + 1)
+            }
+        };
+        let new_last = handle tag {
+            Option::Some(value) => value,
+            None => last
+        };
+        Vec::push(&mut *output, tag);
+        compute_running_tags(
+            discriminants,
+            index + 1,
+            new_last,
+            output
+        )
+    } else { () }
+}
+
+enum_variant_tags<'a>(
+    headers: &super::headers::ParsedHeaders,
+    variants: &super::headers::HeaderRange
+) -> Vec<Option<u32>> {
+    let start = super::headers::range_start(variants);
+    let count = super::headers::range_count(variants);
+    let discriminants = Vec::new();
+    collect_variant_discriminants(
+        headers,
+        start,
+        count,
+        0,
+        &mut discriminants
+    );
+    if(enum_has_any_explicit_discriminant(&discriminants, 0)) {
+        let tags = Vec::new();
+        compute_running_tags(&discriminants, 0, 0, &mut tags);
+        tags
+    } else {
+        let tags = Vec::new();
+        fill_none_tags(count, 0, &mut tags);
+        tags
+    }
+}
+
 collect_enum_variants(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -6418,6 +6547,7 @@ collect_enum_variants(
     variants: &super::headers::HeaderRange,
     module: Option<ShellId>,
     scope: SignatureScope,
+    tags: &Vec<Option<u32>>,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     if(ordinal < super::headers::range_count(variants)) {
@@ -6452,7 +6582,11 @@ collect_enum_variants(
                         usize_from_u32(start),
                         usize_from_u32(start) + Slice::len(payloads)
                     ),
-                    name_token: super::headers::variant_name_token(variant)
+                    name_token: super::headers::variant_name_token(variant),
+                    tag: *Vec::index(
+                        tags,
+                        usize_from_u32(ordinal)
+                    )
                 });
                 collect_enum_variants(
                     headers,
@@ -6462,6 +6596,7 @@ collect_enum_variants(
                     variants,
                     module,
                     scope,
+                    tags,
                     ordinal + 1
                 )
             }
@@ -6555,6 +6690,10 @@ collect_nominal_definitions(
                     let start = checked_u32_from_usize(
                         interface_variant_count(&*output)
                     );
+                    let tags = enum_variant_tags(
+                        headers,
+                        variants
+                    );
                     try(collect_enum_variants(
                         headers,
                         declarations,
@@ -6563,6 +6702,7 @@ collect_nominal_definitions(
                         variants,
                         module,
                         scope,
+                        &tags,
                         0
                     ), @collect_nominal_definitions);
                     set_interface_nominal_kind(
@@ -9912,10 +10052,19 @@ elaborate_handle_arms(
                         let binding_end = Vec::len(&*output_bindings);
                         let arm_bindings =
                             match_binding_range(binding_start, binding_end);
+                        let arm_tag = handle
+                            interface_variant_tag_at(
+                                &*interfaces,
+                                usize_from_u32(variant_index)
+                            ) {
+                            Option::Some(value) => value,
+                            None => variant_ordinal
+                        };
                         Vec::push(&mut *output_arms, CoreMatchArm {
                             variant: variant_ordinal,
                             bindings: arm_bindings,
-                            body: arm_computation
+                            body: arm_computation,
+                            tag: arm_tag
                         });
                         elaborate_handle_arms(
                             original,

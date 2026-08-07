@@ -796,12 +796,19 @@ write_enum_variants<'a>(
                 ), @write_enum_variants);
                 // Emitted runtime tag. `u32::MAX` is the no-discriminant
                 // sentinel, matching the Rust-side enum type encoder exactly so
-                // the emitted artifact decodes canonically. MirVariant has not
-                // yet adopted explicit source discriminants, so variants emitted
-                // by the self-host bubble always carry the `u32::MAX` sentinel.
+                // the emitted artifact decodes canonically. An explicitly
+                // declared enum discriminant is emitted as the real runtime
+                // tag; ordinary variants (no discriminant) keep the sentinel.
+                let emitted_tag = handle
+                    super::lowering::mir_variant_tag(
+                        slice_at(variants, current)
+                    ) {
+                    None => 4294967295,
+                    Option::Some(found) => found
+                };
                 ByteBuf::write_u32_le(
                     &mut *output,
-                    4294967295
+                    emitted_tag
                 );
                 Result::Ok(())
             } else {

@@ -186,7 +186,8 @@ pub struct StructHeader {
 pub struct VariantHeader {
     name: Id<String>,
     name_token: usize,
-    fields: HeaderRange
+    fields: HeaderRange,
+    discriminant: Option<u32>
 }
 
 pub struct EnumHeader {
@@ -421,6 +422,7 @@ pub enum HeaderError {
     InvalidWhereQuantity(usize, usize),
     DuplicateAssociatedBinding(usize, usize),
     DuplicateGenericParameter(usize, usize),
+    InvalidVariantDiscriminant(usize, usize),
     TypeArenaExhausted(usize, usize)
 }
 
@@ -454,6 +456,7 @@ pub header_error_code(error: &HeaderError) -> u32 {
         HeaderError::InvalidWhereQuantity(_, _) => 25,
         HeaderError::DuplicateAssociatedBinding(_, _) => 26,
         HeaderError::DuplicateGenericParameter(_, _) => 27,
+        HeaderError::InvalidVariantDiscriminant(_, _) => 28,
         HeaderError::TypeArenaExhausted(_, _) => 14
     }
 }
@@ -486,6 +489,7 @@ pub header_error_token(error: &HeaderError) -> usize {
         HeaderError::InvalidWhereQuantity(token, _) => token,
         HeaderError::DuplicateAssociatedBinding(token, _) => token,
         HeaderError::DuplicateGenericParameter(token, _) => token,
+        HeaderError::InvalidVariantDiscriminant(token, _) => token,
         HeaderError::TypeArenaExhausted(token, _) => token
     }
 }
@@ -1132,6 +1136,10 @@ pub variant_name(value: &VariantHeader) -> Id<String> { value.name }
 pub variant_fields(value: &VariantHeader) -> &HeaderRange { &value.fields }
 
 pub variant_name_token(value: &VariantHeader) -> usize { value.name_token }
+
+pub variant_discriminant(value: &VariantHeader) -> Option<u32> {
+    value.discriminant
+}
 
 pub effect_shell(value: &EffectHeader) -> ShellId { value.shell }
 
@@ -2925,6 +2933,7 @@ finish_struct(
 }
 
 parse_sum_header(
+    original: &String,
     value: &mut Parser,
     enums: &mut EnumArena,
     variants: &mut VariantArena,
@@ -2943,6 +2952,7 @@ parse_sum_header(
     let name = try(ident(value, start), @parse_sum_header);
     let generics = try(parse_generics(value, start, false), @parse_sum_header);
     if(value.tokens.position == header_end) { parse_sum_body(
+            original,
             value,
             enums,
             variants,
@@ -2960,6 +2970,7 @@ parse_sum_header(
 }
 
 parse_sum_body(
+    original: &String,
     value: &mut Parser,
     enums: &mut EnumArena,
     variants: &mut VariantArena,
@@ -2975,7 +2986,7 @@ parse_sum_body(
     value.tokens.position = next_index(header_end);
     value.tokens.limit = previous_index(whole_end);
     let variant_start = variant_arena_count(&*variants);
-    try(parse_variants(value, variants, start), @parse_sum_body);
+    try(parse_variants(original, value, variants, start), @parse_sum_body);
     finish_enum(
         enums,
         variants,
@@ -2992,6 +3003,7 @@ parse_sum_body(
 }
 
 parse_variants(
+    original: &String,
     value: &mut Parser,
     variants: &mut VariantArena,
     related: usize
@@ -3014,6 +3026,7 @@ parse_variants(
                     @parse_variants
                 );
                 finish_variant(
+                    original,
                     value,
                     variants,
                     related,
@@ -3021,6 +3034,7 @@ parse_variants(
                      fields
                 )
             } else { finish_variant(
+                    original,
                     value,
                     variants,
                     related,
@@ -3030,7 +3044,70 @@ parse_variants(
     } else { Result::Ok(()) }
 }
 
+parse_variant_discriminant(
+    original: &String,
+    value: &mut Parser,
+    related: usize
+) -> Result<Option<u32>, HeaderError> {
+    if(eat_token(value, TokenPattern::Eq)) {
+        let token = value.tokens.position;
+        handle super::lexer::token_kind_at(&value.source, token) {
+            super::lexer::TokenKind::Number(number)
+                => if(integer_number(&number)) {
+                    let spelling =
+                        super::lexer::number_spelling(&number);
+                    let text = source_text(
+                        original,
+                        super::lexer::span_start(&spelling),
+                        super::lexer::span_end(&spelling)
+                    );
+                    handle parse_u64(&text) {
+                        Result::Err(_) => Result::Err(
+                            HeaderError::InvalidVariantDiscriminant(
+                                token,
+                                related
+                            )
+                        ),
+                        Result::Ok(found) => if(found > 4294967295) {
+                            Result::Err(
+                                HeaderError::InvalidVariantDiscriminant(
+                                    token,
+                                    related
+                                )
+                            )
+                        } else {
+                            value.tokens.position = token + 1;
+                            let tag =
+                                wrapping_convert_to_u32(found);
+                            if(tag == 4294967295) {
+                                Result::Err(
+                                    HeaderError::InvalidVariantDiscriminant(
+                                        token,
+                                        related
+                                    )
+                                )
+                            } else {
+                                Result::Ok(Option::Some(tag))
+                            }
+                        }
+                    }
+                } else {
+                    Result::Err(
+                        HeaderError::InvalidVariantDiscriminant(
+                            token,
+                            related
+                        )
+                    )
+                },
+            _ => Result::Err(
+                HeaderError::InvalidVariantDiscriminant(token, related)
+            )
+        }
+    } else { Result::Ok(None) }
+}
+
 finish_variant(
+    original: &String,
     value: &mut Parser,
     variants: &mut VariantArena,
     related: usize,
@@ -3045,17 +3122,22 @@ finish_variant(
         0
     );
     let edge_end = Vec::len(&value.output.type_edges);
+    let discriminant = try(
+        parse_variant_discriminant(original, value, related),
+        @finish_variant
+    );
     Vec::push(
         &mut variants.values,
         VariantHeader {
             name: name.name,
             name_token: name.token,
-            fields: header_range(edge_start, edge_end)
+            fields: header_range(edge_start, edge_end),
+            discriminant: discriminant
         }
     );
     eat_token(value, TokenPattern::Comma);
     eat_token(value, TokenPattern::Semicolon);
-    parse_variants(value, variants, related)
+    parse_variants(original, value, variants, related)
 }
 
 finish_enum(
@@ -4532,6 +4614,7 @@ parse_shells(
                         whole_end
                     ),
                     super::scanner::DeclarationKind::Enum => parse_sum_header(
+                        original,
                         &mut next,
                         &mut nominal.enums,
                         &mut nominal.variants,
