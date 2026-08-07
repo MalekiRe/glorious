@@ -2066,3 +2066,101 @@ fn self_host_source_numeric_literals_syntax_core_match_rust_oracle() {
     self_host_body_numeric_source_payloads_match_bootstrap_ast();
 }
 
+
+/// Ports the native `surface_call_redesign` corpus (syntax_frontend family) to
+/// self-host body/span parity: the self-host body parser must reproduce the
+/// Rust bootstrap parser's AST and exact spans for every source in the file.
+fn surface_call_redesign_body_corpus(directory: &Path) -> Vec<PathBuf> {
+    let focused = [
+        // hyphenated_whitespace_calls_compile_and_execute
+        r#"sum-three(first: i64, second: i64, third: i64) -> i64 {
+            first + second + third
+        }
+
+        nested(value: i64) -> i64 { value + 1 }
+
+        selected() -> i64 {
+            sum-three 10, 20, nested(11)
+        }
+
+        main() -> () { () }"#,
+        // dollar_references_produce_first_class_callables
+        r#"sum-three(first: i64, second: i64, third: i64) -> i64 {
+            first + second + third
+        }
+
+        apply<F>(callable: F) -> i64
+        where F: Fn<(i64, i64, i64), Output = i64> {
+            callable(10, 20, 12)
+        }
+
+        selected() -> i64 { apply($sum-three) }
+        main() -> () { () }"#,
+        // symbolic_add_is_an_ordinary_trait_method
+        r#"struct Wrapped { value: i64 }
+
+        impl Add for Wrapped {
+            +(self: Wrapped, other: Wrapped) -> Wrapped {
+                self;
+                other
+            }
+        }
+
+        selected() -> i64 {
+            let result = Wrapped { value: 10 } + Wrapped { value: 42 };
+            result.value
+        }
+
+        main() -> () { () }"#,
+    ];
+    focused
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let path = directory.join(format!("surface-call-redesign-{index}.glorious"));
+            fs::write(&path, source).unwrap();
+            path
+        })
+        .collect()
+}
+
+#[test]
+fn self_host_body_surface_call_redesign_matches_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let corpus = surface_call_redesign_body_corpus(directory.path());
+            let mut expected = Vec::new();
+            push_u32(&mut expected, corpus.len().try_into().unwrap());
+            for path in &corpus {
+                encode_rust_grouping(&mut expected, &fs::read_to_string(path).unwrap());
+            }
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let output_path = directory.path().join("output.bin");
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(
+                    std::iter::once(output_path.clone().into_os_string())
+                        .chain(corpus.iter().map(|path| path.clone().into_os_string()))
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output_path).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
