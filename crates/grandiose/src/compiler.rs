@@ -10930,6 +10930,73 @@ fn normalize_ground_projections(
             .collect()
     }
 
+    /// Fold a declaration field type that still carries a projection binding a
+    /// symbolic const (or type) parameter, mirroring the signature path. The
+    /// field is replaced when the projection resolves; otherwise it is
+    /// preserved verbatim for specialization to close at instantiation.
+    fn normalize_symbolic_field(
+        syntax: &mut TypeSyntax,
+        generics: &Option<crate::ast::GenericParams>,
+        trait_db: &TraitDb,
+        budget: &mut SolverBudget,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        if !contains_projection(syntax) {
+            return;
+        }
+        let owner = typeck::DeclarationKey::Function("$field_projection$".into());
+        let mut symbolic_binders = BTreeMap::new();
+        let mut symbolic_names = BTreeMap::new();
+        let mut const_binders = BTreeMap::new();
+        let mut const_names = BTreeMap::new();
+        for (ordinal, parameter) in generics.iter().flat_map(|g| &g.params).enumerate() {
+            match parameter.kind {
+                GenericParamKind::Type | GenericParamKind::EffectRow => {
+                    let key = typeck::GenericParamKey {
+                        owner: owner.clone(),
+                        ordinal: ordinal as u32,
+                    };
+                    symbolic_binders
+                        .insert(parameter.name.clone(), typeck::ProvisionalType::Param(key.clone()));
+                    symbolic_names.insert(key, parameter.name.clone());
+                }
+                GenericParamKind::Const(kind) => {
+                    const_binders.insert(parameter.name.clone(), (ordinal as u32, kind));
+                    const_names.insert(ordinal as u32, parameter.name.clone());
+                }
+                GenericParamKind::Lifetime => {}
+            }
+        }
+        match trait_db.normalize_symbolic_type_with_budget(
+            syntax,
+            &symbolic_binders,
+            &const_binders,
+            &crate::compiler_traits::ParamEnv::default(),
+            budget,
+        ) {
+            Ok(normalized) => {
+                *syntax =
+                    from_type_with_names(&normalized, syntax.span, &symbolic_names, &const_names);
+            }
+            Err(report) => {
+                // Preserve for specialization unless the projection is
+                // explicitly inconsistent or over budget.
+                use crate::compiler_traits::SolveResult;
+                if report.result != SolveResult::NoEvidence
+                    && report.result != SolveResult::Ambiguous
+                {
+                    errors.push(type_error(
+                        syntax.span,
+                        format!(
+                            "symbolic associated type projection in a field could not be normalized ({:?})",
+                            report.result
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     let mut normalized = program.clone();
     let mut errors = Vec::new();
     let mut solver_budget = SolverBudget::default();
@@ -10958,6 +11025,13 @@ fn normalize_ground_projections(
                 &mut solver_budget,
                 &mut errors,
             );
+            normalize_symbolic_field(
+                &mut field.ty,
+                &declaration.generics,
+                trait_db,
+                &mut solver_budget,
+                &mut errors,
+            );
         }
     }
     for declaration in &mut normalized.enums {
@@ -10969,6 +11043,13 @@ fn normalize_ground_projections(
             .flat_map(|variant| &mut variant.fields)
         {
             normalize_in_context(field, &binders, trait_db, &mut solver_budget, &mut errors);
+            normalize_symbolic_field(
+                field,
+                &declaration.generics,
+                trait_db,
+                &mut solver_budget,
+                &mut errors,
+            );
         }
     }
     // Effect paths are a side table rather than expression-owned syntax. They

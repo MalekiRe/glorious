@@ -689,3 +689,66 @@ fn symbolic_const_and_type_gat_projection_binders_normalize_together() {
         Value::I64(42)
     );
 }
+
+#[test]
+fn symbolic_const_gat_projection_normalizes_in_struct_fields() {
+    // A struct field whose type is a symbolic const GAT projection folds to
+    // the resolved member type at declaration normalization, so instantiating
+    // the struct at a ground const keeps a concrete field layout.
+    let source = r#"
+        trait Family<const N: u32> { type Member<const M: u32>; }
+        struct S { marker: i64 }
+        impl<const K: u32> Family<K> for S {
+            type Member<const M: u32> = i64;
+        }
+        struct Wrap<const X: u32> { value: <S as Family<X>>::Member<X> }
+        make() -> Wrap<3> { Wrap { value: 42 } }
+        read(w: Wrap<3>) -> i64 { w.value }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    let artifact =
+        compile_source_to_bytecode("const-gat-symbolic-field.glorious", source).unwrap();
+    let verified = verify(artifact).unwrap();
+    let answer = verified
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verified).run(answer, vec![]).unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn symbolic_const_and_type_gat_projection_normalizes_in_struct_fields() {
+    // Mixed const and type symbolic binders inside a struct field projection
+    // must each be folded independently and produce a working field layout.
+    let source = r#"
+        trait Family<const N: u32> { type Member<T, const M: u32>; }
+        struct S { marker: i64 }
+        impl<const K: u32> Family<K> for S {
+            type Member<T, const M: u32> = T;
+        }
+        struct Wrap<const X: u32, T> { value: <S as Family<X>>::Member<T, X> }
+        make() -> Wrap<3, i64> { Wrap { value: 9 } }
+        read(w: Wrap<3, i64>) -> i64 { w.value }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    let artifact =
+        compile_source_to_bytecode("const-gat-symbolic-mixed-field.glorious", source).unwrap();
+    let verified = verify(artifact).unwrap();
+    let answer = verified
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verified).run(answer, vec![]).unwrap(),
+        Value::I64(9)
+    );
+}
