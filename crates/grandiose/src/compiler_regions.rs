@@ -5706,7 +5706,8 @@ mod ownership_engine_tests {
                             ty: I64,
                         },
                     ],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Single".into(),
                     fields: vec![
@@ -5719,7 +5720,8 @@ mod ownership_engine_tests {
                             ty: I64,
                         },
                     ],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });
@@ -5984,14 +5986,16 @@ mod ownership_engine_tests {
                         name: "value".into(),
                         ty: I64,
                     }],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Second".into(),
                     fields: vec![Field {
                         name: "value".into(),
                         ty: I64,
                     }],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });
@@ -6870,11 +6874,13 @@ mod ownership_engine_tests {
                         name: "value".into(),
                         ty: restricted,
                     }],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Empty".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });

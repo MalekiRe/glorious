@@ -15380,11 +15380,13 @@ mod tests {
                 EnumVariant {
                     name: "Left".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Right".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
             ],
             copy: true,
         });
@@ -15449,11 +15451,13 @@ mod tests {
                 EnumVariant {
                     name: "Left".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Right".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
             ],
             copy: true,
         });
@@ -18084,7 +18088,8 @@ mod tests {
                         name: "value".into(),
                         ty: structure,
                     }],
-                }],
+                tag: None,
+}],
                 copy: false,
             }
             .restricted(false, false),

@@ -20491,7 +20491,8 @@ mod tests {
                 variants: vec![EnumVariant {
                     name: "Empty".into(),
                     fields: vec![],
-                }],
+                tag: None,
+}],
                 copy: false,
             },
         ] {
@@ -20632,7 +20633,8 @@ mod tests {
                     variants: vec![EnumVariant {
                         name: "Empty".into(),
                         fields: vec![],
-                    }],
+                    tag: None,
+}],
                     copy: false,
                 },
                 Some(0),
@@ -20722,7 +20724,8 @@ mod tests {
                             name: "0".into(),
                             ty: I64,
                         }],
-                    }],
+                    tag: None,
+}],
                     copy: false,
                 },
                 Some(0),
@@ -20785,7 +20788,8 @@ mod tests {
                             name: "0".into(),
                             ty: I64,
                         }],
-                    }],
+                    tag: None,
+}],
                     copy: true,
                 },
                 Some(0),
@@ -21308,14 +21312,16 @@ mod tests {
                         name: "value".into(),
                         ty: I64,
                     }],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Unsigned".into(),
                     fields: vec![Field {
                         name: "value".into(),
                         ty: U64,
                     }],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });
@@ -21368,11 +21374,13 @@ mod tests {
                         name: "value".into(),
                         ty: I64,
                     }],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Empty".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });
@@ -21459,7 +21467,8 @@ mod tests {
                         name: "value".into(),
                         ty: shared,
                     }],
-                })
+                tag: None,
+})
                 .collect(),
             copy: true,
         });
@@ -22057,14 +22066,16 @@ mod tests {
                 EnumVariant {
                     name: "None".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Some".into(),
                     fields: vec![Field {
                         name: "value".into(),
                         ty: 19,
                     }],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });
@@ -24880,14 +24891,16 @@ mod tests {
                 EnumVariant {
                     name: "Empty".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Present".into(),
                     fields: vec![Field {
                         name: "value".into(),
                         ty: 19,
                     }],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });
@@ -28661,7 +28674,8 @@ mod tests {
                         ty: I64,
                     },
                 ],
-            }],
+            tag: None,
+}],
             copy: false,
         });
         types.push(Type::Resumption {
@@ -29393,14 +29407,16 @@ mod tests {
                         name: "value".into(),
                         ty: 19,
                     }],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Right".into(),
                     fields: vec![Field {
                         name: "value".into(),
                         ty: 19,
                     }],
-                },
+                tag: None,
+},
             ],
             copy: true,
         });
@@ -29462,7 +29478,8 @@ mod tests {
                         name: "value".into(),
                         ty: 19,
                     }],
-                })
+                tag: None,
+})
                 .collect(),
             copy: true,
         });
@@ -29542,7 +29559,8 @@ mod tests {
                         name: "value".into(),
                         ty: 19,
                     }],
-                })
+                tag: None,
+})
                 .collect(),
             copy: true,
         });
@@ -29622,14 +29640,16 @@ mod tests {
                 EnumVariant {
                     name: "Empty".into(),
                     fields: vec![],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Borrowed".into(),
                     fields: vec![Field {
                         name: "value".into(),
                         ty: 20,
                     }],
-                },
+                tag: None,
+},
             ],
             copy: false,
         });

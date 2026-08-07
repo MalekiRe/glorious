@@ -7016,14 +7016,16 @@ mod tests {
                             name: "value".into(),
                             ty: I64,
                         }],
-                    },
+                    tag: None,
+},
                     EnumVariant {
                         name: "Unsigned".into(),
                         fields: vec![Field {
                             name: "value".into(),
                             ty: U64,
                         }],
-                    },
+                    tag: None,
+},
                 ],
                 copy: false,
             }

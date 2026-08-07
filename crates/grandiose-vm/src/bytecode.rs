@@ -41,6 +41,18 @@ pub struct Field {
 pub struct EnumVariant {
     pub name: String,
     pub fields: Vec<Field>,
+    /// Explicit `= <const-expr>` runtime discriminant, when declared. When
+    /// `None`, the variant's emitted runtime tag is its position (index) in the
+    /// enum's variant list, preserving ordinary implicit-index behavior.
+    pub tag: Option<u32>,
+}
+
+impl EnumVariant {
+    /// The emitted runtime tag for this variant at position `index`.
+    /// An explicit discriminant overrides the otherwise index-derived tag.
+    pub fn discriminant(&self, index: u32) -> u32 {
+        self.tag.unwrap_or(index)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2236,6 +2248,11 @@ fn encode_types(
                     put_u32(&mut p, names[&field.name]);
                     put_u32(&mut p, field.ty);
                 }
+                // Emitted runtime tag: an explicit discriminant else `u32::MAX`
+                // (the no-discriminant sentinel). `u32::MAX` is reserved: the
+                // frontend rejects a source discriminant equal to it, so the
+                // sentinel never collides with a real tag.
+                put_u32(&mut p, variant.tag.unwrap_or(u32::MAX));
             }
             rs.push(record(0x23, if *copy { 1 } else { 0 }, p))
         } else if let Type::Array { element } = t {
@@ -2567,9 +2584,12 @@ fn decode_types(
                             ty: r.u32()?,
                         });
                     }
+                    let tag = r.u32()?;
+                    let tag = (tag != u32::MAX).then_some(tag);
                     variants.push(EnumVariant {
                         name: variant_name,
                         fields,
+                        tag,
                     });
                 }
                 r.finish()?;
@@ -6213,14 +6233,16 @@ mod tests {
                             name: "value".into(),
                             ty: I64,
                         }],
-                    },
+                    tag: None,
+},
                     EnumVariant {
                         name: "Narrow".into(),
                         fields: vec![Field {
                             name: "value".into(),
                             ty: U32,
                         }],
-                    },
+                    tag: None,
+},
                 ],
                 copy: true,
             }
@@ -7626,14 +7648,16 @@ mod tests {
                             name: "value".into(),
                             ty: I64,
                         }],
-                    },
+                    tag: None,
+},
                     EnumVariant {
                         name: "Unsigned".into(),
                         fields: vec![Field {
                             name: "value".into(),
                             ty: U64,
                         }],
-                    },
+                    tag: None,
+},
                 ],
                 copy: true,
             },
@@ -7657,14 +7681,16 @@ mod tests {
                         name: "value".into(),
                         ty: UNIT,
                     }],
-                },
+                tag: None,
+},
                 EnumVariant {
                     name: "Number".into(),
                     fields: vec![Field {
                         name: "value".into(),
                         ty: I64,
                     }],
-                },
+                tag: None,
+},
             ],
             copy: true,
         });
@@ -7727,7 +7753,8 @@ mod tests {
             variants: vec![EnumVariant {
                 name: "Only".into(),
                 fields: vec![],
-            }],
+            tag: None,
+}],
             copy: false,
         });
         let borrowed_choice = types.len() as TypeId;
@@ -7851,7 +7878,8 @@ mod tests {
                 variants: vec![EnumVariant {
                     name: "Only".into(),
                     fields: vec![],
-                }],
+                tag: None,
+}],
                 copy: false,
             },
             Type::Enum {
@@ -7860,11 +7888,13 @@ mod tests {
                     EnumVariant {
                         name: "No".into(),
                         fields: vec![],
-                    },
+                    tag: None,
+},
                     EnumVariant {
                         name: "Yes".into(),
                         fields: vec![],
-                    },
+                    tag: None,
+},
                 ],
                 copy: false,
             },
@@ -8207,5 +8237,97 @@ mod tests {
             CORE_G1 | MULTISHOT_G1
         );
         assert_eq!(Artifact::decode(&bytes).unwrap(), artifact);
+    }
+
+    #[test]
+    fn enum_variant_discriminant_respects_explicit_tags() {
+        let implicit = EnumVariant {
+            name: "A".into(),
+            fields: vec![],
+            tag: None,
+        };
+        let explicit = EnumVariant {
+            name: "B".into(),
+            fields: vec![],
+            tag: Some(5),
+        };
+        assert_eq!(implicit.discriminant(0), 0);
+        assert_eq!(implicit.discriminant(2), 2);
+        assert_eq!(explicit.discriminant(1), 5);
+        assert_eq!(explicit.discriminant(7), 5);
+    }
+
+    #[test]
+    fn enum_explicit_tags_survive_encode_decode_roundtrip() {
+        let enum_ty = Type::predefined().len() as TypeId;
+        let artifact = Artifact {
+            functions: vec![Function {
+                flags: 0,
+                name: "tagged_enum".into(),
+                params: vec![],
+                return_type: enum_ty,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, enum_ty],
+                code_start: 0,
+                code_len: 2,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Construct {
+                    dst: 1,
+                    ty: enum_ty,
+                    variant: Some(0),
+                    fields: vec![],
+                },
+                Instruction::Return { src: Some(1) },
+            ],
+            ..Artifact::default()
+        };
+        let artifact = Artifact {
+            types: {
+                let mut types = Type::predefined();
+                types.push(
+                    Type::Enum {
+                        name: "E".into(),
+                        variants: vec![
+                            EnumVariant {
+                                name: "A".into(),
+                                fields: vec![],
+                                tag: Some(1),
+                            },
+                            EnumVariant {
+                                name: "B".into(),
+                                fields: vec![],
+                                tag: Some(5),
+                            },
+                            EnumVariant {
+                                name: "C".into(),
+                                fields: vec![],
+                                tag: None,
+                            },
+                        ],
+                        copy: true,
+                    }
+                    .restricted(true, true),
+                );
+                types
+            },
+            ..artifact
+        };
+        let artifact = canonical(artifact);
+        let bytes = artifact.encode();
+        let decoded = Artifact::decode(&bytes).unwrap();
+        let Type::Enum { variants, .. } = decoded.types[enum_ty as usize].representation() else {
+            panic!("expected an enum type");
+        };
+        assert_eq!(
+            variants
+                .iter()
+                .map(|variant| variant.tag)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(5), None]
+        );
+        assert_eq!(decoded, artifact);
     }
 }

@@ -8523,6 +8523,19 @@ fn compile_program_with_phases(
         protocols: resolved_effects.protocols,
         ..Artifact::default()
     };
+    // Effective per-variant runtime tags (explicit `= <const-expr>` enum
+    // discriminants). Enums with no explicit discriminant at all yield all-`None`
+    // tags and keep ordinary index-derived behavior, completely untouched.
+    let enum_tags = program
+        .enums
+        .iter()
+        .map(|declaration| {
+            (
+                declaration.name.clone(),
+                enum_declaration_tags(declaration),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut nominal_descriptors = nominals.values().collect::<Vec<_>>();
     nominal_descriptors
         .retain(|info| info.id < Type::predefined().len() as TypeId + nominal_ids.len() as TypeId);
@@ -8546,7 +8559,8 @@ fn compile_program_with_phases(
                     name: info.name.clone(),
                     variants: variants
                         .iter()
-                        .map(|(name, fields)| EnumVariant {
+                        .enumerate()
+                        .map(|(variant_index, (name, fields))| EnumVariant {
                             name: name.clone(),
                             fields: fields
                                 .iter()
@@ -8556,6 +8570,11 @@ fn compile_program_with_phases(
                                     ty: erased_types.get(ty).copied().unwrap_or(*ty),
                                 })
                                 .collect(),
+                            tag: enum_tags
+                                .get(info.name.as_str())
+                                .and_then(|tags| tags.get(variant_index))
+                                .copied()
+                                .flatten(),
                         })
                         .collect(),
                     copy: info.copy,
@@ -8620,6 +8639,9 @@ fn compile_program_with_phases(
                                     ty: *ty,
                                 })
                                 .collect(),
+                            // Auto-generated closure enumerations never carry
+                            // explicit source discriminants.
+                            tag: None,
                         })
                         .collect(),
                     copy: info.copy,
@@ -17611,6 +17633,58 @@ fn canonical_nominal_instance(instance: &typeck::NominalInstanceKey) -> typeck::
             .map(canonical_ground_type)
             .collect(),
     }
+}
+
+/// Compute the effective emitted runtime tag for each variant of an enum
+/// declaration, honouring explicit `= <const-expr>` discriminants with
+/// unannotated variants continuing the running discriminator (matching C-style
+/// enum semantics). An enum with no explicit discriminant anywhere preserves the
+/// ordinary index-derived behaviour: every tag is `None`.
+fn enum_declaration_tags(declaration: &crate::ast::EnumDecl) -> Vec<Option<u32>> {
+    use crate::ast::{ConstExprSyntax, EvaluatedConst};
+    fn eval_discriminant(expression: &ConstExprSyntax, previous: &BTreeMap<String, u32>) -> Option<u32> {
+        crate::ast::evaluate_const_expression(expression, |path| {
+            (path.len() == 1)
+                .then(|| previous.get(path[0].name.as_str()))
+                .flatten()
+                .copied()
+                .map(EvaluatedConst::U32)
+        })
+        .ok()
+        .and_then(|value| match value {
+            EvaluatedConst::U32(tag) => Some(tag),
+            _ => None,
+        })
+    }
+    if !declaration
+        .variants
+        .iter()
+        .any(|variant| variant.discriminant.is_some())
+    {
+        return vec![None; declaration.variants.len()];
+    }
+    let mut previous = BTreeMap::new();
+    let mut tags = Vec::with_capacity(declaration.variants.len());
+    let mut last: u32 = 0;
+    for (index, variant) in declaration.variants.iter().enumerate() {
+        let tag = variant
+            .discriminant
+            .as_ref()
+            .and_then(|expression| eval_discriminant(expression, &previous))
+            .or_else(|| {
+                if index == 0 {
+                    Some(0)
+                } else {
+                    last.checked_add(1)
+                }
+            });
+        if let Some(value) = tag {
+            last = value;
+            previous.insert(variant.name.clone(), value);
+        }
+        tags.push(tag);
+    }
+    tags
 }
 
 pub(crate) fn decode_nominal_instance(name: &str) -> Option<typeck::NominalInstanceKey> {
@@ -32908,7 +32982,8 @@ impl<'a> CoreLowerer<'a> {
             name: format!("{declaration_name}<{identity}>"),
             variants: variants
                 .iter()
-                .map(|(name, fields)| EnumVariant {
+                .enumerate()
+                .map(|(variant_index, (name, fields))| EnumVariant {
                     name: name.clone(),
                     fields: fields
                         .iter()
@@ -32918,6 +32993,10 @@ impl<'a> CoreLowerer<'a> {
                             ty: *ty,
                         })
                         .collect(),
+                    tag: enum_declaration_tags(&declaration)
+                        .get(variant_index)
+                        .copied()
+                        .flatten(),
                 })
                 .collect(),
             copy,
