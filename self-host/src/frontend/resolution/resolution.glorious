@@ -1651,6 +1651,91 @@ resolve_closure<'a>(
     )
 }
 
+// Typed closures introduce the same lexical parameter binders as ordinary
+// closures. The closure body resolves under a fresh scope so its parameters
+// shadow outer names for that body only.
+resolve_typed_closure<'a>(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut ScopeMap,
+    output: &mut ResolvedBody,
+    expression: u32,
+    closure_body: super::bodies::ExprId,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    let frame = scope_frame(move bindings);
+    try(resolve_typed_closure_parameters(
+        body,
+        &mut *frame.scope,
+        output,
+        expression,
+        0,
+        module
+    ), @resolve_typed_closure);
+    resolve_expression(
+        headers,
+        index,
+        declarations,
+        body,
+        &mut *frame.scope,
+        output,
+        Id::to_u32(closure_body),
+        module
+    )
+}
+
+resolve_typed_closure_parameters(
+    body: &super::bodies::ParsedBody,
+    scope: &mut ScopeMap,
+    output: &mut ResolvedBody,
+    expression: u32,
+    ordinal: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    if(ordinal < super::bodies::typed_closure_parameter_count(
+        body,
+        expression
+    )) {
+        let token = super::bodies::typed_closure_parameter_token_at(
+            body,
+            expression,
+            usize_from_u32(ordinal)
+        );
+        let local = handle local_id_from_usize(Vec::len(&output.locals)) {
+            Result::Err(_) => @resolve_typed_closure_parameters(Result::Err(
+                ResolutionError::LocalIdExhausted(
+                    token,
+                    Vec::len(&output.locals)
+                )
+            )),
+            Result::Ok(found) => found
+        };
+        Vec::push(&mut output.locals, LocalBinding {
+            name_token: token,
+            block_expression: Id::from_u32(expression)
+        });
+        scope_push(
+            scope,
+            super::bodies::typed_closure_parameter_name_at(
+                body,
+                expression,
+                usize_from_u32(ordinal)
+            ),
+            ResolvedTarget::Local(local)
+        );
+        resolve_typed_closure_parameters(
+            body,
+            scope,
+            output,
+            expression,
+            ordinal + 1,
+            module
+        )
+    } else { Result::Ok(()) }
+}
+
 resolve_pattern_binders<'a>(
     bindings: &mut ScopeMap,
     output: &mut ResolvedBody,
@@ -2228,6 +2313,18 @@ resolve_expression(
                 output,
                 expression,
                 parameters,
+                closure_body,
+                module
+            ),
+        super::bodies::BodyExpressionView::TypedClosure(_, _, _, _, closure_body) =>
+            resolve_typed_closure(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                expression,
                 closure_body,
                 module
             ),
