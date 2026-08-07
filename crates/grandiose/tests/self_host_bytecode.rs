@@ -901,11 +901,12 @@ fn self_host_bundle() -> SourceBundle {
 // compiler/diagnostic modules and frontend phases (lossless/header parsing)
 // that no probe can reach.  This keeps the test's backend wire-format coverage
 // while preventing unrelated self-host compiler graphs from sharing its peak.
-fn self_host_effect_backend_module_paths(root: &Path) -> [PathBuf; 10] {
+fn self_host_effect_backend_module_paths(root: &Path) -> [PathBuf; 11] {
     [
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
         root.join("frontend/scanner/scanner.glorious"),
+        root.join("frontend/headers/headers.glorious"),
         root.join("frontend/bodies/bodies.glorious"),
         root.join("frontend/resolution/resolution.glorious"),
         root.join("frontend/elaboration/elaboration.glorious"),
@@ -938,11 +939,11 @@ fn self_host_effect_backend_bundle() -> SourceBundle {
                 let mut source = fs::read_to_string(&path).unwrap();
                 if path == root.join("frontend/frontend.glorious") {
                     // The production root declares every frontend phase.  The
-                    // direct MIR test needs lexer/scanner/body/resolution/
-                    // elaboration only; omit unreachable sibling modules.
-                    source = source
-                        .replace("pub mod lossless;\n", "")
-                        .replace("pub mod headers;\n", "");
+                    // direct MIR test needs lexer/scanner/header/body/
+                    // resolution/elaboration only (body/resolution/elaboration
+                    // all resolve `super::headers`, so headers must stay);
+                    // omit the unreachable lossless sibling module.
+                    source = source.replace("pub mod lossless;\n", "");
                 }
                 Segment::new(path.to_string_lossy(), source)
             }),
