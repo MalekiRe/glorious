@@ -158,6 +158,14 @@ fn corpus() -> Vec<&'static str> {
          pipeline_extract_binding(choice: PipelineBindingChoice) -> i64 { \
              handle choice { PipelineBindingChoice::Number(value) => { let copy = value; copy } } \
          } main() { () }",
+        // Public qualified aliases remain visible outside their defining module.
+        "mod pipeline_aliases { pub type Public = i64; } \
+         pipeline_public_alias(value: pipeline_aliases::Public) -> pipeline_aliases::Public { value } \
+         main() { () }",
+        // Rejected by both: a qualified private alias cannot escape its module.
+        "mod pipeline_aliases { type Private = i64; } \
+         pipeline_private_alias(value: pipeline_aliases::Private) -> pipeline_aliases::Private { value } \
+         main() { () }",
         // Rejected by both: lexical analysis failure.
         "\"",
         // Rejected by both: declaration scanning failure.

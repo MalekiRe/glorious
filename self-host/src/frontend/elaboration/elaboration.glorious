@@ -3942,6 +3942,54 @@ resolve_type_path_module<'a>(
     } else { Result::Ok(ResolvedModule { shell: current }) }
 }
 
+module_is_descendant_of(
+    declarations: &super::scanner::DeclarationIndex,
+    current: Option<ShellId>,
+    ancestor: Option<ShellId>
+) -> Bool {
+    if(current == ancestor) { true } else { handle current {
+        None => false,
+        Option::Some(shell) => handle super::scanner::shell_at(
+            declarations, shell
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(found) => module_is_descendant_of(
+                declarations,
+                *super::scanner::shell_parent(found),
+                ancestor
+            )
+        }
+    } }
+}
+
+qualified_type_target_is_visible(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    target: TypeNameTarget,
+    from: Option<ShellId>
+) -> Bool {
+    handle target {
+        TypeNameTarget::Alias(index) => handle super::headers::alias_at(
+            super::headers::nominal_index(headers), Id::to_usize(index)
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(alias) => if(super::headers::alias_is_public(alias)) {
+                true
+            } else { handle super::scanner::shell_at(
+                declarations, super::headers::alias_shell(alias)
+            ) {
+                Result::Err(_) => false,
+                Result::Ok(shell) => module_is_descendant_of(
+                    declarations,
+                    from,
+                    *super::scanner::shell_parent(shell)
+                )
+            } }
+        },
+        _ => true
+    }
+}
+
 resolve_qualified_type_target<'a>(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -3963,12 +4011,15 @@ resolve_qualified_type_target<'a>(
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
-        type_name_target_in(
+        let target = try(type_name_target_in(
             headers,
             declarations,
             Id::to_u32(super::headers::name_use_name(name)),
             owner.shell
-        )
+        ), @resolve_qualified_type_target);
+        if(qualified_type_target_is_visible(
+            headers, declarations, target, module
+        )) { Result::Ok(target) } else { Result::Err(()) }
     }
 }
 
