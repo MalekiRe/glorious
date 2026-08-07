@@ -1389,6 +1389,64 @@ construction_flavor_word(value: ConstructionFlavor) -> u32 {
     }
 }
 
+write_variant_dispatch_arms<'a>(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    source_local_limit: u32,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreMatchArm>,
+    ordinal: usize,
+    computation: CoreComputationId
+) -> Result<(), ElaborationError> {
+    if(ordinal < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        // This protocol tag deliberately covers only nullary enum arms.  A
+        // binding entry exists for every payload (including `_`), so zero is
+        // also a checked proof that no payload shape was erased from the wire.
+        if(Slice::len(
+            super::super::frontend::elaboration::core_match_arm_bindings(
+                body,
+                arm
+            )
+        ) != 0) { Result::Err(
+            ElaborationError::VariantDispatchSerializationUnsupported(
+                Id::to_usize(computation)
+            )
+        ) } else {
+            ByteBuf::write_u32_le(
+                output,
+                super::super::frontend::elaboration::core_match_arm_variant(arm)
+            );
+            try(write_computation_expression(
+                output,
+                source,
+                declarations,
+                resolved,
+                body,
+                super::super::frontend::elaboration::core_match_arm_body(arm),
+                source_local_limit,
+                true
+            ), @write_variant_dispatch_arms);
+            write_variant_dispatch_arms(
+                output,
+                source,
+                declarations,
+                resolved,
+                body,
+                source_local_limit,
+                arms,
+                ordinal + 1,
+                computation
+            )
+        }
+    } else { Result::Ok(()) }
+}
+
 write_computation_expression(
     output: &mut ByteBuf,
     source: &super::super::frontend::lexer::LexedSource,
@@ -1477,11 +1535,42 @@ write_computation_expression(
                 fields
             )
         },
-        CoreComputationView::VariantDispatch(_, _, _) => Result::Err(
-            ElaborationError::VariantDispatchSerializationUnsupported(
-                Id::to_usize(computation)
-            )
-        )
+        CoreComputationView::VariantDispatch(ty, subject, arms) => {
+            // Rust's Core retains a general binary RefinementBranch, while the
+            // self host retains an n-arm dispatch.  Tag 8 is their deliberately
+            // tiny shared source projection: exactly two nullary enum arms.
+            if(Slice::len(arms) != 2) { Result::Err(
+                ElaborationError::VariantDispatchSerializationUnsupported(
+                    Id::to_usize(computation)
+                )
+            ) } else {
+                ByteBuf::push(output, 8);
+                write_type_id(output, Id::to_u32(ty));
+                try(write_value_expression(
+                    output,
+                    source,
+                    declarations,
+                    body,
+                    subject,
+                    source_local_limit,
+                    // The Rust lowering's administrative handle-result local
+                    // is a copy; nullary enums are provably copyable too.
+                    true
+                ), @write_computation_expression);
+                ByteBuf::write_u32_le(output, 2);
+                write_variant_dispatch_arms(
+                    output,
+                    source,
+                    declarations,
+                    resolved,
+                    body,
+                    source_local_limit,
+                    arms,
+                    0,
+                    computation
+                )
+            }
+        }
     }
 }
 

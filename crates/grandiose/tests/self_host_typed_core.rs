@@ -671,6 +671,16 @@ impl<'a> TypeEncoder<'a> {
                 }
                 Self::collect_expression(types, tail, output)?;
             }
+            ExprKind::RefinementBranch {
+                subject,
+                positive,
+                negative,
+                ..
+            } => {
+                Self::collect_expression(types, subject, output)?;
+                Self::collect_expression(types, positive, output)?;
+                Self::collect_expression(types, negative, output)?;
+            }
             ExprKind::Construct {
                 nominal, fields, ..
             } => {
@@ -707,6 +717,7 @@ struct Encoder<'a> {
     declaration_identities: &'a BTreeMap<u32, FunctionIdentity>,
     current_function: &'a FunctionIdentity,
     type_encoder: &'a TypeEncoder<'a>,
+    all_functions: &'a BTreeMap<u32, &'a core::Function>,
     locals: BTreeMap<u32, u32>,
     next_local: u32,
 }
@@ -740,6 +751,145 @@ impl Encoder<'_> {
         self.declaration_identities
             .get(&declaration)
             .ok_or_else(|| format!("call escaped focused corpus through fn#{declaration}"))
+    }
+
+    fn transparent_empty_block<'b>(mut expression: &'b core::Expr) -> &'b core::Expr {
+        while let ExprKind::Block { statements, tail } = &expression.kind {
+            if !statements.is_empty() {
+                break;
+            }
+            expression = tail;
+        }
+        expression
+    }
+
+    /// Recognize only the bootstrap's exhaustive two-nullary-variant lowering.
+    /// Other refinement branches retain semantic join evidence with no source-Core peer.
+    fn nullary_variant_dispatch<'b>(
+        &self,
+        expression: &'b core::Expr,
+    ) -> Result<Option<(&'b core::Expr, Vec<(u32, &'b core::Expr)>)>, String> {
+        let expression = Self::transparent_empty_block(expression);
+        let ExprKind::RefinementBranch {
+            subject,
+            pattern,
+            bindings,
+            retire_at_join,
+            conditional_at_join,
+            positive,
+            negative,
+            ..
+        } = &expression.kind
+        else {
+            return Ok(None);
+        };
+        let ExprKind::Local { local, copy: true } = subject.kind else {
+            return Ok(None);
+        };
+        let original_subject = subject.as_ref();
+        let mut arms = Vec::new();
+        let mut current = (
+            pattern,
+            bindings,
+            retire_at_join,
+            conditional_at_join,
+            positive,
+            negative,
+        );
+        loop {
+            let (pattern, bindings, retire, conditional, positive, negative) = current;
+            let core::DecisionPatternKind::Variant { variant, fields } = &pattern.kind else {
+                return Ok(None);
+            };
+            if !fields.is_empty()
+                || !bindings.is_empty()
+                || !retire.is_empty()
+                || !conditional.is_empty()
+                || arms.iter().any(|(seen, _)| seen == variant)
+            {
+                return Ok(None);
+            }
+            arms.push((*variant, Self::transparent_empty_block(positive)));
+            let negative = Self::transparent_empty_block(negative);
+            let ExprKind::RefinementBranch {
+                subject,
+                pattern,
+                bindings,
+                retire_at_join,
+                conditional_at_join,
+                positive,
+                negative,
+                ..
+            } = &negative.kind
+            else {
+                let ExprKind::Call { declaration, args } = &negative.kind else {
+                    return Ok(None);
+                };
+                let Some(function) = self.all_functions.get(declaration) else {
+                    return Ok(None);
+                };
+                if !args.is_empty()
+                    || function.name != "unreachable"
+                    || !function.no_return
+                    || !function.params.is_empty()
+                    || function.receiver_mode.is_some()
+                    || function.receiver_type != UNIT
+                    || !function.receiver_captures.is_empty()
+                {
+                    return Ok(None);
+                }
+                break;
+            };
+            if !matches!(subject.kind, ExprKind::Local { local: found, copy: true } if found == local)
+            {
+                return Ok(None);
+            }
+            current = (
+                pattern,
+                bindings,
+                retire_at_join,
+                conditional_at_join,
+                positive,
+                negative,
+            );
+        }
+        if arms.len() != 2 {
+            return Ok(None);
+        }
+        Ok(Some((original_subject, arms)))
+    }
+
+    fn write_nullary_variant_dispatch(
+        &mut self,
+        output: &mut Vec<u8>,
+        expression: &core::Expr,
+        subject_alias: Option<(u32, &core::Expr)>,
+    ) -> Result<(), String> {
+        let Some((subject, arms)) = self.nullary_variant_dispatch(expression)? else {
+            return Err("unsupported refinement branch in focused typed-Core oracle".into());
+        };
+        let subject = match (subject_alias, &subject.kind) {
+            (
+                Some((local, replacement)),
+                ExprKind::Local {
+                    local: found,
+                    copy: true,
+                },
+            ) if *found == local => replacement,
+            (Some(_), _) => {
+                return Err("synthetic handle result does not feed its refinement subject".into());
+            }
+            (None, _) => subject,
+        };
+        output.push(8);
+        self.write_type(output, expression.ty)?;
+        self.expression(output, subject)?;
+        push_u32(output, arms.len().try_into().unwrap());
+        for (variant, body) in arms {
+            push_u32(output, variant);
+            self.expression(output, body)?;
+        }
+        Ok(())
     }
 
     fn expression(&mut self, output: &mut Vec<u8>, expression: &core::Expr) -> Result<(), String> {
@@ -836,6 +986,33 @@ impl Encoder<'_> {
                 }
             }
             ExprKind::Block { statements, tail } => {
+                // Bootstrap materializes a copyable handle subject in a
+                // compiler-generated `$handle$result$…` local.  The self host
+                // dispatches that source local directly, so erase only this
+                // exact administrative binding before emitting tag 8.
+                if let [
+                    Stmt::Let {
+                        local,
+                        name,
+                        ty,
+                        value,
+                        ..
+                    },
+                ] = statements.as_slice()
+                    && name.starts_with("$handle$result$")
+                    && *ty == value.ty
+                    && matches!(value.kind, ExprKind::Local { copy: true, .. })
+                    && matches!(
+                        Self::transparent_empty_block(tail).kind,
+                        ExprKind::RefinementBranch { .. }
+                    )
+                {
+                    return self.write_nullary_variant_dispatch(
+                        output,
+                        tail,
+                        Some((*local, value)),
+                    );
+                }
                 output.push(5);
                 self.write_type(output, expression.ty)?;
                 push_u32(output, statements.len().try_into().unwrap());
@@ -843,6 +1020,9 @@ impl Encoder<'_> {
                     self.statement(output, statement)?;
                 }
                 self.expression(output, tail)?;
+            }
+            ExprKind::RefinementBranch { .. } => {
+                self.write_nullary_variant_dispatch(output, expression, None)?
             }
             ExprKind::Construct {
                 nominal,
@@ -1041,6 +1221,11 @@ fn encode_success(
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect::<BTreeMap<_, _>>();
+    let all_functions = core
+        .functions
+        .iter()
+        .map(|function| (function.declaration, function))
+        .collect::<BTreeMap<_, _>>();
 
     let mut declarations = BTreeMap::new();
     let mut seen_identities = BTreeSet::new();
@@ -1095,6 +1280,7 @@ fn encode_success(
             declaration_identities: &declarations,
             current_function: &source.identity,
             type_encoder: &type_encoder,
+            all_functions: &all_functions,
             locals: BTreeMap::new(),
             next_local: 0,
         };
@@ -1218,6 +1404,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
              pub struct Holder { value: imported_module::Thing } \
          } \
          probe_imported_module_identity() { () }",
+        // Canonical wire support is restricted to exhaustive, nullary local enums.
+        "enum ProbeChoice { Left, Right } \
+         probe_variant_dispatch(value: ProbeChoice) -> i64 { \
+             handle value { ProbeChoice::Left => 1, ProbeChoice::Right => 2 } \
+         }",
     ];
     let errors = [
         "probe_bad_result() -> i64 { () }",
