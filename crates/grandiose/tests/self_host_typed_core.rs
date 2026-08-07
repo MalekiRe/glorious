@@ -646,7 +646,8 @@ impl<'a> TypeEncoder<'a> {
             ExprKind::Call { args, .. }
             | ExprKind::TailCall { args, .. }
             | ExprKind::CallSelf { args }
-            | ExprKind::TailCallSelf { args } => {
+            | ExprKind::TailCallSelf { args }
+            | ExprKind::Primitive { args, .. } => {
                 for argument in args {
                     Self::collect_expression(types, argument, output)?;
                 }
