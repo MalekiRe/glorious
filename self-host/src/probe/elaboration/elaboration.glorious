@@ -1149,6 +1149,16 @@ write_value_expression(
             write_type_id(output, Id::to_u32(ty));
             Result::Ok(())
         },
+        CoreValueView::Text(ty, spelling) => {
+            ByteBuf::push(output, 8);
+            write_type_id(output, Id::to_u32(ty));
+            let text = handle super::super::frontend::lexer::lexeme(source, spelling) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            write_string(output, text);
+            Result::Ok(())
+        },
         CoreValueView::Integer(ty, constant_id) => {
             let constant =
                 super::super::frontend::elaboration::typed_body_integer_constant_at(

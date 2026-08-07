@@ -346,6 +346,10 @@ pub type IntegerConstantId = Id<IntegerConstantTag>;
 enum CoreValueKind {
     Unit,
     Integer(IntegerConstantId),
+    // A string literal's spelling is interned by the immutable lexed source.
+    // Retaining that stable identity keeps typed Core compact while probes can
+    // serialize its already-decoded UTF-8 bytes without reconstructing tokens.
+    Text(Id<String>),
     Local(CoreLocalId, Bool),
     Projection(CoreValueId, u32),
     Embedded(CoreComputationId)
@@ -715,6 +719,7 @@ impl Use<[0, *]> for InterfaceFieldView {}
 pub enum CoreValueView {
     Unit(TypeId),
     Integer(TypeId, IntegerConstantId),
+    Text(TypeId, Id<String>),
     Local(TypeId, CoreLocalId, Bool, Bool),
     Projection(TypeId, CoreValueId, u32),
     Embedded(TypeId, CoreComputationId)
@@ -755,6 +760,7 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
         CoreNodeView::Value(found) => handle found {
             CoreValueView::Unit(ty) => ty,
             CoreValueView::Integer(ty, _) => ty,
+            CoreValueView::Text(ty, _) => ty,
             CoreValueView::Local(ty, _, _, _) => ty,
             CoreValueView::Projection(ty, _, _) => ty,
             CoreValueView::Embedded(ty, _) => ty
@@ -2641,6 +2647,7 @@ pub typed_body_value_at(
         CoreValueKind::Unit => CoreValueView::Unit(ty),
         CoreValueKind::Integer(constant) =>
             CoreValueView::Integer(ty, constant),
+        CoreValueKind::Text(spelling) => CoreValueView::Text(ty, spelling),
         CoreValueKind::Local(local, forced) => CoreValueView::Local(
             ty,
             local,
@@ -10497,8 +10504,35 @@ elaborate_expression(
             expected
         ),
         super::bodies::BodyExpressionView::Float(_) => unreachable(),
-        super::bodies::BodyExpressionView::Text(_, _) => unreachable(),
-        super::bodies::BodyExpressionView::Character(_, _) => unreachable(),
+        super::bodies::BodyExpressionView::Text(spelling, token) => {
+            let core = push_value(
+                &mut value.core,
+                type_id_from_u32(17),
+                CoreValueKind::Text(spelling)
+            );
+            check_expected(Elaborated {
+                type_id: type_id_from_u32(17),
+                form: ElaboratedForm::Value(core)
+            }, expected, token)
+        },
+        // `char` shares the fixed-width scalar constant representation used by
+        // integers. Its type distinguishes it on the wire; the payload is its
+        // Unicode scalar value in the first little-endian word.
+        super::bodies::BodyExpressionView::Character(found, token) => {
+            let constant = push_integer_constant(
+                &mut value.core,
+                wrapping_convert_to_u128(char_to_u32(found))
+            );
+            let core = push_value(
+                &mut value.core,
+                type_id_from_u32(16),
+                CoreValueKind::Integer(constant)
+            );
+            check_expected(Elaborated {
+                type_id: type_id_from_u32(16),
+                form: ElaboratedForm::Value(core)
+            }, expected, token)
+        },
         super::bodies::BodyExpressionView::Byte(_, _) => unreachable(),
         super::bodies::BodyExpressionView::ByteString(_, _) => unreachable(),
         super::bodies::BodyExpressionView::Unit(_) => {

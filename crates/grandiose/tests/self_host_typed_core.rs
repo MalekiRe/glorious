@@ -910,6 +910,12 @@ impl Encoder<'_> {
                 self.write_type(output, expression.ty)?;
             }
             ExprKind::Constant(value) => {
+                if let Constant::Text(value) = value {
+                    output.push(8);
+                    self.write_type(output, expression.ty)?;
+                    push_string(output, value);
+                    return Ok(());
+                }
                 output.push(1);
                 self.write_type(output, expression.ty)?;
                 let raw = match value {
@@ -925,6 +931,7 @@ impl Encoder<'_> {
                     Constant::I128(value) => *value as u128,
                     Constant::Usize(value) => u128::from(*value),
                     Constant::Isize(value) => *value as u128,
+                    Constant::Char(value) => u128::from(*value as u32),
                     _ => {
                         return Err(format!(
                             "unsupported constant in focused typed-Core corpus: {value:?}:t{}",
@@ -1414,6 +1421,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_false() -> Bool { false }",
         "probe_bool_identity(value: Bool) -> Bool { value }",
         "probe_i64() -> i64 { 7 } probe_u64() -> u64 { 7 }",
+        "probe_text() -> Text { \"hello, 🌍\" } probe_character() -> char { '💩' }",
         // Full-width integer literals exercise the fourth Core word.  Before
         // the probe's 128-bit wire correction this valid native-oracle case
         // was rejected as `IntegerEncodingOverflow`.
