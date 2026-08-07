@@ -10587,6 +10587,7 @@ fn normalize_ground_projections(
         ty: &typeck::ProvisionalType,
         span: Span,
         symbolic_names: &BTreeMap<typeck::GenericParamKey, String>,
+        const_names: &BTreeMap<u32, String>,
     ) -> TypeSyntax {
         let kind = match ty {
             typeck::ProvisionalType::Predefined(name) => {
@@ -10596,10 +10597,17 @@ fn normalize_ground_projections(
                 }])
             }
             typeck::ProvisionalType::Const(value) => {
-                TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
-                    name: value.encoded_name(),
-                    span,
-                }])
+                // A symbolic const binder retains its source name so the
+                // re-emitted signature stays tied to the declared generic;
+                // ordinary ground consts are re-emitted as their encoded name.
+                let name = match value {
+                    typeck::ProvisionalConst::Rigid { index, .. } => const_names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| value.encoded_name()),
+                    _ => value.encoded_name(),
+                };
+                TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment { name, span }])
             }
             typeck::ProvisionalType::Nominal(instance) => {
                 let constructor = TypeSyntax {
@@ -10617,7 +10625,9 @@ fn normalize_ground_projections(
                     arguments: instance
                         .arguments
                         .iter()
-                        .map(|argument| from_type_with_names(argument, span, symbolic_names))
+                        .map(|argument| {
+                            from_type_with_names(argument, span, symbolic_names, const_names)
+                        })
                         .collect(),
                     lifetime_arguments: vec![],
                     const_arguments: vec![],
@@ -10625,16 +10635,28 @@ fn normalize_ground_projections(
             }
             typeck::ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference {
                 lifetime: None,
-                referent: Box::new(from_type_with_names(referent, span, symbolic_names)),
+                referent: Box::new(from_type_with_names(
+                    referent,
+                    span,
+                    symbolic_names,
+                    const_names,
+                )),
             },
             typeck::ProvisionalType::Unique(referent) => TypeSyntaxKind::UniqueReference {
                 lifetime: None,
-                referent: Box::new(from_type_with_names(referent, span, symbolic_names)),
+                referent: Box::new(from_type_with_names(
+                    referent,
+                    span,
+                    symbolic_names,
+                    const_names,
+                )),
             },
             typeck::ProvisionalType::Tuple(elements) => TypeSyntaxKind::Tuple(
                 elements
                     .iter()
-                    .map(|element| from_type_with_names(element, span, symbolic_names))
+                    .map(|element| {
+                        from_type_with_names(element, span, symbolic_names, const_names)
+                    })
                     .collect(),
             ),
             typeck::ProvisionalType::Param(param) => {
@@ -10654,7 +10676,7 @@ fn normalize_ground_projections(
     }
 
     fn from_type(ty: &typeck::ProvisionalType, span: Span) -> TypeSyntax {
-        from_type_with_names(ty, span, &BTreeMap::new())
+        from_type_with_names(ty, span, &BTreeMap::new(), &BTreeMap::new())
     }
 
     fn normalize(
@@ -11100,6 +11122,24 @@ fn normalize_ground_projections(
             .iter()
             .map(|(name, key)| (key.clone(), name.clone()))
             .collect::<BTreeMap<_, _>>();
+        let normalization_consts = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .enumerate()
+            .filter_map(|(ordinal, parameter)| match parameter.kind {
+                GenericParamKind::Const(kind) => {
+                    Some((parameter.name.clone(), (ordinal as u32, kind)))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let const_names = normalization_consts
+            .iter()
+            .map(|(name, (ordinal, _))| (*ordinal, name.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let has_symbolic_binders =
+            !symbolic_binders.is_empty() || !normalization_consts.is_empty();
         let effect_row_binders = function
             .generics
             .iter()
@@ -11201,6 +11241,7 @@ fn normalize_ground_projections(
                                                     argument,
                                                     member.span,
                                                     &symbolic_names,
+                                                    &const_names,
                                                 )
                                             })
                                             .collect(),
@@ -11250,7 +11291,7 @@ fn normalize_ground_projections(
             ));
         }
         let mut normalize_signature = |syntax: &mut TypeSyntax| {
-            if symbolic_binders.is_empty() {
+            if !has_symbolic_binders {
                 apply(syntax, trait_db, &mut solver_budget, &mut errors);
                 return;
             }
@@ -11267,11 +11308,17 @@ fn normalize_ground_projections(
             match trait_db.normalize_symbolic_type_with_budget(
                 syntax,
                 &symbolic_binders,
+                &normalization_consts,
                 &param_env,
                 &mut solver_budget,
             ) {
                 Ok(normalized) => {
-                    *syntax = from_type_with_names(&normalized, syntax.span, &symbolic_names)
+                    *syntax = from_type_with_names(
+                        &normalized,
+                        syntax.span,
+                        &symbolic_names,
+                        &const_names,
+                    )
                 }
                 Err(report) => {
                     // A generic projection with ordinary trait evidence may
@@ -11422,6 +11469,7 @@ fn normalize_ground_projections(
                                                     argument,
                                                     effect.span,
                                                     &symbolic_names,
+                                                    &const_names,
                                                 )
                                             })
                                             .collect(),

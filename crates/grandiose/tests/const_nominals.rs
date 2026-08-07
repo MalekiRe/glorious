@@ -629,3 +629,63 @@ fn nominal_const_defaults_reject_out_of_domain_values() {
         );
     }
 }
+
+#[test]
+fn symbolic_const_gat_projection_normalizes_in_function_signatures() {
+    // `Member` resolves to a fixed type regardless of the const argument, so
+    // the symbolic `<S as Family<X>>::Member<X>` projection folds to i64 at
+    // signature normalization and the whole call chain executes.
+    let source = r#"
+        trait Family<const N: u32> { type Member<const M: u32>; }
+        struct S { marker: i64 }
+        impl<const K: u32> Family<K> for S {
+            type Member<const M: u32> = i64;
+        }
+        gat_value<const X: u32>(value: <S as Family<X>>::Member<X>) -> i64 { value }
+        answer() -> i64 { gat_value(42) }
+        main() -> () { () }
+    "#;
+    let artifact =
+        compile_source_to_bytecode("const-gat-symbolic-signature.glorious", source).unwrap();
+    let verified = verify(artifact).unwrap();
+    let answer = verified
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verified).run(answer, vec![]).unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn symbolic_const_and_type_gat_projection_binders_normalize_together() {
+    // A projection carrying both a symbolic const binder and a symbolic type
+    // binder must lower each independently and radio back into a working
+    // generic signature.
+    let source = r#"
+        trait Family<const N: u32> { type Member<T, const M: u32>; }
+        struct S { marker: i64 }
+        impl<const K: u32> Family<K> for S {
+            type Member<T, const M: u32> = T;
+        }
+        gat_value<const X: u32, T>(value: <S as Family<X>>::Member<T, X>) -> T { value }
+        answer() -> i64 { gat_value(42) }
+        main() -> () { () }
+    "#;
+    let artifact =
+        compile_source_to_bytecode("const-gat-symbolic-mixed.glorious", source).unwrap();
+    let verified = verify(artifact).unwrap();
+    let answer = verified
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verified).run(answer, vec![]).unwrap(),
+        Value::I64(42)
+    );
+}

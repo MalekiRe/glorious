@@ -2819,32 +2819,48 @@ impl TraitDb {
         &self,
         syntax: &TypeSyntax,
         symbolic_binders: &BTreeMap<String, ProvisionalType>,
+        const_binders: &BTreeMap<String, (u32, ConstKind)>,
         param_env: &ParamEnv,
         budget: &mut SolverBudget,
     ) -> Result<ProvisionalType, SolveReport> {
-        let binders = symbolic_binders
-            .keys()
-            .enumerate()
-            .map(|(index, name)| {
-                (
-                    name.as_str(),
-                    Binder {
-                        index: index as u32,
-                        kind: GenericParameterKind::Type,
-                        higher_ranked: false,
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let substitutions = binders
-            .iter()
-            .map(|(name, binder)| {
-                (
-                    binder.index,
-                    GenericArg::Type(symbolic_binders[*name].clone()),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        // Type binders keep their declaration ordinal as the pattern index (a
+        // distinct space from const rigid ordinals), while const binders are
+        // lowered to the same rigid ordinal the specializing backend uses, so
+        // a projection result that retains a const stays canonical across
+        // specialization.
+        let mut binders = BTreeMap::new();
+        let mut substitutions = BTreeMap::new();
+        for (name, placeholder) in symbolic_binders {
+            let ProvisionalType::Param(key) = placeholder else {
+                continue;
+            };
+            binders.insert(
+                name.as_str(),
+                Binder {
+                    index: key.ordinal,
+                    kind: GenericParameterKind::Type,
+                    higher_ranked: false,
+                },
+            );
+            substitutions.insert(
+                key.ordinal,
+                GenericArg::Type(placeholder.clone()),
+            );
+        }
+        for (name, (ordinal, kind)) in const_binders {
+            binders.insert(
+                name.as_str(),
+                Binder {
+                    index: *ordinal,
+                    kind: GenericParameterKind::Const(*kind),
+                    higher_ranked: false,
+                },
+            );
+            substitutions.insert(
+                *ordinal,
+                GenericArg::RigidConst(*ordinal, *kind),
+            );
+        }
         let pattern = pattern_with_const_arguments(
             syntax,
             &binders,
