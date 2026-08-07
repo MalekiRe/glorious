@@ -911,11 +911,11 @@ fn symbolic_type_in(
             TypeSyntaxKind::Application {
                 arguments,
                 lifetime_arguments,
+                const_arguments,
                 ..
             },
             ProvisionalType::Nominal(instance),
         ) => {
-            let const_arguments = program.type_const_arguments(syntax.span);
             if const_arguments.is_empty() {
                 for (source, argument) in arguments.iter().zip(&mut instance.arguments) {
                     *argument = symbolic_type_in(program, source, generics, callable_constraints)?;

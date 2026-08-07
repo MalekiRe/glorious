@@ -17614,11 +17614,10 @@ fn instantiate_ground_nominals(
                 constructor,
                 arguments,
                 lifetime_arguments,
-                ..
+                const_arguments,
             } => {
                 let name = constructor.simple_name()?;
                 generic_heads.contains(name).then_some(())?;
-                let const_arguments = program.type_const_arguments(syntax.span);
                 let const_by_position = const_arguments
                     .iter()
                     .map(|argument| (argument.position, &argument.value))
