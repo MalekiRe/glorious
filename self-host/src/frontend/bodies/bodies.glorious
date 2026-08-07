@@ -1337,6 +1337,14 @@ pub effect_operation_token(value: &EffectOperationSyntax) -> usize {
 pub label_name(value: &LabelSyntax) -> Id<String> { value.name }
 pub label_token(value: &LabelSyntax) -> usize { value.token }
 
+pub expression_label_name(value: &ParsedBody, expression: u32) -> Id<String> {
+    let found = handle Arena::index(&value.nodes, Id::from_u32(expression)).kind {
+        ExprKind::LabelReference(label) => label,
+        _ => unreachable()
+    };
+    label_name(&found)
+}
+
 node_name_range(value: &ExprNode) -> ExpressionNameRange {
     handle value.kind {
         ExprKind::Identifier(range) => range,

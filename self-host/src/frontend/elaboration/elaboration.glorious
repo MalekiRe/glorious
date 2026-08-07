@@ -524,7 +524,8 @@ pub enum ElaborationError {
     IntegerEncodingOverflow(usize, u32),
     InvalidLocalReference(usize, u32, u32),
     EmbeddedValueSerializationUnsupported(usize),
-    VariantDispatchSerializationUnsupported(usize)
+    VariantDispatchSerializationUnsupported(usize),
+    UnknownLabel(usize)
 }
 
 // Backend-facing views keep the finalized Core representation semantic.
@@ -1295,6 +1296,7 @@ struct PlaceFlow {
 
 struct BodyContext {
     parameter_count: u32,
+    self_label: u32,
     next_source_local: u32,
     place_flow: PlaceFlow,
     core: CoreBuilder
@@ -1330,11 +1332,13 @@ new_core_builder(
 
 new_body_context(
     parameter_count: u32,
+    self_label: u32,
     place_flow: PlaceFlow,
     local_types: IndexVec<CoreLocalTag, Option<TypeId>>
 ) -> BodyContext {
     BodyContext {
         parameter_count: parameter_count,
+        self_label: self_label,
         next_source_local: 0,
         place_flow: place_flow,
         core: new_core_builder(local_types)
@@ -8367,23 +8371,33 @@ elaborate_label_call(
     expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
-    let found_count = super::bodies::expression_child_count_at(body, expression)
-        - 1;
-    if(found_count == 1) {
-        elaborate_expression(
-            original,
-            headers,
-            declarations,
-            interfaces,
-            body,
-            map,
-            value,
-            super::bodies::expression_child_at(body, expression, 1),
-            expected
-        )
-    } else { Result::Err(ElaborationError::ArgumentCountMismatch(
-        token, 1, found_count
-    )) }
+    let callee = super::bodies::expression_child_at(body, expression, 0);
+    // A label invocation is only legal when the invoked label is the
+    // enclosing function's own self-label (the active lexical destination
+    // for its body). Name identities share the lexer intern arena, so raw
+    // id equality is exact within one source.
+    if(Id::to_u32(super::bodies::expression_label_name(body, callee))
+        != value.self_label) {
+        Result::Err(ElaborationError::UnknownLabel(token))
+    } else {
+        let found_count =
+            super::bodies::expression_child_count_at(body, expression) - 1;
+        if(found_count == 1) {
+            elaborate_expression(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                super::bodies::expression_child_at(body, expression, 1),
+                expected
+            )
+        } else { Result::Err(ElaborationError::ArgumentCountMismatch(
+            token, 1, found_count
+        )) }
+    }
 }
 
 elaborate_call(
@@ -11004,6 +11018,25 @@ build_place_flow(
     output
 }
 
+function_self_label_name(
+    headers: &super::headers::ParsedHeaders,
+    shell: ShellId,
+    index: usize
+) -> u32 {
+    let header_index = super::headers::parsed_index(headers);
+    if(index < super::headers::callable_count(header_index)) {
+        handle super::headers::callable_at(header_index, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(callable) =>
+                if(super::headers::callable_shell(callable) == shell) {
+                    super::headers::callable_name_raw(callable)
+                } else {
+                    function_self_label_name(headers, shell, index + 1)
+                }
+        }
+    } else { 0 }
+}
+
 pub elaborate_function_instance_body(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -11026,8 +11059,12 @@ pub elaborate_function_instance_body(
             );
             let parameter_count =
                 callable_instance_parameter_count(interfaces, instance);
+            let self_label = function_self_label_name(
+                headers, shell, 0
+            );
             let builder = new_body_context(
                 parameter_count,
+                self_label,
                 build_place_flow(
                     body,
                     resolved,
