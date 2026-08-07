@@ -1305,9 +1305,30 @@ lower_concrete_type<'a>(
                     reserved
                 ), @lower_concrete_type);
                 Result::Ok(artifact)
+            } else { if(tag == 3) {
+                // Dynamically allocated scalars reach lowering only through the
+                // focused-arena Bool marker (scalar kind 16).  The distributed
+                // Bool is `Result<Unit, Unit>`: an enum of two nullary variants.
+                let kinds = elaboration::interface_type_a_at(&session.interfaces, index);
+                if(kinds == 16) {
+                    let variants = Vec::new();
+                    let ok_name = checked_u32(Vec::len(&*type_names));
+                    Vec::push(&mut *type_names, ordinal_name(0));
+                    Vec::push(&mut variants, lowering::enum_variant(ok_name, Vec::new(), Vec::new()));
+                    let err_name = checked_u32(Vec::len(&*type_names));
+                    Vec::push(&mut *type_names, ordinal_name(1));
+                    Vec::push(&mut variants, lowering::enum_variant(err_name, Vec::new(), Vec::new()));
+                    let bool_name = checked_u32(Vec::len(&*type_names));
+                    Vec::push(&mut *type_names, ordinal_name(2));
+                    lowering::set_enum_type(types, reserved, bool_name, variants, 1);
+                    lowering::set_mapped_type_copyable(map, semantic, true);
+                    Result::Ok(artifact)
+                } else { c; Result::Err(
+                    CompileError::UnsupportedInterfaceType(index)
+                ) }
             } else { c; Result::Err(
                 CompileError::UnsupportedInterfaceType(index)
-            ) } } } }
+            ) } } } } }
         }
     }
 }
