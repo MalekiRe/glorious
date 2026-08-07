@@ -5,6 +5,7 @@ use grandiose_vm::{
     SEED_IDENTITY_VERSION, TEXT, Type, UNIT,
     bytecode::{Import, Signature},
     verify::with_generated_cleanup_plans,
+    vm::MAX_PRIMITIVE_ALLOCATION_BYTES,
 };
 
 struct TempArtifact(PathBuf);
@@ -135,7 +136,7 @@ fn allocation_limit_program() -> TempArtifact {
         required_features: 1,
         entry_function: Some(0),
         types,
-        constants: vec![Constant::Usize(64 * 1024 * 1024 + 1), Constant::Unit],
+        constants: vec![Constant::Usize(MAX_PRIMITIVE_ALLOCATION_BYTES as u64 + 1), Constant::Unit],
         functions: vec![Function {
             flags: 0,
             name: "main".into(),

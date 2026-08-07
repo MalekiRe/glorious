@@ -4392,7 +4392,7 @@ fn to_index(value: u64) -> Result<usize, RuntimeError> {
 
 // Primitive results are bounded independently of the native allocator so a
 // small artifact cannot turn allocation amplification into a process abort.
-const MAX_PRIMITIVE_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_PRIMITIVE_ALLOCATION_BYTES: usize = 16 * 1024 * 1024 * 1024;
 
 fn checked_output_bytes<T>(count: usize) -> Result<(), RuntimeError> {
     let bytes = count
