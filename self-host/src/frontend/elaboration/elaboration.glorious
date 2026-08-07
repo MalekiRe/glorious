@@ -8273,13 +8273,19 @@ elaborate_block_statements<'a>(
             Result::Ok(found) => found
         };
         handle super::bodies::block_statement_view(statement) {
-            super::bodies::BlockStatementView::Let(id, _) => {
+            super::bodies::BlockStatementView::Let(id, token) => {
                 let child = Id::to_u32(id);
-                let local = core_local_id_from_u32(
-                    value.parameter_count + value.next_source_local
-                );
-                value.next_source_local =
-                    value.next_source_local + 1;
+                let local = handle resolved_binding_local(
+                    map,
+                    value.parameter_count,
+                    expression,
+                    token
+                ) {
+                    None => @elaborate_block_statements(Result::Err(
+                        ElaborationError::MissingLocalType(token)
+                    )),
+                    Option::Some(found) => found
+                };
                 let initializer = try(elaborate_expression(
                     original,
                     headers,
@@ -10455,6 +10461,41 @@ finalize_local_types(
             )
         }
     } else { () }
+}
+
+// The resolver assigns one source-local identity to *every* lexical binder,
+// including match-arm binders.  A `let` must recover that identity rather than
+// allocate by elaboration order: an earlier arm binder otherwise shifts all
+// following lets and can make their Core local types alias the arm payload.
+resolved_binding_local_at(
+    map: &ResolutionMap,
+    block: u32,
+    token: usize,
+    index: usize
+) -> Option<CoreLocalId> {
+    if(index < super::resolution::local_count(map)) {
+        if(super::resolution::local_name_token_at(map, index) == token
+            and { super::resolution::local_block_expression_at(map, index)
+                == block }) {
+            Option::Some(core_local_id_from_u32(u32_from_usize(index)))
+        } else {
+            resolved_binding_local_at(map, block, token, index + 1)
+        }
+    } else { None }
+}
+
+resolved_binding_local(
+    map: &ResolutionMap,
+    parameter_count: u32,
+    block: u32,
+    token: usize
+) -> Option<CoreLocalId> {
+    handle resolved_binding_local_at(map, block, token, 0) {
+        None => None,
+        Option::Some(local) => Option::Some(core_local_id_from_u32(
+            parameter_count + Id::to_u32(local)
+        ))
+    }
 }
 
 resolved_core_local(

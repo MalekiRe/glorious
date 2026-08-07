@@ -152,6 +152,12 @@ fn corpus() -> Vec<&'static str> {
          main() { () }",
         // Accepted by both: tuple construction and projection.
         "pipeline_first() -> i64 { let pair = (7, 9); pair.0 } main() { () }",
+        // Accepted by both: an arm binder precedes a let in the same lexical
+        // body. This ensures elaboration retains resolver-assigned local IDs.
+        "enum PipelineBindingChoice { Number(i64) } \
+         pipeline_extract_binding(choice: PipelineBindingChoice) -> i64 { \
+             handle choice { PipelineBindingChoice::Number(value) => { let copy = value; copy } } \
+         } main() { () }",
         // Rejected by both: lexical analysis failure.
         "\"",
         // Rejected by both: declaration scanning failure.
