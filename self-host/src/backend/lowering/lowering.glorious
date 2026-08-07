@@ -716,7 +716,10 @@ pub enum LoweringError {
     UnboundMirBlock(MirBlockId),
     InvalidMirRegisterPack(RegisterPackId),
     InvalidMirSwitchPack(MirSwitchPackId),
-    InvalidMirFunction(MirFunctionId)
+    InvalidMirFunction(MirFunctionId),
+    // Typed Core can retain effect control before MIR learns its one-shot
+    // cleanup semantics. Reject it here rather than emitting ordinary calls.
+    EffectControlNotLowered(CoreComputationId)
 }
 
 invalid_mir_register_result(
@@ -2057,7 +2060,12 @@ analyze_computation(
             );
             output.live = joined;
             analyze_value(body, subject, output, allow_transfer)
-        }
+        ,
+        // No source elaboration produces these yet. Keeping this explicit
+        // makes place-flow non-authoritative until effect MIR lowering exists.
+        CoreComputationView::Perform(_, _, _) => unreachable(),
+        CoreComputationView::Resume(_, _, _) => unreachable(),
+        CoreComputationView::Handle(_, _, _) => unreachable()
     }
 }
 
@@ -3390,7 +3398,13 @@ lower_computation<'a>(
             }
         },
         CoreComputationView::VariantDispatch(_, subject, arms) =>
-            lower_match(interfaces, body, value, id, subject, arms)
+            lower_match(interfaces, body, value, id, subject, arms),
+        CoreComputationView::Perform(_, _, _) =>
+            Result::Err(LoweringError::EffectControlNotLowered(id)),
+        CoreComputationView::Resume(_, _, _) =>
+            Result::Err(LoweringError::EffectControlNotLowered(id)),
+        CoreComputationView::Handle(_, _, _) =>
+            Result::Err(LoweringError::EffectControlNotLowered(id))
     }
 }
 
