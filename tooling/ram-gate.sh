@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Serialize expensive test/replay commands across three shared flock slots.
+# Serialize expensive test/replay commands across four shared flock slots.
 set -euo pipefail
 
 usage() {
@@ -7,7 +7,7 @@ usage() {
 usage: tooling/ram-gate.sh <command> [args...]
 
 `cargo build` and `cargo check` deliberately pass through: compilation may run
-freely. Every `cargo test` invocation must use this gate; at most three may
+freely. Every `cargo test` invocation must use this gate; at most four may
 run concurrently across Grandiose worktrees and each receives a 16 GiB
 virtual-memory limit. Other direct commands retain the 8 GiB limit.
 USAGE
@@ -30,7 +30,7 @@ mkdir -p "$lock_dir"
 # Each separately locked file is a semaphore slot. Unlike a counter, flock
 # releases a slot automatically if its owner exits or is killed.
 while :; do
-    for slot in 1 2 3; do
+    for slot in 1 2 3 4; do
         lock_file="$lock_dir/slot-$slot.lock"
         exec {lock_fd}>"$lock_file"
         if flock -n "$lock_fd"; then
