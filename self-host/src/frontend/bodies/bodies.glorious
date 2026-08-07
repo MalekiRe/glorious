@@ -2704,6 +2704,82 @@ lookup_fixity(
     }
 }
 
+// Builtin prelude operator fixities mirror the distributed standard library's
+// operator declarations (see distributed_std.glorious).  A corpus source parsed
+// in isolation has no standard segment, so the shared body parser falls back to
+// these spellings so infix grouping matches the real-prelude semantics that the
+// bootstrap oracle evaluates against.  Only infix fixities are seeded; prefix
+// parsing of Minus/Star is handled separately in parse_primary.
+builtin_prelude_fixity(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    range: &BodyTokenRange,
+    prefix: Bool
+) -> Option<(u8, u8)> {
+    if(prefix) {
+        None
+    } else {
+        let spelling = range_text(original, source, range.start, range.end);
+        if(spelling == "+") {
+            Option::Some((2, 30))
+        } else {
+            if(spelling == "-") {
+                Option::Some((2, 30))
+            } else {
+                if(spelling == "*") {
+                    Option::Some((2, 40))
+                } else {
+                    if(spelling == "/") {
+                        Option::Some((2, 40))
+                    } else {
+                        if(spelling == "%") {
+                            Option::Some((2, 40))
+                        } else {
+                            if(spelling == "==") {
+                                Option::Some((2, 20))
+                            } else {
+                                if(spelling == "!=") {
+                                    Option::Some((2, 20))
+                                } else {
+                                    if(spelling == "<") {
+                                        Option::Some((2, 20))
+                                    } else {
+                                        if(spelling == "<=") {
+                                            Option::Some((2, 20))
+                                        } else {
+                                            if(spelling == ">") {
+                                                Option::Some((2, 20))
+                                            } else {
+                                                if(spelling == ">=") {
+                                                    Option::Some((2, 20))
+                                                } else {
+                                                    if(spelling == "else") {
+                                                        Option::Some((3, 1))
+                                                    } else {
+                                                        if(spelling == "or") {
+                                                            Option::Some((2, 2))
+                                                        } else {
+                                                            if(spelling == "and") {
+                                                                Option::Some((2, 3))
+                                                            } else {
+                                                                None
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 peek_operator(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -2727,7 +2803,23 @@ peek_operator(
                 @peek_operator
             );
             handle found {
-                Result::Err(_) => Result::Ok(Result::Err(())),
+                Result::Err(_) => handle builtin_prelude_fixity(
+                    original,
+                    source,
+                    &range,
+                    prefix
+                ) {
+                    None => Result::Ok(Result::Err(())),
+                    Option::Some((form, precedence)) => Result::Ok(
+                        Result::Ok(OperatorUse {
+                            fixity: 0,
+                            start: range.start,
+                            end: range.end,
+                            form: form,
+                            precedence: precedence
+                        })
+                    )
+                },
                 Result::Ok(index) => {
                     let header_index = usize_from_u32(index);
                     Result::Ok(Result::Ok(OperatorUse {

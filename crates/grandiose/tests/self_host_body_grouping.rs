@@ -657,8 +657,13 @@ fn encode_expression(
 }
 
 fn raw_source_bundle(source: &str) -> SourceBundle {
-    SourceBundle::raw_with_trusted_standard_for_conformance(
-        Segment::new("<empty-std>", ""),
+    // Group-parity is evaluated against the same real-prelude semantics as the
+    // semantic-control harness: the distributed standard library, whose
+    // operator fixity declarations make `+`, `-`, `*`, `/`, `%`, comparisons,
+    // `or`, `and`, and `else` infix.  The shared body parser (self-host frontend)
+    // seeds the same builtin prelude fixities when a parsed source carries no
+    // declaration, so the bootstrap oracle and the self-host agree on grouping.
+    SourceBundle::distributed(
         Segment::new("body-grouping-input.glorious", source),
         [],
     )
