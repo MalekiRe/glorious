@@ -825,6 +825,15 @@ impl Encoder<'_> {
                     self.expression(output, argument)?;
                 }
             }
+            ExprKind::Primitive { primitive, args } => {
+                output.push(8);
+                self.write_type(output, expression.ty)?;
+                push_u32(output, *primitive as u32);
+                push_u32(output, args.len().try_into().unwrap());
+                for argument in args {
+                    self.expression(output, argument)?;
+                }
+            }
             ExprKind::Block { statements, tail } => {
                 output.push(5);
                 self.write_type(output, expression.ty)?;
@@ -1150,6 +1159,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         // was rejected as `IntegerEncodingOverflow`.
         "probe_u128_max() -> u128 { 340282366920938463463374607431768211455 }",
         "probe_param(value: i64) -> i64 { value }",
+        // Structural `-` must remain available without a prefix-fixity header.
+        // It lowers to the checked integer-negation primitive, not a call.
+        "probe_negate(value: i64) -> i64 { -value }",
         "probe_target(value: i64) -> i64 { value } \
          probe_forward(value: i64) -> i64 { probe_target(value) }",
         "probe_let() -> i64 { let value = 1; value }",

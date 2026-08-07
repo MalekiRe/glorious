@@ -1440,11 +1440,24 @@ write_computation_expression(
                 operands
             )
         },
-        CoreComputationView::Primitive(_, _, _) => Result::Err(
-            ElaborationError::EmbeddedValueSerializationUnsupported(
-                Id::to_usize(computation)
+        CoreComputationView::Primitive(ty, primitive, operands) => {
+            ByteBuf::push(output, 8);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, primitive);
+            ByteBuf::write_u32_le(
+                output,
+                u32_from_usize(Slice::len(operands))
+            );
+            write_call_operands(
+                output,
+                source,
+                declarations,
+                resolved,
+                body,
+                source_local_limit,
+                operands
             )
-        ),
+        },
         CoreComputationView::Construct(ty, flavor, fields) => {
             ByteBuf::push(output, 6);
             write_type_id(output, Id::to_u32(ty));

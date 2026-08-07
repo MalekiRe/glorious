@@ -9896,6 +9896,15 @@ append_primitive_operands(
     operand_range(start, Vec::len(&value.operands))
 }
 
+append_primitive_operand(
+    value: &mut CoreBuilder,
+    operand: CoreValueId
+) -> OperandRange {
+    let start = super::syntax::range_mark(&value.operands);
+    Vec::push(&mut value.operands, operand);
+    operand_range(start, Vec::len(&value.operands))
+}
+
 find_callable_named(
     interfaces: &TypedInterfaces,
     declarations: &super::scanner::DeclarationIndex,
@@ -10126,6 +10135,55 @@ elaborate_integer_infix(
     }
 }
 
+elaborate_integer_negate(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    operand: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    let operand_expected = expected else { type_id_from_u32(10) };
+    let elaborated = try(elaborate_expression(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        map,
+        value,
+        operand,
+        Option::Some(operand_expected)
+    ), @elaborate_integer_negate);
+    let type_id = elaborated.type_id;
+    if(integer_type(type_id) and {
+        scalar_is_signed(type_to_scalar_kind(Id::to_u32(type_id)))
+    }) {
+        let operand = embed_operand(&mut value.core, elaborated);
+        let operands = append_primitive_operand(&mut value.core, operand);
+        let primitive = push_computation(
+            &mut value.core,
+            type_id,
+            CoreComputationKind::Primitive(22, operands)
+        );
+        Result::Ok(Elaborated {
+            type_id: type_id,
+            form: ElaboratedForm::Computation(primitive)
+        })
+    } else {
+        Result::Err(ElaborationError::TypeMismatch(
+            token,
+            Id::to_u32(type_id),
+            10
+        ))
+    }
+}
+
 elaborate_expression(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -10209,10 +10267,27 @@ elaborate_expression(
             child,
             expected
         ),
-        super::bodies::BodyExpressionView::Prefix(_, _) => Result::Err(
-            ElaborationError::UnsupportedExpression(
-            super::bodies::expression_token_start_at(body, expression)
-        )),
+        super::bodies::BodyExpressionView::Prefix(operator, operand) =>
+            handle super::lexer::token_kind_at(
+                super::headers::parsed_source(headers),
+                super::syntax::token_start(&operator)
+            ) {
+                TokenKind::Minus => elaborate_integer_negate(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    map,
+                    value,
+                    expression,
+                    Id::to_u32(operand),
+                    expected
+                ),
+                _ => Result::Err(ElaborationError::UnsupportedExpression(
+                    super::bodies::expression_token_start_at(body, expression)
+                ))
+            },
         super::bodies::BodyExpressionView::Infix(operator, left, right) =>
             handle integer_infix_operator(
                 super::lexer::token_kind_at(
