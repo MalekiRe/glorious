@@ -1338,11 +1338,11 @@ pub label_name(value: &LabelSyntax) -> Id<String> { value.name }
 pub label_token(value: &LabelSyntax) -> usize { value.token }
 
 pub expression_label_name(value: &ParsedBody, expression: u32) -> Id<String> {
-    let found = handle Arena::index(&value.nodes, Id::from_u32(expression)).kind {
-        ExprKind::LabelReference(label) => label,
+    let node = arena_node_at_raw(&value.nodes, expression);
+    handle node.kind {
+        ExprKind::LabelReference(label) => label_name(&label),
         _ => unreachable()
-    };
-    label_name(&found)
+    }
 }
 
 node_name_range(value: &ExprNode) -> ExpressionNameRange {

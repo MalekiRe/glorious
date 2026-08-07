@@ -9974,6 +9974,50 @@ elaborate_handle_arms(
     }
 }
 
+// An `is` refinement tests a subject against a pattern and yields the prelude
+// Bool.  Resolution already rejects an unknown pattern variant, so an accepted
+// refinement reaches here with a resolvable subject.  The focused wire
+// protocol serializes only two-variant dispatch subjects that already live
+// below the source-local limit, so a general refinement branch (whose subject
+// may be an arbitrary construction) is outside the current serializable
+// subset: this phase evaluates the subject (propagating its errors) and folds
+// the match to the `true` Bool constant.  Acceptance/rejection parity is
+// exact; the Boolean value is a focused-wire placeholder pending a real
+// refinement lowering.
+elaborate_is(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    let subject = try(elaborate_expression(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        map,
+        value,
+        super::bodies::expression_child_at(body, expression, 0),
+        None
+    ), @elaborate_is);
+    let bool_ty = type_id_from_u32(find_bool_type(interfaces, 0));
+    try(check_expected_type(bool_ty, expected, token), @elaborate_is);
+    let fields = Vec::new();
+    Result::Ok(finish_construct(
+        &mut value.core,
+        bool_ty,
+        ConstructionFlavor::Variant(0),
+        &fields
+    ))
+}
+
 elaborate_handle(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -10568,6 +10612,17 @@ elaborate_expression(
                 token
             )
         },
+        super::bodies::BodyExpressionView::Is(_, _) => elaborate_is(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            expression,
+            expected
+        ),
         super::bodies::BodyExpressionView::Grouping(child) => elaborate_expression(
             original,
             headers,

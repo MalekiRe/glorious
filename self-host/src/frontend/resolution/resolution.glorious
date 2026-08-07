@@ -1934,6 +1934,101 @@ resolve_handle<'a>(
     )
 }
 
+resolve_is_refinement(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut ScopeMap,
+    output: &mut ResolvedBody,
+    expression: u32,
+    subject: super::bodies::ExprId,
+    pattern: super::bodies::PatternId,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    try(resolve_expression(
+        headers,
+        index,
+        declarations,
+        body,
+        bindings,
+        output,
+        Id::to_u32(subject),
+        module
+    ), @resolve_is_refinement);
+    handle super::bodies::pattern_view(body, pattern) {
+        super::bodies::PatternView::Variant(names, _, _) => {
+            let name_count =
+                super::bodies::pattern_name_count(body, pattern);
+            let enum_token =
+                super::bodies::pattern_name_token(body, pattern, 0);
+            if(name_count == 2) {
+                let variant_token =
+                    super::bodies::pattern_name_token(body, pattern, 1);
+                let owner = Id::to_u32(
+                    super::bodies::pattern_name_value(body, pattern, 0)
+                );
+                let member = Id::to_u32(
+                    super::bodies::pattern_name_value(body, pattern, 1)
+                );
+                let found = handle resolve_global_alias(
+                    headers,
+                    index,
+                    declarations,
+                    owner,
+                    Option::Some(member),
+                    module,
+                    enum_token
+                ) {
+                    Option::Some(found) => found,
+                    None => try(resolve_variant_name(
+                        super::headers::nominal_index(headers),
+                        declarations,
+                        owner,
+                        member,
+                        module,
+                        enum_token,
+                        variant_token
+                    ), @resolve_is_refinement)
+                };
+                push_resolution(
+                    output,
+                    Id::from_u32(expression),
+                    found
+                );
+                Result::Ok(())
+            } else {
+                let found = try(
+                    handle resolve_global_alias(
+                        headers,
+                        index,
+                        declarations,
+                        Id::to_u32(
+                            super::bodies::pattern_name_value(body, pattern, 0)
+                        ),
+                        None,
+                        module,
+                        enum_token
+                    ) {
+                        Option::Some(found) => Result::Ok(found),
+                        None => Result::Err(
+                            ResolutionError::InvalidNamePath(enum_token)
+                        )
+                    },
+                    @resolve_is_refinement
+                );
+                push_resolution(
+                    output,
+                    Id::from_u32(expression),
+                    found
+                );
+                Result::Ok(())
+            }
+        },
+        _ => Result::Ok(())
+    }
+}
+
 resolve_expression(
     headers: &super::headers::ParsedHeaders,
     index: &ResolutionIndex,
@@ -1962,6 +2057,19 @@ resolve_expression(
         super::bodies::BodyExpressionView::Byte(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::ByteString(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::Unit(_) => Result::Ok(()),
+        super::bodies::BodyExpressionView::Is(subject, pattern) =>
+            resolve_is_refinement(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                expression,
+                subject,
+                pattern,
+                module
+            ),
         super::bodies::BodyExpressionView::Grouping(child) =>
             resolve_expression(
                 headers,
