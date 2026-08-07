@@ -752,3 +752,26 @@ fn symbolic_const_and_type_gat_projection_normalizes_in_struct_fields() {
         Value::I64(9)
     );
 }
+
+#[test]
+fn symbolic_const_gat_projection_without_ground_evidence_fails_closed() {
+    // When the impl only covers a ground trait argument, a generic const
+    // projection is preserved by frontend normalization and fails closed at
+    // specialization, matching the established type-binder behaviour exactly.
+    let source = r#"
+        trait Family<const N: u32> { type Member<const M: u32>; }
+        struct S { marker: i64 }
+        impl Family<3> for S { type Member<const M: u32> = i64; }
+        gat_value<const X: u32>(value: <S as Family<X>>::Member<X>) -> i64 { value }
+        answer() -> i64 { gat_value(42) }
+        main() -> () { () }
+    "#;
+    let errors =
+        compile_source_to_bytecode("const-gat-no-ground-evidence.glorious", source).unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("no ground specialization proves a unique associated value")
+        }),
+        "{errors:#?}"
+    );
+}
