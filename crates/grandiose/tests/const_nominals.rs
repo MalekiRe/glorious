@@ -525,3 +525,57 @@ fn inferred_function_consts_substitute_into_marker_evidence() {
         Value::I64(11)
     );
 }
+
+
+#[test]
+fn const_alias_expressions_substitute_arithmetic_into_nominal_identity() {
+    // Single-level alias whose target const expression folds arithmetic.
+    let single = r#"
+        struct Tag<const N: u32> { marker: i64 }
+        type Alias<const N: u32> = Tag<N + 1>;
+        make() -> Alias<2> { Tag { marker: 3 } }
+        read(value: Tag<3>) -> i64 { value.marker }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    // Nested aliases: the const value must thread through each level and hoist
+    // the target arithmetic (AliasC<0> == Tag<(0+1)+1> == Tag<2>).
+    let nested = r#"
+        struct Tag<const N: u32> { marker: i64 }
+        type AliasA<const N: u32> = Tag<N>;
+        type AliasB<const N: u32> = AliasA<N + 1>;
+        type AliasC<const N: u32> = AliasB<N + 1>;
+        make() -> AliasC<0> { Tag { marker: 3 } }
+        read(value: Tag<2>) -> i64 { value.marker }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    // Arithmetic that references the const binder twice folds independently.
+    let doubled = r#"
+        struct Tag<const N: u32> { marker: i64 }
+        type Alias<const N: u32> = Tag<N * 2>;
+        make() -> Alias<4> { Tag { marker: 8 } }
+        read(value: Tag<8>) -> i64 { value.marker }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    for (name, source, expected) in [
+        ("const-alias-arith-single.glorious", single, 3),
+        ("const-alias-arith-nested.glorious", nested, 3),
+        ("const-alias-arith-doubled.glorious", doubled, 8),
+    ] {
+        let artifact = compile_source_to_bytecode(name, source).unwrap();
+        let verified = verify(artifact).unwrap();
+        let answer = verified
+            .artifact()
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verified).run(answer, vec![]).unwrap(),
+            Value::I64(expected),
+            "{name}"
+        );
+    }
+}

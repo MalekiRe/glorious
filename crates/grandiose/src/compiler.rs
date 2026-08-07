@@ -15579,8 +15579,108 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 }
             }
         }
+        fn const_argument_expression(
+            value: &crate::ast::ConstArgumentValueSyntax,
+        ) -> crate::ast::ConstExprSyntax {
+            match value {
+                crate::ast::ConstArgumentValueSyntax::U32 { value, span } => {
+                    crate::ast::ConstExprSyntax {
+                        kind: crate::ast::ConstExprSyntaxKind::U32(*value),
+                        span: *span,
+                    }
+                }
+                crate::ast::ConstArgumentValueSyntax::Quantity(quantity) => {
+                    crate::ast::ConstExprSyntax {
+                        kind: crate::ast::ConstExprSyntaxKind::Quantity(quantity.clone()),
+                        span: quantity.span,
+                    }
+                }
+                crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
+                    expression.clone()
+                }
+            }
+        }
+        fn substitute_const_syntax(
+            expression: &crate::ast::ConstExprSyntax,
+            values: &BTreeMap<&str, crate::ast::ConstArgumentValueSyntax>,
+        ) -> crate::ast::ConstExprSyntax {
+            use crate::ast::ConstExprSyntaxKind;
+            if let ConstExprSyntaxKind::Path(path) = &expression.kind
+                && let [segment] = path.as_slice()
+                && let Some(value) = values.get(segment.name.as_str())
+            {
+                return const_argument_expression(value);
+            }
+            let mut expression = expression.clone();
+            expression.kind = match &expression.kind {
+                ConstExprSyntaxKind::Neg(value) => {
+                    ConstExprSyntaxKind::Neg(Box::new(substitute_const_syntax(value, values)))
+                }
+                ConstExprSyntaxKind::Binary { op, lhs, rhs } => ConstExprSyntaxKind::Binary {
+                    op: *op,
+                    lhs: Box::new(substitute_const_syntax(lhs, values)),
+                    rhs: Box::new(substitute_const_syntax(rhs, values)),
+                },
+                other => other.clone(),
+            };
+            expression
+        }
+        fn substitute_target_consts(
+            syntax: &mut TypeSyntax,
+            values: &BTreeMap<&str, crate::ast::ConstArgumentValueSyntax>,
+        ) {
+            match &mut syntax.kind {
+                TypeSyntaxKind::Application {
+                    arguments,
+                    const_arguments,
+                    ..
+                } => {
+                    for argument in arguments.iter_mut() {
+                        substitute_target_consts(argument, values);
+                    }
+                    for argument in const_arguments.iter_mut() {
+                        if let crate::ast::ConstArgumentValueSyntax::Expression(expression) =
+                            &mut argument.value
+                        {
+                            *expression = substitute_const_syntax(expression, values);
+                        }
+                    }
+                }
+                TypeSyntaxKind::Tuple(elements) => {
+                    for element in elements.iter_mut() {
+                        substitute_target_consts(element, values);
+                    }
+                }
+                TypeSyntaxKind::SharedReference { referent, .. }
+                | TypeSyntaxKind::UniqueReference { referent, .. } => {
+                    substitute_target_consts(referent, values);
+                }
+                TypeSyntaxKind::Projection {
+                    subject,
+                    trait_ref,
+                    arguments,
+                    ..
+                } => {
+                    substitute_target_consts(subject, values);
+                    for argument in &mut trait_ref.arguments {
+                        if let crate::ast::GoalArgument::Type(ty) = argument {
+                            substitute_target_consts(ty, values);
+                        }
+                    }
+                    for argument in arguments.iter_mut() {
+                        if let crate::ast::AssociatedArgumentSyntax::Type(ty) = argument {
+                            substitute_target_consts(ty, values);
+                        }
+                    }
+                }
+                TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) => {}
+            }
+        }
         visiting.push(name.to_owned());
         let mut substituted = substitute(&declaration.target, &values);
+        if !const_values.is_empty() {
+            substitute_target_consts(&mut substituted, &const_values);
+        }
         if !const_values.is_empty()
             && let TypeSyntaxKind::Application { arguments, .. } = &mut substituted.kind
         {
