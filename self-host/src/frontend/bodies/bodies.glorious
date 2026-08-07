@@ -2745,7 +2745,8 @@ parse_primary(
                 node_tokens(&*value, child).end
             ))
         } else {
-            if(at_token(&*value, source, TokenPattern::Minus)) {
+            handle super::lexer::token_kind_at(source, start) {
+            TokenKind::Minus => {
                 value.tokens.position = start + 1;
                 let child = try(parse_primary(
                     original,
@@ -2770,7 +2771,8 @@ parse_primary(
                     start,
                     end
                 ))
-            } else { if(at_token(&*value, source, TokenPattern::Star)
+            },
+            _ => { if(at_token(&*value, source, TokenPattern::Star)
                 and { start + 1 < value.tokens.limit }
                 and {
                     let operator = token_span(source, start);
@@ -2863,6 +2865,7 @@ parse_primary(
                         atom
                     )
                 }
+            }
             }
             }
             }
