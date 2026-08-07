@@ -579,3 +579,53 @@ fn const_alias_expressions_substitute_arithmetic_into_nominal_identity() {
         );
     }
 }
+
+
+#[test]
+fn nominal_const_defaults_reject_out_of_domain_values() {
+    // Valid ground and symbolic defaults still compile and execute.
+    let valid = r#"
+        struct Good<const N: u32 = 4294967295> { marker: i64 }
+        make() -> Good<4294967295> { Good { marker: 7 } }
+        read(value: Good<4294967295>) -> i64 { value.marker }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    compile_source_to_bytecode("const-default-boundary.glorious", valid).unwrap();
+
+    // Symbolic defaults referencing an earlier const parameter remain valid.
+    let symbolic = r#"
+        struct Win<const Start: u32, const End: u32 = Start + 1> { marker: i64 }
+        make() -> Win<3> { Win { marker: 4 } }
+        read(value: Win<3, 4>) -> i64 { value.marker }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    compile_source_to_bytecode("const-default-symbolic.glorious", symbolic).unwrap();
+
+    // Out-of-domain ground defaults are rejected with an exact diagnostic even
+    // when the binder is never used (parity with declaration-time validation).
+    for (name, default, expected) in [
+        ("overflow-literal", "4294967296", "exceeds the u32 domain"),
+        ("overflow-arithmetic", "1 + 4294967295", "overflows the u32 domain"),
+        ("negative", "-1", "negative value"),
+        ("division-by-zero", "4 / 0", "division by zero"),
+    ] {
+        let source = format!(
+            "struct Bad<const N: u32 = {default}> {{marker:i64}} main()->(){{()}}"
+        );
+        let errors = compile_source_to_bytecode(
+            &format!("const-default-{name}.glorious"),
+            &source,
+        )
+        .expect_err("invalid const default compiled");
+        assert!(
+            errors.iter().any(|error| {
+                error.code.as_deref() == Some("G0008")
+                    && error.span.is_some()
+                    && error.message.contains(expected)
+            }),
+            "{name}: {errors:#?}"
+        );
+    }
+}

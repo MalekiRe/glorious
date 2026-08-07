@@ -169,7 +169,27 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
                     _ => continue,
                 };
                 match const_expression_kind(default, &const_scope) {
-                    Ok(actual) if actual == expected => {}
+                    Ok(actual) if actual == expected => {
+                        // The kind matches, but a ground default must also stay
+                        // inside its numeric domain. Symbolic defaults that
+                        // reference earlier const parameters are resolved at
+                        // use sites, so only fully-ground evaluation failures
+                        // (overflow, negative u32, division by zero) are
+                        // rejected here.
+                        if let Err(message) =
+                            crate::ast::evaluate_const_expression(default, |_| None)
+                            && !message.contains("unresolved parameter or path")
+                        {
+                            errors.push(
+                                Diagnostic::error(
+                                    "invalid const generic default",
+                                    message,
+                                    default.span,
+                                )
+                                .with_code("G0008"),
+                            );
+                        }
+                    }
                     Ok(actual) => errors.push(
                         Diagnostic::error(
                             "const generic default kind mismatch",
