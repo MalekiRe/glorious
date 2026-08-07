@@ -172,14 +172,13 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
                 constructor,
                 arguments,
                 lifetime_arguments,
-                ..
+                const_arguments,
             } => {
                 if let Some(variances) = constructor
                     .simple_name()
                     .and_then(|name| evidence.get(name))
                 {
-                    let const_positions = program
-                        .type_const_arguments(syntax.span)
+                    let const_positions = const_arguments
                         .iter()
                         .map(|argument| argument.position)
                         .collect::<BTreeSet<_>>();
@@ -308,13 +307,12 @@ pub(crate) fn type_lifetime_variance(
                 constructor,
                 arguments,
                 lifetime_arguments,
-                ..
+                const_arguments,
             } => {
                 let variances = constructor
                     .simple_name()
                     .and_then(|name| nominal_variance.get(name));
-                let const_positions = program
-                    .type_const_arguments(syntax.span)
+                let const_positions = const_arguments
                     .iter()
                     .map(|argument| argument.position)
                     .collect::<BTreeSet<_>>();
@@ -3832,6 +3830,29 @@ mod tests {
         ]);
         assert_eq!(infer_nominal_variance(&first), expected);
         assert_eq!(infer_nominal_variance(&reordered), expected);
+    }
+
+    #[test]
+    fn positioned_const_variance_uses_application_ast_after_side_table_is_cleared() {
+        let mut program = crate::parser::parse(
+            crate::lexer::lex(
+                "struct Holder<const N:u32,T>{value:T} struct Outer<'a>{value:Holder<3,&'a i64>} main()->{()}",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // The compatibility side table is deliberately unavailable after
+        // structural alias rewriting; type variance must read the positioned
+        // const slot owned by the application itself.
+        program.type_const_arguments.clear();
+
+        let nominal = infer_nominal_variance(&program);
+        assert_eq!(nominal["Outer"], vec![Variance::Covariant]);
+        let field = &program.structs[1].fields[0].ty;
+        assert_eq!(
+            type_lifetime_variance(&program, field, &nominal),
+            BTreeMap::from([("'a".into(), Variance::Covariant)]),
+        );
     }
 
     #[test]
