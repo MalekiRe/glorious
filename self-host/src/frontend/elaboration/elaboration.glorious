@@ -3004,10 +3004,36 @@ signature_scalar_type(output: &mut TypedInterfaces, kind: u8) -> u32 {
     scalar_kind_to_type(kind)
 }
 
-named_builtin_type(value: &String) -> Option<u32> {
-    if(String::eq(value, &"Text")) { Result::Ok(17) } else {
-        if(String::eq(value, &"Bytes")) { Result::Ok(18) } else {
-            Result::Err(())
+find_bool_type(value: &mut TypedInterfaces, index: usize) -> u32 {
+    if(index < interface_type_count(&*value)) {
+        let ty = type_id_from_usize(index);
+        handle type_kind_at(&*value, ty) {
+            TypeKind::Scalar(kind) => if(kind == wrapping_convert_to_u8(
+                wrapping_convert_to_u32(16)
+            )) {
+                Id::to_u32(ty)
+            } else { find_bool_type(value, index + 1) },
+            _ => find_bool_type(value, index + 1)
+        }
+    } else {
+        Id::to_u32(alloc_type(value, TypeNode {
+            // The prelude Bool is represented as a two-variant copyable enum
+            // in Core.  A private marker preserves it in the focused arena
+            // without requiring a distributed-prelude declaration shell.
+            kind: TypeKind::Scalar(wrapping_convert_to_u8(
+                wrapping_convert_to_u32(16)
+            )),
+            copyable: true
+        }))
+    }
+}
+
+named_builtin_type(value: &mut TypedInterfaces, name: &String) -> Option<u32> {
+    if(String::eq(name, &"Text")) { Result::Ok(17) } else {
+        if(String::eq(name, &"Bytes")) { Result::Ok(18) } else {
+            if(String::eq(name, &"Bool")) {
+                Result::Ok(find_bool_type(value, 0))
+            } else { Result::Err(()) }
         }
     }
 }
@@ -4443,7 +4469,7 @@ resolve_signature_type(
             ) {
                 Result::Err(_) =>
                     Result::Err(ElaborationError::UnknownTypeName(token)),
-                Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle named_builtin_type(name) {
+                Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle named_builtin_type(output, name) {
                     Result::Ok(ty) => Result::Ok(ty),
                     Result::Err(_) => handle scalar_kind(name) {
                         Result::Err(_) => handle type_name_target(
@@ -7120,6 +7146,52 @@ integer_constant_for_token(
     }
 }
 
+elaborate_bool_literal(
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    value: &mut BodyContext,
+    expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    handle super::lexer::token_kind_at(
+        super::headers::parsed_source(headers),
+        token
+    ) {
+        TokenKind::Ident(name) => handle super::lexer::lexeme(
+            super::headers::parsed_source(headers), name
+        ) {
+            Result::Ok(text) => {
+                let fields = Vec::new();
+                // Feed the variants through a typed collection length: bare
+                // numeric literals default to i64 in the bootstrap subset.
+                let variant = if(String::eq(text, &"true")) {
+                    wrapping_convert_to_u32(Vec::len(&fields))
+                } else {
+                    if(String::eq(text, &"false")) {
+                        wrapping_convert_to_u32(Vec::len(&fields) + 1)
+                    } else { @elaborate_bool_literal(Result::Err(
+                        ElaborationError::UnexpectedExpressionToken(token)
+                    )) }
+                };
+                let ty = type_id_from_u32(find_bool_type(interfaces, 0));
+                try(check_expected_type(ty, expected, token), @elaborate_bool_literal);
+                Result::Ok(finish_construct(
+                    &mut value.core,
+                    ty,
+                    ConstructionFlavor::Variant(variant),
+                    &fields
+                ))
+            },
+            Result::Err(_) => Result::Err(
+                ElaborationError::UnexpectedExpressionToken(token)
+            )
+        },
+        _ => Result::Err(ElaborationError::UnexpectedExpressionToken(token))
+    }
+}
+
 elaborate_integer(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -7161,6 +7233,7 @@ elaborate_integer(
 }
 
 elaborate_identifier(
+    headers: &super::headers::ParsedHeaders,
     interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
     map: &ResolutionMap,
@@ -7204,9 +7277,26 @@ elaborate_identifier(
                 expected,
                 token
             ),
-        _ => Result::Err(
-            ElaborationError::UnexpectedExpressionToken(token)
-        )
+        _ => handle super::lexer::token_kind_at(
+            super::headers::parsed_source(headers), token
+        ) {
+            TokenKind::Ident(name) => handle super::lexer::lexeme(
+                super::headers::parsed_source(headers), name
+            ) {
+                Result::Ok(text) => if(String::eq(text, &"true")
+                    or { String::eq(text, &"false") }) {
+                    elaborate_bool_literal(
+                        headers, interfaces, body, value, expression, expected
+                    )
+                } else { Result::Err(
+                    ElaborationError::UnexpectedExpressionToken(token)
+                ) },
+                Result::Err(_) => Result::Err(
+                    ElaborationError::UnexpectedExpressionToken(token)
+                )
+            },
+            _ => Result::Err(ElaborationError::UnexpectedExpressionToken(token))
+        }
     }
 }
 
@@ -10264,6 +10354,7 @@ elaborate_expression(
                 expected
             ),
             _ => elaborate_identifier(
+                headers,
                 interfaces,
                 body,
                 map,

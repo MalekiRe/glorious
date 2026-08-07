@@ -1312,6 +1312,19 @@ function_pattern_variant(
     }
 }
 
+bare_bool_literal(
+    headers: &super::headers::ParsedHeaders,
+    raw: u32
+) -> Bool {
+    handle super::lexer::lexeme(
+        super::headers::parsed_source(headers), Id::from_u32(raw)
+    ) {
+        Result::Ok(name) => String::eq(name, &"true")
+            or { String::eq(name, &"false") },
+        Result::Err(_) => false
+    }
+}
+
 resolve_identifier(
     headers: &super::headers::ParsedHeaders,
     index: &ResolutionIndex,
@@ -1337,7 +1350,12 @@ resolve_identifier(
                     );
                     Result::Ok(())
                 },
-                Result::Err(_) => {
+                Result::Err(_) => if(bare_bool_literal(headers, raw)) {
+                    // `true`/`false` are prelude values, but the focused
+                    // self-host probe intentionally has no prelude index.
+                    // Leave them unresolved for elaboration's literal path.
+                    Result::Ok(())
+                } else {
                     let found = handle resolve_global_alias(
                         headers,
                         index,
@@ -1356,12 +1374,12 @@ resolve_identifier(
                             token
                         ), @resolve_identifier)
                     };
-                        push_resolution(
-                            output,
-                            Id::from_u32(expression),
-                            found
-                        );
-                        Result::Ok(())
+                    push_resolution(
+                        output,
+                        Id::from_u32(expression),
+                        found
+                    );
+                    Result::Ok(())
                 }
             }
         },

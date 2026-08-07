@@ -718,6 +718,9 @@ struct Encoder<'a> {
     current_function: &'a FunctionIdentity,
     type_encoder: &'a TypeEncoder<'a>,
     all_functions: &'a BTreeMap<u32, &'a core::Function>,
+    // Only the distributed zero-argument Bool constructors are normalized:
+    // the self-host Core keeps those literals as direct constructs.
+    bool_literal_calls: &'a BTreeMap<u32, u32>,
     locals: BTreeMap<u32, u32>,
     next_local: u32,
 }
@@ -940,22 +943,29 @@ impl Encoder<'_> {
                 push_u32(output, self.local(*local)?);
                 output.push(u8::from(*copy));
             }
-            ExprKind::Call { declaration, args } => {
-                output.push(3);
-                self.write_type(output, expression.ty)?;
-                encode_identity(output, self.target(*declaration)?);
-                push_u32(output, args.len().try_into().unwrap());
-                for argument in args {
-                    self.expression(output, argument)?;
-                }
-            }
-            ExprKind::TailCall { declaration, args } => {
-                output.push(4);
-                self.write_type(output, expression.ty)?;
-                encode_identity(output, self.target(*declaration)?);
-                push_u32(output, args.len().try_into().unwrap());
-                for argument in args {
-                    self.expression(output, argument)?;
+            ExprKind::Call { declaration, args }
+            | ExprKind::TailCall { declaration, args } => {
+                if args.is_empty()
+                    && let Some(variant) = self.bool_literal_calls.get(declaration)
+                {
+                    // The distributed prelude exposes literals as calls; the
+                    // self-host Core deliberately records their enum shape.
+                    output.push(6);
+                    self.write_type(output, expression.ty)?;
+                    self.write_type(output, expression.ty)?;
+                    push_u32(output, *variant + 1);
+                    push_u32(output, 0);
+                } else {
+                    output.push(if matches!(
+                        &expression.kind,
+                        ExprKind::TailCall { .. }
+                    ) { 4 } else { 3 });
+                    self.write_type(output, expression.ty)?;
+                    encode_identity(output, self.target(*declaration)?);
+                    push_u32(output, args.len().try_into().unwrap());
+                    for argument in args {
+                        self.expression(output, argument)?;
+                    }
                 }
             }
             ExprKind::CallSelf { args } => {
@@ -1207,6 +1217,60 @@ impl Encoder<'_> {
     }
 }
 
+fn bool_call_variant(expression: &core::Expr, direct: &BTreeMap<u32, u32>) -> Option<u32> {
+    match &expression.kind {
+        ExprKind::Block { statements, tail } if statements.is_empty() => {
+            bool_call_variant(tail, direct)
+        }
+        ExprKind::Call { declaration, args } | ExprKind::TailCall { declaration, args }
+            if args.is_empty() => direct.get(declaration).copied(),
+        _ => None,
+    }
+}
+
+fn is_distributed_bool_abi(types: &[Type], function: &core::Function) -> bool {
+    function.params.is_empty()
+        && function.receiver_mode.is_none()
+        && !function.no_return
+        && function.outward_protocols.is_empty()
+        && matches!(
+            types.get(function.result as usize).map(Type::representation),
+            // Source Bool is the distributed `Result<Unit, Unit>` alias.
+            Some(Type::Enum { name, .. }) if name == "Result"
+        )
+}
+
+fn distributed_bool_literal_calls(
+    types: &[Type],
+    core: &core::Program,
+) -> BTreeMap<u32, u32> {
+    let direct = core.functions.iter().filter_map(|function| {
+        let variant = match function.name.as_str() {
+            "__g1_bool_true" => 0,
+            "__g1_bool_false" => 1,
+            _ => return None,
+        };
+        // Only the exact prelude constructor definitions are roots.  Their
+        // ABI prevents arbitrary source or external zero-argument calls from
+        // entering the normalization set.
+        if is_distributed_bool_abi(types, function) && !function.global_factory {
+            Some((function.declaration, variant))
+        } else { None }
+    }).collect::<BTreeMap<_, _>>();
+    let mut calls = direct.clone();
+    for function in &core.functions {
+        // Source uses resolve through compiler-generated global factories.
+        // Admit one only when its complete body is an empty block forwarding
+        // to an exact prelude root above.
+        if function.global_factory && is_distributed_bool_abi(types, function)
+            && let Some(variant) = bool_call_variant(&function.body, &direct)
+        {
+            calls.insert(function.declaration, variant);
+        }
+    }
+    calls
+}
+
 fn encode_success(
     output: &mut Vec<u8>,
     bundle: &SourceBundle,
@@ -1256,6 +1320,7 @@ fn encode_success(
         .map(|source| by_backend[source.backend_name.as_str()])
         .collect::<Vec<_>>();
     let type_encoder = TypeEncoder::new(types, &source_core_functions)?;
+    let bool_literal_calls = distributed_bool_literal_calls(types, core);
 
     push_u32(output, sources.len().try_into().unwrap());
     for source in &sources {
@@ -1281,6 +1346,7 @@ fn encode_success(
             current_function: &source.identity,
             type_encoder: &type_encoder,
             all_functions: &all_functions,
+            bool_literal_calls: &bool_literal_calls,
             locals: BTreeMap::new(),
             next_local: 0,
         };
@@ -1340,6 +1406,12 @@ fn encode_rust_core(output: &mut Vec<u8>, source: &str) {
 fn corpus(directory: &Path) -> Vec<PathBuf> {
     let valid = [
         "probe_unit() { () }",
+        // Bool is a prelude aggregate even when the focused probe has no
+        // distributed-prelude declaration arena.  Keep literals and an ABI
+        // parameter/return path separate from conditional lowering.
+        "probe_true() -> Bool { true }",
+        "probe_false() -> Bool { false }",
+        "probe_bool_identity(value: Bool) -> Bool { value }",
         "probe_i64() -> i64 { 7 } probe_u64() -> u64 { 7 }",
         // Full-width integer literals exercise the fourth Core word.  Before
         // the probe's 128-bit wire correction this valid native-oracle case
