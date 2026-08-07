@@ -2079,15 +2079,16 @@ parse_type(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
                 ) } else { parse_path(value, related) } } }
 }
 
-parse_generics(value: &mut Parser, related: usize) -> Result<HeaderRange, HeaderError> {
+parse_generics(value: &mut Parser, related: usize, preserve_duplicates: Bool) -> Result<HeaderRange, HeaderError> {
     let start = super::syntax::range_mark(&value.output.generic_params);
-    if(eat_token(value, TokenPattern::Lt)) { parse_generic_items(value, related, start) } else { Result::Ok(header_range(start, start)) }
+    if(eat_token(value, TokenPattern::Lt)) { parse_generic_items(value, related, start, preserve_duplicates) } else { Result::Ok(header_range(start, start)) }
 }
 
 parse_generic_items(
     value: &mut Parser,
     related: usize,
-    start: usize
+    start: usize,
+    preserve_duplicates: Bool
 ) -> Result<HeaderRange, HeaderError> {
     if(at_token(&*value, TokenPattern::Gt)) {
         Result::Err(
@@ -2095,20 +2096,23 @@ parse_generic_items(
         )
     } else {
         let found = try(parse_one_generic(value, related), @parse_generic_items);
-        let duplicate = find_duplicate_generic_parameter(
-            &value.output, start, found.name
-        );
-        handle duplicate {
-            None => (),
-            Option::Some(previous) => @parse_generic_items(Result::Err(
-                HeaderError::DuplicateGenericParameter(found.tokens.start, previous)
-            ))
-        };
+        if(not(preserve_duplicates)) {
+            let duplicate = find_duplicate_generic_parameter(
+                &value.output, start, found.name
+            );
+            handle duplicate {
+                None => (),
+                Option::Some(previous) => @parse_generic_items(Result::Err(
+                    HeaderError::DuplicateGenericParameter(found.tokens.start, previous)
+                ))
+            };
+        } else { () };
         Vec::push(&mut value.output.generic_params, found);
         if(eat_token(value, TokenPattern::Comma)) { if(at_token(&*value, TokenPattern::Gt)) { finish_generics(value, related, start) } else { parse_generic_items(
                     value,
                     related,
-                    start
+                    start,
+                    preserve_duplicates
                 ) } } else { finish_generics(value, related, start) }
     }
 }
@@ -2327,7 +2331,7 @@ parse_callable(
     } else { () };
     let name = try(ident(value, start), @parse_callable);
     let generic_token_start = value.tokens.position;
-    let generics = try(parse_generics(value, start), @parse_callable);
+    let generics = try(parse_generics(value, start, false), @parse_callable);
     let generic_tokens = token_range(generic_token_start, value.tokens.position);
     try(expect_left_parenthesis(value, start), @parse_callable);
     let parameters = try(parse_parameters(value, start), @parse_callable);
@@ -2702,7 +2706,7 @@ parse_alias_name(
 ) -> Result<(), HeaderError> {
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_alias_name);
-    let generics = try(parse_generics(value, start), @parse_alias_name);
+    let generics = try(parse_generics(value, start, false), @parse_alias_name);
     try(expect_equals(value, start), @parse_alias_name);
     value.tokens.limit = whole_end - 1;
     let target = try(parse_type(value, start), @parse_alias_name);
@@ -2803,7 +2807,7 @@ parse_struct(
     } else { () };
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_struct);
-    let generics = try(parse_generics(value, start), @parse_struct);
+    let generics = try(parse_generics(value, start, false), @parse_struct);
     if(value.tokens.position == header_end) {
         value.tokens.position = header_end + 1;
         value.tokens.limit = whole_end - 1;
@@ -2907,7 +2911,7 @@ parse_sum_header(
     } else { () };
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_sum_header);
-    let generics = try(parse_generics(value, start), @parse_sum_header);
+    let generics = try(parse_generics(value, start, false), @parse_sum_header);
     if(value.tokens.position == header_end) { parse_sum_body(
             value,
             enums,
@@ -3773,7 +3777,7 @@ parse_where_item(
 ) -> Result<(), HeaderError> {
     let higher_ranked = if(at_ident(&*value, &"for")) {
         value.tokens.position = value.tokens.position + 1;
-        try(parse_generics(value, related), @parse_where_item)
+        try(parse_generics(value, related, false), @parse_where_item)
     } else {
         let at = Vec::len(&value.output.generic_params);
         header_range(at, at)
@@ -4064,7 +4068,7 @@ parse_effect_operations(
             @parse_effect_operations
         );
         let name = try(ident(value, related), @parse_effect_operations);
-        let generics = try(parse_generics(value, related), @parse_effect_operations);
+        let generics = try(parse_generics(value, related, true), @parse_effect_operations);
         try(expect_left_parenthesis(value, related), @parse_effect_operations);
         let parameters = try(
             parse_parameters(value, related),
@@ -4133,7 +4137,7 @@ parse_effect_header(
     } else { () };
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_effect_header);
-    let generics = try(parse_generics(value, start), @parse_effect_header);
+    let generics = try(parse_generics(value, start, true), @parse_effect_header);
     let where_tokens = try(
         parse_bounded_where_clause(value, start, header_end),
         @parse_effect_header
@@ -4188,7 +4192,7 @@ parse_impl_header(
 ) -> Result<(), HeaderError> {
     value.tokens.position = start + 1;
     value.tokens.limit = header_end;
-    let generics = try(parse_generics(value, start), @parse_impl_header);
+    let generics = try(parse_generics(value, start, false), @parse_impl_header);
     if(at_ident(&*value, &"Drop")) {
         value.tokens.position = value.tokens.position + 1;
         if(not(at_ident(&*value, &"for"))) {
@@ -4352,7 +4356,7 @@ parse_trait_header(
     if(public) { value.tokens.position = value.tokens.position + 1; } else { () };
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_trait_header);
-    let generics = try(parse_generics(value, start), @parse_trait_header);
+    let generics = try(parse_generics(value, start, false), @parse_trait_header);
     if(value.tokens.position == header_end) {
         let method_start = Vec::len(&value.output.callables);
         let methods = try(parse_trait_methods(
@@ -4380,7 +4384,7 @@ parse_trait_impl_header(
 ) -> Result<(), HeaderError> {
     value.tokens.position = start + 1;
     value.tokens.limit = header_end;
-    let generics = try(parse_generics(value, start), @parse_trait_impl_header);
+    let generics = try(parse_generics(value, start, false), @parse_trait_impl_header);
     let path_start = Vec::len(&value.output.names);
     let first = try(ident(value, start), @parse_trait_impl_header);
     Vec::push(&mut value.output.names, first);
