@@ -881,7 +881,7 @@ impl Encoder<'_> {
             }
             (None, _) => subject,
         };
-        output.push(8);
+        output.push(10);
         self.write_type(output, expression.ty)?;
         self.expression(output, subject)?;
         push_u32(output, arms.len().try_into().unwrap());
@@ -989,7 +989,7 @@ impl Encoder<'_> {
                 // Bootstrap materializes a copyable handle subject in a
                 // compiler-generated `$handle$result$…` local.  The self host
                 // dispatches that source local directly, so erase only this
-                // exact administrative binding before emitting tag 8.
+                // exact administrative binding before emitting tag 10.
                 if let [
                     Stmt::Let {
                         local,

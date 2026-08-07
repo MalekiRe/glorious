@@ -1537,14 +1537,14 @@ write_computation_expression(
         },
         CoreComputationView::VariantDispatch(ty, subject, arms) => {
             // Rust's Core retains a general binary RefinementBranch, while the
-            // self host retains an n-arm dispatch.  Tag 8 is their deliberately
+            // self host retains an n-arm dispatch.  Tag 10 is their deliberately
             // tiny shared source projection: exactly two nullary enum arms.
             if(Slice::len(arms) != 2) { Result::Err(
                 ElaborationError::VariantDispatchSerializationUnsupported(
                     Id::to_usize(computation)
                 )
             ) } else {
-                ByteBuf::push(output, 8);
+                ByteBuf::push(output, 10);
                 write_type_id(output, Id::to_u32(ty));
                 try(write_value_expression(
                     output,
