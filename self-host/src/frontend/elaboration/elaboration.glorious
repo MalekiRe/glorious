@@ -79,13 +79,6 @@ struct CallableSubstitutionRangeTag {}
 type CallableSubstitutionRange =
     super::syntax::IdRange<CallableSubstitutionRangeTag>;
 
-// Typed Core retains effect-control identities rather than encoding them as
-// ordinary calls.  These ranges are deliberately separate from match arms:
-// handler clauses bind payload and one-shot resumption locals, while a match
-// arm binds only data projections.
-pub struct CoreHandlerClauseTag {}
-type CoreHandlerClauseRange = super::syntax::IdRange<CoreHandlerClauseTag>;
-
 struct InterfaceEffectOperationRangeTag {}
 type InterfaceEffectOperationRange =
     super::syntax::IdRange<InterfaceEffectOperationRangeTag>;
@@ -383,20 +376,10 @@ enum CoreComputationKind {
     Call(ShellId, CallableInstanceId, OperandRange),
     Primitive(u32, OperandRange),
     Construct(ConstructionFlavor, ConstructionFieldRange),
-    VariantDispatch(CoreValueId, MatchArmRange),
-    // Operation identity is an interface identity, never a spelling or a
-    // callable shell. This keeps a future lowering from accidentally treating
-    // `perform` as an ordinary call.
-    Perform(InterfaceEffectOperationId, OperandRange),
-    // A resume consumes the resumption value exactly once. Quantity checking
-    // and MIR cleanup remain deliberately unimplemented in this foundation.
-    Resume(CoreValueId, CoreValueId),
-    // `handle body { ... }`: each clause owns fresh payload/resumption locals
-    // and its typed computation. The body is a computation to preserve its
-    // suspension point rather than embedding it as a value.
-    Handle(CoreComputationId, CoreHandlerClauseRange)
+    VariantDispatch(CoreValueId, MatchArmRange)
 }
 
+impl Use<[0, *]> for CoreComputationKind {}
 
 struct CoreComputation { ty: TypeId, kind: CoreComputationKind }
 
@@ -423,17 +406,6 @@ pub struct CoreMatchBinding {
 
 impl Use<[0, *]> for CoreMatchBinding {}
 
-// A clause names the resolved operation and its binder locals explicitly.
-// `payloads` are the operation parameters in declaration order; `resumption`
-// is absent only for terminal operations.
-pub struct CoreHandlerClause {
-    operation: InterfaceEffectOperationId,
-    payloads: Vec<CoreLocalId>,
-    resumption: Option<CoreLocalId>,
-    body: CoreComputationId
-}
-
-
 struct IntegerConstant { low0: u32, low1: u32, high0: u32, high1: u32 }
 
 impl Use<[0, *]> for IntegerConstant {}
@@ -450,7 +422,6 @@ pub struct TypedBody {
     construction_fields: Vec<ConstructionField>,
     match_arms: Vec<CoreMatchArm>,
     match_bindings: Vec<CoreMatchBinding>,
-    handler_clauses: Vec<CoreHandlerClause>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
@@ -728,10 +699,7 @@ pub enum CoreComputationView<'a> {
     Call(TypeId, ShellId, CallableInstanceId, Slice<'a, CoreValueId>),
     Primitive(TypeId, u32, Slice<'a, CoreValueId>),
     Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>),
-    VariantDispatch(TypeId, CoreValueId, Slice<'a, CoreMatchArm>),
-    Perform(TypeId, InterfaceEffectOperationId, Slice<'a, CoreValueId>),
-    Resume(TypeId, CoreValueId, CoreValueId),
-    Handle(TypeId, CoreComputationId, Slice<'a, CoreHandlerClause>)
+    VariantDispatch(TypeId, CoreValueId, Slice<'a, CoreMatchArm>)
 }
 
 impl<'a> Use<[0, *]> for CoreComputationView<'a> {}
@@ -765,10 +733,7 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
             CoreComputationView::Call(ty, _, _, _) => ty,
             CoreComputationView::Primitive(ty, _, _) => ty,
             CoreComputationView::Construct(ty, _, _) => ty,
-            CoreComputationView::VariantDispatch(ty, _, _) => ty,
-            CoreComputationView::Perform(ty, _, _) => ty,
-            CoreComputationView::Resume(ty, _, _) => ty,
-            CoreComputationView::Handle(ty, _, _) => ty
+            CoreComputationView::VariantDispatch(ty, _, _) => ty
         }
     }
 }
@@ -804,10 +769,7 @@ core_node_child_count(
                 Slice::len(operands),
             CoreComputationView::Construct(_, _, fields) => Slice::len(fields),
             CoreComputationView::VariantDispatch(_, _, arms) =>
-                Slice::len(arms) + 1,
-            CoreComputationView::Perform(_, _, operands) => Slice::len(operands),
-            CoreComputationView::Resume(_, _, _) => 2,
-            CoreComputationView::Handle(_, _, clauses) => Slice::len(clauses) + 1
+                Slice::len(arms) + 1
         }
     }
 }
@@ -861,25 +823,6 @@ core_node_child_at(
                     };
                     CoreNodeId::Computation(core_match_arm_body(arm))
                 }
-            },
-            CoreComputationView::Perform(_, _, operands) => {
-                let value = handle Slice::get(operands, index) {
-                    Result::Err(_) => unreachable(),
-                    Result::Ok(found) => *found
-                };
-                CoreNodeId::Value(value)
-            },
-            CoreComputationView::Resume(_, resumption, result) => if(index == 0) {
-                CoreNodeId::Value(resumption)
-            } else { CoreNodeId::Value(result) },
-            CoreComputationView::Handle(_, handled, clauses) => if(index == 0) {
-                CoreNodeId::Computation(handled)
-            } else {
-                let clause = handle Slice::get(clauses, index - 1) {
-                    Result::Err(_) => unreachable(),
-                    Result::Ok(found) => found
-                };
-                CoreNodeId::Computation(core_handler_clause_body(clause))
             }
         }
     }
@@ -1008,15 +951,6 @@ core_match_arm_set_body(value: &mut CoreMatchArm, replacement: CoreComputationId
     ()
 }
 
-core_handler_clause_set_body(
-    value: &mut CoreHandlerClause,
-    replacement: CoreComputationId
-) {
-    (*value).body = replacement;
-    ()
-}
-
-
 typed_body_set_root(value: &mut TypedBody, replacement: CoreComputationId) {
     (*value).root = replacement;
     ()
@@ -1090,28 +1024,6 @@ core_node_child_set(
                         core_rewrite_value(replacement)
                     );
                     CoreComputationKind::Construct(flavor, fields)
-                },
-                CoreComputationKind::Perform(operation, operands) => {
-                    *Vec::index_mut(
-                        &mut body.operands,
-                        usize_from_u32(operands.start) + index
-                    ) = core_rewrite_value(replacement);
-                    CoreComputationKind::Perform(operation, operands)
-                },
-                CoreComputationKind::Resume(resumption, result) => if(index == 0) {
-                    CoreComputationKind::Resume(core_rewrite_value(replacement), result)
-                } else { CoreComputationKind::Resume(resumption, core_rewrite_value(replacement)) },
-                CoreComputationKind::Handle(handled, clauses) => {
-                    if(index == 0) {
-                        CoreComputationKind::Handle(core_rewrite_computation(replacement), clauses)
-                    } else {
-                        core_handler_clause_set_body(
-                            Vec::index_mut(&mut body.handler_clauses,
-                                usize_from_u32(clauses.start) + index - 1),
-                            core_rewrite_computation(replacement)
-                        );
-                        CoreComputationKind::Handle(handled, clauses)
-                    }
                 },
                 CoreComputationKind::VariantDispatch(subject, arms) => {
                     if(index == 0) {
@@ -2709,36 +2621,6 @@ typed_body_match_arms<'a>(
     }
 }
 
-pub typed_body_handler_clauses<'a>(
-    value: &'a TypedBody,
-    range: CoreHandlerClauseRange
-) -> Slice<'a, CoreHandlerClause> {
-    handle Slice::subslice(
-        Vec::as_slice(&value.handler_clauses),
-        usize_from_u32(range.start),
-        usize_from_u32(range.count)
-    ) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
-    }
-}
-
-pub core_handler_clause_operation(
-    value: &CoreHandlerClause
-) -> InterfaceEffectOperationId { value.operation }
-
-pub core_handler_clause_payloads<'a>(
-    value: &'a CoreHandlerClause
-) -> Slice<'a, CoreLocalId> { Vec::as_slice(&value.payloads) }
-
-pub core_handler_clause_resumption(
-    value: &CoreHandlerClause
-) -> Option<CoreLocalId> { value.resumption }
-
-pub core_handler_clause_body(
-    value: &CoreHandlerClause
-) -> CoreComputationId { value.body }
-
 pub core_match_arm_variant(value: &CoreMatchArm) -> u32 {
     value.variant
 }
@@ -2834,14 +2716,7 @@ pub typed_body_computation_at<'a>(
                 ty,
                 subject,
                 typed_body_match_arms(value, range)
-            ),
-        CoreComputationKind::Perform(operation, range) =>
-            CoreComputationView::Perform(ty, operation, typed_body_operands(value, range)),
-        CoreComputationKind::Resume(resumption, result) =>
-            CoreComputationView::Resume(ty, resumption, result),
-        CoreComputationKind::Handle(handled, range) => CoreComputationView::Handle(
-            ty, handled, typed_body_handler_clauses(value, range)
-        )
+            )
     }
 }
 
@@ -10791,7 +10666,6 @@ pub elaborate_function_instance_body(
                 construction_fields: construction_fields,
                 match_arms: match_arms,
                 match_bindings: match_bindings,
-                handler_clauses: Vec::new(),
                 integer_constants: integer_constants
             };
             Result::Ok(__g1_identity_rewrite_core(

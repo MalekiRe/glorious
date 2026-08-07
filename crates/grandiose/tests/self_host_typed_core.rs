@@ -1684,37 +1684,6 @@ fn self_hosted_resumption_quantity_interfaces_match_rust_oracle() {
 }
 
 #[test]
-fn self_host_effect_core_foundation_retains_control_and_rejects_lowering() {
-    // This is an architectural contract, not a claim that the self-hosted
-    // compiler executes effects yet.  The Core shapes must stay distinct from
-    // ordinary calls, and lowering must keep rejecting them until one-shot
-    // continuation cleanup and quantity checking are implemented.
-    let root = repository_root();
-    let core = fs::read_to_string(
-        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
-    )
-    .unwrap();
-    for required in [
-        "Perform(InterfaceEffectOperationId, OperandRange)",
-        "Resume(CoreValueId, CoreValueId)",
-        "Handle(CoreComputationId, CoreHandlerClauseRange)",
-        "pub struct CoreHandlerClause",
-        "resumption: Option<CoreLocalId>",
-        "CoreComputationView::Perform",
-        "CoreComputationView::Resume",
-        "CoreComputationView::Handle",
-    ] {
-        assert!(core.contains(required), "missing Typed Core effect foundation: {required}");
-    }
-    let lowering = fs::read_to_string(
-        root.join("self-host/src/backend/lowering/lowering.glorious"),
-    )
-    .unwrap();
-    assert!(lowering.contains("EffectControlNotLowered(CoreComputationId)"));
-    assert_eq!(lowering.matches("Result::Err(LoweringError::EffectControlNotLowered(id))").count(), 3);
-}
-
-#[test]
 fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
