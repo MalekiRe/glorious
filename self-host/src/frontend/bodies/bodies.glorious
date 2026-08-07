@@ -2023,6 +2023,31 @@ node_is_library_control(
         }
 }
 
+// `match(subject){ Pattern => body, ... }` is a direct-enum refinement: the
+// brace introduces pattern arms over the single scrutinee, exactly like a
+// direct handle over an enum value. Detect the library spelling so the brace
+// is consumed as a match block instead of a contextual call argument.
+node_is_match_call(
+    source: &super::lexer::LexedSource,
+    value: &BodyParser,
+    id: ExprId
+) -> Bool {
+    node_is_call(value, id)
+        and {
+            let arguments = call_arguments(value, id);
+            Vec::len(&arguments) == 1
+        }
+        and {
+            let callee = call_callee(value, id);
+            node_is_identifier(value, callee)
+                and { node_name_count(value, callee) == 1 }
+                and {
+                    let token = node_tokens(value, callee).start;
+                    token_is_contextual_ident(source, token, &"match")
+                }
+        }
+}
+
 call_callee(value: &BodyParser, id: ExprId) -> ExprId {
     handle Arena::index(&value.nodes, id).kind {
         ExprKind::Call(callee, _) => callee,
@@ -5158,7 +5183,49 @@ parse_postfix(
                         call
                     )
                 },
-                TokenKind::LBrace => if(handler_clause_brace(
+                TokenKind::LBrace => if(node_is_match_call(
+                    source,
+                    &*value,
+                    callee
+                )) {
+                    let subject_arguments = call_arguments(&*value, callee);
+                    let subject = *Vec::index(&subject_arguments, 0);
+                    let start = node_tokens(&*value, callee).start;
+                    let open = value.tokens.position;
+                    value.tokens.position = open + 1;
+                    let arms = Vec::new();
+                    try(parse_handle_arms(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth + 1,
+                        open,
+                        &mut arms,
+                        None,
+                        false
+                    ), @parse_postfix);
+                    let end = value.tokens.position;
+                    let found = push_handle(
+                        value,
+                        subject,
+                        arms,
+                        start,
+                        end
+                    );
+                    parse_postfix(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth + 1,
+                        found
+                    )
+                } else if(handler_clause_brace(
                     source,
                     value.tokens.position + 1,
                     value.tokens.limit
