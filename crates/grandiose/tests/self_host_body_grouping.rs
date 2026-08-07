@@ -281,7 +281,12 @@ fn normalized_direct_enum_handle(expression: &Expr) -> Option<(&Expr, Vec<(&Patt
     else {
         return None;
     };
-    if !name.starts_with("$handle$result$") {
+    // The bootstrap normalizes both explicit direct-enum `handle` blocks
+    // and library `match(subject){ Pattern => body, ... }` refinements into a
+    // `$let$result` / `$match$` bound block. The self-host body parser
+    // represents both as a direct `Handle` node, so the oracle recognizes
+    // both spellings and re-encodes them as one direct-enum handle.
+    if !(name.starts_with("$handle$result$") || name.starts_with("$match$")) {
         return None;
     }
     let mut arms = Vec::new();
@@ -2189,6 +2194,36 @@ fn surface_simplifications_body_corpus(directory: &Path) -> Vec<PathBuf> {
             times(3, { => { continue() } });
             times(10, { => { break() } });
             42
+        }
+        main() -> { () }"#,
+        // library_match_syntax_elaborates_to_source_defined_refinement_calls
+        r#"make() -> Result<i64, ()> { Result::Ok(42) }
+        answer() -> i64 {
+            match(make()) {
+                Result::Ok(answer) => answer,
+                Result::Err(_) => 0
+            }
+        }
+        main() -> { () }"#,
+        // match_moves_noncopy_payloads_out_of_its_subject
+        r#"struct Token { value: i64 }
+        impl Use<[0,1]> for Token {}
+        enum Choice { Some(Token), None }
+        make() -> Choice { Choice::Some(Token { value: 42 }) }
+        answer() -> i64 {
+            match(make()) {
+                Choice::Some(token) => token.value,
+                Choice::None => 0
+            }
+        }
+        main() -> { () }"#,
+        // constructor_and_nullary_value_aliases_are_patterns
+        r#"enum Signal { Stop, Value(i64) }
+        selected(signal: Signal) -> i64 {
+            match(signal) {
+                Signal::Stop => 0,
+                Signal::Value(value) => value
+            }
         }
         main() -> { () }"#,
     ];
