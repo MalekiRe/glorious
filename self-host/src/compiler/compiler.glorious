@@ -1379,7 +1379,11 @@ lower_typed_body_types<'a>(
 
 // `compile_source` receives a bare user stream, whereas the bootstrap
 // compiler compiles it through SourceBundle::distributed and therefore sees
-// the distributed Result declaration. Keep this deliberately small until the
+// the distributed Result declaration. Provide the minimal Result interface as
+// an appended prelude only when the incoming source does not already declare
+// a `Result` type. Appending one on top of an existing declaration (such as
+// the distributed standard-library prelude) would mint a duplicate type name
+// and break interface resolution. Keep this deliberately small until the
 // self-host driver owns the complete standard-library bundle. Appending keeps
 // every user token (and hence every reported user token index) unchanged.
 minimal_interface_prelude(original: &String) -> String {
@@ -1395,10 +1399,52 @@ minimal_interface_prelude(original: &String) -> String {
     }
 }
 
+// Thin wrapper so the bytecode-subset optimizer never has to specialize the
+// Result-detection dispatch inside the compiler orchestration module.
+result_prelude_missing(
+    source: &lexer::LexedSource,
+    declarations: &scanner::DeclarationIndex
+) -> Bool {
+    elaboration::result_prelude_missing(source, declarations)
+}
+
+// Decide on the session source text: append the minimal Result prelude only
+// when the incoming source does not already provide a `Result` type.
+session_source(original: &String) -> Result<String, CompileError> {
+    let source = try(
+        Result::map_err(
+            lexer::lex(original),
+            { found => CompileError::Lex(found) }
+        ),
+        @session_source
+    );
+    let declarations = try(
+        Result::map_err(
+            scanner::scan(&source),
+            { found => CompileError::Scan(found) }
+        ),
+        @session_source
+    );
+    if(result_prelude_missing(&source, &declarations)) {
+        Result::Ok(minimal_interface_prelude(original))
+    } else {
+        handle String::from_utf8(String::as_bytes(original)) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => Result::Ok(found)
+        }
+    }
+}
+
 prepare_session(
     original: &String
 ) -> Result<CompilerSession, CompileError> {
-    let original = minimal_interface_prelude(original);
+    let original = try(
+        Result::map_err(
+            session_source(original),
+            { found => found }
+        ),
+        @prepare_session
+    );
     let source = try(
         Result::map_err(
             lexer::lex(&original),

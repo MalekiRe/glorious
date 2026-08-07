@@ -6977,6 +6977,29 @@ compute_type_flags(
     } else { Result::Ok(()) }
 }
 
+// True when the incoming source has no `Result` type declaration reachable
+// from the root module, so the appended minimal prelude is required to make
+// `Result` available at all. Hoisted here so the bytecode-subset optimizer can
+// compile the def_search dispatch in an already-specialized module.
+pub result_prelude_missing(
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex
+) -> Bool {
+    let id = handle super::lexer::lexeme_id(source, &"Result") {
+        Result::Err(_) => false,
+        Result::Ok(found) => {
+            let found = super::scanner::def_search(
+                declarations,
+                None,
+                found,
+                super::scanner::Namespace::Type
+            );
+            super::scanner::def_search_count(&found) == 0
+        }
+    };
+    id
+}
+
 pub collect_interfaces(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex
