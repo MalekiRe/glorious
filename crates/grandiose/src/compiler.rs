@@ -15228,47 +15228,26 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         syntax: &mut TypeSyntax,
         program: &Program,
         nominal_params: &BTreeMap<&str, &crate::ast::GenericParams>,
-        generated_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
     ) -> Result<(), Diagnostic> {
         match &mut syntax.kind {
             TypeSyntaxKind::SharedReference { referent, .. }
             | TypeSyntaxKind::UniqueReference { referent, .. } => {
-                lower_const_defaults_and_fixed_arrays(
-                    referent,
-                    program,
-                    nominal_params,
-                    generated_consts,
-                )?;
+                lower_const_defaults_and_fixed_arrays(referent, program, nominal_params)?;
             }
             TypeSyntaxKind::Tuple(elements) => {
                 for element in elements {
-                    lower_const_defaults_and_fixed_arrays(
-                        element,
-                        program,
-                        nominal_params,
-                        generated_consts,
-                    )?;
+                    lower_const_defaults_and_fixed_arrays(element, program, nominal_params)?;
                 }
             }
             TypeSyntaxKind::Application {
                 constructor,
                 arguments,
                 lifetime_arguments,
-                ..
+                const_arguments,
             } => {
-                lower_const_defaults_and_fixed_arrays(
-                    constructor,
-                    program,
-                    nominal_params,
-                    generated_consts,
-                )?;
+                lower_const_defaults_and_fixed_arrays(constructor, program, nominal_params)?;
                 for argument in arguments.iter_mut() {
-                    lower_const_defaults_and_fixed_arrays(
-                        argument,
-                        program,
-                        nominal_params,
-                        generated_consts,
-                    )?;
+                    lower_const_defaults_and_fixed_arrays(argument, program, nominal_params)?;
                 }
                 let Some(name) = constructor.simple_name() else {
                     return Ok(());
@@ -15276,24 +15255,8 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 let Some(params) = nominal_params.get(name) else {
                     return Ok(());
                 };
-                let generated = generated_consts
-                    .borrow()
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.application == syntax.span)
-                    .cloned();
-                let mut const_arguments = generated
-                    .or_else(|| {
-                        program
-                            .type_const_arguments
-                            .iter()
-                            .find(|entry| entry.application == syntax.span)
-                            .cloned()
-                    })
-                    .unwrap_or(crate::ast::TypeConstApplicationSyntax {
-                        application: syntax.span,
-                        arguments: Vec::new(),
-                    });
+                // Const arguments are owned by this application; do not recover
+                // them from Program's compatibility span-indexed table.
                 fn argument_expression(
                     value: &crate::ast::ConstArgumentValueSyntax,
                 ) -> crate::ast::ConstExprSyntax {
@@ -15341,7 +15304,6 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                     expression
                 }
                 let const_by_position = const_arguments
-                    .arguments
                     .iter()
                     .map(|argument| (argument.position, &argument.value))
                     .collect::<BTreeMap<_, _>>();
@@ -15352,7 +15314,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 let mut source_types = arguments.iter();
                 let mut known = BTreeMap::new();
                 let initially_supplied =
-                    arguments.len() + lifetime_arguments.len() + const_arguments.arguments.len();
+                    arguments.len() + lifetime_arguments.len() + const_arguments.len();
                 for (position, parameter) in params.params.iter().enumerate() {
                     if position >= initially_supplied {
                         break;
@@ -15380,7 +15342,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                     }
                 }
                 let mut supplied =
-                    arguments.len() + lifetime_arguments.len() + const_arguments.arguments.len();
+                    arguments.len() + lifetime_arguments.len() + const_arguments.len();
                 while supplied < params.params.len() {
                     let parameter = &params.params[supplied];
                     let Some(default) = &parameter.const_default else {
@@ -15388,24 +15350,11 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                     };
                     let default = substitute_default(default, &known);
                     known.insert(parameter.name.clone(), default.clone());
-                    const_arguments
-                        .arguments
-                        .push(crate::ast::ConstAssociatedArgumentSyntax {
-                            position: supplied,
-                            value: crate::ast::ConstArgumentValueSyntax::Expression(default),
-                        });
+                    const_arguments.push(crate::ast::ConstAssociatedArgumentSyntax {
+                        position: supplied,
+                        value: crate::ast::ConstArgumentValueSyntax::Expression(default),
+                    });
                     supplied += 1;
-                }
-                if !const_arguments.arguments.is_empty() {
-                    let mut generated = generated_consts.borrow_mut();
-                    if let Some(existing) = generated
-                        .iter_mut()
-                        .find(|entry| entry.application == syntax.span)
-                    {
-                        *existing = const_arguments;
-                    } else {
-                        generated.push(const_arguments);
-                    }
                 }
             }
             TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) | TypeSyntaxKind::Projection { .. } => {
@@ -15445,8 +15394,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
     fn expand(
         syntax: &TypeSyntax,
         aliases: &BTreeMap<&str, &crate::ast::TypeAliasDecl>,
-        const_applications: &[crate::ast::TypeConstApplicationSyntax],
-        generated_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
+        compatibility_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
         visiting: &mut Vec<String>,
     ) -> Result<TypeSyntax, Diagnostic> {
         if let Some(name) = syntax.simple_name()
@@ -15462,13 +15410,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 let mut expanded = syntax.clone();
                 expanded.kind = TypeSyntaxKind::SharedReference {
                     lifetime: lifetime.clone(),
-                    referent: Box::new(expand(
-                        referent,
-                        aliases,
-                        const_applications,
-                        generated_consts,
-                        visiting,
-                    )?),
+                    referent: Box::new(expand(referent, aliases, compatibility_consts, visiting)?),
                 };
                 return Ok(expanded);
             }
@@ -15476,13 +15418,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 let mut expanded = syntax.clone();
                 expanded.kind = TypeSyntaxKind::UniqueReference {
                     lifetime: lifetime.clone(),
-                    referent: Box::new(expand(
-                        referent,
-                        aliases,
-                        const_applications,
-                        generated_consts,
-                        visiting,
-                    )?),
+                    referent: Box::new(expand(referent, aliases, compatibility_consts, visiting)?),
                 };
                 return Ok(expanded);
             }
@@ -15491,15 +15427,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 expanded.kind = TypeSyntaxKind::Tuple(
                     elements
                         .iter()
-                        .map(|element| {
-                            expand(
-                                element,
-                                aliases,
-                                const_applications,
-                                generated_consts,
-                                visiting,
-                            )
-                        })
+                        .map(|element| expand(element, aliases, compatibility_consts, visiting))
                         .collect::<Result<Vec<_>, _>>()?,
                 );
                 return Ok(expanded);
@@ -15527,15 +15455,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         };
         let expanded_arguments = arguments
             .iter()
-            .map(|argument| {
-                expand(
-                    argument,
-                    aliases,
-                    const_applications,
-                    generated_consts,
-                    visiting,
-                )
-            })
+            .map(|argument| expand(argument, aliases, compatibility_consts, visiting))
             .collect::<Result<Vec<_>, _>>()?;
         let Some(declaration) = aliases.get(name).copied() else {
             let mut syntax = syntax.clone();
@@ -15554,10 +15474,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             ));
         }
         let params = &declaration.generics.as_ref().unwrap().params;
-        let supplied_consts = const_applications
-            .iter()
-            .find(|application| application.application == syntax.span)
-            .map_or(&[][..], |application| application.arguments.as_slice());
+        let supplied_consts = const_arguments.as_slice();
         let supplied = expanded_arguments.len() + lifetime_arguments.len() + supplied_consts.len();
         let required = params
             .iter()
@@ -15685,27 +15602,29 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             *arguments = retained;
             substituted.span = syntax.span;
             if !generated.is_empty() {
-                generated_consts
-                    .borrow_mut()
-                    .push(crate::ast::TypeConstApplicationSyntax {
-                        application: syntax.span,
-                        arguments: generated,
-                    });
+                if let TypeSyntaxKind::Application {
+                    const_arguments, ..
+                } = &mut substituted.kind
+                {
+                    const_arguments.extend(generated);
+                    // Keep legacy span consumers coherent while they migrate.
+                    compatibility_consts.borrow_mut().push(
+                        crate::ast::TypeConstApplicationSyntax {
+                            application: syntax.span,
+                            arguments: const_arguments.clone(),
+                        },
+                    );
+                }
             }
         }
-        let expanded = expand(
-            &substituted,
-            aliases,
-            const_applications,
-            generated_consts,
-            visiting,
-        );
+        let expanded = expand(&substituted, aliases, compatibility_consts, visiting);
         visiting.pop();
         expanded
     }
 
     let mut errors = Vec::new();
-    let generated_consts = std::cell::RefCell::new(Vec::new());
+    // Output-only compatibility mirror for consumers not migrated in this step.
+    let compatibility_consts = std::cell::RefCell::new(Vec::new());
     for declaration in aliases.values() {
         let params = declaration
             .generics
@@ -15718,8 +15637,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         let expanded = expand(
             &declaration.target,
             &aliases,
-            &program.type_const_arguments,
-            &generated_consts,
+            &compatibility_consts,
             &mut vec![declaration.name.clone()],
         );
         match expanded {
@@ -15830,18 +15748,14 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
     let mut rewrite = |syntax: &mut TypeSyntax| match expand(
         syntax,
         &aliases,
-        &program.type_const_arguments,
-        &generated_consts,
+        &compatibility_consts,
         &mut Vec::new(),
     ) {
         Ok(expanded) => {
             *syntax = expanded;
-            if let Err(error) = lower_const_defaults_and_fixed_arrays(
-                syntax,
-                program,
-                &nominal_params,
-                &generated_consts,
-            ) {
+            if let Err(error) =
+                lower_const_defaults_and_fixed_arrays(syntax, program, &nominal_params)
+            {
                 errors.push(error);
             }
         }
@@ -15904,15 +15818,13 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
     fn rewrite_expression_alias_types(
         expression: &mut Expr,
         aliases: &BTreeMap<&str, &crate::ast::TypeAliasDecl>,
-        const_applications: &[crate::ast::TypeConstApplicationSyntax],
-        generated_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
+        compatibility_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
         errors: &mut Vec<Diagnostic>,
     ) {
         let mut rewrite_type = |syntax: &mut TypeSyntax| match expand(
             syntax,
             aliases,
-            const_applications,
-            generated_consts,
+            compatibility_consts,
             &mut Vec::new(),
         ) {
             Ok(expanded) => *syntax = expanded,
@@ -15934,8 +15846,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 rewrite_expression_alias_types(
                     Rc::make_mut(body),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
             }
@@ -15946,8 +15857,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 rewrite_expression_alias_types(
                     Rc::make_mut(body),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
             }
@@ -15958,8 +15868,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 rewrite_expression_alias_types(
                     Rc::make_mut(value),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
             }
@@ -15968,8 +15877,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                     rewrite_expression_alias_types(
                         Rc::make_mut(value),
                         aliases,
-                        const_applications,
-                        generated_consts,
+                        compatibility_consts,
                         errors,
                     );
                 }
@@ -15979,8 +15887,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                     rewrite_expression_alias_types(
                         Rc::make_mut(resumption),
                         aliases,
-                        const_applications,
-                        generated_consts,
+                        compatibility_consts,
                         errors,
                     );
                 }
@@ -15989,8 +15896,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 rewrite_expression_alias_types(
                     Rc::make_mut(resumption),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
             }
@@ -15998,8 +15904,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 rewrite_expression_alias_types(
                     Rc::make_mut(subject),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
             }
@@ -16021,19 +15926,12 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                             },
                         ),
                     };
-                    rewrite_expression_alias_types(
-                        value,
-                        aliases,
-                        const_applications,
-                        generated_consts,
-                        errors,
-                    );
+                    rewrite_expression_alias_types(value, aliases, compatibility_consts, errors);
                     if let Some(reference) = reference {
                         rewrite_expression_alias_types(
                             reference,
                             aliases,
-                            const_applications,
-                            generated_consts,
+                            compatibility_consts,
                             errors,
                         );
                     }
@@ -16041,53 +15939,28 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             }
             ExprKind::List(values) | ExprKind::Tuple(values) => {
                 for value in Rc::make_mut(values) {
-                    rewrite_expression_alias_types(
-                        value,
-                        aliases,
-                        const_applications,
-                        generated_consts,
-                        errors,
-                    );
+                    rewrite_expression_alias_types(value, aliases, compatibility_consts, errors);
                 }
             }
             ExprKind::Struct { fields, .. } => {
                 for (_, value) in Rc::make_mut(fields) {
-                    rewrite_expression_alias_types(
-                        value,
-                        aliases,
-                        const_applications,
-                        generated_consts,
-                        errors,
-                    );
+                    rewrite_expression_alias_types(value, aliases, compatibility_consts, errors);
                 }
             }
             ExprKind::Call(callee, arguments) => {
                 rewrite_expression_alias_types(
                     Rc::make_mut(callee),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
                 for argument in Rc::make_mut(arguments) {
-                    rewrite_expression_alias_types(
-                        argument,
-                        aliases,
-                        const_applications,
-                        generated_consts,
-                        errors,
-                    );
+                    rewrite_expression_alias_types(argument, aliases, compatibility_consts, errors);
                 }
             }
             ExprKind::Perform { args, .. } => {
                 for argument in Rc::make_mut(args) {
-                    rewrite_expression_alias_types(
-                        argument,
-                        aliases,
-                        const_applications,
-                        generated_consts,
-                        errors,
-                    );
+                    rewrite_expression_alias_types(argument, aliases, compatibility_consts, errors);
                 }
             }
             ExprKind::Handle {
@@ -16097,16 +15970,14 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 rewrite_expression_alias_types(
                     Rc::make_mut(computation),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
                 for clause in Rc::make_mut(clauses) {
                     rewrite_expression_alias_types(
                         &mut clause.body,
                         aliases,
-                        const_applications,
-                        generated_consts,
+                        compatibility_consts,
                         errors,
                     );
                 }
@@ -16115,15 +15986,13 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 rewrite_expression_alias_types(
                     Rc::make_mut(lhs),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
                 rewrite_expression_alias_types(
                     Rc::make_mut(rhs),
                     aliases,
-                    const_applications,
-                    generated_consts,
+                    compatibility_consts,
                     errors,
                 );
             }
@@ -16234,8 +16103,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         rewrite_expression_alias_types(
             &mut function.body,
             &aliases,
-            &program.type_const_arguments,
-            &generated_consts,
+            &compatibility_consts,
             &mut errors,
         );
     }
@@ -16243,21 +16111,14 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         rewrite_expression_alias_types(
             &mut global.value,
             &aliases,
-            &program.type_const_arguments,
-            &generated_consts,
+            &compatibility_consts,
             &mut errors,
         );
     }
     for implementation in &mut normalized.impls {
         for method in &mut implementation.methods {
             if let Some(body) = &mut method.body {
-                rewrite_expression_alias_types(
-                    body,
-                    &aliases,
-                    &program.type_const_arguments,
-                    &generated_consts,
-                    &mut errors,
-                );
+                rewrite_expression_alias_types(body, &aliases, &compatibility_consts, &mut errors);
             }
         }
     }
@@ -16265,8 +16126,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         rewrite_expression_alias_types(
             &mut declaration.body,
             &aliases,
-            &program.type_const_arguments,
-            &generated_consts,
+            &compatibility_consts,
             &mut errors,
         );
     }
@@ -16432,7 +16292,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
     normalized
         .type_aliases
         .retain(|declaration| !composed_monomorphic_aliases.contains(&declaration.name));
-    for generated in generated_consts.into_inner() {
+    for generated in compatibility_consts.into_inner() {
         if let Some(existing) = normalized
             .type_const_arguments
             .iter_mut()
@@ -16444,6 +16304,60 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         }
     }
     Ok(normalized)
+}
+
+#[cfg(test)]
+mod const_generic_alias_normalization_tests {
+    use crate::{
+        ast::{ConstArgumentValueSyntax, TypeSyntaxKind},
+        lexer::lex,
+        parser::parse,
+    };
+
+    use super::normalize_generic_type_aliases;
+
+    #[test]
+    fn alias_normalization_reads_positioned_consts_from_application_ast() {
+        let source = "struct Pair<T, const N: u32> { value: T } \
+            type Reordered<const N: u32, T> = Pair<T, N>; \
+            make() -> Reordered<3, i64> { Pair { value: 9 } } \
+            main() -> () { () }";
+        let mut program = parse(lex(source).expect("lex focused alias input"))
+            .expect("parse focused alias input");
+        assert!(
+            !program.type_const_arguments.is_empty(),
+            "parser compatibility table should still be populated during migration"
+        );
+        // The normalizer must not use this legacy span-indexed table: its real
+        // input is TypeSyntaxKind::Application::const_arguments.
+        program.type_const_arguments.clear();
+
+        let normalized = normalize_generic_type_aliases(&program)
+            .expect("structural const aliases normalize without the side table");
+        let make = normalized
+            .functions
+            .iter()
+            .find(|function| function.name == "make")
+            .expect("make declaration");
+        let TypeSyntaxKind::Application {
+            constructor,
+            arguments,
+            const_arguments,
+            ..
+        } = &make.return_type.as_ref().expect("make return type").kind
+        else {
+            panic!("alias did not normalize to an application");
+        };
+        assert_eq!(constructor.simple_name(), Some("Pair"));
+        assert_eq!(arguments.len(), 1);
+        assert_eq!(arguments[0].simple_name(), Some("i64"));
+        assert_eq!(const_arguments.len(), 1);
+        assert_eq!(const_arguments[0].position, 1);
+        assert!(matches!(
+            const_arguments[0].value,
+            ConstArgumentValueSyntax::U32 { value: 3, .. }
+        ));
+    }
 }
 
 /// Generalize immutable constructor values whose result has type parameters
