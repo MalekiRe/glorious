@@ -987,7 +987,7 @@ impl Encoder<'_> {
                 }
             }
             ExprKind::Primitive { primitive, args } => {
-                output.push(8);
+                output.push(9);
                 self.write_type(output, expression.ty)?;
                 push_u32(output, *primitive as u32);
                 push_u32(output, args.len().try_into().unwrap());

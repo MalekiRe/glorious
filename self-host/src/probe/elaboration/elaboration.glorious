@@ -1499,7 +1499,7 @@ write_computation_expression(
             )
         },
         CoreComputationView::Primitive(ty, primitive, operands) => {
-            ByteBuf::push(output, 8);
+            ByteBuf::push(output, 9);
             write_type_id(output, Id::to_u32(ty));
             ByteBuf::write_u32_le(output, primitive);
             ByteBuf::write_u32_le(
