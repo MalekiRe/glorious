@@ -128,29 +128,30 @@ fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
 // Rust bootstrap and self-host compiler must both report.
 fn corpus() -> Vec<&'static str> {
     vec![
-        // Accepted by both compilers: ordinary callable pipeline.
-        "identity(value: i64) -> i64 { value } main() { () }",
+        // Accepted by both compilers: ordinary callable pipeline.  These names
+        // deliberately avoid declarations injected by the bootstrap standard library.
+        "pipeline_identity(value: i64) -> i64 { value } main() { () }",
         // Accepted by both: local bindings and struct construction/projection.
-        "struct Pair { first: i64, second: i64 } \
-         struct_answer() -> i64 { \
+        "struct PipelinePair { first: i64, second: i64 } \
+         pipeline_struct_answer() -> i64 { \
              let value = 11; \
-             let pair = Pair { second: value, first: value }; \
+             let pair = PipelinePair { second: value, first: value }; \
              pair.first \
          } \
          main() { () }",
         // Accepted by both: enum variants and `handle` dispatch.
-        "enum Choice { Empty, Number(i64), Pair(i64, u64) } \
-         inspect_choice(choice: Choice) -> i64 { \
+        "enum PipelineChoice { Empty, Number(i64), Pair(i64, u64) } \
+         pipeline_inspect_choice(choice: PipelineChoice) -> i64 { \
              handle choice { \
-                 Choice::Empty => 3, \
-                 Choice::Number(value) => value, \
-                 Choice::Pair(first, _) => first \
+                 PipelineChoice::Empty => 3, \
+                 PipelineChoice::Number(value) => value, \
+                 PipelineChoice::Pair(first, _) => first \
              } \
          } \
-         matched_number() -> i64 { inspect_choice(Choice::Number(13)) } \
+         pipeline_matched_number() -> i64 { pipeline_inspect_choice(PipelineChoice::Number(13)) } \
          main() { () }",
         // Accepted by both: tuple construction and projection.
-        "first() -> i64 { let pair = (7, 9); pair.0 } main() { () }",
+        "pipeline_first() -> i64 { let pair = (7, 9); pair.0 } main() { () }",
         // Rejected by both: lexical analysis failure.
         "\"",
         // Rejected by both: declaration scanning failure.
