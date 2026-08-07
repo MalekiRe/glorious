@@ -158,6 +158,21 @@ fn corpus() -> Vec<&'static str> {
          pipeline_extract_binding(choice: PipelineBindingChoice) -> i64 { \
              handle choice { PipelineBindingChoice::Number(value) => { let copy = value; copy } } \
          } main() { () }",
+        // Accepted by both: Bool literals and Bool-typed nominal
+        // instantiation lower through the full pipeline (the focused-arena Bool
+        // scalar maps to its two-nullary-variant enum artifact).
+        "pipeline_true() -> Bool { true } main() { () }",
+        "pipeline_false() -> Bool { false } main() { () }",
+        "pipeline_result_bool() -> Result<Bool, u8> { Result::Ok(true) } main() { () }",
+        "enum PipelineToggle<T> { On, Off(T) } \
+         pipeline_generic_bool() -> PipelineToggle<Bool> { PipelineToggle::Off(true) } \
+         main() { () }",
+        "struct PipelineSlot<T> { value: T } \
+         pipeline_struct_bool() -> PipelineSlot<Bool> { PipelineSlot { value: true } } \
+         main() { () }",
+        "pipeline_true() -> Bool { true } \
+         pipeline_bool_passthrough(value: Bool) -> Bool { value } \
+         main() { () }",
         // Public qualified aliases remain visible outside their defining module.
         "mod pipeline_aliases { pub type Public = i64; } \
          pipeline_public_alias(value: pipeline_aliases::Public) -> pipeline_aliases::Public { value } \

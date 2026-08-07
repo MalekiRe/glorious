@@ -3392,6 +3392,37 @@ lower_computation<'a>(
                         fields
                     )
                 },
+                InterfaceTypeView::Scalar(kind) => if(kind ==
+                    wrapping_convert_to_u8(16)
+                ) {
+                    handle flavor {
+                        // Focused-arena Bool literals elaborate as a variant
+                        // construct over the Bool scalar marker (kind 16;
+                        // `Result<Unit, Unit>`: two nullary variants).
+                        ConstructionFlavor::Variant(ordinal) => {
+                            let registers = Vec::new();
+                            let target = alloc_register(value);
+                            emit_construct(
+                                value,
+                                target,
+                                handle mapped_artifact_type(
+                                    value.type_map, type_id
+                                ) {
+                                    None => unreachable(),
+                                    Option::Some(found) => found
+                                },
+                                Option::Some(ordinal),
+                                registers
+                            );
+                            Result::Ok(Option::Some(target))
+                        },
+                        ConstructionFlavor::Product => Result::Err(
+                            LoweringError::UnexpectedVariant(type_id, 0)
+                        )
+                    }
+                } else { Result::Err(
+                    LoweringError::InvalidConstructionType(type_id)
+                ) },
                 _ => Result::Err(
                     LoweringError::InvalidConstructionType(type_id)
                 )
