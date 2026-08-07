@@ -59,8 +59,10 @@ type MirTypeArena = lowering::MirTypes;
 // One session owns all cross-body semantic state. Body syntax and resolution
 // are deliberately absent: those live only in BodyCompilation and are released
 // immediately after the corresponding function is lowered.
-struct CompilerSession<'a> {
-    original: &'a String,
+struct CompilerSession {
+    // Own the augmented stream: parsed headers retain source references while
+    // lowering bodies, so the injected interface must live for the session.
+    original: String,
     headers: headers::ParsedHeaders,
     declarations: scanner::DeclarationIndex,
     resolution_index: resolution::ResolutionIndex,
@@ -118,7 +120,7 @@ compile_error_message(value: &CompileError) -> String {
 }
 
 function_name<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     shell: ShellId
 ) -> Result<String, CompileError> {
     handle scanner::shell_at(
@@ -358,7 +360,7 @@ runtime_host_named(
 }
 
 prepare_body<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     instance: CallableInstanceId
 ) -> Result<BodyCompilation, CompileError> {
     let callable = elaboration::callable_instance_callable(
@@ -376,7 +378,7 @@ prepare_body<'a>(
     let syntax = try(
         Result::map_err(
             bodies::parse_function_body(
-                session.original,
+                &session.original,
                 &session.headers,
                 &session.declarations,
                 shell
@@ -407,7 +409,7 @@ prepare_body<'a>(
 }
 
 lower_body<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -427,7 +429,7 @@ lower_body<'a>(
     let typed = try(
         Result::map_err(
             elaboration::elaborate_function_instance_body(
-                session.original,
+                &session.original,
                 &session.headers,
                 &session.declarations,
                 &mut session.interfaces,
@@ -459,7 +461,7 @@ lower_body<'a>(
 }
 
 lower_callable<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -546,7 +548,7 @@ lower_callable<'a>(
 }
 
 lower_functions<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -618,7 +620,7 @@ find_entry(
 }
 
 interface_name<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     raw: u32,
     kind: InterfaceNameKind,
     detail: u32
@@ -634,7 +636,7 @@ interface_name<'a>(
 }
 
 collect_struct_fields<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     start: u32,
     count: u32,
     ordinal: u32,
@@ -707,7 +709,7 @@ collect_variant_payloads<'a>(
 }
 
 collect_enum_variants<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     start: u32,
     count: u32,
     ordinal: u32,
@@ -755,7 +757,7 @@ collect_enum_variants<'a>(
 }
 
 collect_types<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     index: usize,
     output: &mut MirTypeArena,
     type_names: &mut Vec<String>
@@ -861,7 +863,7 @@ collect_types<'a>(
 }
 
 append_concrete_type_arguments<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     ty: elaboration::TypeId,
     output: &mut Formatter,
     ordinal: u32
@@ -899,7 +901,7 @@ append_concrete_type_arguments<'a>(
 }
 
 concrete_nominal_name<'a>(
-    session: &CompilerSession<'a>,
+    session: &CompilerSession,
     shell: ShellId,
     application: Option<elaboration::TypeId>
 ) -> Result<String, CompileError> {
@@ -919,7 +921,7 @@ concrete_nominal_name<'a>(
 }
 
 concrete_member_type<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     application: Option<elaboration::TypeId>,
     member: elaboration::TypeId
 ) -> elaboration::TypeId {
@@ -936,7 +938,7 @@ concrete_member_type<'a>(
 }
 
 lower_concrete_type_elements<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -970,7 +972,7 @@ lower_concrete_type_elements<'a>(
 }
 
 lower_concrete_struct_fields<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -1020,7 +1022,7 @@ lower_concrete_struct_fields<'a>(
 }
 
 lower_concrete_variant_payloads<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -1063,7 +1065,7 @@ lower_concrete_variant_payloads<'a>(
 }
 
 lower_concrete_enum_variants<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -1118,7 +1120,7 @@ lower_concrete_enum_variants<'a>(
 }
 
 lower_concrete_nominal<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -1194,7 +1196,7 @@ lower_concrete_nominal<'a>(
 }
 
 lower_concrete_type<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -1311,7 +1313,7 @@ lower_concrete_type<'a>(
 }
 
 lower_typed_body_types<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
@@ -1342,12 +1344,31 @@ lower_typed_body_types<'a>(
     Result::Ok(())
 }
 
-prepare_session<'a>(
-    original: &'a String
-) -> Result<CompilerSession<'a>, CompileError> {
+// `compile_source` receives a bare user stream, whereas the bootstrap
+// compiler compiles it through SourceBundle::distributed and therefore sees
+// the distributed Result declaration. Keep this deliberately small until the
+// self-host driver owns the complete standard-library bundle. Appending keeps
+// every user token (and hence every reported user token index) unchanged.
+minimal_interface_prelude(original: &String) -> String {
+    let output = ByteBuf::new();
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(original));
+    ByteBuf::append_bytes(
+        &mut output,
+        &String::as_bytes(&"\nenum Result<T, E> { Ok(T), Err(E) }\n")
+    );
+    handle String::from_utf8(ByteBuf::finish(output)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+prepare_session(
+    original: &String
+) -> Result<CompilerSession, CompileError> {
+    let original = minimal_interface_prelude(original);
     let source = try(
         Result::map_err(
-            lexer::lex(original),
+            lexer::lex(&original),
             { found => CompileError::Lex(found) }
         ),
         @prepare_session
@@ -1361,7 +1382,7 @@ prepare_session<'a>(
     );
     let parsed_headers = try(
         Result::map_err(
-            headers::parse(original, source, &declarations),
+            headers::parse(&original, source, &declarations),
             { found => CompileError::Headers(found) }
         ),
         @prepare_session
@@ -1396,7 +1417,7 @@ prepare_session<'a>(
 }
 
 seed_concrete_callables<'a>(
-    session: &mut CompilerSession<'a>,
+    session: &mut CompilerSession,
     index: usize
 ) {
     if(index < elaboration::interface_callable_count(&session.interfaces)) {
@@ -1424,7 +1445,7 @@ seed_concrete_callables<'a>(
 }
 
 compile_session<'a>(
-    session: CompilerSession<'a>
+    session: CompilerSession
 ) -> Result<Bytes, CompileError> {
     let functions = Arena::new();
     let types = lowering::mir_types();
