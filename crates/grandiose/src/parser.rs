@@ -1100,9 +1100,15 @@ impl Parser {
             } else {
                 Vec::new()
             };
+            let discriminant = if self.eat(&TokenKind::Eq) {
+                Some(self.const_expression()?)
+            } else {
+                None
+            };
             variants.push(VariantDecl {
                 name: variant,
                 fields,
+                discriminant,
                 span: variant_span,
             });
             self.eat(&TokenKind::Comma);

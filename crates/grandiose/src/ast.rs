@@ -602,6 +602,9 @@ pub struct EnumDecl {
 pub struct VariantDecl {
     pub name: String,
     pub fields: Vec<TypeSyntax>,
+    /// Explicit `= <const-expr>` variant discriminant, when declared. The
+    /// discriminant value becomes the variant's emitted runtime tag.
+    pub discriminant: Option<ConstExprSyntax>,
     pub span: Span,
 }
 

@@ -649,3 +649,32 @@ fn arbitrary_sources_never_hang_the_parser() {
         }
     }
 }
+
+#[test]
+fn enum_variants_accept_explicit_discriminants() {
+    let program = parse_ok("enum E { A = 1, B = 40 + 2, C, D(i64) = 7 }");
+    let variants = &program.enums[0].variants;
+    assert_eq!(variants.len(), 4);
+    // A carries an explicit literal discriminant.
+    let discriminant = variants[0]
+        .discriminant
+        .as_ref()
+        .expect("A declares an explicit discriminant");
+    assert_eq!(
+        discriminant.kind,
+        grandiose::ast::ConstExprSyntaxKind::U32(1)
+    );
+    // B carries an explicit const-expression discriminant.
+    assert!(matches!(
+        variants[1].discriminant.as_ref().unwrap().kind,
+        grandiose::ast::ConstExprSyntaxKind::Binary { .. }
+    ));
+    // C (and D by contrast) declare no discriminant; D keeps a payload.
+    assert!(variants[2].discriminant.is_none());
+    assert_eq!(variants[2].fields.len(), 0);
+    assert_eq!(variants[3].fields.len(), 1);
+    assert!(matches!(
+        variants[3].discriminant.as_ref().unwrap().kind,
+        grandiose::ast::ConstExprSyntaxKind::U32(7)
+    ));
+}

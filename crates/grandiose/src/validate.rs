@@ -105,6 +105,8 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
             ),
         }
     }
+    validate_enum_variant_discriminants(program, &mut errors);
+
     let mut generic_lists = Vec::new();
     generic_lists.extend(
         program
@@ -1352,6 +1354,31 @@ fn validate_effect_row_binder_positions(program: &Program, errors: &mut Vec<Diag
     }
     for declaration in &program.uses {
         reject(declaration.generics.as_ref(), "Use declarations");
+    }
+}
+
+fn validate_enum_variant_discriminants(program: &Program, errors: &mut Vec<Diagnostic>) {
+    // Explicit `= <const-expr>` variant discriminants are parsed and captured
+    // in the AST, but the emission path that turns them into explicit runtime
+    // tags is not yet implemented. Reject them here (rather than silently
+    // emitting implicit index tags) so the feature stays parity-correct while
+    // the emission phase lands.
+    for declaration in &program.enums {
+        for variant in &declaration.variants {
+            if let Some(discriminant) = &variant.discriminant {
+                errors.push(
+                    Diagnostic::error(
+                        "explicit variant discriminants are not yet emitted",
+                        format!(
+                            "variant `{}` declares an explicit `= <const-expr>` discriminant, but emission of explicit tags is not implemented yet",
+                            variant.name
+                        ),
+                        discriminant.span,
+                    )
+                    .with_help("remove the `= <const-expr>` discriminant until explicit-tag emission lands"),
+                );
+            }
+        }
     }
 }
 
