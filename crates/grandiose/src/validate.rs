@@ -1358,24 +1358,27 @@ fn validate_effect_row_binder_positions(program: &Program, errors: &mut Vec<Diag
 }
 
 fn validate_enum_variant_discriminants(program: &Program, errors: &mut Vec<Diagnostic>) {
-    // Explicit `= <const-expr>` variant discriminants are parsed and captured
-    // in the AST, but the emission path that turns them into explicit runtime
-    // tags is not yet implemented. Reject them here (rather than silently
-    // emitting implicit index tags) so the feature stays parity-correct while
-    // the emission phase lands.
+    // Explicit `= <const-expr>` variant discriminants are emitted as signed
+    // u32 runtime tags. `u32::MAX` is reserved as the wire-encoding
+    // no-discriminant sentinel, so a source discriminant equal to it must be
+    // rejected to keep the sentinel unambiguous.
     for declaration in &program.enums {
         for variant in &declaration.variants {
-            if let Some(discriminant) = &variant.discriminant {
+            if let Some(discriminant) = &variant.discriminant
+                && let Ok(crate::ast::EvaluatedConst::U32(value)) =
+                    crate::ast::evaluate_const_expression(discriminant, |_| None)
+                && value == u32::MAX
+            {
                 errors.push(
                     Diagnostic::error(
-                        "explicit variant discriminants are not yet emitted",
+                        "enum discriminant equal to the reserved tag sentinel",
                         format!(
-                            "variant `{}` declares an explicit `= <const-expr>` discriminant, but emission of explicit tags is not implemented yet",
+                            "variant `{}` declares discriminant `{value}`, which is reserved (u32::MAX) as the no-explicit-discriminant wire sentinel",
                             variant.name
                         ),
-                        discriminant.span,
+                        variant.span,
                     )
-                    .with_help("remove the `= <const-expr>` discriminant until explicit-tag emission lands"),
+                    .with_help("choose a discriminant other than `4294967295`"),
                 );
             }
         }

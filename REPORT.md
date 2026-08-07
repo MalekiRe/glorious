@@ -1,46 +1,51 @@
-# g6 enum const-discriminant emission — Phase 2 milestone
+
+# g6 enum const-discriminant emission — Phase 3+4 milestone
 
 ## Status
-Phase 2 (structural: thread the explicit tag into `Type::Enum EnumVariant(Option<u32>)`,
-and keep the serialized bytecode format in sync across the Rust encoder/decoder AND the
-self-host frontend emitter) is implemented and validated in the isolated worktree
-`/tmp/grandiose-g6-enum-emission` (branch `agent/g6-enum-emission`).
+Phases 3 and 4 implemented in the isolated worktree `/tmp/grandiose-g6-enum-emission`
+(branch `agent/g6-enum-emission`). Explicit `= <const-expr>` enum discriminants are now
+EMITTED end-to-end in both the bytecode/VM and LLVM/native backends, with real runtime tags.
 
-## What landed (Phase 2)
-- `crates/grandiose-vm/src/bytecode.rs`: `EnumVariant` gains `pub tag: Option<u32>` plus a
-  `discriminant(index) -> u32` helper (`tag.unwrap_or(index)`), preserving implicit-index
-  behavior for ordinary enums. The `Type::Enum` wire encoding now carries each variant's
-  emitted tag as a u32 (`u32::MAX` = no-discriminant sentinel, which the frontend will reject
-  as a source discriminant so it never collides); the decoder reads it back.
-- `crates/grandiose/src/compiler.rs`: new `enum_declaration_tags(&EnumDecl) -> Vec<Option<u32>>`
-  computes effective per-variant tags (C-style running discriminator for mixed enums; all-`None`
-  for enums with no explicit discriminant — ordinary enums untouched). The three
-  `Type::Enum` lowering sites (main nominal table, closure nominals, late/generic nominals)
-  now stamp the per-variant `tag`.
-- self-host frontend `self-host/src/backend/emission/emission.glorious`: `write_enum_variants`
-  now writes the discriminant u32 sentinel (`4294967295`) per variant, exactly matching the
-  Rust encoder so self-host-emitted artifacts still decode canonically. Self-host `MirVariant`
-  does not yet adopt explicit source discriminants (gate still fails closed), so the sentinel is
-  always written for the bubble's implicit enums.
-- The validate() fail-closed gate is UNTOUCHED in this phase (explicit discriminants still
-  rejected with the `explicit variant discriminants are not yet emitted` diagnostic).
+## What landed (Phases 3+4)
+- VM runtime (`crates/grandiose-vm/src/vm.rs`): EnumTag now reports the explicit
+  discriminant (`enum_variant_tag` translates the stored variant index -> discriminant
+  via the enum type's `EnumVariant.tag`). References unwrap to the referent enum.
+- Verifier (`crates/grandiose-vm/src/verify.rs`): enum-tag switch dominance now maps each
+  switch case constant (an emitted tag) back to the variant index via
+  `enum_tag_to_index`, and the default edge is the set of variant indices whose
+  discriminant was not covered.
+- Compiler (`crates/grandiose/src/compiler.rs`): MirLowerer carries `enum_variant_tags`
+  (built from the final artifact type table) and the three enum-pattern switch sites
+  (`emit_pattern_tests`, lower_borrowed_pattern_test, prove_enum_variant) now emit the
+  discriminant as the switch constant instead of the raw variant index.
+- Optimizer (`crates/grandiose/src/compiler_opt.rs`): `sparse_statement_value` folds an
+  EnumTag to the discriminant (not the index) using the enum type's tags, keeping sparse
+  constant propagation consistent with runtime.
+- LLVM/native (`crates/grandiose/src/llvm_backend.rs`): EnumTag emission maps the stored
+  index to the discriminant with a per-index select chain; ordinary enums (all implicit)
+  keep identity so native output is byte-identical to before.
+- validate.rs: the fail-closed `not yet emitted` gate is REMOVED; only a discriminant equal
+  to `u32::MAX` (the reserved wire sentinel) is rejected.
+- Tests: enum_discriminants.rs now has 5 positive/negative tests (real tags in the type,
+  dispatch on real tags A/B and a widely-spaced 4-variant enum, ordinary enums keep index
+  tags, mixed implicit/explicit continue the running discriminator, u32::MAX rejected);
+  llvm_backend.rs gains `native_explicit_enum_discriminants_dispatch_on_real_tags` proving
+  VM and native outputs agree on real-tag dispatch.
 
-## Evidence (all in the isolated worktree with the gated RAM tool)
-- `cargo build -p grandiose-vm` / `-p grandiose`: OK (ungated).
-- Gated `cargo test -p grandiose-vm --lib enum_`: 25 passed (includes new
-  `enum_variant_discriminant_respects_explicit_tags` and
-  `enum_explicit_tags_survive_encode_decode_roundtrip`).
-- Gated `cargo test -p grandiose --test enum_discriminants`: 2 passed (gate intact).
-- Gated `cargo test -p grandiose --test compiler -- --skip captureless_reference_callback_requires_a_direct_compatible_origin`:
-  205 passed / 2 failed. The 3 failures (incl. the skipped one) were confirmed PRE-EXISTING by
-  running the identical command on a pristine `origin/master` (4432bce) worktree — identical result.
-- Gated `cargo test -p grandiose --test type_syntax --test parser_conformance --test llvm_backend`:
-  only `retains_kinded_open_effect_row_tails` fails; confirmed PRE-EXISTING on master (unchanged).
-- Gated `G1_SELF_HOST_BYTECODE_CHECK_ONLY=1 cargo test -p grandiose --test self_host_bytecode
-  self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native`: PASSED (752s) —
-  the self-host bundle (including the edited emission.glorious) still compiles, encodes, and
-  round-trips through decode+verify.
+## Evidence (gated, isolated worktree)
+- `cargo test -p grandiose-vm --lib`: 371 passed.
+- `cargo test -p grandiose --test enum_discriminants`: 5 passed.
+- `cargo test -p grandiose --test llvm_backend`: 80 passed (incl. new native parity test).
+- `cargo test -p grandiose --test compiler -- --skip captureless_reference_callback_requires_a_direct_compatible_origin`:
+  205 passed / 2 failed — identical pre-existing failures confirmed on pristine master.
+- `cargo test -p grandiose --test optimizer_semantic_baseline --test optimizer_trace_equivalence`:
+  passed. `--lib`: 382 passed. `self_host_bytecode` (full, incl. native): 2 passed / 1 ignored
+  (validates the discriminant wire encoding + self-host emitter).
+- Positive native run: `native_explicit_enum_discriminants_dispatch_on_real_tags ... ok`.
 
-## Next
-Phase 3: make Switch + verifier dominance translate tag<->index and the VM EnumTag report the
-discriminant; Phase 4: LLVM/native parity + remove the fail-closed gate + positive parity test.
+## Known remaining follow-ups (not blocking Rust VM/LLVM parity)
+- The self-host frontend's `MirVariant` does not yet carry explicit tags, so the self-host
+  compiler would emit the no-discriminant sentinel for a user discriminant. This only
+  matters if a user feeds an explicit-discriminant program to the self-host compiler; the
+  Rust compiler path (VM + LLVM native) is fully correct. Upstreaming the tag into
+  self-host lowering is a natural next increment.

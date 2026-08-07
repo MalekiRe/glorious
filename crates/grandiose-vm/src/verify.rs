@@ -7,9 +7,10 @@ use std::{
 };
 
 use crate::bytecode::{
-    Artifact, Constant, DROP_HOOK, DecodedTables, EXPORTED, EncodedConstantPayload, Function,
-    HandlerClause, Instruction, NO_RETURN, PackedCode, Primitive, ReferenceReturnOrigin, Signature,
-    Type, TypeId, U32, UNIT, construction_field_types, primitive_signature, projection_field_type,
+    Artifact, Constant, DROP_HOOK, DecodedTables, EXPORTED, EncodedConstantPayload, EnumVariant,
+    Function, HandlerClause, Instruction, NO_RETURN, PackedCode, Primitive, ReferenceReturnOrigin,
+    Signature, Type, TypeId, U32, UNIT, construction_field_types, primitive_signature,
+    projection_field_type,
 };
 
 /// Immutable, verifier-produced indexes used by the interpreter.
@@ -8024,6 +8025,19 @@ type EnumDominance = (
     Vec<std::collections::BTreeSet<u32>>,
 );
 
+
+/// Translate an emitted runtime tag (discriminant) back to the variant index it
+/// denotes for the given enum's variant list. `EnumVariant.discriminant(index)`
+/// is the source of truth: an explicit discriminant maps the tag to its
+/// declaration order, otherwise the tag is the variant's own index.
+fn enum_tag_to_index(variants: &[EnumVariant], tag: u32) -> Option<u32> {
+    variants
+        .iter()
+        .enumerate()
+        .find(|(index, variant)| variant.discriminant(*index as u32) == tag)
+        .map(|(index, _)| index as u32)
+}
+
 fn verify_enum_dominance(
     a: &Artifact,
     fid: u32,
@@ -8136,10 +8150,29 @@ fn verify_enum_dominance(
                     continue_enum_successors(&mut states, &mut work, successors);
                     continue;
                 }
+                let origin = origin.expect("None handled above");
+                // The origin register's enum type is authoritative for mapping a
+                // Switch case constant (an emitted runtime tag / discriminant)
+                // back to the variant index the verifier uses for field layout.
+                let origin_type = type_at(a, f.register_types[origin as usize])?;
+                let origin_type = match origin_type {
+                    Type::RefShared { referent } | Type::RefUnique { referent } => {
+                        type_at(a, *referent)?
+                    }
+                    origin_type => origin_type,
+                };
+                let Type::Enum { variants, .. } = origin_type else {
+                    return Err(VerifyError::InvalidAggregate {
+                        function: fid,
+                        instruction: pc,
+                    });
+                };
                 let mut seen = std::collections::BTreeSet::new();
                 for &(constant, target) in cases {
                     let variant = match a.constants.get(constant as usize) {
-                        Some(Constant::U32(variant)) if seen.insert(*variant) => *variant,
+                        Some(Constant::U32(tag)) if seen.insert(*tag) => {
+                            enum_tag_to_index(variants, *tag)
+                        }
                         _ => {
                             return Err(VerifyError::InvalidAggregate {
                                 function: fid,
@@ -8147,56 +8180,23 @@ fn verify_enum_dominance(
                             });
                         }
                     };
+                    let Some(variant) = variant else {
+                        return Err(VerifyError::InvalidAggregate {
+                            function: fid,
+                            instruction: pc,
+                        });
+                    };
                     let mut edge = state.clone();
-                    if let Some(origin) = origin {
-                        let origin_type = type_at(a, f.register_types[origin as usize])?;
-                        let origin_type = match origin_type {
-                            Type::RefShared { referent } | Type::RefUnique { referent } => {
-                                type_at(a, *referent)?
-                            }
-                            origin_type => origin_type,
-                        };
-                        let Type::Enum { variants, .. } = origin_type else {
-                            return Err(VerifyError::InvalidAggregate {
-                                function: fid,
-                                instruction: pc,
-                            });
-                        };
-                        if variant as usize >= variants.len() {
-                            return Err(VerifyError::InvalidAggregate {
-                                function: fid,
-                                instruction: pc,
-                            });
-                        }
-                        edge.variants[origin as usize] = Some(variant);
-                    }
+                    edge.variants[origin as usize] = Some(variant);
                     successors.push((target, edge));
                 }
-                let mut default = state.clone();
-                let mut default_reachable = true;
-                if let Some(origin) = origin
-                    && let origin_type = type_at(a, f.register_types[origin as usize])?
-                {
-                    let origin_type = match origin_type {
-                        Type::RefShared { referent } | Type::RefUnique { referent } => {
-                            type_at(a, *referent)?
-                        }
-                        origin_type => origin_type,
-                    };
-                    let Type::Enum { variants, .. } = origin_type else {
-                        successors.push((*otherwise, default));
-                        reachable_successors[pc as usize]
-                            .extend(successors.iter().map(|(target, _)| *target));
-                        continue_enum_successors(&mut states, &mut work, successors);
-                        continue;
-                    };
-                    let remaining = (0..variants.len() as u32)
-                        .filter(|variant| !seen.contains(variant))
-                        .collect::<Vec<_>>();
-                    default_reachable = !remaining.is_empty();
-                    default.variants[origin as usize] =
-                        (remaining.len() == 1).then(|| remaining[0]);
-                }
+                let default = state.clone();
+                let remaining = (0..variants.len() as u32)
+                    .filter(|variant| !seen.contains(&variants[*variant as usize].discriminant(*variant)))
+                    .collect::<Vec<_>>();
+                let default_reachable = !remaining.is_empty();
+                let mut default = default;
+                default.variants[origin as usize] = (remaining.len() == 1).then(|| remaining[0]);
                 if default_reachable {
                     successors.push((*otherwise, default));
                 }

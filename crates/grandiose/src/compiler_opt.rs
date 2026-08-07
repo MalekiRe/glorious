@@ -4175,6 +4175,7 @@ fn sparse_statement_value(
     facts: &[SparseConstant],
     variants: &[SparseVariant],
     register_types: &[TypeId],
+    types: &[Type],
 ) -> SparseConstant {
     match statement {
         InstructionKind::Const { value, .. } => SparseConstant::Constant(value.clone()),
@@ -4216,7 +4217,22 @@ fn sparse_statement_value(
             .unwrap_or(SparseConstant::Overdefined)
         }
         InstructionKind::EnumTag { src, .. } => match variants[*src as usize] {
-            SparseVariant::Variant(variant) => SparseConstant::Constant(Constant::U32(variant)),
+            SparseVariant::Variant(variant) => {
+                // The runtime tag is the variant's explicit discriminant when
+                // one is declared, else its index. Fold to the discriminant so
+                // sparse constant propagation matches runtime EnumTag output.
+                let discriminant = types
+                    .get(register_types[*src as usize] as usize)
+                    .map(Type::representation)
+                    .and_then(|ty| match ty {
+                        Type::Enum { variants, .. } => variants
+                            .get(variant as usize)
+                            .map(|declared| declared.discriminant(variant)),
+                        _ => None,
+                    })
+                    .unwrap_or(variant);
+                SparseConstant::Constant(Constant::U32(discriminant))
+            }
             SparseVariant::Unknown => SparseConstant::Unknown,
             SparseVariant::Overdefined => SparseConstant::Overdefined,
         },
@@ -4593,7 +4609,13 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
                 continue;
             }
             let incoming =
-                sparse_statement_value(&statement.kind, &facts, &variants, &scratch.register_types);
+                sparse_statement_value(
+                    &statement.kind,
+                    &facts,
+                    &variants,
+                    &scratch.register_types,
+                    types,
+                );
             let constant_changed =
                 merge_sparse_constant(&mut facts[destination as usize], incoming);
             let incoming_variant = sparse_statement_variant(&statement.kind, &variants);

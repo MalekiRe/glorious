@@ -5516,7 +5516,7 @@ impl<'a> Emitter<'a> {
                 }
                 let aggregate_ty = self.llvm_type(aggregate_id)?;
                 let aggregate = self.load_register(function, *src)?;
-                let tag = if through_reference {
+                let raw = if through_reference {
                     let address = self.temp();
                     self.line(&format!(
                         "  %{address} = getelementptr inbounds {aggregate_ty}, ptr {aggregate}, i32 0, i32 0"
@@ -5531,8 +5531,49 @@ impl<'a> Emitter<'a> {
                     ));
                     tag
                 };
+                // The stored tag is the variant's position; map it to the
+                // explicit `= <const-expr>` discriminant when the enum declares
+                // one (identity for ordinary enums so native output is
+                // unchanged). This selects the discriminant per variant index.
+                // Owned (index, discriminant) pairs so we can call mutable
+                // `self.*` while iterating (the `runtime_type` borrow ends).
+                let discriminants = match self.runtime_type(aggregate_id)?
+                {
+                    Type::Enum { variants, .. } => variants
+                        .iter()
+                        .enumerate()
+                        .map(|(index, variant)| (index as u32, variant.discriminant(index as u32)))
+                        .collect::<Vec<(u32, u32)>>(),
+                    _ => {
+                        return Err(vec![unsupported(function, "tag read from a non-enum")]);
+                    }
+                };
+                let needs_explicit = discriminants
+                    .iter()
+                    .any(|(index, discriminant)| *discriminant != *index);
+                let tag = if needs_explicit {
+                    let mut expression = format!(
+                        "{}",
+                        discriminants
+                            .last()
+                            .map(|(_, discriminant)| *discriminant)
+                            .unwrap_or(0)
+                    );
+                    for &(index, discriminant) in discriminants.iter().rev().skip(1) {
+                        let cmp = self.temp();
+                        self.line(&format!("  %{cmp} = icmp eq i32 %{raw}, {index}"));
+                        let selected = self.temp();
+                        self.line(&format!(
+                            "  %{selected} = select i1 %{cmp}, i32 {discriminant}, i32 {expression}"
+                        ));
+                        expression = format!("%{selected}");
+                    }
+                    expression
+                } else {
+                    format!("%{raw}")
+                };
                 let dst_ty = self.register_type(function, *dst)?;
-                self.line(&format!("  store {dst_ty} %{tag}, ptr %r{dst}"));
+                self.line(&format!("  store {dst_ty} {tag}, ptr %r{dst}"));
             }
             InstructionKind::Primitive {
                 dst,

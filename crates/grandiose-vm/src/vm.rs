@@ -1000,7 +1000,7 @@ impl Vm {
                 }
                 Instruction::EnumTag { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let tag = match get(frame, src)? {
+                    let raw = match get(frame, src)? {
                         Value::Aggregate(aggregate) => aggregate
                             .borrow()
                             .variant
@@ -1008,6 +1008,10 @@ impl Vm {
                         Value::Reference { target, .. } => reference_target_enum_tag(&target)?,
                         _ => return Err(RuntimeError::TypeConfusion),
                     };
+                    // The stored aggregate tag is the variant's position; the
+                    // emitted runtime tag is the explicit discriminant when the
+                    // variant declares one, else its index.
+                    let tag = enum_variant_tag(a, fun.register_types[src as usize], raw)?;
                     put(frame, dst, Value::U64(u64::from(tag)))?;
                     frame.pc += 1;
                 }
@@ -2474,6 +2478,37 @@ fn observe_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeEr
         Ok(value)
     } else {
         Err(RuntimeError::TypeConfusion)
+    }
+}
+
+/// The emitted runtime tag (discriminant) for the enum variant at
+/// `variant_index` in the enum type `ty` (which may be a reference wrapper).
+/// An explicit `EnumVariant.tag` overrides the index-derived tag; unwrapping a
+/// reference keeps the referent enum's discriminant set authoritative.
+fn enum_variant_tag(
+    a: &ExecutionImage,
+    ty: TypeId,
+    variant_index: u32,
+) -> Result<u32, RuntimeError> {
+    fn resolve(t: &Type, variant_index: u32) -> Result<u32, RuntimeError> {
+        let Type::Enum { variants, .. } = t else {
+            return Err(RuntimeError::TypeConfusion);
+        };
+        variants
+            .get(variant_index as usize)
+            .map(|variant| variant.discriminant(variant_index))
+            .ok_or(RuntimeError::TypeConfusion)
+    }
+    match a.checked_type(ty).map(Type::representation) {
+        Some(Type::RefShared { referent }) | Some(Type::RefUnique { referent }) => {
+            let referent = a
+                .checked_type(*referent)
+                .map(Type::representation)
+                .ok_or(RuntimeError::TypeConfusion)?;
+            resolve(referent, variant_index)
+        }
+        Some(other) => resolve(other, variant_index),
+        None => Err(RuntimeError::TypeConfusion),
     }
 }
 

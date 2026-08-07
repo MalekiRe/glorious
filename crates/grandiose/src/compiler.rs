@@ -46460,6 +46460,12 @@ struct MirLowerer {
     /// drop glue in an owned child. These are optimizer-observable even when
     /// the outer aggregate has no direct hook.
     custom_drop_types: BTreeSet<TypeId>,
+    /// Per nominal enum TypeId, the effective emitted runtime tag of each
+    /// variant (`Option<u32>`; `None` = index-derived). Populated from the
+    /// final artifact type table so enum pattern switches discriminate on the
+    /// explicit `= <const-expr>` discriminant rather than the raw variant
+    /// index. Ordinary enums (all `None`) keep index tags, untouched.
+    enum_variant_tags: BTreeMap<TypeId, Vec<Option<u32>>>,
     callable_outward_protocols: BTreeMap<TypeId, Vec<u32>>,
     /// Live loan identity per reference register, tracked at issue time so
     /// reborrows and chained projections record their parent loans.
@@ -47114,6 +47120,17 @@ impl MirLowerer {
                 })
                 .collect(),
             custom_drop_types: custom_drop_types.clone(),
+            enum_variant_tags: types
+                .iter()
+                .enumerate()
+                .filter_map(|(id, descriptor)| match descriptor.representation() {
+                    Type::Enum { variants, .. } => Some((
+                        id as TypeId,
+                        variants.iter().map(|variant| variant.tag).collect(),
+                    )),
+                    _ => None,
+                })
+                .collect(),
             callable_outward_protocols: types
                 .iter()
                 .enumerate()
@@ -48212,10 +48229,18 @@ impl MirLowerer {
         }
     }
 
-    /// Branch on one exact discriminant value and retire the temporary on
-    /// both outgoing paths. Pattern lowering uses this shape for literal,
-    /// enum-tag, and refinement decisions; keeping it here makes the CFG and
-    /// ownership cleanup an atomic lowering operation.
+    /// The emitted runtime tag of the enum variant at `variant_index` in the
+    /// enum type `ty`. An explicit discriminant overrides the index-derived
+    /// tag; ordinary enums (no discriminant) resolve to the index.
+    fn variant_discriminant(&self, ty: TypeId, variant_index: u32) -> u32 {
+        self.enum_variant_tags
+            .get(&ty)
+            .and_then(|tags| tags.get(variant_index as usize))
+            .copied()
+            .flatten()
+            .unwrap_or(variant_index)
+    }
+
     fn switch_and_destroy(
         &mut self,
         discr: u32,
@@ -49362,7 +49387,13 @@ impl MirLowerer {
                 self.close_pattern_path(shells, pattern.span);
                 failures.push((failure, owner_history.to_vec()));
                 let next = self.label();
-                self.switch_and_destroy(tag, Constant::U32(*variant), next, failure, pattern.span);
+                self.switch_and_destroy(
+    tag,
+    Constant::U32(self.variant_discriminant(pattern.ty, *variant)),
+    next,
+    failure,
+    pattern.span,
+);
                 self.mark(next, pattern.span);
                 for (field, child) in fields.iter().enumerate() {
                     path.push(PatternPathStep {
@@ -49526,7 +49557,7 @@ impl MirLowerer {
                 let join = self.label();
                 self.switch_and_destroy(
                     tag,
-                    Constant::U32(*variant),
+                    Constant::U32(self.variant_discriminant(pattern.ty, *variant)),
                     matched_block,
                     unmatched_block,
                     span,
@@ -49807,6 +49838,7 @@ impl MirLowerer {
     /// pattern test produces a Boolean and intentionally does not leak its
     /// tag fact through that join.
     fn prove_enum_variant(&mut self, source: u32, variant: u32, span: Span) {
+        let discriminant = self.variant_discriminant(self.register_types[source as usize], variant);
         let tag = self.allocate(U32);
         self.push(
             span,
@@ -49820,7 +49852,7 @@ impl MirLowerer {
         self.terminate(mir::Terminator::Switch {
             discr: Self::operand(tag, mir::UseMode::Copy),
             cases: vec![(
-                Constant::U32(variant),
+                Constant::U32(discriminant),
                 mir::Edge {
                     target: proven,
                     args: vec![],

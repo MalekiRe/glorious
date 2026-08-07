@@ -75,6 +75,45 @@ fn native_block_edge_rebases_projected_reference_with_moved_owner() {
 }
 
 #[test]
+fn native_explicit_enum_discriminants_dispatch_on_real_tags() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-explicit-enum-discriminants.glorious",
+        r#"
+            enum E { A = 1, B = 5 }
+            selected() -> i64 { match E::B { E::A => 10, E::B => 20 } }
+            again() -> i64 { match E::A { E::A => 10, E::B => 20 } }
+            main() -> () { selected(); again(); () }
+        "#,
+        grandiose::CompileOptions::default(),
+    )
+    .unwrap_or_else(|errors| panic!("{errors:#?}"));
+    // VM agrees on the real tag dispatch.
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|f| f.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(20)
+    );
+    // Native/LLVM must emit the real discriminant tags and dispatch identically.
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|f| f.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, llvm_function, 20, "llvm-explicit-enum-discriminants");
+}
+
+#[test]
 fn native_effect_edge_rebases_projected_reference_with_moved_owner() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-effect-edge-project-reference.glorious",
