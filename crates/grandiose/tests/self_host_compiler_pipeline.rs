@@ -199,7 +199,6 @@ fn corpus() -> Vec<&'static str> {
 }
 
 #[test]
-#[ignore = "baseline-blocked: the full self-host compiler bundle is not yet green under the RAM gate; kept as a future compiler-pipeline parity gate"]
 fn self_hosted_compiler_pipeline_accept_reject_matches_rust_in_vm() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
@@ -250,7 +249,6 @@ fn self_hosted_compiler_pipeline_accept_reject_matches_rust_in_vm() {
 // the same source-level availability as the bootstrap's distributed bundle,
 // while an arbitrary missing nominal must still be rejected.
 #[test]
-#[ignore = "baseline-blocked: run through the full self-host compiler RAM gate"]
 fn self_hosted_compiler_pipeline_result_prelude_does_not_mask_unknown_names() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
