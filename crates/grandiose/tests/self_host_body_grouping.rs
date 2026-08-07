@@ -1316,7 +1316,7 @@ fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_
             for (index, path) in corpus.iter().enumerate() {
                 let vm_one_path = directory.path().join(format!("vm-{index}.bin"));
                 let vm = Vm::with_host(
-                    verified.clone(),
+                    verify(phases.artifact.clone()).unwrap(),
                     ["process.args", "fs.read", "fs.write", "diagnostic"],
                     SystemHost::new(vec![
                         vm_one_path.clone().into_os_string(),
@@ -2131,6 +2131,85 @@ fn self_host_body_surface_call_redesign_matches_bootstrap_ast() {
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
             let corpus = surface_call_redesign_body_corpus(directory.path());
+            let mut expected = Vec::new();
+            push_u32(&mut expected, corpus.len().try_into().unwrap());
+            for path in &corpus {
+                encode_rust_grouping(&mut expected, &fs::read_to_string(path).unwrap());
+            }
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+            let output_path = directory.path().join("output.bin");
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(
+                    std::iter::once(output_path.clone().into_os_string())
+                        .chain(corpus.iter().map(|path| path.clone().into_os_string()))
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output_path).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Ports the body-parity core of the native `surface_simplifications`
+/// corpus (syntax_frontend family) that the shared parse oracle accepts on
+/// both sides. The self-host body parser reproduces the Rust bootstrap
+/// parser's grouped AST and exact spans for nested-call/struct-projection
+/// bodies and for loop-combinator bodies with closures, labels, `break`, and
+/// `continue`.
+fn surface_simplifications_body_corpus(directory: &Path) -> Vec<PathBuf> {
+    let focused = [
+        // owned_values_move_implicitly_without_surface_move_noise
+        r#"struct Token { value: i64 }
+        unwrap(token: Token) -> i64 { token.value }
+        answer() -> i64 {
+            let token = Token { value: 42 };
+            unwrap(token)
+        }
+        main() -> { () }"#,
+        // source_defined_loop_combinators_handle_break_and_continue
+        r#"answer() -> i64 {
+            while({ => 0 });
+            until({ => 0 });
+            @outer: { loop({ => { break() } }) };
+            times(3, { => { continue() } });
+            times(10, { => { break() } });
+            42
+        }
+        main() -> { () }"#,
+    ];
+    focused
+        .into_iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let path = directory.join(format!("surface-simplifications-{index}.glorious"));
+            fs::write(&path, source).unwrap();
+            path
+        })
+        .collect()
+}
+
+#[test]
+fn self_host_body_surface_simplifications_matches_bootstrap_ast() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let corpus = surface_simplifications_body_corpus(directory.path());
             let mut expected = Vec::new();
             push_u32(&mut expected, corpus.len().try_into().unwrap());
             for path in &corpus {
