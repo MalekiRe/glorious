@@ -11025,6 +11025,22 @@ struct WholeProgramPassTables<'a> {
     handler_defs: &'a [HandlerDef],
 }
 
+/// Whether a whole-program pass mutated the MIR-relevant part of a function
+/// (the pieces the ownership/cleanup analyses read). ``flow`` is deliberately
+/// excluded: untouched bodies carry their still-valid facts forward verbatim,
+/// and touched bodies are invalidated by this predicate so the next refresh
+/// re-derives their flow.
+fn body_mutated_since(after: &Function, before: &Function) -> bool {
+    after.blocks != before.blocks
+        || after.register_types != before.register_types
+        || after.entry != before.entry
+        || after.params != before.params
+        || after.result != before.result
+        || after.no_return != before.no_return
+        || after.receiver_mode != before.receiver_mode
+        || after.receiver_type != before.receiver_type
+}
+
 fn run_transactional_whole_program_pass(
     program: &mut Program,
     pass: PassId,
@@ -11033,6 +11049,18 @@ fn run_transactional_whole_program_pass(
     global_remaining: &mut u64,
     inline_policy: &mut InlinePolicyState,
 ) -> PassReport {
+    // Whole-program scratch passes commit a full program swap
+    // (``*program = scratch``) and cannot report per-body change sets. Diff
+    // the committed bodies against this pre-pass clone so only functions
+    // whose MIR actually changed are invalidated; untouched bodies keep their
+    // (still-valid) ownership facts and skip the next refresh re-solve
+    // entirely. Only whole-program-scope passes clone (the others invalidate
+    // per body as they commit), so gate the clone on the pass scope.
+    let before = if pass_contract(pass).scope == InvalidationScope::WholeProgram {
+        Some(program.clone())
+    } else {
+        None
+    };
     let (outcome, work_units) = match pass {
         PassId::ScalarizeCallables => scalarize_callables(program, tables.types, *global_remaining),
         PassId::SpecializeControl => specialize_static_handlers(
@@ -11055,8 +11083,15 @@ fn run_transactional_whole_program_pass(
         let contract = pass_contract(pass);
         match contract.scope {
             InvalidationScope::WholeProgram => {
-                for function in &mut program.functions {
-                    function.invalid_analyses |= contract.invalidates;
+                let before = before.expect("whole-program clone prepared above");
+                for (after, before_function) in program
+                    .functions
+                    .iter_mut()
+                    .zip(&before.functions)
+                {
+                    if body_mutated_since(after, before_function) {
+                        after.invalid_analyses |= contract.invalidates;
+                    }
                 }
             }
             InvalidationScope::ChangedBodies => {
