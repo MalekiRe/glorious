@@ -246,6 +246,7 @@ struct VmHotFunctions {
 
 impl VmHotFunctions {
     fn from_env(function_count: usize) -> Option<Self> {
+        let function_count = function_count;
         let sample_interval = std::env::var("G1_VM_HOT_FUNCTION_SAMPLE_STEPS")
             .ok()?
             .parse::<u64>()
@@ -266,7 +267,7 @@ impl VmHotFunctions {
         })
     }
 
-    fn observe(&mut self, function: u32) {
+    fn observe(&mut self, function: u32, a: &ExecutionImage) {
         self.steps = self.steps.saturating_add(1);
         if self.sample_countdown == 0 {
             self.sample_countdown = self.sample_interval.saturating_sub(1);
@@ -294,7 +295,15 @@ impl VmHotFunctions {
             .into_iter()
             .take(16)
             .map(|(function, count)| {
-                format!("f{function}={:.2}%", count as f64 * 100.0 / total as f64)
+                let name = a
+                    .functions
+                    .get(function)
+                    .map(|function| function.name.as_str())
+                    .unwrap_or("<unknown>");
+                format!(
+                    "f{function}={name}={:.2}%",
+                    count as f64 * 100.0 / total as f64
+                )
             })
             .collect::<Vec<_>>()
             .join(",");
@@ -820,7 +829,7 @@ impl Vm {
             }
             let frame = stack.last_mut().expect("execution stack cannot be empty");
             if let Some(profile) = &mut hot_functions {
-                profile.observe(frame.function);
+                profile.observe(frame.function, a);
             }
             let (fun, decoded) = match cached_function {
                 Some((cached_id, fun, decoded)) if cached_id == frame.function => (fun, decoded),
@@ -837,7 +846,11 @@ impl Vm {
             if frame.pc >= fun.code_len {
                 return Err(RuntimeError::TypeConfusion);
             }
-            let ins = &decoded[frame.pc as usize];
+            // SAFETY: `frame.pc < fun.code_len == decoded.len()` was checked
+            // above, and `decoded` is this function's immutable, verifier-built
+            // instruction slice indexed by its function-local pc.
+            let ins =
+                unsafe { decoded.get_unchecked(frame.pc as usize) };
             if instruction_profile_enabled {
                 instruction_profile.as_mut().unwrap().observe(ins);
             }
@@ -880,8 +893,7 @@ impl Vm {
                 }
                 Instruction::Copy { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let value = get(frame, src)?;
-                    let v = copy_value(a, fun.register_types[src as usize], &value)?;
+                    let v = copy_register(a, frame, src, fun.register_types[src as usize])?;
                     put(frame, dst, v)?;
                     frame.pc += 1;
                 }
@@ -2490,6 +2502,7 @@ impl Vm {
         Ok(())
     }
 }
+#[inline(always)]
 fn take(f: &mut Frame, r: u32) -> Result<Value, RuntimeError> {
     let value = f.registers[r as usize]
         .take()
@@ -2522,6 +2535,7 @@ fn runtime_value_kind(value: &Value) -> &'static str {
         Value::Resumption(_) => "resumption",
     }
 }
+#[inline(always)]
 fn get(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
     let value = f.registers[r as usize]
         .as_ref()
@@ -2531,6 +2545,7 @@ fn get(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
         value => Ok(value.clone()),
     }
 }
+#[inline(always)]
 fn put(f: &mut Frame, r: u32, v: Value) -> Result<(), RuntimeError> {
     if f.registers[r as usize].replace(v).is_some() {
         Err(RuntimeError::TypeConfusion)
@@ -3045,6 +3060,26 @@ fn owned_callable_receiver(
         _ => return Err(RuntimeError::TypeConfusion),
     };
     Ok((function, receiver))
+}
+
+/// Copy a register's value into an owned register value in exactly one deep
+/// pass. The prior generic path cloned the register value (via `get`) and then
+/// deep-copied that clone again (via `copy_value`), allocating the payload twice
+/// for `Text`/`Bytes`/aggregate values. Reading the register in place and
+/// running `copy_value` once is observationally identical: both produce the same
+/// owned deep copy, and the discarded intermediate clone was never observable.
+#[inline(always)]
+fn copy_register(a: &ExecutionImage, f: &Frame, r: u32, ty: TypeId) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => {
+            let stored = slot.get().map_err(|_| RuntimeError::EmptyRegister(r))?;
+            copy_value(a, ty, &stored)
+        }
+        value => copy_value(a, ty, value),
+    }
 }
 
 fn copy_value(a: &ExecutionImage, ty: TypeId, value: &Value) -> Result<Value, RuntimeError> {
