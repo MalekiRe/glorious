@@ -56841,6 +56841,12 @@ fn cross_validate_cleanup_maps(
             }
         }
         let map = pc_maps.get(fid).and_then(|map| map.as_ref());
+        // Cleanup plans are serialized in (function, first_instruction)
+        // order and program counters advance monotonically within a
+        // function, so a single forward cursor locates the plan covering
+        // each instruction in amortized linear time instead of scanning the
+        // whole plan table per instruction (quadratic on large programs).
+        let mut plan_cursor = 0usize;
         let mut offset = 0_u32;
         for block in &function.blocks {
             let points = lists.get(&block.id);
@@ -56860,16 +56866,21 @@ fn cross_validate_cleanup_maps(
                     let pc = map
                         .and_then(|map| map.ordinals.get(old_pc as usize).copied())
                         .unwrap_or(old_pc);
-                    let actual = artifact
-                        .cleanups
-                        .iter()
-                        .find(|plan| {
-                            plan.function == fid as u32
-                                && plan.first_instruction <= pc
-                                && pc < plan.end_instruction
-                        })
-                        .map(|plan| plan.registers.as_slice())
-                        .unwrap_or(&[]);
+                    while plan_cursor < artifact.cleanups.len()
+                        && (artifact.cleanups[plan_cursor].function < fid as u32
+                            || artifact.cleanups[plan_cursor].end_instruction <= pc)
+                    {
+                        plan_cursor += 1;
+                    }
+                    let actual = if plan_cursor < artifact.cleanups.len()
+                        && artifact.cleanups[plan_cursor].function == fid as u32
+                        && artifact.cleanups[plan_cursor].first_instruction <= pc
+                        && pc < artifact.cleanups[plan_cursor].end_instruction
+                    {
+                        artifact.cleanups[plan_cursor].registers.as_slice()
+                    } else {
+                        &[]
+                    };
                     let relocated_pc = |old_pc: u32| {
                         map.and_then(|map| map.ordinals.get(old_pc as usize).copied())
                             .unwrap_or(old_pc)
