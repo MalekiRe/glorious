@@ -1266,22 +1266,22 @@ impl Vm {
                     args,
                 } => {
                     let (dst, function) = (*dst, *function);
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let callee =
+                        make_callee_frame_from_registers(a, function, args, Value::Unit, dst, frame)?;
                     frame.pc += 1;
-                    stack.push(make_verified_frame(a, function, values, Value::Unit, dst)?);
+                    stack.push(callee);
                 }
                 Instruction::TailCall { function, args } => {
                     let function = *function;
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, Value::Unit, return_dst)?;
+                    let mut replacement = make_callee_frame_from_registers(
+                        a,
+                        function,
+                        args,
+                        Value::Unit,
+                        return_dst,
+                        frame,
+                    )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -1295,28 +1295,28 @@ impl Vm {
                     if !matches!(fun.receiver_mode, Some(0 | 1)) {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let receiver = get(frame, 0)?.clone();
                     let function = frame.function;
+                    let receiver = get(frame, 0)?.clone();
+                    let callee =
+                        make_callee_frame_from_registers(a, function, args, receiver, dst, frame)?;
                     frame.pc += 1;
-                    stack.push(make_verified_frame(a, function, values, receiver, dst)?);
+                    stack.push(callee);
                 }
                 Instruction::TailCallSelf { args } => {
                     if fun.receiver_mode.is_none() {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let receiver = take(frame, 0)?;
                     let function = frame.function;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement = make_callee_frame_from_registers(
+                        a,
+                        function,
+                        args,
+                        receiver,
+                        return_dst,
+                        frame,
+                    )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -1340,12 +1340,16 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     }
                     let receiver = get(frame, receiver)?.clone();
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let callee = make_callee_frame_from_registers(
+                        a,
+                        function,
+                        args,
+                        receiver,
+                        dst,
+                        frame,
+                    )?;
                     frame.pc += 1;
-                    stack.push(make_verified_frame(a, function, values, receiver, dst)?);
+                    stack.push(callee);
                 }
                 Instruction::TailCallKnownReceiver {
                     function,
@@ -1361,13 +1365,15 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     }
                     let receiver = get(frame, receiver)?.clone();
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement = make_callee_frame_from_registers(
+                        a,
+                        function,
+                        args,
+                        receiver,
+                        return_dst,
+                        frame,
+                    )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -1550,12 +1556,9 @@ impl Vm {
                     let (dst, callable, receiver_mode) = (*dst, *callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
-                    let values = args
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut callee =
+                        make_callee_frame_from_registers(a, function, args, receiver, dst, frame)?;
                     frame.pc += 1;
-                    let mut callee = make_verified_frame(a, function, values, receiver, dst)?;
                     if let Some(guard) = guard {
                         callee.guards.push(guard);
                     }
@@ -1569,13 +1572,15 @@ impl Vm {
                     let (callable, receiver_mode) = (*callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
-                    let values = args
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement = make_callee_frame_from_registers(
+                        a,
+                        function,
+                        args,
+                        receiver,
+                        return_dst,
+                        frame,
+                    )?;
                     if let Some(guard) = guard {
                         replacement.guards.push(guard);
                     }
@@ -1597,13 +1602,9 @@ impl Vm {
                     let handler = take(frame, handler)?;
                     let body = take(frame, body)?;
                     let (function, receiver) = owned_callable_receiver(a, body, 2)?;
-                    let values = args
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    frame.pc += 1;
                     let mut body_frame =
-                        make_verified_frame(a, function, values, receiver, Some(dst))?;
+                        make_callee_frame_from_registers(a, function, args, receiver, Some(dst), frame)?;
+                    frame.pc += 1;
                     body_frame.delimiter = Some(handler);
                     stack.push(body_frame);
                 }
@@ -2235,6 +2236,46 @@ fn frame_from_verified_values(
         // tiny function into a process-scale speculative reservation.
         labels: Vec::new(),
     }
+}
+
+/// Build a callee frame by moving argument values directly out of the
+/// caller's registers, avoiding an intermediate argument Vec allocation.
+/// This is the fast path for verified direct calls: the caller's registers
+/// are consumed into the callee's fresh register vector in one pass.
+#[inline]
+fn make_callee_frame_from_registers(
+    a: &ExecutionImage,
+    function: u32,
+    arg_registers: &[u32],
+    receiver: Value,
+    return_dst: Option<u32>,
+    caller: &mut Frame,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if arg_registers.len() != f.params.len() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: arg_registers.len(),
+        });
+    }
+    let mut registers = vec![None; f.register_types.len()];
+    registers[0] = Some(receiver);
+    for (i, &src) in arg_registers.iter().enumerate() {
+        registers[i + 1] = Some(take(caller, src)?);
+    }
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
 }
 
 fn cleanup_registers(
