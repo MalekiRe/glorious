@@ -4623,7 +4623,16 @@ resolve_signature_type(
             ) {
                 Result::Err(_) =>
                     Result::Err(ElaborationError::UnknownTypeName(token)),
-                Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle named_builtin_type(output, name) {
+                Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else if(String::eq(name, &"Self")) {
+                    resolve_self_type(
+                        headers,
+                        declarations,
+                        output,
+                        module,
+                        scope,
+                        token
+                    )
+                } else { handle named_builtin_type(output, name) {
                     Result::Ok(ty) => Result::Ok(ty),
                     Result::Err(_) => handle scalar_kind(name) {
                         Result::Err(_) => handle type_name_target(
@@ -4807,6 +4816,104 @@ resolve_signature_type(
             } }
         },
         super::headers::HeaderTypeView::Never(_, _) => Result::Ok(1)
+    }
+}
+
+// Resolve the implicit `Self` subject to which a trait or impl method
+// signature binds (Rust binder model: `Self` sits at index =
+// explicit_generics_count of the enclosing trait; for an impl it is the
+// implementation's self type, resolved in the impl's own generic scope).
+resolve_self_type(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    module: Option<ShellId>,
+    scope: Option<SignatureTypeScope>,
+    token: usize
+) -> Result<u32, ElaborationError> {
+    handle scope {
+        Result::Err(_) => Result::Err(
+            ElaborationError::UnknownTypeName(token)
+        ),
+        Result::Ok(SignatureTypeScope::Declaration(owner_scope)) =>
+            resolve_self_owner(
+                headers,
+                declarations,
+                output,
+                module,
+                owner_scope.owner,
+                token
+            ),
+        Result::Ok(SignatureTypeScope::EffectOperation(owner_scope, _, _)) =>
+            resolve_self_owner(
+                headers,
+                declarations,
+                output,
+                module,
+                owner_scope.owner,
+                token
+            )
+    }
+}
+
+resolve_self_owner(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    module: Option<ShellId>,
+    owner: ShellId,
+    token: usize
+) -> Result<u32, ElaborationError> {
+    let nominal = super::headers::nominal_index(headers);
+    handle super::headers::def_kind_for_shell(nominal, owner) {
+        Result::Err(_) => Result::Err(
+            ElaborationError::UnknownTypeName(token)
+        ),
+        Result::Ok(super::headers::HeaderOrder::Trait(trait_id)) => {
+            let trait_index = Id::to_usize(trait_id);
+            handle super::headers::trait_at(nominal, trait_index) {
+                Result::Err(_) => Result::Err(
+                    ElaborationError::UnknownTypeName(token)
+                ),
+                Result::Ok(trait_header) => {
+                    let explicit_count = super::headers::range_count(
+                        super::headers::trait_generics(trait_header)
+                    );
+                    Result::Ok(intern_record_type(
+                        output,
+                        TypeKind::TypeParameter(
+                            TypeParameterOwner::Declaration(owner),
+                            explicit_count
+                        ),
+                        false
+                    ))
+                }
+            }
+        },
+        Result::Ok(super::headers::HeaderOrder::Impl(impl_id)) => {
+            let impl_index = Id::to_usize(impl_id);
+            handle super::headers::impl_at(nominal, impl_index) {
+                Result::Err(_) => Result::Err(
+                    ElaborationError::UnknownTypeName(token)
+                ),
+                Result::Ok(impl_header) => {
+                    let self_ty = super::headers::impl_self_type(impl_header);
+                    let impl_scope = signature_scope(
+                        owner,
+                        super::headers::impl_generics(impl_header)
+                    );
+                    resolve_signature_type(
+                        headers,
+                        declarations,
+                        output,
+                        self_ty,
+                        module,
+                        Option::Some(SignatureTypeScope::Declaration(impl_scope))
+                    )
+                }
+            }
+        },
+        _ => Result::Err(ElaborationError::UnknownTypeName(token))
     }
 }
 

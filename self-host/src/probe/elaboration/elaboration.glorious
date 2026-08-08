@@ -73,6 +73,35 @@ pub interface_type_metadata(
     }
 }
 
+// Focused interface-collection gate: returns 0 when the whole header +
+// interface-collection frontend succeeds on `original`, otherwise the
+// rejecting phase index (lex=1, scan=2, headers=3, interface collection=4).
+// This isolates `Self` resolution from body elaboration and lowering.
+pub interface_collection_status(original: String) -> u32 {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => 1,
+        Result::Ok(source) => handle
+            super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => 2,
+            Result::Ok(declarations) => handle
+                super::super::frontend::headers::parse(
+                    &original,
+                    source,
+                    &declarations
+                ) {
+                Result::Err(_) => 3,
+                Result::Ok(headers) => handle collect_interfaces(
+                    &headers,
+                    &declarations
+                ) {
+                    Result::Err(_) => 4,
+                    Result::Ok(_) => 0
+                }
+            }
+        }
+    }
+}
+
 write_constraint_text(
     output: &mut ByteBuf,
     original: &String,
