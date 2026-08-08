@@ -219,3 +219,262 @@ fn self_host_full_pipeline_benchmark() {
         .join()
         .unwrap();
 }
+
+
+use grandiose_vm::bytecode::Instruction as Insn;
+use grandiose_vm::bytecode::Register;
+
+fn reg_of_insn(ins: &Insn) -> Option<(Register, Register)> {
+    match ins {
+        Insn::Move { dst, src } => Some((*dst, *src)),
+        Insn::Copy { dst, src } => Some((*dst, *src)),
+        Insn::DerefMove { dst, src } => Some((*dst, *src)),
+        Insn::DerefCopy { dst, src } => Some((*dst, *src)),
+        _ => None,
+    }
+}
+
+fn insn_writes(ins: &Insn) -> Vec<Register> {
+    match ins {
+        Insn::Const { dst, .. } => vec![*dst],
+        Insn::Move { dst, .. } => vec![*dst],
+        Insn::Copy { dst, .. } => vec![*dst],
+        Insn::BorrowShared { dst, .. } => vec![*dst],
+        Insn::BorrowUnique { dst, .. } => vec![*dst],
+        Insn::ReborrowShared { dst, .. } => vec![*dst],
+        Insn::ReborrowUnique { dst, .. } => vec![*dst],
+        Insn::DerefCopy { dst, .. } => vec![*dst],
+        Insn::DerefReborrowShared { dst, .. } => vec![*dst],
+        Insn::DerefReborrowUnique { dst, .. } => vec![*dst],
+        Insn::DerefMove { dst, .. } => vec![*dst],
+        Insn::Construct { dst, .. } => vec![*dst],
+        Insn::ProjectMove { dst, .. } => vec![*dst],
+        Insn::ProjectCopy { dst, .. } => vec![*dst],
+        Insn::ProjectBorrowShared { dst, .. } => vec![*dst],
+        Insn::ProjectBorrowUnique { dst, .. } => vec![*dst],
+        Insn::EnumTag { dst, .. } => vec![*dst],
+        Insn::Primitive { dst, .. } => vec![*dst],
+        _ => vec![],
+    }
+}
+
+fn insn_reads(ins: &Insn) -> Vec<Register> {
+    match ins {
+        Insn::Move { src, .. } => vec![*src],
+        Insn::Copy { src, .. } => vec![*src],
+        Insn::BorrowShared { src, .. } => vec![*src],
+        Insn::BorrowUnique { src, .. } => vec![*src],
+        Insn::ReborrowShared { src, .. } => vec![*src],
+        Insn::ReborrowUnique { src, .. } => vec![*src],
+        Insn::DerefCopy { src, .. } => vec![*src],
+        Insn::DerefReborrowShared { src, .. } => vec![*src],
+        Insn::DerefReborrowUnique { src, .. } => vec![*src],
+        Insn::DerefMove { src, .. } => vec![*src],
+        Insn::DerefStore { src, .. } => vec![*src],
+        Insn::EndBorrow { reference } => vec![*reference],
+        Insn::Construct { fields, .. } => fields.clone(),
+        Insn::ProjectMove { src, .. } => vec![*src],
+        Insn::ProjectCopy { src, .. } => vec![*src],
+        Insn::ProjectBorrowShared { src, .. } => vec![*src],
+        Insn::ProjectBorrowUnique { src, .. } => vec![*src],
+        Insn::EnumTag { src, .. } => vec![*src],
+        Insn::Deconstruct { src } => vec![*src],
+        Insn::Drop { register } => vec![*register],
+        Insn::Primitive { args, .. } => args.clone(),
+        Insn::Switch { discr, cases, .. } => {
+            let mut v = vec![*discr];
+            for (_, t) in cases { v.push(*t); }
+            v
+        }
+        Insn::Call { args, .. } => args.clone(),
+        Insn::TailCall { args, .. } => args.clone(),
+        Insn::CallSelf { args, .. } => args.clone(),
+        Insn::TailCallSelf { args, .. } => args.clone(),
+        Insn::CallKnownReceiver { receiver, args, .. } => {
+            let mut v = vec![*receiver]; v.extend(args.clone()); v
+        }
+        Insn::TailCallKnownReceiver { receiver, args, .. } => {
+            let mut v = vec![*receiver]; v.extend(args.clone()); v
+        }
+        Insn::MakeCallable { captures, .. } => captures.clone(),
+        Insn::MakeHandler { clauses, .. } => clauses.clone(),
+        Insn::MakeHandlerShared { captures, .. } => captures.clone(),
+        Insn::MakeBindingPack { payloads, .. } => payloads.clone(),
+        Insn::CallIndirect { callable, args, .. } => {
+            let mut v = vec![*callable]; v.extend(args.clone()); v
+        }
+        Insn::TailCallIndirect { callable, args, .. } => {
+            let mut v = vec![*callable]; v.extend(args.clone()); v
+        }
+        Insn::Handle { handler, body, args, .. } => {
+            let mut v = vec![*handler, *body]; v.extend(args.clone()); v
+        }
+        Insn::Perform { payloads, .. } => payloads.clone(),
+        Insn::Resume { resumption, value, .. } => vec![*resumption, *value],
+        Insn::TailResume { resumption, value, .. } => vec![*resumption, *value],
+        Insn::Cancel { resumption, .. } => vec![*resumption],
+        Insn::HostCall { args, .. } => args.clone(),
+        Insn::LabelPush { result_register, .. } => vec![*result_register],
+        Insn::Return { src } => { if let Some(s) = src { vec![*s] } else { vec![] } }
+        _ => vec![],
+    }
+}
+
+fn insn_succs(pc: usize, ins: &Insn, code_len: usize) -> Vec<usize> {
+    match ins {
+        Insn::Jump { target } => vec![*target as usize],
+        Insn::Switch { cases, otherwise, .. } => {
+            let mut v = cases.iter().map(|(_, t)| *t as usize).collect::<Vec<_>>();
+            v.push(*otherwise as usize);
+            v
+        }
+        Insn::Return { .. } | Insn::Unreachable | Insn::Abort { .. } | Insn::TailCall { .. }
+        | Insn::TailCallSelf { .. } | Insn::TailCallKnownReceiver { .. } | Insn::TailCallIndirect { .. }
+        | Insn::TailResume { .. } | Insn::Leave { .. } => vec![],
+        _ => {
+            if pc + 1 < code_len { vec![pc + 1] } else { vec![] }
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual perf instrumentation"]
+fn self_host_body_instrument() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let code = &phases.artifact.code;
+            let mut hist: std::collections::BTreeMap<String, usize> = Default::default();
+            for ins in code {
+                let name = format!("{:?}", ins).split('{').next().unwrap_or("?").to_string();
+                *hist.entry(name).or_default() += 1;
+            }
+            eprintln!("=== OPCODE HISTOGRAM ===");
+            for (name, count) in &hist {
+                eprintln!("{name}: {count}");
+            }
+            let names: Vec<&str> = phases.artifact.functions.iter().map(|f| f.name.as_str()).collect();
+            let hot = [1657usize, 2359, 954, 1876, 113, 1998, 955, 974, 196];
+            eprintln!("=== HOT FUNCTION NAMES ===");
+            for idx in hot {
+                if let Some(name) = names.get(idx) {
+                    eprintln!("f{idx}: {} (len {})", name, phases.artifact.functions[idx].code_len);
+                }
+            }
+            let mut dead_moves = 0usize;
+            let mut dead_copies = 0usize;
+            let mut self_moves = 0usize;
+            let mut dead_drops = 0usize;
+            let mut total_moves_copies = 0usize;
+            let mut all_drops = 0usize;
+            let analyzed = code.len();
+            for f in &phases.artifact.functions {
+                let start = f.code_start as usize;
+                let end = start + f.code_len as usize;
+                let n = end - start;
+                if n == 0 { continue; }
+                let mut live_out: Vec<Vec<Register>> = vec![vec![]; n];
+                let mut live_in: Vec<Vec<Register>> = vec![vec![]; n];
+                loop {
+                    let mut changed = false;
+                    for i in (0..n).rev() {
+                        let succs = insn_succs(i, &code[start + i], n);
+                        let mut lo: Vec<Register> = Vec::new();
+                        for s in &succs {
+                            if *s < n { lo.extend(live_in[*s].iter().copied()); }
+                        }
+                        lo.sort_unstable(); lo.dedup();
+                        if lo != live_out[i] { live_out[i] = lo; changed = true; }
+                        let writes = insn_writes(&code[start + i]);
+                        let reads = insn_reads(&code[start + i]);
+                        let mut li = reads.clone();
+                        li.extend(live_out[i].iter().copied());
+                        li.retain(|r| !writes.contains(r));
+                        li.sort_unstable(); li.dedup();
+                        if li != live_in[i] { live_in[i] = li; changed = true; }
+                    }
+                    if !changed { break; }
+                }
+                for i in 0..n {
+                    let ins = &code[start + i];
+                    if let Some((dst, src)) = reg_of_insn(ins) {
+                        total_moves_copies += 1;
+                        if dst == src {
+                            self_moves += 1;
+                        } else if !live_out[i].contains(&dst) {
+                            match ins {
+                                Insn::Move { .. } => dead_moves += 1,
+                                _ => dead_copies += 1,
+                            }
+                        }
+                    }
+                    if let Insn::Drop { .. } = ins {
+                        all_drops += 1;
+                        // drop whose register is not read (incl. not dropped again)
+                        if !live_out[i].contains(&register_of_drop(ins)) {
+                            dead_drops += 1;
+                        }
+                    }
+                }
+            }
+            eprintln!("TOTAL_INSNS={analyzed}");
+            eprintln!("TOTAL_MOVES_COPIES={total_moves_copies}");
+            eprintln!("SELF_MOVES={self_moves}");
+            eprintln!("DEAD_MOVES={dead_moves}");
+            eprintln!("DEAD_COPIES={dead_copies}");
+            eprintln!("ALL_DROPS={all_drops}");
+            eprintln!("DEAD_DROPS={dead_drops}");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn register_of_drop(ins: &Insn) -> Register {
+    match ins {
+        Insn::Drop { register } => *register,
+        _ => unreachable!(),
+    }
+}
+
+
+#[test]
+#[ignore = "manual perf instrumentation"]
+fn self_host_body_dump_artifact() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let mut out = String::new();
+            out.push_str(&format!("TOTAL {}\n", phases.artifact.code.len()));
+            for (i, f) in phases.artifact.functions.iter().enumerate() {
+                out.push_str(&format!("FUNC {i} {} start={} len={} regs={:?}\n", f.name, f.code_start, f.code_len, f.register_types));
+            }
+            out.push_str(&format!("TYPES {}\n", types_pretty(&phases.artifact.types)));
+            out.push_str(&format!("GLUE {:?}\n", phases.artifact.drop_glue));
+            for (pc, ins) in phases.artifact.code.iter().enumerate() {
+                out.push_str(&format!("{pc} {:?}\n", ins));
+            }
+            std::fs::write("/tmp/g24_body_artifact.txt", out).unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn types_pretty(types: &[grandiose_vm::bytecode::Type]) -> String {
+    let mut s = String::new();
+    for (i, t) in types.iter().enumerate() {
+        s.push_str(&format!("{i}: {:?}\n", t));
+    }
+    s
+}
