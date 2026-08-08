@@ -97,9 +97,11 @@ impl BootstrapTimings {
         if self.enabled {
             let now = Instant::now();
             eprintln!(
-                "g1-bootstrap {phase}: phase={:.3}s total={:.3}s",
+                "g1-bootstrap {phase}: phase={:.3}s total={:.3}s solve={:.3}s({}c)",
                 now.duration_since(self.checkpoint).as_secs_f64(),
-                now.duration_since(self.started).as_secs_f64()
+                now.duration_since(self.started).as_secs_f64(),
+                crate::compiler_regions::solve_cumulative_micros() as f64 / 1e6,
+                crate::compiler_regions::solve_calls()
             );
             self.checkpoint = now;
         }

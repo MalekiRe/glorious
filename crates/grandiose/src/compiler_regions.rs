@@ -3,6 +3,7 @@
 //! `ElaborateCleanup`, and the `Cleanup`-phase MIR validators.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use grandiose_vm::{Primitive, Type, TypeId};
 
@@ -3569,7 +3570,33 @@ impl Interpreter<'_> {
 }
 
 /// Solve the deterministic ownership fixed point for one body.
-pub(crate) fn solve(context: &FlowContext<'_>) -> Result<FlowSolution, FlowError> {
+// Cumulative ownership-fixed-point cost across one whole-program compile.
+static SOLVE_MICROS: AtomicU64 = AtomicU64::new(0);
+static SOLVE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn solve_cumulative_micros() -> u64 {
+    SOLVE_MICROS.load(AtomicOrdering::Relaxed)
+}
+pub(crate) fn solve_calls() -> u64 {
+    SOLVE_CALLS.load(AtomicOrdering::Relaxed)
+}
+
+struct SolveTimerGuard(std::time::Instant, bool, &'static str);
+impl Drop for SolveTimerGuard {
+    fn drop(&mut self) {
+        let micros = self.0.elapsed().as_micros() as u64;
+        let calls = SOLVE_CALLS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        let total = SOLVE_MICROS.fetch_add(micros, AtomicOrdering::Relaxed) + micros;
+        if self.1 {
+            eprintln!("g1-solve[{}] #{calls}: {:.3}s (cumulative {:.3}s in {calls} calls)", self.2, micros as f64 / 1e6, total as f64 / 1e6);
+        }
+    }
+}
+
+pub(crate) fn solve(context: &FlowContext<'_>, site: &'static str) -> Result<FlowSolution, FlowError> {
+    let _solve_t0 = std::time::Instant::now();
+    let _solve_cum = std::env::var_os("G1_OPT_TIMINGS").is_some();
+    let _solve_drop = SolveTimerGuard(_solve_t0, _solve_cum, site);
     let mut drop_flag_keys = BTreeSet::new();
     for fact in &context.function.flow.drop_flags {
         if fact.owner as usize >= context.function.register_types.len()

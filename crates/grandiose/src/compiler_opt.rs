@@ -11543,7 +11543,7 @@ fn derive_cleanup_elaboration_with_array_calls(
         strict: strict_flow(function),
         refine_enum_switches: true,
     };
-    let solution = regions::solve(&context).map_err(|flow_error| {
+    let solution = regions::solve(&context, "derive_cleanup_elaboration").map_err(|flow_error| {
         if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
             let program = Program {
                 functions: vec![function.clone()],
@@ -11887,7 +11887,7 @@ fn import_and_validate_place_flow(
             strict: strict_flow(function),
             refine_enum_switches: true,
         };
-        regions::solve(&context).map_err(|error| {
+        regions::solve(&context, "import_validate").map_err(|error| {
             if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
                 let program = Program {
                     functions: vec![function.clone()],
@@ -12540,7 +12540,7 @@ pub(crate) fn derive_program_serialization_cleanup_lists(
                 strict: strict_flow(function),
                 refine_enum_switches: false,
             };
-            Ok(regions::solve(&context)
+            Ok(regions::solve(&context, "serialization_lists")
                 .map_err(|error| flow_to_validation(function, error))?
                 .cleanup_lists)
         })
@@ -12588,7 +12588,7 @@ fn derive_cleanup_state_analysis_with_array_calls(
         strict: strict_flow(function),
         refine_enum_switches: true,
     };
-    let solution = regions::solve(&context).map_err(|error| flow_to_validation(function, error))?;
+    let solution = regions::solve(&context, "derive_state_analysis").map_err(|error| flow_to_validation(function, error))?;
     let reachable = solution.entries.keys().copied().collect();
     Ok(CleanupStateAnalysis {
         lists: solution.cleanup_lists,
@@ -13122,9 +13122,11 @@ impl OptTimings {
         if self.enabled {
             let now = Instant::now();
             eprintln!(
-                "g1-opt {phase}: phase={:.3}s total={:.3}s",
+                "g1-opt {phase}: phase={:.3}s total={:.3}s solve={:.3}s({} calls)",
                 now.duration_since(self.checkpoint).as_secs_f64(),
-                now.duration_since(self.started).as_secs_f64()
+                now.duration_since(self.started).as_secs_f64(),
+                regions::solve_cumulative_micros() as f64 / 1e6,
+                regions::solve_calls()
             );
             self.checkpoint = now;
         }
