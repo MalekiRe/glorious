@@ -1,4 +1,5 @@
-use std::{
+use std::{sync::atomic::{AtomicUsize, Ordering},
+
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
@@ -14,6 +15,14 @@ use grandiose::{
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
+
+
+// The corpus source is parsed as the final segment of a bundle that also
+// carries the distributed standard library (which supplies prelude operator
+// fixity semantics).  The oracle encodes grouping spans relative to the corpus
+// segment; this cell records that segment's global start so encoded spans match
+// the self-host's local numbering while source slicing still uses global ranges.
+static CORPUS_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -400,8 +409,8 @@ fn encode_expression(
     source: &str,
     expression: &Expr,
 ) -> Result<(), ()> {
-    push_u32(output, expression.span.start.try_into().map_err(|_| ())?);
-    push_u32(output, expression.span.end.try_into().map_err(|_| ())?);
+    push_u32(output, (expression.span.start - CORPUS_OFFSET.load(Ordering::Relaxed)).try_into().map_err(|_| ())?);
+    push_u32(output, (expression.span.end - CORPUS_OFFSET.load(Ordering::Relaxed)).try_into().map_err(|_| ())?);
     if let Some((computation, arms)) = normalized_direct_enum_handle(expression) {
         return encode_direct_enum_handle(output, program, source, computation, &arms);
     }
@@ -416,14 +425,14 @@ fn encode_expression(
         ExprKind::LabelReference(label) => {
             output.push(16);
             push_string(output, &label.name);
-            push_u32(output, label.span.start as u32);
-            push_u32(output, label.span.end as u32);
+            push_u32(output, (label.span.start - CORPUS_OFFSET.load(Ordering::Relaxed)) as u32);
+            push_u32(output, (label.span.end - CORPUS_OFFSET.load(Ordering::Relaxed)) as u32);
         }
         ExprKind::LabelDestination { label, ty, body } => {
             output.push(17);
             push_string(output, &label.name);
-            push_u32(output, label.span.start as u32);
-            push_u32(output, label.span.end as u32);
+            push_u32(output, (label.span.start - CORPUS_OFFSET.load(Ordering::Relaxed)) as u32);
+            push_u32(output, (label.span.end - CORPUS_OFFSET.load(Ordering::Relaxed)) as u32);
             match ty {
                 None => output.push(0),
                 Some(ty) => {
@@ -575,8 +584,8 @@ fn encode_expression(
         }
         ExprKind::ContextBlock(statements) => {
             output.push(16);
-            push_u32(output, expression.span.start.try_into().map_err(|_| ())?);
-            push_u32(output, expression.span.end.try_into().map_err(|_| ())?);
+            push_u32(output, (expression.span.start - CORPUS_OFFSET.load(Ordering::Relaxed)).try_into().map_err(|_| ())?);
+            push_u32(output, (expression.span.end - CORPUS_OFFSET.load(Ordering::Relaxed)).try_into().map_err(|_| ())?);
             push_u32(output, statements.len().try_into().map_err(|_| ())?);
             for statement in statements.iter() {
                 encode_statement(output, program, source, statement)?;
@@ -598,8 +607,8 @@ fn encode_expression(
             body,
         } => {
             output.push(16);
-            push_u32(output, expression.span.start.try_into().map_err(|_| ())?);
-            push_u32(output, expression.span.end.try_into().map_err(|_| ())?);
+            push_u32(output, (expression.span.start - CORPUS_OFFSET.load(Ordering::Relaxed)).try_into().map_err(|_| ())?);
+            push_u32(output, (expression.span.end - CORPUS_OFFSET.load(Ordering::Relaxed)).try_into().map_err(|_| ())?);
             push_u32(output, params.len().try_into().map_err(|_| ())?);
             for parameter in params.iter() {
                 output.push(1);
@@ -716,11 +725,28 @@ fn encode_rust_grouping(output: &mut Vec<u8>, source: &str) {
         output.push(3);
         return;
     };
-    let mut functions = program.functions.iter().collect::<Vec<_>>();
+    // The distributed standard library is an implementation dependency, not a
+    // grouping-parity subject: only the corpus source's own functions and impl
+    // methods are encoded.  This keeps the oracle robust when the standard
+    // segment accompanies the corpus (real-prelude fixity semantics) without
+    // treating the standard library's bodies as grouping fixtures.  In the
+    // conformance bundle the corpus is the final/additional segment, so spans
+    // that fall inside that segment identify the corpus's own declarations.
+    let corpus_range = bundle.segments().last().unwrap().global_range();
+    CORPUS_OFFSET.store(corpus_range.start - 1, Ordering::Relaxed);
+    let in_corpus = |span: grandiose::span::Span| {
+        span.start >= corpus_range.start && span.start < corpus_range.end
+    };
+    let mut functions = program
+        .functions
+        .iter()
+        .filter(|function| in_corpus(function.span))
+        .collect::<Vec<_>>();
     functions.sort_by_key(|function| function.span.start);
     let implementation_methods = program
         .impls
         .iter()
+        .filter(|implementation| in_corpus(implementation.span))
         .flat_map(|implementation| implementation.methods.iter())
         .filter_map(|method| method.body.as_ref().map(|body| (&method.name, body)))
         .collect::<Vec<_>>();
@@ -880,7 +906,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_nested_block() { let x = { let y = 1; y }; x }",
         "probe_block_argument() { consume({ let x = 1; x }) }",
         "probe_contextual_trailing() { select() { 1 } }",
-        "infixr 1 else; probe_contextual_operand() { compute() else { 0 } }",
+        "probe_contextual_operand() { compute() else { 0 } }",
         "probe_eager_block() { let x = { 1 }; x }",
         "probe_single_tuple() { (value,) }",
         "probe_tuple() { (first, second, third) }",
@@ -1179,7 +1205,7 @@ fn self_host_body_contextual_blocks_match_bootstrap_ast() {
             let input = directory.path().join("contextual-blocks.glorious");
             let vm_output = directory.path().join("contextual-blocks-vm.bin");
             let native_output = directory.path().join("contextual-blocks-native.bin");
-            let source = "probe_trailing() { select() { 1 } }\ninfixr 1 else; probe_operand() { compute() else { 0 } }\nprobe_eager() { let x = { 1 }; x }";
+            let source = "probe_trailing() { select() { 1 } }\nprobe_operand() { compute() else { 0 } }\nprobe_eager() { let x = { 1 }; x }";
             fs::write(&input, source).unwrap();
 
             let mut expected = Vec::new();
@@ -1467,8 +1493,8 @@ fn self_host_body_dereference_adjacency_matches_bootstrap_ast() {
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
             let sources = [
-                "infixl 40 *; valid(value: &i64) -> i64 { *value * 2 }",
-                "infixl 40 *; invalid(value: &i64) -> i64 { * value }",
+                "valid(value: &i64) -> i64 { *value * 2 }",
+                "invalid(value: &i64) -> i64 { * value }",
             ];
             let mut inputs = Vec::new();
             let mut expected = Vec::new();
@@ -1869,7 +1895,7 @@ fn self_host_unit_pattern_binders_and_remainders_are_validated() {
 #[test]
 fn self_host_body_typed_closures_match_bootstrap_ast() {
     // The focused contract includes typed, grouped, and tuple body identities, spans, and effects.
-    let source = "infixl 30 +; typed() { (x: i64, y: i64) -> i64 { x + y } } \
+    let source = "typed() { (x: i64, y: i64) -> i64 { x + y } } \
         effects_body() { (x: i64) -> / {Console} { x } } \
         grouped() { (1) } tupled() { (1, 2) }";
     assert!(source.contains("-> / {Console}"));
