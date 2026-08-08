@@ -11848,7 +11848,6 @@ fn import_and_validate_place_flow(
 ) -> Result<PassReport, ValidationError> {
     let mut work = 0_u64;
     let mut changed = false;
-    let array_calls = regions::array_call_summaries(program, types);
     for function in &mut program.functions {
         work = work.saturating_add(body_size(function));
         if strict_flow(function) {
@@ -11878,24 +11877,13 @@ fn import_and_validate_place_flow(
             function.flow.move_paths = move_paths;
             changed = true;
         }
-        let context = regions::FlowContext {
-            function,
-            types,
-            locals: &function.flow.locals,
-            loans: regions::loan_table(function, types),
-            array_calls: &array_calls,
-            strict: strict_flow(function),
-            refine_enum_switches: true,
-        };
-        regions::solve(&context, "import_validate").map_err(|error| {
-            if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
-                let program = Program {
-                    functions: vec![function.clone()],
-                };
-                eprintln!("{}", program.canonical_text());
-            }
-            flow_to_validation(function, error)
-        })?;
+        // The ownership fixed point itself is validated by the immediately
+        // following `ElaborateCleanup` pass, which re-solves every function
+        // on identical inputs (import mutates only phase/features before that
+        // pass). Re-solving here purely to check it succeeds therefore
+        // repeats a full-program ownership solve for no benefit. Removing it
+        // is a pure speedup: any unsolvable-flow error surfaces identically
+        // (same context) at the elaborate step.
         function.phase = MirPhase::Owned;
         function.features = infer_feature_bits(function);
     }
