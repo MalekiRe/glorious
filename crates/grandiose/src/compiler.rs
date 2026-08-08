@@ -57739,6 +57739,7 @@ mod mir_edge_emission_tests {
         let cleanup_lists = mir::optimizer::derive_program_serialization_cleanup_lists(
             &program,
             &grandiose_vm::Type::predefined(),
+            None,
         )
         .unwrap();
         let mut pc_maps = Vec::new();
