@@ -57735,7 +57735,20 @@ mod mir_edge_emission_tests {
         let program = mir::Program {
             functions: functions.to_vec(),
         };
-        artifact.cleanups = serialize_mir_cleanup_plans(&artifact, &program, &[]).unwrap();
+        let cleanup_lists = mir::optimizer::derive_program_serialization_cleanup_lists(
+            &program,
+            &grandiose_vm::Type::predefined(),
+        )
+        .unwrap();
+        let mut pc_maps = Vec::new();
+        pc_maps.resize_with(functions.len(), || None);
+        artifact.cleanups = serialize_mir_cleanup_plans(
+            &artifact,
+            &program,
+            &cleanup_lists,
+            &pc_maps,
+        )
+        .unwrap();
         grandiose_vm::verify::verify(artifact.clone()).unwrap();
         artifact
     }

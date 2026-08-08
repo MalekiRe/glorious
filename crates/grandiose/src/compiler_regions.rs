@@ -5491,7 +5491,7 @@ mod ownership_engine_tests {
             strict: true,
             refine_enum_switches: true,
         };
-        solve(&context)
+        solve(&context, "test_flow_solve")
     }
 
     fn pair_types() -> (Vec<Type>, grandiose_vm::TypeId, grandiose_vm::TypeId) {
@@ -6092,7 +6092,7 @@ mod ownership_engine_tests {
             array_calls: &BTreeMap::new(),
             strict: true,
             refine_enum_switches: false,
-        })
+        }, "test_flow_solve")
         .expect("serialization follows every encoded enum edge");
 
         assert_eq!(solution.entries[&1].active_variants[2], Some(0));
@@ -7831,7 +7831,7 @@ mod ownership_engine_tests {
             array_calls: &summaries,
             strict: true,
             refine_enum_switches: true,
-        })
+        }, "test_flow_solve")
         .expect("aggregate reference path is installed in the array slot");
         let aggregate_slots = &aggregate_solution.entries[&1].array_slots[&4];
         assert_eq!(
@@ -7879,7 +7879,7 @@ mod ownership_engine_tests {
             array_calls: &summaries,
             strict: true,
             refine_enum_switches: true,
-        })
+        }, "test_flow_solve")
         .expect("wrapper call installs the transported reference origin");
         let slots = &solution.entries[&1].array_slots[&2];
         assert_eq!(slots.length, Some(1));
