@@ -12029,7 +12029,12 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
         })?;
     }
     let mut changed = 0_u64;
-    for function in &mut program.functions {
+    // Functions mutated since the first serialization-mode cleanup solve must
+    // be re-validated after the final transfer canonicalization; functions
+    // that never changed solve identically on the second pass (deterministic
+    // engine), so this mask lets the trailing validation skip them.
+    let mut changed_mask = vec![false; program.functions.len()];
+    for (function_index, function) in program.functions.iter_mut().enumerate() {
         let changed_before = changed;
         let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
             .is_some_and(|filter| function.name.contains(&filter.to_string_lossy().as_ref()));
@@ -12097,6 +12102,7 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
         }
         if changed != changed_before {
             function.invalid_analyses |= analysis::ALL;
+            changed_mask[function_index] = true;
         }
     }
 
@@ -12106,8 +12112,10 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     // an edge.
     // Keeping this as an ordinary MIR cleanup block means every later phase,
     // including move-path and loan verification, observes the retirement.
-    let cleanup_lists = derive_program_serialization_cleanup_lists(program, types)?;
-    for (function, lists) in program.functions.iter_mut().zip(cleanup_lists) {
+    let cleanup_lists = derive_program_serialization_cleanup_lists(program, types, None)?;
+    for (function_index, (function, lists)) in
+        program.functions.iter_mut().zip(cleanup_lists).enumerate()
+    {
         let function_name = function.name.clone();
         let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
             .is_some_and(|filter| function_name.contains(filter.to_string_lossy().as_ref()));
@@ -12461,6 +12469,7 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
                     });
                     changed += 1;
                     function.invalid_analyses |= analysis::ALL;
+                    changed_mask[function_index] = true;
                 }
             }
         }
@@ -12477,16 +12486,20 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
                 changed += (before - block.statements.len()) as u64;
             }
             function.invalid_analyses |= analysis::ALL;
+            changed_mask[function_index] = true;
         }
         if !cleanup_blocks.is_empty() {
             function.blocks.extend(cleanup_blocks);
             function.invalid_analyses |= analysis::ALL;
+            changed_mask[function_index] = true;
         }
     }
     refresh_invalidated_flow(program, types)?;
     // No emission-only assumption bypasses the ordinary ownership, loan, or
-    // physical-switch checks.
-    derive_program_serialization_cleanup_lists(program, types)?;
+    // physical-switch checks. Functions unchanged since the serialization
+    // solve above are deterministic: re-solving them cannot change the
+    // outcome, so only the ones this pass actually mutated are re-validated.
+    derive_program_serialization_cleanup_lists(program, types, Some(&changed_mask))?;
     if let Some(path) = mir_snapshot_path {
         let mut post_path = path;
         post_path.push(".post");
@@ -12511,13 +12524,26 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
 pub(crate) fn derive_program_serialization_cleanup_lists(
     program: &Program,
     types: &[Type],
+    change_mask: Option<&[bool]>,
 ) -> Result<Vec<BTreeMap<u32, Vec<Vec<Register>>>>, ValidationError> {
     let _ps = std::time::Instant::now();
     let array_calls = regions::array_call_summaries(program, types);
     program
         .functions
         .iter()
-        .map(|function| {
+        .enumerate()
+        .map(|(function_index, function)| {
+            // A change mask limits re-validation to functions whose MIR
+            // changed since the previous serialization-mode solve. Unchanged
+            // functions solve identically (the engine is deterministic), so
+            // skipping them preserves the validation outcome exactly while
+            // avoiding a redundant whole-program ownership pass. The caller
+            // must supply a superset of functions mutated since that solve.
+            if change_mask.is_some_and(|mask| {
+                function_index >= mask.len() || !mask[function_index]
+            }) {
+                return Ok(BTreeMap::new());
+            }
             let locals = bridged_locals(function, types);
             let context = regions::FlowContext {
                 function,

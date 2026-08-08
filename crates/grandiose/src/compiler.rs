@@ -10140,6 +10140,7 @@ fn compile_program_with_phases(
         mir::optimizer::derive_program_serialization_cleanup_lists(
             &mir_program,
             &artifact.types,
+            None,
         )
         .map_err(|error| {
             vec![
