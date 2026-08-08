@@ -345,6 +345,125 @@ struct VmMemoryProfile {
     next_report_rss_kib: Option<u64>,
 }
 
+/// Opt-in per-instruction-class execution counter used to profile hot VM
+/// dispatch paths (`G1_VM_INSTR_PROFILE=1`). Disabled runs take one
+/// never-taken branch per instruction and no allocations.
+struct InstructionProfile {
+    counts: Vec<u64>,
+    steps: u64,
+}
+
+impl InstructionProfile {
+    fn from_env() -> Option<Self> {
+        std::env::var_os("G1_VM_INSTR_PROFILE")
+            .is_some()
+            .then(|| Self {
+                counts: vec![0; 49],
+                steps: 0,
+            })
+    }
+
+    fn observe(&mut self, instruction: &Instruction) {
+        self.steps = self.steps.saturating_add(1);
+        self.counts[instruction_class(instruction)] += 1;
+    }
+
+    fn report(&self) {
+        let total = self.counts.iter().sum::<u64>().max(1);
+        let mut ranked = self
+            .counts
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, count)| *count != 0)
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by_key(|(class, count)| (std::cmp::Reverse(*count), *class));
+        eprintln!(
+            "g1-vm-instructions total_reflected={} sum={} hot=[{}]",
+            self.steps,
+            total,
+            ranked
+                .into_iter()
+                .take(20)
+                .map(|(class, count)| format!(
+                    "{}={:.2}%({})",
+                    INSTRUCTION_CLASS_NAMES[class],
+                    count as f64 * 100.0 / total as f64,
+                    count
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+    }
+}
+
+const INSTRUCTION_CLASS_NAMES: [&str; 49] = [
+    "Nop", "Const", "Move", "Copy", "BorrowShared", "BorrowUnique",
+    "ReborrowShared", "ReborrowUnique", "DerefCopy", "DerefReborrowShared",
+    "DerefReborrowUnique", "DerefMove", "DerefStore", "EndBorrow", "Construct",
+    "ProjectMove", "ProjectCopy", "ProjectBorrowShared", "ProjectBorrowUnique",
+    "EnumTag", "Drop", "Deconstruct", "Primitive", "Jump", "Switch", "Call",
+    "TailCall", "CallSelf", "TailCallSelf", "CallKnownReceiver",
+    "TailCallKnownReceiver", "MakeCallable", "MakeHandler", "MakeHandlerShared",
+    "MakeBindingPack", "CallIndirect", "TailCallIndirect", "Handle", "Perform",
+    "Resume", "TailResume", "Cancel", "HostCall", "Abort", "LabelPush",
+    "LabelPop", "Leave", "Return", "Unreachable",
+];
+
+fn instruction_class(instruction: &Instruction) -> usize {
+    match instruction {
+        Instruction::Nop => 0,
+        Instruction::Const { .. } => 1,
+        Instruction::Move { .. } => 2,
+        Instruction::Copy { .. } => 3,
+        Instruction::BorrowShared { .. } => 4,
+        Instruction::BorrowUnique { .. } => 5,
+        Instruction::ReborrowShared { .. } => 6,
+        Instruction::ReborrowUnique { .. } => 7,
+        Instruction::DerefCopy { .. } => 8,
+        Instruction::DerefReborrowShared { .. } => 9,
+        Instruction::DerefReborrowUnique { .. } => 10,
+        Instruction::DerefMove { .. } => 11,
+        Instruction::DerefStore { .. } => 12,
+        Instruction::EndBorrow { .. } => 13,
+        Instruction::Construct { .. } => 14,
+        Instruction::ProjectMove { .. } => 15,
+        Instruction::ProjectCopy { .. } => 16,
+        Instruction::ProjectBorrowShared { .. } => 17,
+        Instruction::ProjectBorrowUnique { .. } => 18,
+        Instruction::EnumTag { .. } => 19,
+        Instruction::Drop { .. } => 20,
+        Instruction::Deconstruct { .. } => 21,
+        Instruction::Primitive { .. } => 22,
+        Instruction::Jump { .. } => 23,
+        Instruction::Switch { .. } => 24,
+        Instruction::Call { .. } => 25,
+        Instruction::TailCall { .. } => 26,
+        Instruction::CallSelf { .. } => 27,
+        Instruction::TailCallSelf { .. } => 28,
+        Instruction::CallKnownReceiver { .. } => 29,
+        Instruction::TailCallKnownReceiver { .. } => 30,
+        Instruction::MakeCallable { .. } => 31,
+        Instruction::MakeHandler { .. } => 32,
+        Instruction::MakeHandlerShared { .. } => 33,
+        Instruction::MakeBindingPack { .. } => 34,
+        Instruction::CallIndirect { .. } => 35,
+        Instruction::TailCallIndirect { .. } => 36,
+        Instruction::Handle { .. } => 37,
+        Instruction::Perform { .. } => 38,
+        Instruction::Resume { .. } => 39,
+        Instruction::TailResume { .. } => 40,
+        Instruction::Cancel { .. } => 41,
+        Instruction::HostCall { .. } => 42,
+        Instruction::Abort { .. } => 43,
+        Instruction::LabelPush { .. } => 44,
+        Instruction::LabelPop { .. } => 45,
+        Instruction::Leave { .. } => 46,
+        Instruction::Return { .. } => 47,
+        Instruction::Unreachable => 48,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProcessMemory {
     virtual_kib: u64,
@@ -670,6 +789,23 @@ impl Vm {
         let breakpoint = VmBreakpoint::from_env();
         let traced_function = std::env::var("G1_VM_FUNCTION").ok();
         let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        let mut instruction_profile = InstructionProfile::from_env();
+        let instruction_profile_enabled = instruction_profile.is_some();
+        // Cache the current function's descriptor and lazily-decoded
+        // instruction slice so per-step dispatch does not re-resolve the
+        // function or re-check bounds on every instruction. Refreshed only
+        // when a call/return changes the active frame's function.
+        let artifact_ref = &self.artifact;
+        let mut cached_function: Option<(u32, &crate::bytecode::Function, &[Instruction])> = None;
+        if instruction_profile_enabled {
+            eprintln!(
+                "g1-vm-tables drop_glue={} types={} cleanups={} functions={}",
+                a.drop_glue.len(),
+                a.types.len(),
+                a.cleanups.len(),
+                a.functions.len()
+            );
+        }
         loop {
             if let Some(profile) = &mut memory_profile {
                 profile.observe(&stack, &self.slots, a);
@@ -686,15 +822,25 @@ impl Vm {
             if let Some(profile) = &mut hot_functions {
                 profile.observe(frame.function);
             }
-            let verified_fun = self
-                .artifact
-                .function(frame.function)
-                .ok_or(RuntimeError::InvalidFunction(frame.function))?;
-            let fun = verified_fun.descriptor();
-            let verified_pc = verified_fun
-                .checked_pc(frame.pc)
-                .ok_or(RuntimeError::TypeConfusion)?;
-            let ins = verified_fun.instruction(verified_pc);
+            let (fun, decoded) = match cached_function {
+                Some((cached_id, fun, decoded)) if cached_id == frame.function => (fun, decoded),
+                _ => {
+                    let verified_fun = artifact_ref
+                        .function(frame.function)
+                        .ok_or(RuntimeError::InvalidFunction(frame.function))?;
+                    let fun = verified_fun.descriptor();
+                    let decoded = verified_fun.decoded_instructions();
+                    cached_function = Some((frame.function, fun, decoded));
+                    (fun, decoded)
+                }
+            };
+            if frame.pc >= fun.code_len {
+                return Err(RuntimeError::TypeConfusion);
+            }
+            let ins = &decoded[frame.pc as usize];
+            if instruction_profile_enabled {
+                instruction_profile.as_mut().unwrap().observe(ins);
+            }
             if let Some(trace) = &mut progress_trace {
                 trace.observe(frame.function, &fun.name, frame.pc, stack_depth);
             }
@@ -1753,7 +1899,12 @@ impl Vm {
                                 return Err(RuntimeError::TypeConfusion);
                             }
                         }
-                        None => return Ok(value),
+                        None => {
+                            if let Some(profile) = &instruction_profile {
+                                profile.report();
+                            }
+                            return Ok(value);
+                        }
                     }
                 }
                 Instruction::LabelPush {

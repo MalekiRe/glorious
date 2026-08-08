@@ -151,14 +151,23 @@ impl<'a> VerifiedFunction<'a> {
             pc.function, self.function,
             "verified PC used with wrong function"
         );
+        self.decoded_instructions()
+            .get(pc.offset as usize)
+            .expect("verified PC has a decoded instruction")
+    }
+
+    /// The whole function body in function-local instruction order, decoding
+    /// lazily once per function. Used by the VM dispatch loop to cache the
+    /// current function's instruction slice across iterations so per-step
+    /// dispatch does not re-resolve the function or re-check bounds.
+    pub(crate) fn decoded_instructions(&self) -> &'a [Instruction] {
         self.decoded
             .get_or_init(|| {
                 self.code.materialize_range(
                     self.code_range.start as usize..self.code_range.end as usize,
                 )
             })
-            .get(pc.offset as usize)
-            .expect("verified PC has a decoded instruction")
+            .as_ref()
     }
 
     pub(crate) fn cleanup_registers(&self, pc: VerifiedPc) -> &'a [u32] {
