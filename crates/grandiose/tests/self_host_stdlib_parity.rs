@@ -29,7 +29,7 @@ use grandiose::{
     compile_source_to_bytecode_with_options,
     source_bundle::{Segment, SourceBundle},
 };
-use grandiose_vm::{SystemHost, Value, Vm, verify};
+use grandiose_vm::{Artifact, SystemHost, Value, Vm, verify};
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -111,14 +111,18 @@ const PHASES: [&str; 14] = [
 ];
 
 // The supported subset: programs the self-host compiler accepts AND that the
-// Rust oracle also accepts (real parity, asserted).
-const SUPPORTED: [(&str, &str); 2] = [
-    ("result_constructor_and_dispatch", "ok(v: i64) -> Result<i64, i64> { Result::Ok(v) } pick() -> i64 { handle ok(5) { Result::Ok(x) => x, Result::Err(_) => 0 } } main() { () }"), ("result_err_and_dispatch", "bad(v: i64) -> Result<i64, i64> { Result::Err(v) } pick() -> i64 { handle bad(9) { Result::Ok(_) => 0, Result::Err(e) => e } } main() { () }"),
+// Rust oracle also accepts (real parity, asserted). This now includes the
+// injected scalar standard-library mirror (wrapping_*/bit_*/shift_*) whose
+// generic wrappers resolve through the appended scalar prelude and lower to
+// their bytecode primitives, matching the native distributed standard surface.
+const SUPPORTED: [(&str, &str); 12] = [
+    ("result_constructor_and_dispatch", "ok(v: i64) -> Result<i64, i64> { Result::Ok(v) } pick() -> i64 { handle ok(5) { Result::Ok(x) => x, Result::Err(_) => 0 } } main() { () }"), ("result_err_and_dispatch", "bad(v: i64) -> Result<i64, i64> { Result::Err(v) } pick() -> i64 { handle bad(9) { Result::Ok(_) => 0, Result::Err(e) => e } } main() { () }"), ("scalar_wrapping_add_i64", "add(a: i64, b: i64) -> i64 { wrapping_add(move a, move b) } main() { () }"), ("scalar_wrapping_add_u8", "add(a: u8, b: u8) -> u8 { wrapping_add(move a, move b) } main() { () }"), ("scalar_wrapping_sub_i64", "sub(a: i64, b: i64) -> i64 { wrapping_sub(move a, move b) } main() { () }"), ("scalar_wrapping_mul_u64", "mul(a: u64, b: u64) -> u64 { wrapping_mul(move a, move b) } main() { () }"), ("scalar_bit_and_u64", "w(a: u64, b: u64) -> u64 { bit_and(move a, move b) } main() { () }"), ("scalar_bit_or_u64", "w(a: u64, b: u64) -> u64 { bit_or(move a, move b) } main() { () }"), ("scalar_bit_xor_i64", "w(a: i64, b: i64) -> i64 { bit_xor(move a, move b) } main() { () }"), ("scalar_bit_not_i64", "w(a: i64) -> i64 { bit_not(move a) } main() { () }"), ("scalar_shift_left_i64", "w(v: i64, c: u32) -> i64 { shift_left(move v, move c) } main() { () }"), ("scalar_shift_right_u64", "w(v: u64, c: u32) -> u64 { shift_right(move v, move c) } main() { () }"),
 ];
+
 // The frontier: programs the Rust oracle accepts that the self-host compiler
 // does not yet accept (blocker phase printed). These keep ledger rows unported.
-const FRONTIER: [(&str, &str); 13] = [
-    ("collection_extended_surface", "empty() -> Vec<i64> { Vec::new() } main() { () }"), ("collection_foundations", "empty() -> Vec<u64> { Vec::new() } main() { () }"), ("hash_collections", "m() -> HashMap<u64, u64> { HashMap::new() } main() { () }"), ("index_vec_traversal", "v() -> IndexVec<u8, i64> { IndexVec::new() } main() { () }"), ("range_helpers", "r(start: usize, end: usize) -> Range<usize> { Range { start: move start, end: move end } } main() { () }"), ("option_surface", "some(v: i64) -> Option<i64> { Option::Some(v) } main() { () }"), ("scalar_surface", "add(a: i64, b: i64) -> i64 { wrapping_add(move a, move b) } main() { () }"), ("slot_surface", "s() -> Slot<i64> { slot_empty() } main() { () }"), ("toolkit_foundations", "b() -> StepBudget { StepBudget::new(5) } main() { () }"), ("vec_copying_growth", "e() -> Vec<i64> { Vec::new() } main() { () }"), ("vec_deque", "dq() -> VecDeque<i64> { VecDeque::new() } main() { () }"), ("vec_destructive_shrink", "e() -> Vec<u64> { Vec::new() } main() { () }"), ("vec_into_iter", "e() -> Vec<i64> { Vec::new() } main() { () }"),
+const FRONTIER: [(&str, &str); 12] = [
+    ("collection_extended_surface", "empty() -> Vec<i64> { Vec::new() } main() { () }"), ("collection_foundations", "empty() -> Vec<u64> { Vec::new() } main() { () }"), ("hash_collections", "m() -> HashMap<u64, u64> { HashMap::new() } main() { () }"), ("index_vec_traversal", "v() -> IndexVec<u8, i64> { IndexVec::new() } main() { () }"), ("range_helpers", "r(start: usize, end: usize) -> Range<usize> { Range { start: move start, end: move end } } main() { () }"), ("option_surface", "some(v: i64) -> Option<i64> { Option::Some(v) } main() { () }"), ("slot_surface", "s() -> Slot<i64> { slot_empty() } main() { () }"), ("toolkit_foundations", "b() -> StepBudget { StepBudget::new(5) } main() { () }"), ("vec_copying_growth", "e() -> Vec<i64> { Vec::new() } main() { () }"), ("vec_deque", "dq() -> VecDeque<i64> { VecDeque::new() } main() { () }"), ("vec_destructive_shrink", "e() -> Vec<u64> { Vec::new() } main() { () }"), ("vec_into_iter", "e() -> Vec<i64> { Vec::new() } main() { () }"),
 ];
 
 #[test]
@@ -197,3 +201,70 @@ fn self_host_stdlib_parity_supported_subset_and_frontier() {
         .join()
         .unwrap();
 }
+
+
+// Genuine semantic parity for the injected scalar surface: the self-hosted
+// compiler must not merely ACCEPT wrapping_add but lower it to the wrapping-add
+// primitive truthfully (matching the Rust-oracle result). One program exercising
+// each lowering surface is compiled by BOTH compilers and its observable result
+// compared.
+#[test]
+fn self_host_stdlib_scalar_semantics_match_native() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let cases: [(&str, &str); 4] = [
+                ("wrapping_add", "add(a: i64, b: i64) -> i64 { wrapping_add(move a, move b) } compute() -> i64 { add(20, 22) } main() { () }"),
+                ("wrapping_sub", "sub(a: i64, b: i64) -> i64 { wrapping_sub(move a, move b) } compute() -> i64 { sub(50, 8) } main() { () }"),
+                ("wrapping_mul", "mul(a: u64, b: u64) -> u64 { wrapping_mul(move a, move b) } compute() -> u64 { mul(6, 7) } main() { () }"),
+                ("bit_xor", "x(a: i64, b: i64) -> i64 { bit_xor(move a, move b) } compute() -> i64 { x(12, 10) } main() { () }"),
+            ];
+            let oracle_results: Vec<Value> = cases.iter().map(|(name, src)| {
+                let artifact = compile_source_to_bytecode_with_options(
+                    name, src, CompileOptions::default()).unwrap();
+                let fid = function_id(&artifact, "compute");
+                let vm = Vm::with_host(verify(artifact).unwrap(),
+                    ["process.args","fs.read","fs.write","diagnostic"], SystemHost::new(Vec::new())).unwrap();
+                vm.run(fid, vec![]).unwrap()
+            }).collect();
+            let artifact = compile_bundle_to_bytecode_with_options(
+                &bundle(),
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            ).unwrap();
+            let main_entry = artifact.entry_function.expect("self-host compiler entry");
+            let verified = verify(artifact).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            for (i, (name, src)) in cases.iter().enumerate() {
+                let input = dir.path().join(format!("in{i}.glorious"));
+                let output = dir.path().join(format!("out{i}.grbc"));
+                fs::write(&input, src).unwrap();
+                let vm = Vm::with_host(
+                    verified.clone(),
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        output.clone().into_os_string(),
+                        input.clone().into_os_string(),
+                    ]),
+                ).unwrap();
+                assert_eq!(vm.run(main_entry, vec![]).unwrap(), Value::Unit);
+                let bytes = fs::read(&output).unwrap();
+                let decoded = Artifact::decode(&bytes).expect("self-host GRBC must decode");
+                let fid = decoded.functions.iter().position(|f| f.name == "compute")
+                    .unwrap_or_else(|| panic!("{name}: self-host artifact missing compute")) as u32;
+                let rvm = Vm::with_host(
+                    grandiose_vm::verify::load_verified(&bytes).unwrap(),
+                    ["process.args","fs.read","fs.write","diagnostic"], SystemHost::new(Vec::new())).unwrap();
+                let res = rvm.run(fid, vec![]).unwrap();
+                assert_eq!(
+                    res, oracle_results[i],
+                    "scalar semantics diverged for {name}: native={:?} self-host={:?}",
+                    oracle_results[i], res
+                );
+                eprintln!("STDLIB-PARITY scalar semantics {name} => native={:?} self-host={:?} (match)", oracle_results[i], res);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
