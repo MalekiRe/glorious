@@ -17,6 +17,15 @@ pub type InterfaceEffectId = Id<InterfaceEffectTag>;
 pub struct InterfaceEffectOperationTag {}
 pub type InterfaceEffectOperationId = Id<InterfaceEffectOperationTag>;
 
+pub struct InterfaceTraitTag {}
+pub type InterfaceTraitId = Id<InterfaceTraitTag>;
+
+pub struct InterfaceImplTag {}
+pub type InterfaceImplId = Id<InterfaceImplTag>;
+
+struct TraitMethodRangeTag {}
+type TraitMethodRange = super::syntax::IdRange<TraitMethodRangeTag>;
+
 enum TypeParameterOwner {
     Declaration(ShellId),
     EffectOperation(InterfaceEffectOperationId)
@@ -204,6 +213,35 @@ struct InterfaceEffectOperation {
 
 impl Use<[0, *]> for InterfaceEffectOperation {}
 
+// A trait retains the collection identity, generic scope, where-clause
+// (constraint) goals, and the contiguous callable range of its methods.  All
+// trait members share the trait's declaration shell, so the method range
+// indexes the collected callable arena exactly as the header callable arena.
+struct InterfaceTrait {
+    shell: ShellId,
+    name: u32,
+    public: Bool,
+    generics: SignatureScope,
+    constraints: ConstraintClause,
+    methods: TraitMethodRange
+}
+
+impl Use<[0, *]> for InterfaceTrait {}
+
+// An impl is a concrete trait instance: it resolves the implementation's self
+// type, names the implemented trait, collects its own where-clause goals, and
+// owns the contiguous callable range of its methods.
+struct InterfaceImpl {
+    shell: ShellId,
+    generics: SignatureScope,
+    trait_name: u32,
+    self_ty: TypeId,
+    constraints: ConstraintClause,
+    methods: TraitMethodRange
+}
+
+impl Use<[0, *]> for InterfaceImpl {}
+
 enum InterfaceNominalKind {
     Struct(InterfaceFieldRange),
     Enum(InterfaceVariantRange)
@@ -314,6 +352,8 @@ pub struct TypedInterfaces {
     effect_operations:
         Arena<InterfaceEffectOperationTag, InterfaceEffectOperation>,
     effect_payloads: Vec<TypeId>,
+    traits: Arena<InterfaceTraitTag, InterfaceTrait>,
+    impls: Arena<InterfaceImplTag, InterfaceImpl>,
     constraint_goals: Vec<ConstraintGoal>,
     constraint_arguments: Vec<ConstraintArgument>,
     constraint_bindings: Vec<ConstraintBinding>,
@@ -328,6 +368,8 @@ pub struct TypedInterfaces {
         IndexVec<ShellTag, Option<InterfaceNominalId>>,
     shell_to_type: IndexVec<ShellTag, Option<TypeId>>,
     shell_to_effect: IndexVec<ShellTag, Option<InterfaceEffectId>>,
+    shell_to_trait: IndexVec<ShellTag, Option<InterfaceTraitId>>,
+    shell_to_impl: IndexVec<ShellTag, Option<InterfaceImplId>>,
     // Collection-only memo state retained for deterministic diagnostics.
     alias_states: Vec<AliasResolutionState>
 }
@@ -2988,6 +3030,30 @@ push_missing_type_ids(
 
 push_missing_effect_ids(
     value: &mut IndexVec<ShellTag, Option<InterfaceEffectId>>,
+    remaining: usize
+) {
+    for_range(Range::new(0, remaining), { _ =>
+        handle IndexVec::push(&mut *value, None) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        }
+    })
+}
+
+push_missing_trait_ids(
+    value: &mut IndexVec<ShellTag, Option<InterfaceTraitId>>,
+    remaining: usize
+) {
+    for_range(Range::new(0, remaining), { _ =>
+        handle IndexVec::push(&mut *value, None) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        }
+    })
+}
+
+push_missing_impl_ids(
+    value: &mut IndexVec<ShellTag, Option<InterfaceImplId>>,
     remaining: usize
 ) {
     for_range(Range::new(0, remaining), { _ =>
@@ -6178,6 +6244,431 @@ set_effect_constraints(
     (*semantic_effect).constraints = constraints;
 }
 
+pub interface_trait_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.traits)
+}
+
+pub interface_impl_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.impls)
+}
+
+pub interface_trait_id_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> Option<InterfaceTraitId> {
+    let id = try(Id::from_usize(index), @interface_trait_id_at);
+    handle Arena::get(&value.traits, id) {
+        Result::Err(_) => None,
+        Result::Ok(_) => Option::Some(id)
+    }
+}
+
+pub interface_impl_id_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> Option<InterfaceImplId> {
+    let id = try(Id::from_usize(index), @interface_impl_id_at);
+    handle Arena::get(&value.impls, id) {
+        Result::Err(_) => None,
+        Result::Ok(_) => Option::Some(id)
+    }
+}
+
+pub interface_trait_for_shell(
+    value: &TypedInterfaces,
+    shell: ShellId
+) -> Option<InterfaceTraitId> {
+    handle IndexVec::get(&value.shell_to_trait, shell) {
+        Result::Err(_) => None,
+        Result::Ok(found) => *found
+    }
+}
+
+pub interface_impl_for_shell(
+    value: &TypedInterfaces,
+    shell: ShellId
+) -> Option<InterfaceImplId> {
+    handle IndexVec::get(&value.shell_to_impl, shell) {
+        Result::Err(_) => None,
+        Result::Ok(found) => *found
+    }
+}
+
+interface_trait_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceTraitId
+) -> &'a InterfaceTrait {
+    Arena::index(&value.traits, id)
+}
+
+interface_impl_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceImplId
+) -> &'a InterfaceImpl {
+    Arena::index(&value.impls, id)
+}
+
+pub interface_trait_shell(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> ShellId {
+    interface_trait_at(value, id).shell
+}
+
+pub interface_trait_name(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> u32 {
+    interface_trait_at(value, id).name
+}
+
+pub interface_trait_is_public(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> Bool {
+    interface_trait_at(value, id).public
+}
+
+pub interface_trait_generic_count(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> u32 {
+    interface_trait_at(value, id).generics.count
+}
+
+pub interface_trait_method_count(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> u32 {
+    interface_trait_at(value, id).methods.count
+}
+
+pub interface_trait_method_id(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId,
+    ordinal: u32
+) -> Option<InterfaceCallableId> {
+    let range = interface_trait_at(value, id).methods;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub interface_trait_constraint_start(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> usize {
+    interface_trait_at(value, id).constraints.start
+}
+
+pub interface_trait_constraint_end(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> usize {
+    interface_trait_at(value, id).constraints.end
+}
+
+pub interface_trait_constraint_goal_count(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> u32 {
+    interface_trait_at(value, id).constraints.goals.count
+}
+
+pub interface_trait_constraint_goal_id(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId,
+    ordinal: u32
+) -> Option<ConstraintGoalId> {
+    let range = interface_trait_at(value, id).constraints.goals;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub interface_trait_constraint_lifetime_count(
+    value: &TypedInterfaces,
+    id: InterfaceTraitId
+) -> u32 {
+    interface_trait_at(value, id).constraints.lifetime_outlives.count
+}
+
+
+pub interface_impl_shell(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> ShellId {
+    interface_impl_at(value, id).shell
+}
+
+pub interface_impl_generic_count(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> u32 {
+    interface_impl_at(value, id).generics.count
+}
+
+pub interface_impl_trait_name(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> u32 {
+    interface_impl_at(value, id).trait_name
+}
+
+pub interface_impl_self_type(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> TypeId {
+    interface_impl_at(value, id).self_ty
+}
+
+pub interface_impl_method_count(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> u32 {
+    interface_impl_at(value, id).methods.count
+}
+
+pub interface_impl_method_id(
+    value: &TypedInterfaces,
+    id: InterfaceImplId,
+    ordinal: u32
+) -> Option<InterfaceCallableId> {
+    let range = interface_impl_at(value, id).methods;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub interface_impl_constraint_start(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> usize {
+    interface_impl_at(value, id).constraints.start
+}
+
+pub interface_impl_constraint_end(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> usize {
+    interface_impl_at(value, id).constraints.end
+}
+
+pub interface_impl_constraint_goal_count(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> u32 {
+    interface_impl_at(value, id).constraints.goals.count
+}
+
+pub interface_impl_constraint_goal_id(
+    value: &TypedInterfaces,
+    id: InterfaceImplId,
+    ordinal: u32
+) -> Option<ConstraintGoalId> {
+    let range = interface_impl_at(value, id).constraints.goals;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
+    } else { None }
+}
+
+pub interface_impl_constraint_lifetime_count(
+    value: &TypedInterfaces,
+    id: InterfaceImplId
+) -> u32 {
+    interface_impl_at(value, id).constraints.lifetime_outlives.count
+}
+
+alloc_interface_trait(
+    value: &mut TypedInterfaces,
+    declaration: InterfaceTrait
+) -> InterfaceTraitId {
+    handle Arena::alloc(&mut value.traits, declaration) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+alloc_interface_impl(
+    value: &mut TypedInterfaces,
+    declaration: InterfaceImpl
+) -> InterfaceImplId {
+    handle Arena::alloc(&mut value.impls, declaration) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+set_interface_trait_constraints(
+    output: &mut TypedInterfaces,
+    trait_id: InterfaceTraitId,
+    constraints: ConstraintClause
+) {
+    let semantic_trait = Arena::index_mut(
+        &mut output.traits, trait_id
+    );
+    (*semantic_trait).constraints = constraints;
+}
+
+set_interface_impl_constraints(
+    output: &mut TypedInterfaces,
+    impl_id: InterfaceImplId,
+    constraints: ConstraintClause
+) {
+    let semantic_impl = Arena::index_mut(
+        &mut output.impls, impl_id
+    );
+    (*semantic_impl).constraints = constraints;
+}
+
+
+collect_traits(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    index: usize
+) -> Result<(), ElaborationError> {
+    let nominal = super::headers::nominal_index(headers);
+    if(index < super::headers::trait_count(nominal)) {
+        let declaration = handle super::headers::trait_at(nominal, index) {
+            Result::Err(_) => @collect_traits(Result::Err(
+                ElaborationError::InvalidSignatureType(index)
+            )),
+            Result::Ok(found) => found
+        };
+        let shell = super::headers::trait_shell(declaration);
+        let scope = signature_scope(
+            shell,
+            super::headers::trait_generics(declaration)
+        );
+        let module = handle super::scanner::shell_at(
+            declarations,
+            shell
+        ) {
+            Result::Err(_) => None,
+            Result::Ok(owner) => shell_parent_module(owner)
+        };
+        let methods = super::headers::trait_methods(declaration);
+        let method_start = super::headers::range_start(methods);
+        let method_count = super::headers::range_count(methods);
+        let where_tokens = super::headers::trait_tokens(declaration);
+        let trait_id = alloc_interface_trait(
+            output,
+            InterfaceTrait {
+                shell: shell,
+                name: Id::to_u32(super::headers::trait_name(declaration)),
+                public: super::headers::trait_public(declaration),
+                generics: scope,
+                constraints: empty_constraint_clause(
+                    super::syntax::token_start(where_tokens)
+                ),
+                methods: super::syntax::id_range(
+                    usize_from_u32(method_start),
+                    usize_from_u32(method_start)
+                        + usize_from_u32(method_count)
+                )
+            }
+        );
+        handle IndexVec::replace(
+            &mut output.shell_to_trait,
+            shell,
+            Option::Some(trait_id)
+        ) {
+            Result::Err(_) => @collect_traits(Result::Err(
+                ElaborationError::MissingNominalType(Id::to_usize(shell))
+            )),
+            Result::Ok(_) => ()
+        };
+        collect_traits(headers, declarations, output, index + 1)
+    } else { Result::Ok(()) }
+}
+
+
+collect_impls(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    index: usize
+) -> Result<(), ElaborationError> {
+    let nominal = super::headers::nominal_index(headers);
+    if(index < super::headers::impl_count(nominal)) {
+        let declaration = handle super::headers::impl_at(nominal, index) {
+            Result::Err(_) => @collect_impls(Result::Err(
+                ElaborationError::InvalidSignatureType(index)
+            )),
+            Result::Ok(found) => found
+        };
+        let shell = super::headers::impl_shell(declaration);
+        let impl_scope = signature_scope(
+            shell,
+            super::headers::impl_generics(declaration)
+        );
+        let module = handle super::scanner::shell_at(
+            declarations,
+            shell
+        ) {
+            Result::Err(_) => None,
+            Result::Ok(owner) => shell_parent_module(owner)
+        };
+        let self_ty = try(resolve_signature_type(
+            headers,
+            declarations,
+            output,
+            super::headers::impl_self_type(declaration),
+            module,
+            Option::Some(SignatureTypeScope::Declaration(impl_scope))
+        ), @collect_impls);
+        let trait_name = Id::to_u32(super::headers::impl_trait_path_name(
+            super::headers::parsed_index(headers),
+            declaration,
+            0
+        ));
+        let methods = super::headers::impl_methods(declaration);
+        let method_start = super::headers::range_start(methods);
+        let method_count = super::headers::range_count(methods);
+        let where_tokens = super::headers::impl_tokens(declaration);
+        let impl_id = alloc_interface_impl(
+            output,
+            InterfaceImpl {
+                shell: shell,
+                generics: impl_scope,
+                trait_name: trait_name,
+                self_ty: type_id_from_u32(self_ty),
+                constraints: empty_constraint_clause(
+                    super::syntax::token_start(where_tokens)
+                ),
+                methods: super::syntax::id_range(
+                    usize_from_u32(method_start),
+                    usize_from_u32(method_start)
+                        + usize_from_u32(method_count)
+                )
+            }
+        );
+        handle IndexVec::replace(
+            &mut output.shell_to_impl,
+            shell,
+            Option::Some(impl_id)
+        ) {
+            Result::Err(_) => @collect_impls(Result::Err(
+                ElaborationError::MissingNominalType(Id::to_usize(shell))
+            )),
+            Result::Ok(_) => ()
+        };
+        let constraints = try(elaborate_constraint_clause(
+            headers,
+            declarations,
+            output,
+            super::headers::impl_where_clause(declaration),
+            where_tokens,
+            module,
+            SignatureTypeScope::Declaration(impl_scope)
+        ), @collect_impls);
+        set_interface_impl_constraints(output, impl_id, constraints);
+        collect_impls(headers, declarations, output, index + 1)
+    } else { Result::Ok(()) }
+}
+
+
 collect_callables(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -7127,6 +7618,8 @@ pub collect_interfaces(
         effects: Arena::new(),
         effect_operations: Arena::new(),
         effect_payloads: Vec::new(),
+        traits: Arena::new(),
+        impls: Arena::new(),
         constraint_goals: Vec::new(),
         constraint_arguments: Vec::new(),
         constraint_bindings: Vec::new(),
@@ -7137,6 +7630,8 @@ pub collect_interfaces(
         shell_to_nominal: IndexVec::new(),
         shell_to_type: IndexVec::new(),
         shell_to_effect: IndexVec::new(),
+        shell_to_trait: IndexVec::new(),
+        shell_to_impl: IndexVec::new(),
         alias_states: Vec::new()
     };
     seed_types(&mut output);
@@ -7145,6 +7640,8 @@ pub collect_interfaces(
     push_missing_nominal_ids(&mut output.shell_to_nominal, shell_count);
     push_missing_type_ids(&mut output.shell_to_type, shell_count);
     push_missing_effect_ids(&mut output.shell_to_effect, shell_count);
+    push_missing_trait_ids(&mut output.shell_to_trait, shell_count);
+    push_missing_impl_ids(&mut output.shell_to_impl, shell_count);
     push_unresolved_aliases(
         &mut output.alias_states,
         super::headers::alias_count(super::headers::nominal_index(headers))
@@ -7170,6 +7667,18 @@ pub collect_interfaces(
         0
     ), @collect_interfaces);
     try(collect_effects(
+        headers,
+        declarations,
+        &mut output,
+        0
+    ), @collect_interfaces);
+    try(collect_traits(
+        headers,
+        declarations,
+        &mut output,
+        0
+    ), @collect_interfaces);
+    try(collect_impls(
         headers,
         declarations,
         &mut output,

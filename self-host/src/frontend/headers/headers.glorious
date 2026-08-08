@@ -1143,6 +1143,10 @@ pub variant_discriminant(value: &VariantHeader) -> Option<u32> {
 
 pub effect_shell(value: &EffectHeader) -> ShellId { value.shell }
 
+pub trait_shell(value: &TraitHeader) -> ShellId { value.shell }
+
+pub impl_shell(value: &ImplHeader) -> ShellId { value.shell }
+
 pub effect_name(value: &EffectHeader) -> Id<String> { value.name }
 
 pub effect_is_public(value: &EffectHeader) -> Bool { value.public }

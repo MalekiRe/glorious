@@ -102,6 +102,76 @@ pub interface_collection_status(original: String) -> u32 {
     }
 }
 
+// Trait/impl (instance) arena gate: encodes the trait/impl collection result as
+// (status, trait_count, impl_count, impl_goal_count) where status is the
+// rejecting phase index (lex=1, scan=2, headers=3, interface collection=4)
+// or 0 on success. impl_goal_count sums the where-clause constraint goals
+// collected into every impl arena entry, validating where-clause goal
+// collection independent of body elaboration/lowering.
+sum_trait_impl_goals(
+    interfaces: &TypedInterfaces,
+    index: usize,
+    accumulator: u32
+) -> u32 {
+    if(index < super::super::frontend::elaboration::interface_impl_count(
+        interfaces
+    )) {
+        let id = handle
+            super::super::frontend::elaboration::interface_impl_id_at(
+                interfaces, index
+            ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        sum_trait_impl_goals(
+            interfaces,
+            index + 1,
+            accumulator
+                + super::super::frontend::elaboration::interface_impl_constraint_goal_count(
+                    interfaces, id
+                )
+        )
+    } else { accumulator }
+}
+
+pub trait_impl_metadata(original: String) -> (u32, u32, u32, u32) {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => (1, 0, 0, 0),
+        Result::Ok(source) => handle
+            super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => (2, 0, 0, 0),
+            Result::Ok(declarations) => handle
+                super::super::frontend::headers::parse(
+                    &original,
+                    source,
+                    &declarations
+                ) {
+                Result::Err(_) => (3, 0, 0, 0),
+                Result::Ok(headers) => handle collect_interfaces(
+                    &headers,
+                    &declarations
+                ) {
+                    Result::Err(_) => (4, 0, 0, 0),
+                    Result::Ok(interfaces) => (
+                        0,
+                        u32_from_usize(
+                            super::super::frontend::elaboration::interface_trait_count(
+                                &interfaces
+                            )
+                        ),
+                        u32_from_usize(
+                            super::super::frontend::elaboration::interface_impl_count(
+                                &interfaces
+                            )
+                        ),
+                        sum_trait_impl_goals(&interfaces, 0, 0)
+                    )
+                }
+            }
+        }
+    }
+}
+
 write_constraint_text(
     output: &mut ByteBuf,
     original: &String,
