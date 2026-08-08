@@ -187,8 +187,36 @@ pub struct VariantHeader {
     name: Id<String>,
     name_token: usize,
     fields: HeaderRange,
-    discriminant: Option<u32>
+    discriminant: Option<u32>,
+    has_explicit: u8
 }
+
+// A previously-parsed variant's effective runtime tag, keyed by variant name.
+// This is threaded through `parse_variants` so an explicit `= <path>` const
+// expression can resolve a single-segment path (e.g. `= A + 1`) to the tag of
+// an earlier variant, exactly matching the bootstrap compiler's running-tag
+// semantics.
+struct VariantTagEntry {
+    name: Id<String>,
+    tag: u32
+}
+
+// The result of evaluating a `= <const-expr>` discriminant grammar node.
+// `value` is `None` when the expression is well-formed but does not evaluate to
+// a u32 tag (unresolved path, negation, division by zero, overflow, quantity),
+// which falls back to the running discriminator; `end` is the token index just
+// past the consumed expression so the header parser can resume after it.
+struct ConstExprOutcome {
+    value: Option<u64>,
+    end: usize
+}
+
+// Cursor/classification results threaded through the const-expression
+// evaluator. Structs (rather than multi-element tuples) so the bootstrap
+// compiler's single-named-callable codegen can lower the field accesses.
+struct BinaryOpInfo { opcode: u8, precedence: u32 }
+struct PathRest { multi: u8, end: usize }
+struct DiscriminantParse { explicit: u8, tag: Option<u32> }
 
 pub struct EnumHeader {
     shell: ShellId,
@@ -2990,7 +3018,24 @@ parse_sum_body(
     value.tokens.position = next_index(header_end);
     value.tokens.limit = previous_index(whole_end);
     let variant_start = variant_arena_count(&*variants);
-    try(parse_variants(original, value, variants, start), @parse_sum_body);
+    let previous = Vec::new();
+    let explicit_count = 0;
+    let last = 0;
+    try(
+        parse_variants(
+            original,
+            value,
+            variants,
+            start,
+            &mut previous,
+            &mut explicit_count,
+            &mut last,
+            variant_start,
+            0
+        ),
+        @parse_sum_body
+    );
+    finish_enum_discriminants(variants, variant_start);
     finish_enum(
         enums,
         variants,
@@ -3006,11 +3051,68 @@ parse_sum_body(
     Result::Ok(())
 }
 
+clear_enum_discriminants(
+    value: &mut VariantArena,
+    start: usize,
+    count: usize,
+    ordinal: usize
+) {
+    if(ordinal < count) {
+        set_variant_discriminant_none(value, start + ordinal);
+        clear_enum_discriminants(value, start, count, ordinal + 1)
+    } else { () }
+}
+
+set_variant_discriminant_none(value: &mut VariantArena, index: usize) {
+    let variant = Vec::index_mut(&mut value.values, index);
+    (*variant).discriminant = None;
+}
+
+// Whether any variant in [start, start+count) declared an explicit
+// `= <const-expr>` discriminant. `1` if so, else `0`.
+any_variant_explicit(
+    value: &VariantArena,
+    start: usize,
+    count: usize,
+    ordinal: usize
+) -> u8 {
+    if(ordinal < count) {
+        let variant = Vec::index(&value.values, start + ordinal);
+        if(variant.has_explicit == 1) {
+            1
+        } else {
+            any_variant_explicit(value, start, count, ordinal + 1)
+        }
+    } else { 0 }
+}
+
+// Post-pass over one enum's variants. When none declares an explicit
+// `= <const-expr>` discriminant the enum keeps ordinary implicit (index) tags:
+// every stored tag must be `None`. The forward pass computed running joins only
+// to resolve later path references; reset them here to preserve the index-tag
+// wire representation.
+finish_enum_discriminants(value: &mut VariantArena, start: usize) {
+    let count = variant_arena_count(&*value) - start;
+    let explicit = any_variant_explicit(&*value, start, count, 0);
+    handle explicit {
+        0 => {
+            clear_enum_discriminants(value, start, count, 0);
+            ()
+        },
+        _ => ()
+    }
+}
+
 parse_variants(
     original: &String,
     value: &mut Parser,
     variants: &mut VariantArena,
-    related: usize
+    related: usize,
+    previous: &mut Vec<VariantTagEntry>,
+    explicit: &mut u8,
+    last: &mut u32,
+    variant_start: usize,
+    ordinal: u32
 ) -> Result<(), HeaderError> {
     if(value.tokens.position < value.tokens.limit) {
             let name = try(ident(value, related), @parse_variants);
@@ -3035,7 +3137,12 @@ parse_variants(
                     variants,
                     related,
                     name,
-                     fields
+                     fields,
+                    previous,
+                    explicit,
+                    last,
+                    variant_start,
+                    ordinal
                 )
             } else { finish_variant(
                     original,
@@ -3043,71 +3150,60 @@ parse_variants(
                     variants,
                     related,
                     name,
-                     fields
+                     fields,
+                    previous,
+                    explicit,
+                    last,
+                    variant_start,
+                    ordinal
                 ) }
-    } else { Result::Ok(()) }
+    } else {
+        Result::Ok(())
+    }
 }
 
 parse_variant_discriminant(
     original: &String,
     value: &mut Parser,
-    related: usize
-) -> Result<Option<u32>, HeaderError> {
+    related: usize,
+    previous: &Vec<VariantTagEntry>
+) -> Result<DiscriminantParse, HeaderError> {
     if(eat_token(value, TokenPattern::Eq)) {
         let token = value.tokens.position;
-        handle super::lexer::token_kind_at(&value.source, token) {
-            super::lexer::TokenKind::Number(number)
-                => if(integer_number(&number)) {
-                    let spelling =
-                        super::lexer::number_spelling(&number);
-                    let text = source_text(
-                        original,
-                        super::lexer::span_start(&spelling),
-                        super::lexer::span_end(&spelling)
-                    );
-                    handle parse_u64(&text) {
-                        Result::Err(_) => Result::Err(
-                            HeaderError::InvalidVariantDiscriminant(
-                                token,
-                                related
-                            )
-                        ),
-                        Result::Ok(found) => if(found > 4294967295) {
-                            Result::Err(
-                                HeaderError::InvalidVariantDiscriminant(
-                                    token,
-                                    related
-                                )
-                            )
-                        } else {
-                            value.tokens.position = token + 1;
-                            let tag =
-                                wrapping_convert_to_u32(found);
-                            if(tag == 4294967295) {
-                                Result::Err(
-                                    HeaderError::InvalidVariantDiscriminant(
-                                        token,
-                                        related
-                                    )
-                                )
-                            } else {
-                                Result::Ok(Option::Some(tag))
-                            }
-                        }
-                    }
-                } else {
+        let outcome = try(
+            eval_const_expr(original, &*value, related, previous, token),
+            @parse_variant_discriminant
+        );
+        value.tokens.position = outcome.end;
+        handle outcome.value {
+            Option::Some(wide) => {
+                let tag = wrapping_convert_to_u32(wide);
+                // `u32::MAX` is reserved as the no-explicit-discriminant wire
+                // sentinel; an explicit discriminant evaluating to it must be
+                // rejected (matching the bootstrap validator).
+                if(tag == 4294967295) {
                     Result::Err(
                         HeaderError::InvalidVariantDiscriminant(
                             token,
                             related
                         )
                     )
-                },
-            _ => Result::Err(
-                HeaderError::InvalidVariantDiscriminant(token, related)
-            )
+                } else {
+                    Result::Ok(DiscriminantParse {
+                        explicit: 1,
+                        tag: Option::Some(tag)
+                    })
+                }
+            },
+            None => Result::Ok(DiscriminantParse {
+                explicit: 1,
+                tag: None
+            })
         }
-    } else { Result::Ok(None) }
+    } else { Result::Ok(DiscriminantParse {
+        explicit: 0,
+        tag: None
+    }) }
 }
 
 finish_variant(
@@ -3116,7 +3212,12 @@ finish_variant(
     variants: &mut VariantArena,
     related: usize,
     name: NameUse,
-    fields: Vec<TypeId>
+    fields: Vec<TypeId>,
+    previous: &mut Vec<VariantTagEntry>,
+    explicit: &mut u8,
+    last: &mut u32,
+    variant_start: usize,
+    ordinal: u32
 ) -> Result<(), HeaderError> {
     let edge_start = super::syntax::range_mark(&value.output.type_edges);
     append_edges(
@@ -3126,9 +3227,34 @@ finish_variant(
         0
     );
     let edge_end = Vec::len(&value.output.type_edges);
-    let discriminant = try(
-        parse_variant_discriminant(original, value, related),
+    let parsed = try(
+        parse_variant_discriminant(
+            original,
+            value,
+            related,
+            &*previous
+        ),
         @finish_variant
+    );
+    let current_last = *last;
+    // The running discriminator: an explicit value wins; otherwise continue the
+    // previous tag (0 for the first variant), matching bootstrap semantics even
+    // when an explicit `= <expr>` fails to evaluate to a u32 tag.
+    let effective = handle parsed.tag {
+        Option::Some(found) => Option::Some(found),
+        None => if(ordinal == 0) {
+            Option::Some(0)
+        } else { Option::Some(current_last + 1) }
+    };
+    let effective_value = handle effective {
+        Option::Some(found) => found,
+        None => 0
+    };
+    *explicit = *explicit + parsed.explicit;
+    *last = effective_value;
+    Vec::push(
+        &mut *previous,
+        VariantTagEntry { name: name.name, tag: effective_value }
     );
     Vec::push(
         &mut variants.values,
@@ -3136,12 +3262,323 @@ finish_variant(
             name: name.name,
             name_token: name.token,
             fields: header_range(edge_start, edge_end),
-            discriminant: discriminant
+            discriminant: effective,
+            has_explicit: parsed.explicit
         }
     );
     eat_token(value, TokenPattern::Comma);
     eat_token(value, TokenPattern::Semicolon);
-    parse_variants(original, value, variants, related)
+    parse_variants(
+        original,
+        value,
+        variants,
+        related,
+        previous,
+        explicit,
+        last,
+        variant_start,
+        ordinal + 1
+    )
+}
+
+eval_const_expr(
+    original: &String,
+    value: &Parser,
+    related: usize,
+    previous: &Vec<VariantTagEntry>,
+    cursor: usize
+) -> Result<ConstExprOutcome, HeaderError> {
+    eval_const_bp(original, value, related, previous, cursor, 0)
+}
+
+eval_const_bp(
+    original: &String,
+    value: &Parser,
+    related: usize,
+    previous: &Vec<VariantTagEntry>,
+    cursor: usize,
+    minimum: u32
+) -> Result<ConstExprOutcome, HeaderError> {
+    let lhs = try(
+        eval_const_operand(original, value, related, previous, cursor),
+        @eval_const_bp
+    );
+    eval_const_tail(original, value, related, previous, lhs, minimum)
+}
+
+eval_const_tail(
+    original: &String,
+    value: &Parser,
+    related: usize,
+    previous: &Vec<VariantTagEntry>,
+    lhs: ConstExprOutcome,
+    minimum: u32
+) -> Result<ConstExprOutcome, HeaderError> {
+    let cursor = lhs.end;
+    let info = const_binary_op(value, cursor);
+    let opcode = info.opcode;
+    let precedence = info.precedence;
+    if(opcode == 0) {
+        Result::Ok(lhs)
+    } else {
+        if(precedence < minimum) {
+            Result::Ok(lhs)
+        } else {
+            let rhs = try(
+                eval_const_bp(
+                    original,
+                    value,
+                    related,
+                    previous,
+                    cursor + 1,
+                    precedence + 1
+                ),
+                @eval_const_tail
+            );
+            let combined = const_binary_value(opcode, lhs.value, rhs.value);
+            eval_const_tail(
+                original,
+                value,
+                related,
+                previous,
+                ConstExprOutcome {
+                    value: combined,
+                    end: rhs.end
+                },
+                minimum
+            )
+        }
+    }
+}
+
+const_binary_op(value: &Parser, cursor: usize) -> BinaryOpInfo {
+    handle super::lexer::token_kind_at(&value.source, cursor) {
+        super::lexer::TokenKind::Plus => BinaryOpInfo { opcode: 1, precedence: 1 },
+        super::lexer::TokenKind::Minus => BinaryOpInfo { opcode: 2, precedence: 1 },
+        super::lexer::TokenKind::Star => BinaryOpInfo { opcode: 3, precedence: 2 },
+        super::lexer::TokenKind::Slash => BinaryOpInfo { opcode: 4, precedence: 2 },
+        super::lexer::TokenKind::Percent => BinaryOpInfo { opcode: 5, precedence: 2 },
+        _ => BinaryOpInfo { opcode: 0, precedence: 0 }
+    }
+}
+
+const_binary_value(opcode: u8, lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
+    handle lhs {
+        Option::Some(left) => handle rhs {
+            Option::Some(right) => const_binary_checked(opcode, left, right),
+            None => None
+        },
+        None => None
+    }
+}
+
+const_binary_checked(opcode: u8, left: u64, right: u64) -> Option<u64> {
+    if(opcode == 1) {
+        let sum = left + right;
+        if(sum > 4294967295) { None } else { Option::Some(sum) }
+    } else { if(opcode == 2) {
+        if(right > left) { None } else { Option::Some(left - right) }
+    } else { if(opcode == 3) {
+        let product = left * right;
+        if(product > 4294967295) { None } else { Option::Some(product) }
+    } else { if(opcode == 4) {
+        if(right == 0) { None } else { Option::Some(left / right) }
+    } else {
+        if(right == 0) { None } else { Option::Some(left % right) }
+    } } } }
+}
+
+eval_const_operand(
+    original: &String,
+    value: &Parser,
+    related: usize,
+    previous: &Vec<VariantTagEntry>,
+    cursor: usize
+) -> Result<ConstExprOutcome, HeaderError> {
+    handle super::lexer::token_kind_at(&value.source, cursor) {
+        super::lexer::TokenKind::Minus => {
+            // Unary negation binds tighter than any binary operator. Negative
+            // values are outside the u32 const domain, so a well-formed negated
+            // expression always falls back to the running discriminator.
+            let operand = try(
+                eval_const_bp(
+                    original,
+                    value,
+                    related,
+                    previous,
+                    cursor + 1,
+                    3
+                ),
+                @eval_const_operand
+            );
+            Result::Ok(ConstExprOutcome { value: None, end: operand.end })
+        },
+        super::lexer::TokenKind::LParen => {
+            let inner = try(
+                eval_const_bp(
+                    original,
+                    value,
+                    related,
+                    previous,
+                    cursor + 1,
+                    0
+                ),
+                @eval_const_operand
+            );
+            handle super::lexer::token_kind_at(&value.source, inner.end) {
+                super::lexer::TokenKind::RParen => Result::Ok(
+                    ConstExprOutcome {
+                        value: inner.value,
+                        end: inner.end + 1
+                    }
+                ),
+                _ => Result::Err(
+                    HeaderError::InvalidVariantDiscriminant(cursor, related)
+                )
+            }
+        },
+        super::lexer::TokenKind::LBracket => {
+            // A bracketed quantity is grammar-valid but never evaluates to a
+            // u32 tag, so it falls back like any other non-tag const value.
+            let end = try(
+                skip_quantity(value, related, cursor + 1, 1),
+                @eval_const_operand
+            );
+            Result::Ok(ConstExprOutcome { value: None, end: end })
+        },
+        super::lexer::TokenKind::Number(number)
+            => if(integer_number(&number)) {
+                let spelling =
+                    super::lexer::number_spelling(&number);
+                let text = source_text(
+                    original,
+                    super::lexer::span_start(&spelling),
+                    super::lexer::span_end(&spelling)
+                );
+                handle parse_u64(&text) {
+                    Result::Err(_) => Result::Err(
+                        HeaderError::InvalidVariantDiscriminant(
+                            cursor,
+                            related
+                        )
+                    ),
+                    Result::Ok(found) => if(found > 4294967295) {
+                        Result::Ok(
+                            ConstExprOutcome {
+                                value: None,
+                                end: cursor + 1
+                            }
+                        )
+                    } else {
+                        Result::Ok(
+                            ConstExprOutcome {
+                                value: Option::Some(found),
+                                end: cursor + 1
+                            }
+                        )
+                    }
+                }
+            } else {
+                Result::Err(
+                    HeaderError::InvalidVariantDiscriminant(cursor, related)
+                )
+            },
+        super::lexer::TokenKind::Ident(first) => {
+            let pathrest = try(
+                eval_const_path_tail(value, related, cursor + 1),
+                @eval_const_operand
+            );
+            if(pathrest.multi == 1) {
+                // A multi-segment path is grammar-valid but never resolves
+                // against the previous-variant tag table.
+                Result::Ok(
+                    ConstExprOutcome {
+                        value: None,
+                        end: pathrest.end
+                    }
+                )
+            } else {
+                handle resolve_previous(previous, first, 0) {
+                    Option::Some(tag) => Result::Ok(
+                        ConstExprOutcome {
+                            value: Option::Some(wrapping_convert_to_u64(tag)),
+                            end: pathrest.end
+                        }
+                    ),
+                    None => Result::Ok(
+                        ConstExprOutcome {
+                            value: None,
+                            end: pathrest.end
+                        }
+                    )
+                }
+            }
+        },
+        _ => Result::Err(
+            HeaderError::InvalidVariantDiscriminant(cursor, related)
+        )
+    }
+}
+
+eval_const_path_tail(
+    value: &Parser,
+    related: usize,
+    cursor: usize
+) -> Result<PathRest, HeaderError> {
+    if(super::lexer::token_matches_at(&value.source, cursor, TokenPattern::DoubleColon)) {
+        handle super::lexer::token_kind_at(&value.source, cursor + 1) {
+            super::lexer::TokenKind::Ident(_) => {
+                let after = try(
+                    eval_const_path_tail(value, related, cursor + 2),
+                    @eval_const_path_tail
+                );
+                Result::Ok(PathRest { multi: 1, end: after.end })
+            },
+            _ => Result::Err(
+                HeaderError::InvalidVariantDiscriminant(cursor, related)
+            )
+        }
+    } else { Result::Ok(PathRest { multi: 0, end: cursor }) }
+}
+
+skip_quantity(
+    value: &Parser,
+    related: usize,
+    cursor: usize,
+    depth: u32
+) -> Result<usize, HeaderError> {
+    handle super::lexer::token_kind_at(&value.source, cursor) {
+        super::lexer::TokenKind::LBracket => skip_quantity(
+            value,
+            related,
+            cursor + 1,
+            depth + 1
+        ),
+        super::lexer::TokenKind::RBracket => if(depth == 1) {
+            Result::Ok(cursor + 1)
+        } else {
+            skip_quantity(value, related, cursor + 1, depth - 1)
+        },
+        super::lexer::TokenKind::Eof => Result::Err(
+            HeaderError::InvalidVariantDiscriminant(cursor, related)
+        ),
+        _ => skip_quantity(value, related, cursor + 1, depth)
+    }
+}
+
+resolve_previous(
+    entries: &Vec<VariantTagEntry>,
+    name: Id<String>,
+    index: usize
+) -> Option<u32> {
+    if(index < Vec::len(entries)) {
+        let entry = Vec::index(entries, index);
+        if(Id::to_u32(entry.name) == Id::to_u32(name)) {
+            Option::Some(entry.tag)
+        } else {
+            resolve_previous(entries, name, index + 1)
+        }
+    } else { None }
 }
 
 finish_enum(

@@ -1700,3 +1700,146 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
         .join()
         .unwrap();
 }
+
+
+#[test]
+fn self_hosted_enum_const_expr_discriminants_match_rust() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            // Positive/negative const-expr discriminant cases drawn directly from
+            // the bootstrap `enum_declaration_tags` semantics:
+            //   - integer arithmetic with precedence and parentheses
+            //   - `=` path references to a previous variant (implicit or explicit)
+            //   - running-discriminator continuation
+            //   - non-tag const values (negation, quantity, unresolved/multi-segment
+            //     path, division by zero, overflow) falling back to continuation
+            //   - the reserved u32::MAX sentinel and grammar errors rejected
+            // Each source is referenced so the emitter keeps the enum type.
+            let cases: &[(&str, &str, bool)] = &[
+                // (source, enum name, expected-accepted)
+                ("enum E { A = 1 + 2, B, C } main() -> { () }", "E", true),
+                ("enum E { A = 1 + 2 * 3, B } main() -> { () }", "E", true),
+                ("enum E { A = (1 + 2) * 3, B } main() -> { () }", "E", true),
+                ("enum E { A = 10 / 2 - 10 % 3, B } main() -> { () }", "E", true),
+                ("enum E { A = 1, B = A + 1, C } main() -> { () }", "E", true),
+                ("enum E { A, B = A + 1 } main() -> { () }", "E", true),
+                ("enum E { A = 3, B, C = 10 } main() -> { () }", "E", true),
+                ("enum E { A = -5, B } main() -> { () }", "E", true),
+                ("enum E { A = 999999999, B } main() -> { () }", "E", true),
+                ("enum E { A = Missing, B } main() -> { () }", "E", true),
+                ("enum E { A = 1 / 0, B } main() -> { () }", "E", true),
+                ("enum E { A = [1, 2], B } main() -> { () }", "E", true),
+                ("enum E { A = M::N, B } main() -> { () }", "E", true),
+                ("enum E { A = 2147483647 + 2147483648 + 1 } main() -> { () }", "E", true),
+                ("enum E { A, B = 5, C } main() -> { () }", "E", true),
+                ("enum E { A, B } main() -> { () }", "E", true),
+                ("enum E { A = 4294967295 } main() -> { () }", "E", false),
+                ("enum E { A = 2147483647 + 2147483648 } main() -> { () }", "E", false),
+                ("enum E { A = 1 + } main() -> { () }", "E", false),
+                ("enum E { A = \"x\" } main() -> { () }", "E", false),
+                ("enum E { A = } main() -> { () }", "E", false),
+            ];
+
+            let bundle = self_host_bundle();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &bundle,
+                CompileOptions { optimization_level: OptimizationLevel::O2 },
+            )
+            .unwrap();
+            let compiler_entry = phases.artifact.entry_function.unwrap();
+            let compiler_bytes = phases.artifact.encode();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&compiler_bytes).unwrap();
+            let directory = tempfile::tempdir().unwrap();
+
+            for (case_index, (source, enum_name, oracle_expected)) in cases.iter().enumerate() {
+                // Reference the enum so both compilers emit its type.
+                let referenced = format!("{source} probe_use() -> {enum_name} {{ {enum_name}::A }}");
+
+                // Rust bootstrap oracle.
+                let oracle_ok = grandiose::compile_source_to_bytecode("p.glorious", &referenced).is_ok();
+                assert_eq!(oracle_ok, *oracle_expected, "oracle invariant case {case_index}: {source:?}");
+                let oracle_tags = if oracle_ok {
+                    grandiose::compile_source_to_bytecode("p.glorious", &referenced)
+                        .ok()
+                        .and_then(|art| {
+                            art.types.iter().find_map(|d| match d.representation() {
+                                Type::Enum { name, variants, .. } if name == *enum_name => {
+                                    Some(variants.iter().map(|v| v.tag).collect::<Vec<_>>())
+                                }
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+                // Self-host accept/reject.
+                let vm = Vm::with_host(
+                    compiler.clone(),
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(Vec::<std::ffi::OsString>::new()),
+                )
+                .unwrap();
+                let Value::U64(self_host_class) = vm
+                    .run(classify, vec![Value::Text(referenced.clone().into())])
+                    .unwrap()
+                else {
+                    panic!("classify failed case {case_index}: {source:?}");
+                };
+                let self_host_ok = self_host_class == 0;
+                assert_eq!(
+                    oracle_ok, self_host_ok,
+                    "accept/reject divergence case {case_index}: {source:?} \
+                     (oracle={oracle_ok}, self-host phase={self_host_class})"
+                );
+
+                if oracle_ok {
+                    let input = directory.path().join(format!("in{case_index}.glorious"));
+                    let output = directory.path().join(format!("out{case_index}.grbc"));
+                    fs::write(&input, &referenced).unwrap();
+                    let vm = Vm::with_host(
+                        compiler.clone(),
+                        ["process.args", "fs.read", "fs.write", "diagnostic"],
+                        SystemHost::new(vec![
+                            output.clone().into_os_string(),
+                            input.clone().into_os_string(),
+                        ]),
+                    )
+                    .unwrap();
+                    assert_eq!(vm.run(compiler_entry, vec![]).unwrap(), Value::Unit);
+                    let art = Artifact::decode(&fs::read(&output).unwrap()).unwrap();
+                    let self_host_names: Vec<String> = art
+                        .types
+                        .iter()
+                        .filter_map(|d| match d.representation() {
+                            Type::Enum { name, .. } => Some(name.to_owned()),
+                            _ => None,
+                        })
+                        .collect();
+                    let self_host_tags = art
+                        .types
+                        .iter()
+                        .find_map(|d| match d.representation() {
+                            Type::Enum { name, variants, .. } if name == *enum_name => {
+                                Some(variants.iter().map(|v| v.tag).collect::<Vec<_>>())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| panic!(
+                            "self-hosted artifact missing enum {enum_name} case {case_index}: \
+                             available enums {self_host_names:?}; source {source:?}"
+                        ));
+                    assert_eq!(
+                        oracle_tags, self_host_tags,
+                        "tag divergence case {case_index}: {source:?}"
+                    );
+                }
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
