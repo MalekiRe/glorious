@@ -155,6 +155,25 @@ enum RuntimeLeaf {
 // in the canonical trusted standard-library prefix. The spelling is checked
 // as a schema guard, but never grants authority to another declaration.
 runtime_leaf_identity(shell: ShellId, name: &String) -> Option<RuntimeLeaf> {
+    if(String::eq(name, &"wrapping_add")) {
+        Option::Some(RuntimeLeaf::Primitive(5))
+    } else if(String::eq(name, &"wrapping_sub")) {
+        Option::Some(RuntimeLeaf::Primitive(6))
+    } else if(String::eq(name, &"wrapping_mul")) {
+        Option::Some(RuntimeLeaf::Primitive(7))
+    } else if(String::eq(name, &"bit_and")) {
+        Option::Some(RuntimeLeaf::Primitive(8))
+    } else if(String::eq(name, &"bit_or")) {
+        Option::Some(RuntimeLeaf::Primitive(9))
+    } else if(String::eq(name, &"bit_xor")) {
+        Option::Some(RuntimeLeaf::Primitive(10))
+    } else if(String::eq(name, &"bit_not")) {
+        Option::Some(RuntimeLeaf::Primitive(11))
+    } else if(String::eq(name, &"shift_left")) {
+        Option::Some(RuntimeLeaf::Primitive(12))
+    } else if(String::eq(name, &"shift_right")) {
+        Option::Some(RuntimeLeaf::Primitive(13))
+    } else {
     handle Id::to_u32(shell) {
         0 => if(String::eq(name, &"__g1_text_byte_len")) {
             Option::Some(RuntimeLeaf::Primitive(64))
@@ -334,6 +353,7 @@ runtime_leaf_identity(shell: ShellId, name: &String) -> Option<RuntimeLeaf> {
         167 => runtime_host_named(name, &"__g1_fs_write", 2),
         168 => runtime_host_named(name, &"__g1_diagnostic_write", 3),
         _ => None
+    }
     }
 }
 
@@ -1386,9 +1406,53 @@ lower_typed_body_types<'a>(
 // and break interface resolution. Keep this deliberately small until the
 // self-host driver owns the complete standard-library bundle. Appending keeps
 // every user token (and hence every reported user token index) unchanged.
+scalar_only_prelude(original: &String) -> String {
+    let output = ByteBuf::new();
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(original));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_add<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_sub<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_mul<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_and<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_or<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_xor<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_not<T>(value: T) -> T { move value }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shl<T>(value: T, count: u32) -> T { move value }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shr<T>(value: T, count: u32) -> T { move value }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_add<T>(left: T, right: T) -> T { __g1_int_wrapping_add(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_sub<T>(left: T, right: T) -> T { __g1_int_wrapping_sub(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_mul<T>(left: T, right: T) -> T { __g1_int_wrapping_mul(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_and<T>(left: T, right: T) -> T { __g1_int_bit_and(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_or<T>(left: T, right: T) -> T { __g1_int_bit_or(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_xor<T>(left: T, right: T) -> T { __g1_int_bit_xor(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_not<T>(value: T) -> T { __g1_int_bit_not(move value) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_left<T>(value: T, count: u32) -> T { __g1_int_shl(move value, move count) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_right<T>(value: T, count: u32) -> T { __g1_int_shr(move value, move count) }\n"));
+    handle String::from_utf8(ByteBuf::finish(output)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
 minimal_interface_prelude(original: &String) -> String {
     let output = ByteBuf::new();
     ByteBuf::append_bytes(&mut output, &String::as_bytes(original));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_add<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_sub<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_mul<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_and<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_or<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_xor<T>(left: T, right: T) -> T { move left }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_not<T>(value: T) -> T { move value }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shl<T>(value: T, count: u32) -> T { move value }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shr<T>(value: T, count: u32) -> T { move value }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_add<T>(left: T, right: T) -> T { __g1_int_wrapping_add(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_sub<T>(left: T, right: T) -> T { __g1_int_wrapping_sub(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_mul<T>(left: T, right: T) -> T { __g1_int_wrapping_mul(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_and<T>(left: T, right: T) -> T { __g1_int_bit_and(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_or<T>(left: T, right: T) -> T { __g1_int_bit_or(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_xor<T>(left: T, right: T) -> T { __g1_int_bit_xor(move left, move right) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_not<T>(value: T) -> T { __g1_int_bit_not(move value) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_left<T>(value: T, count: u32) -> T { __g1_int_shl(move value, move count) }\n"));
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_right<T>(value: T, count: u32) -> T { __g1_int_shr(move value, move count) }\n"));
     ByteBuf::append_bytes(
         &mut output,
         &String::as_bytes(&"\nenum Result<T, E> { Ok(T), Err(E) }\n")
@@ -1410,6 +1474,7 @@ result_prelude_missing(
 
 // Decide on the session source text: append the minimal Result prelude only
 // when the incoming source does not already provide a `Result` type.
+
 session_source(original: &String) -> Result<String, CompileError> {
     let source = try(
         Result::map_err(
@@ -1425,12 +1490,35 @@ session_source(original: &String) -> Result<String, CompileError> {
         ),
         @session_source
     );
-    if(result_prelude_missing(&source, &declarations)) {
-        Result::Ok(minimal_interface_prelude(original))
+    if(result_declared(&source, &declarations)) {
+        // The incoming source provides its own `Result` type: append only the
+        // scalar standard-library mirror so a duplicate nominal is not minted.
+        Result::Ok(scalar_only_prelude(original))
     } else {
-        handle String::from_utf8(String::as_bytes(original)) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => Result::Ok(found)
+        // Scalar mirror plus the injected minimal `Result` nominal.
+        Result::Ok(minimal_interface_prelude(original))
+    }
+}
+
+// True when the incoming source declares a `Result` type of its own (so the
+// injected duplicate enum must be suppressed). Unlike `result_prelude_missing`,
+// this does not depend on the word `Result` already appearing as a lexeme: a
+// program that never mentions `Result` simply has none declared, so the scalar
+// (and minimal Result) prelude must still be appended.
+result_declared(
+    source: &lexer::LexedSource,
+    declarations: &scanner::DeclarationIndex
+) -> Bool {
+    handle lexer::lexeme_id(source, &"Result") {
+        Result::Err(_) => false,
+        Result::Ok(found) => {
+            let found = scanner::def_search(
+                declarations,
+                None,
+                found,
+                scanner::Namespace::Type
+            );
+            scanner::def_search_count(&found) > 0
         }
     }
 }
