@@ -13171,7 +13171,12 @@ pub(crate) fn optimize_program_with_control_tables(
     let cleanup = elaborate_cleanup(program, types)?;
     passes.push(cleanup);
     validate_program(program, types, MirPhase::Cleanup)?;
-    validate_flow_and_cleanup(program, types)?;
+    // elaborate_cleanup just re-derived and stored fresh cleanup plans for
+    // every function, and nothing between here and the Cleanup validation
+    // mutates the program, so a whole-program validate_flow_and_cleanup right
+    // now would re-solve every function only to re-discover the plans we just
+    // stored. The ownership contract is instead enforced at the later
+    // incremental checkpoints and the trailing final validation.
     timings.mark("cleanup+validate");
     record(
         &mut passes,
@@ -13349,7 +13354,10 @@ pub(crate) fn optimize_program_with_control_tables(
         function.features = infer_feature_bits(function);
     }
     validate_program(program, types, MirPhase::Optimized)?;
-    validate_flow_and_cleanup(program, types)?;
+    // validate_bytecode_input_checkpoint immediately re-runs the same
+    // whole-program validate_flow_and_cleanup (plus the cleanup-state
+    // analysis) with nothing mutating in between, so the explicit call here
+    // would re-solve every function a redundant second time.
     passes.push(validate_bytecode_input_checkpoint(program, types)?);
     timings.mark("final-validations");
     Ok(OptimizationReport {

@@ -3595,7 +3595,7 @@ impl Drop for SolveTimerGuard {
 
 pub(crate) fn solve(context: &FlowContext<'_>, site: &'static str) -> Result<FlowSolution, FlowError> {
     let _solve_t0 = std::time::Instant::now();
-    let _solve_cum = std::env::var_os("G1_OPT_TIMINGS").is_some();
+    let _solve_cum = std::env::var_os("G1_SOLVE_TRACE").is_some();
     let _solve_drop = SolveTimerGuard(_solve_t0, _solve_cum, site);
     let mut drop_flag_keys = BTreeSet::new();
     for fact in &context.function.flow.drop_flags {
