@@ -1058,9 +1058,26 @@ pub fn with_compiler_seeded_cleanup_plans_unverified(
             (function.code_len as usize).saturating_mul(function.register_types.len().max(1))
         })
         .fold(2usize, usize::saturating_add);
+    let _oracle_iter_start = std::time::Instant::now();
+    let mut _oracle_iters = 0usize;
     for _ in 0..iteration_limit {
+        let it_start = std::time::Instant::now();
+        _oracle_iters += 1;
         let completed = verify_artifact(&artifact, false, true)?;
+        if std::env::var_os("G1_BOOTSTRAP_TIMINGS").is_some() {
+            eprintln!(
+                "g1-verifier oracle-iter #{_oracle_iters}: {:.3}s (running total {:.3}s, {_oracle_iters} iters)",
+                it_start.elapsed().as_secs_f64(),
+                _oracle_iter_start.elapsed().as_secs_f64()
+            );
+        }
         if completed == artifact.cleanups {
+            if std::env::var_os("G1_BOOTSTRAP_TIMINGS").is_some() {
+                eprintln!(
+                    "g1-verifier oracle CONVERGED after {_oracle_iters} iters, total {:.3}s",
+                    _oracle_iter_start.elapsed().as_secs_f64()
+                );
+            }
             return Ok(artifact);
         }
         artifact.cleanups = completed;

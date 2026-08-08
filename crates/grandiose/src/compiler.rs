@@ -10128,19 +10128,49 @@ fn compile_program_with_phases(
 
     canonicalize_protocols(&mut artifact);
 
-    artifact.cleanups = serialize_mir_cleanup_plans(&artifact, &mir_program, &peephole_pc_maps)
+    // Bytecode structurally verifies every encoded switch successor, including
+    // arms the semantic enum-refinement solver can prove impossible, so the
+    // serialized physical CFG solution is compared against that same cleanup
+    // solution. Both serialization and the cross-check consume the same
+    // MIR-derived cleanup lists, so derive them exactly once here rather than
+    // re-running the ownership fixed point in each.
+    let serialization_cleanup_lists =
+        mir::optimizer::derive_program_serialization_cleanup_lists(
+            &mir_program,
+            &artifact.types,
+        )
         .map_err(|error| {
             vec![
                 Diagnostic::plain(format!(
-                    "failed to serialize cleanup metadata directly from MIR: {error}"
+                    "failed to derive MIR cleanup lists for serialization: {error}"
                 ))
                 .with_code("G1BC999"),
             ]
         })?;
+    artifact.cleanups = serialize_mir_cleanup_plans(
+        &artifact,
+        &mir_program,
+        &serialization_cleanup_lists,
+        &peephole_pc_maps,
+    )
+    .map_err(|error| {
+        vec![
+            Diagnostic::plain(format!(
+                "failed to serialize cleanup metadata directly from MIR: {error}"
+            ))
+            .with_code("G1BC999"),
+        ]
+    })?;
     // Validate MIR-derived cleanup identities before the final dense rename:
     // the latter is a representation-only bijection and intentionally has no
     // source-level register identity to compare against.
-    cross_validate_cleanup_maps(&artifact, &mir_program, &peephole_pc_maps).map_err(|error| {
+    cross_validate_cleanup_maps(
+        &artifact,
+        &mir_program,
+        &serialization_cleanup_lists,
+        &peephole_pc_maps,
+    )
+    .map_err(|error| {
         vec![
             Diagnostic::plain(format!(
                 "bytecode cleanup maps disagree with the MIR ownership facts: {error}"
@@ -56484,12 +56514,10 @@ fn reverse_edge_cleanup_states(
 fn serialize_mir_cleanup_plans(
     artifact: &Artifact,
     mir_program: &mir::Program,
+    cleanup_lists: &[BTreeMap<u32, Vec<Vec<u32>>>],
     pc_maps: &[Option<PeepholePcMap>],
 ) -> Result<Vec<CleanupPlan>, String> {
     let mut plans = Vec::new();
-    let cleanup_lists =
-        mir::optimizer::derive_program_serialization_cleanup_lists(mir_program, &artifact.types)
-            .map_err(|error| error.to_string())?;
     for (fid, function) in mir_program.functions.iter().enumerate() {
         let lists = &cleanup_lists[fid];
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
@@ -56782,15 +56810,9 @@ fn serialize_mir_cleanup_plans(
 fn cross_validate_cleanup_maps(
     artifact: &Artifact,
     mir_program: &mir::Program,
+    cleanup_lists: &[BTreeMap<u32, Vec<Vec<u32>>>],
     pc_maps: &[Option<PeepholePcMap>],
 ) -> Result<(), String> {
-    // Bytecode structurally verifies every encoded switch successor, including
-    // arms the semantic enum-refinement solver can prove impossible. Compare
-    // serialization against that same physical CFG solution; the refined
-    // ownership solution has already passed its independent MIR validation.
-    let cleanup_lists =
-        mir::optimizer::derive_program_serialization_cleanup_lists(mir_program, &artifact.types)
-            .map_err(|error| error.to_string())?;
     for (fid, function) in mir_program.functions.iter().enumerate() {
         let lists = &cleanup_lists[fid];
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)

@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::time::Instant;
 
 use grandiose_vm::bytecode::{HandlerDef, Protocol};
 use grandiose_vm::{
@@ -25,6 +26,12 @@ use crate::compiler_mir::analyses::{
     AnalysisErrorKind, ControlFlowAnalysis, EdgeLiveness, PhysicalRegisterAllocation,
     RegisterClass, RegisterIntervals,
 };
+
+/// Measurement-only: when set, validation passes return immediately so the
+/// transform cost can be isolated. Never enabled in normal builds.
+fn validation_disabled() -> bool {
+    std::env::var_os("G1_OPT_NO_VALIDATE").is_some()
+}
 use crate::compiler_mir::mutation::{CheckedCfg, ResourceLimits, check_resource_limits};
 use crate::compiler_regions as regions;
 use crate::compiler_traits::HostImportRole;
@@ -523,6 +530,9 @@ pub(crate) fn validate_program(
     types: &[Type],
     expected_phase: MirPhase,
 ) -> Result<(), ValidationError> {
+    if validation_disabled() {
+        return Ok(());
+    }
     let mut declarations = BTreeSet::new();
     for function in &program.functions {
         if !declarations.insert(function.declaration) {
@@ -11931,6 +11941,9 @@ fn elaborate_cleanup(program: &mut Program, types: &[Type]) -> Result<PassReport
 /// fresh elaboration exactly, and require protected values to survive their
 /// own cleanup chains.
 fn validate_flow_and_cleanup(program: &Program, types: &[Type]) -> Result<(), ValidationError> {
+    if validation_disabled() {
+        return Ok(());
+    }
     let array_calls = regions::array_call_summaries(program, types);
     for function in &program.functions {
         let elaboration =
@@ -12511,6 +12524,7 @@ pub(crate) fn derive_program_serialization_cleanup_lists(
     program: &Program,
     types: &[Type],
 ) -> Result<Vec<BTreeMap<u32, Vec<Vec<Register>>>>, ValidationError> {
+    let _ps = std::time::Instant::now();
     let array_calls = regions::array_call_summaries(program, types);
     program
         .functions
@@ -12530,7 +12544,17 @@ pub(crate) fn derive_program_serialization_cleanup_lists(
                 .map_err(|error| flow_to_validation(function, error))?
                 .cleanup_lists)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lists| {
+            if std::env::var_os("G1_BOOTSTRAP_TIMINGS").is_some() {
+                eprintln!(
+                    "g1-bootstrap derive-serialization-cleanup-lists: {:.3}s ({} funcs)",
+                    _ps.elapsed().as_secs_f64(),
+                    program.functions.len()
+                );
+            }
+            lists
+        })
 }
 
 struct CleanupStateAnalysis {
@@ -12920,7 +12944,9 @@ fn validate_bytecode_input_checkpoint(
 /// change ORs the invalidation mask, and this refresh is the only way the
 /// facts become trusted again.
 fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(), ValidationError> {
+    let _riff = std::time::Instant::now();
     let array_calls = regions::array_call_summaries(program, types);
+    let mut _riff_n = 0usize;
     for function in &mut program.functions {
         let invalidated = function.invalid_analyses;
         if invalidated == 0 {
@@ -12934,6 +12960,7 @@ fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(),
             function.invalid_analyses = 0;
             continue;
         }
+        _riff_n += 1;
         rebuild_site_facts(function);
         let locals = bridged_locals(function, types);
         function.flow.locals = locals;
@@ -12942,6 +12969,13 @@ fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(),
             derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
         apply_cleanup_elaboration(function, elaboration);
         function.invalid_analyses = 0;
+    }
+    if std::env::var_os("G1_OPT_TIMINGS").is_some() {
+        eprintln!(
+            "g1-opt refresh-io: {:.3}s rebuilt={_riff_n}/{} funcs",
+            _riff.elapsed().as_secs_f64(),
+            program.functions.len()
+        );
     }
     Ok(())
 }
@@ -13068,6 +13102,35 @@ pub(crate) fn optimize_program(
     optimize_program_with_control_tables(program, types, &[], &[], level)
 }
 
+struct OptTimings {
+    enabled: bool,
+    started: Instant,
+    checkpoint: Instant,
+}
+
+impl OptTimings {
+    fn from_environment() -> Self {
+        let now = Instant::now();
+        Self {
+            enabled: std::env::var_os("G1_OPT_TIMINGS").is_some(),
+            started: now,
+            checkpoint: now,
+        }
+    }
+
+    fn mark(&mut self, phase: &str) {
+        if self.enabled {
+            let now = Instant::now();
+            eprintln!(
+                "g1-opt {phase}: phase={:.3}s total={:.3}s",
+                now.duration_since(self.checkpoint).as_secs_f64(),
+                now.duration_since(self.started).as_secs_f64()
+            );
+            self.checkpoint = now;
+        }
+    }
+}
+
 pub(crate) fn optimize_program_with_control_tables(
     program: &mut Program,
     types: &[Type],
@@ -13075,6 +13138,7 @@ pub(crate) fn optimize_program_with_control_tables(
     handler_defs: &[HandlerDef],
     level: OptimizationLevel,
 ) -> Result<OptimizationReport, ValidationError> {
+    let mut timings = OptTimings::from_environment();
     validate_program(program, types, MirPhase::Raw)?;
     let initial_operations = operation_count(program);
     let mut passes = Vec::new();
@@ -13085,12 +13149,14 @@ pub(crate) fn optimize_program_with_control_tables(
         initial_operations,
     );
     let import = import_and_validate_place_flow(program, types)?;
+    timings.mark("validate-raw");
     passes.push(import);
     validate_program(program, types, MirPhase::Owned)?;
     let cleanup = elaborate_cleanup(program, types)?;
     passes.push(cleanup);
     validate_program(program, types, MirPhase::Cleanup)?;
     validate_flow_and_cleanup(program, types)?;
+    timings.mark("cleanup+validate");
     record(
         &mut passes,
         PassId::ValidateCleanupMir,
@@ -13100,6 +13166,7 @@ pub(crate) fn optimize_program_with_control_tables(
 
     let normalize = run_mandatory_normalize(program);
     push_checked(&mut passes, normalize, program, types)?;
+    timings.mark("normalize");
     let mut global_remaining = 64_u64.saturating_mul(initial_operations);
     let mut inline_policy = InlinePolicyState::default();
     let whole_program_tables = WholeProgramPassTables {
@@ -13116,6 +13183,7 @@ pub(crate) fn optimize_program_with_control_tables(
             types,
             &mut global_remaining,
         )?;
+        timings.mark("sparse-o1");
         if global_remaining != 0 {
             let report = run_transactional_pass(
                 program,
@@ -13145,6 +13213,7 @@ pub(crate) fn optimize_program_with_control_tables(
             );
             push_checked(&mut passes, report, program, types)?;
         }
+        timings.mark("global-simplify-o2");
         if global_remaining != 0 {
             let report = run_transactional_whole_program_pass(
                 program,
@@ -13156,6 +13225,7 @@ pub(crate) fn optimize_program_with_control_tables(
             );
             push_checked(&mut passes, report, program, types)?;
         }
+        timings.mark("scalarize-callables");
         if global_remaining != 0 {
             let report = run_transactional_whole_program_pass(
                 program,
@@ -13167,6 +13237,7 @@ pub(crate) fn optimize_program_with_control_tables(
             );
             push_checked(&mut passes, report, program, types)?;
         }
+        timings.mark("specialize-control");
         if global_remaining != 0 {
             let report = run_transactional_pass(
                 program,
@@ -13176,6 +13247,7 @@ pub(crate) fn optimize_program_with_control_tables(
             );
             push_checked(&mut passes, report, program, types)?;
         }
+        timings.mark("specialize-cleanup");
         if global_remaining != 0 {
             let report = run_transactional_whole_program_pass(
                 program,
@@ -13194,6 +13266,7 @@ pub(crate) fn optimize_program_with_control_tables(
             types,
             &mut global_remaining,
         )?;
+        timings.mark("inline-by-cost-o2");
         // O3 repeats the devirtualization/control/inlining family, then gives
         // its newly exposed local facts a distinct bounded fixed point. This
         // must happen before proof erasure and tail formation.
@@ -13243,6 +13316,7 @@ pub(crate) fn optimize_program_with_control_tables(
     // optimization level, not an optional O2 profitability transform.
     let erasure = run_mandatory_loan_erasure(program);
     push_checked(&mut passes, erasure, program, types)?;
+    timings.mark("erasure");
     if level.at_least(OptimizationLevel::O2) {
         let report = run_transactional_pass(
             program,
@@ -13252,7 +13326,7 @@ pub(crate) fn optimize_program_with_control_tables(
         );
         push_checked(&mut passes, report, program, types)?;
     }
-
+    timings.mark("tailcalls");
     refresh_invalidated_flow(program, types)?;
     for function in &mut program.functions {
         function.phase = MirPhase::Optimized;
@@ -13261,6 +13335,7 @@ pub(crate) fn optimize_program_with_control_tables(
     validate_program(program, types, MirPhase::Optimized)?;
     validate_flow_and_cleanup(program, types)?;
     passes.push(validate_bytecode_input_checkpoint(program, types)?);
+    timings.mark("final-validations");
     Ok(OptimizationReport {
         level,
         initial_operations,
