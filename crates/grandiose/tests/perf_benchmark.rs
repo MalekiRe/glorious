@@ -460,6 +460,7 @@ fn self_host_body_dump_artifact() {
                 out.push_str(&format!("FUNC {i} {} start={} len={} regs={:?}\n", f.name, f.code_start, f.code_len, f.register_types));
             }
             out.push_str(&format!("TYPES {}\n", types_pretty(&phases.artifact.types)));
+            out.push_str(&format!("CONSTS {:?}\n", phases.artifact.constants));
             out.push_str(&format!("GLUE {:?}\n", phases.artifact.drop_glue));
             for (pc, ins) in phases.artifact.code.iter().enumerate() {
                 out.push_str(&format!("{pc} {:?}\n", ins));

@@ -2566,6 +2566,31 @@ fn thread_one_constant_switch_parameter_diamond(
     budget: u64,
     work: &mut u64,
 ) -> Result<bool, ()> {
+    thread_diamond_with_policy(function, budget, work, false)
+}
+
+/// Like [`thread_one_constant_switch_parameter_diamond`], but also threads
+/// diamonds whose incoming edges carry live loans or reference locals,
+/// whenever retargeting provably preserves the loan state at the selected
+/// successor: the dispatcher body is empty, so the successor entry state is
+/// the dispatcher entry state exactly when every loan live across the
+/// incoming edge is also live across the dispatcher's selected edge. This is
+/// the shape emitted for `if`-style constant selects in hot self-host
+/// bodies, which the conservative policy leaves untouched.
+fn thread_constant_select_diamond(
+    function: &mut Function,
+    budget: u64,
+    work: &mut u64,
+) -> Result<bool, ()> {
+    thread_diamond_with_policy(function, budget, work, true)
+}
+
+fn thread_diamond_with_policy(
+    function: &mut Function,
+    budget: u64,
+    work: &mut u64,
+    select_exact_loan_crossing: bool,
+) -> Result<bool, ()> {
     #[derive(Clone)]
     struct Incoming {
         source: u32,
@@ -2817,17 +2842,39 @@ fn thread_one_constant_switch_parameter_diamond(
         if invalid_incoming || incoming.is_empty() {
             continue;
         }
-        if reference_liveness.as_ref().is_some_and(|liveness| {
+        // The conservative policy retains the dispatcher whenever an
+        // incoming edge carries a live loan or reference local. The
+        // select-exact policy additionally threads when the crossing is
+        // provably preserved: a loan crossing arm A -> dispatcher D is
+        // state-preserving for A's selected successor S iff it is also live
+        // across D -> S (D's body is empty, so the entry state of S equals
+        // the entry state of D on that path).
+        let loan_crossing_is_blocking = |liveness: &EdgeLiveness| {
             incoming.iter().any(|incoming| {
                 loan_sensitive_references.iter().any(|reference| {
-                    liveness.live_on_any_edge(
+                    if !liveness.live_on_any_edge(
                         super::BlockId(incoming.source),
                         super::BlockId(dispatcher_id),
                         *reference,
-                    )
+                    ) {
+                        return false;
+                    }
+                    if select_exact_loan_crossing {
+                        !liveness.live_on_any_edge(
+                            super::BlockId(dispatcher_id),
+                            super::BlockId(incoming.selected.target),
+                            *reference,
+                        )
+                    } else {
+                        true
+                    }
                 })
             })
-        }) {
+        };
+        if reference_liveness
+            .as_ref()
+            .is_some_and(&loan_crossing_is_blocking)
+        {
             continue;
         }
 
@@ -2957,6 +3004,19 @@ fn normalize_cfg(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
     let mut threaded_any = false;
     loop {
         match thread_one_constant_switch_parameter_diamond(&mut scratch, budget, &mut work) {
+            Ok(true) => {
+                changed = true;
+                threaded_any = true;
+            }
+            Ok(false) => break,
+            Err(()) => return (PassOutcome::BudgetExhausted, work),
+        }
+    }
+    // The conservative policy leaves `if`-style constant selects alone when
+    // a loan or reference local is live on an arm edge. The select-exact
+    // policy threads those too, provided the crossing is provably preserved.
+    loop {
+        match thread_constant_select_diamond(&mut scratch, budget, &mut work) {
             Ok(true) => {
                 changed = true;
                 threaded_any = true;
