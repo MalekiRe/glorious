@@ -11864,7 +11864,7 @@ __g1_interner_fill_buckets<T>(buckets: &mut Vec<Vec<Id<T>>>, capacity: usize) {
 __g1_interner_new<T>() -> Interner<T> { Interner { values: Vec::new(), buckets: Vec::new() } }
 
 __g1_interner_prepare<T>(value: &mut Interner<T>) {
-    __g1_interner_fill_buckets(&mut value.buckets, 2048)
+    __g1_interner_fill_buckets(&mut value.buckets, 1024)
 }
 
 __g1_interner_len<T>(value: &Interner<T>) -> usize { Vec::len(&value.values) }
