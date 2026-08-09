@@ -10533,7 +10533,25 @@ elaborate_expression(
                 form: ElaboratedForm::Value(core)
             }, expected, token)
         },
-        super::bodies::BodyExpressionView::Byte(_, _) => unreachable(),
+        // A byte literal is a `u8` integer constant.  Keep its literal
+        // payload in the same four-word Core integer representation as the
+        // other scalar constants; its `u8` type is what distinguishes it
+        // from an untyped numeric literal on the canonical wire.
+        super::bodies::BodyExpressionView::Byte(found, token) => {
+            let constant = push_integer_constant(
+                &mut value.core,
+                wrapping_convert_to_u128(wrapping_convert_to_u32(found))
+            );
+            let core = push_value(
+                &mut value.core,
+                type_id_from_u32(2),
+                CoreValueKind::Integer(constant)
+            );
+            check_expected(Elaborated {
+                type_id: type_id_from_u32(2),
+                form: ElaboratedForm::Value(core)
+            }, expected, token)
+        },
         super::bodies::BodyExpressionView::ByteString(_, _) => unreachable(),
         super::bodies::BodyExpressionView::Unit(_) => {
             let token = super::bodies::expression_token_start_at(

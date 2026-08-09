@@ -1421,7 +1421,8 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_false() -> Bool { false }",
         "probe_bool_identity(value: Bool) -> Bool { value }",
         "probe_i64() -> i64 { 7 } probe_u64() -> u64 { 7 }",
-        "probe_text() -> Text { \"hello, 🌍\" } probe_character() -> char { '💩' }",
+        "probe_text() -> Text { \"hello, 🌍\" } probe_character() -> char { '💩' } \\
+         probe_byte() -> u8 { b'\\xff' }",
         // Full-width integer literals exercise the fourth Core word.  Before
         // the probe's 128-bit wire correction this valid native-oracle case
         // was rejected as `IntegerEncodingOverflow`.
