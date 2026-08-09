@@ -55,7 +55,11 @@ pub enum HeaderTypeView<'a> {
 
 impl<'a> Use<[0, *]> for HeaderTypeView<'a> {}
 
-enum GenericParamKind { Type, Lifetime, EffectRow, Const }
+// Const binders are semantically kinded.  Keeping the distinction in the
+// shared header index is necessary for later elaboration to distinguish
+// numeric arguments from resumption-quantity arguments, including under a
+// higher-ranked `for<...>` binder.
+enum GenericParamKind { Type, Lifetime, EffectRow, ConstU32, ConstQuantity }
 
 impl Use<[0, *]> for GenericParamKind {}
 
@@ -847,7 +851,19 @@ pub generic_param_kind_code(value: &GenericParam) -> u8 {
         GenericParamKind::Type => 1,
         GenericParamKind::Lifetime => 2,
         GenericParamKind::EffectRow => 3,
-        GenericParamKind::Const => 4
+        GenericParamKind::ConstU32 => 4,
+        GenericParamKind::ConstQuantity => 4
+    }
+}
+
+// Zero means this is not a const binder.  The separate discriminator keeps
+// the established outer generic wire tag stable while preserving the const
+// parameter's actual kind.
+pub generic_param_const_kind_code(value: &GenericParam) -> u8 {
+    handle value.kind {
+        GenericParamKind::ConstU32 => 1,
+        GenericParamKind::ConstQuantity => 2,
+        _ => 0
     }
 }
 
@@ -2190,10 +2206,21 @@ parse_one_generic(
                 value.tokens.position = value.tokens.position + 1;
                 let name = try(ident(value, related), @parse_one_generic);
                 if(eat_token(value, TokenPattern::Colon)) {
-                    try(parse_type(value, related), @parse_one_generic);
+                    let kind = if(at_ident(&*value, &"u32")) {
+                        value.tokens.position = value.tokens.position + 1;
+                        GenericParamKind::ConstU32
+                    } else { if(at_ident(&*value, &"Quantity")) {
+                        value.tokens.position = value.tokens.position + 1;
+                        GenericParamKind::ConstQuantity
+                    } else { @parse_one_generic(Result::Err(
+                        HeaderError::UnsupportedGenericParameterKind(
+                            value.tokens.position,
+                            related
+                        )
+                    )) } };
                     Result::Ok(GenericParam {
                         name: name.name,
-                        kind: GenericParamKind::Const,
+                        kind: kind,
                         tokens: token_range(token, value.tokens.position)
                     })
                 } else {

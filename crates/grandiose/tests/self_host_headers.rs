@@ -26,13 +26,9 @@ fn repository_root() -> PathBuf {
 
 fn self_host_bundle(application: &str) -> SourceBundle {
     let root = repository_root().join("self-host/src");
-    let primary_source = format!(
-        "mod frontend;\nmod probe;\n\nmain() {{ run_compiler_host({application}) }}\n"
-    );
-    let primary = Segment::new(
-        root.join("main.glorious").to_string_lossy(),
-        primary_source,
-    );
+    let primary_source =
+        format!("mod frontend;\nmod probe;\n\nmain() {{ run_compiler_host({application}) }}\n");
+    let primary = Segment::new(root.join("main.glorious").to_string_lossy(), primary_source);
     let paths = [
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
@@ -218,6 +214,11 @@ fn encode_generics(output: &mut Vec<u8>, generics: Option<&GenericParams>) -> Re
             GenericParamKind::Const(_) => 4,
         };
         output.push(kind);
+        output.push(match parameter.kind {
+            GenericParamKind::Const(grandiose::ast::ConstKind::U32) => 1,
+            GenericParamKind::Const(grandiose::ast::ConstKind::Quantity) => 2,
+            _ => 0,
+        });
         push_string(output, &parameter.name);
         if parameter.const_default.is_some() {
             return Err(());
@@ -226,11 +227,7 @@ fn encode_generics(output: &mut Vec<u8>, generics: Option<&GenericParams>) -> Re
     Ok(())
 }
 
-fn encode_effect_row(
-    output: &mut Vec<u8>,
-    source: &str,
-    row: &EffectRowSyntax,
-) -> Result<(), ()> {
+fn encode_effect_row(output: &mut Vec<u8>, source: &str, row: &EffectRowSyntax) -> Result<(), ()> {
     push_u32(output, row.effects.len().try_into().unwrap());
     for effect in &row.effects {
         push_span(output, effect.span);
@@ -247,11 +244,7 @@ fn encode_effect_row(
     Ok(())
 }
 
-fn encode_where_contract(
-    output: &mut Vec<u8>,
-    source: &str,
-    clause: Option<&ast::WhereClause>,
-) {
+fn encode_where_contract(output: &mut Vec<u8>, source: &str, clause: Option<&ast::WhereClause>) {
     let Some(clause) = clause else {
         output.push(0);
         return;
@@ -273,6 +266,11 @@ fn encode_where_contract(
                 GenericParamKind::Const(_) => 4,
             };
             output.push(kind);
+            output.push(match parameter.kind {
+                GenericParamKind::Const(grandiose::ast::ConstKind::U32) => 1,
+                GenericParamKind::Const(grandiose::ast::ConstKind::Quantity) => 2,
+                _ => 0,
+            });
             push_string(output, &parameter.name);
         }
         push_span(output, goal.subject.span);
@@ -336,6 +334,11 @@ fn encode_where_contract(
                 GenericParamKind::Const(_) => 4,
             };
             output.push(kind);
+            output.push(match parameter.kind {
+                GenericParamKind::Const(grandiose::ast::ConstKind::U32) => 1,
+                GenericParamKind::Const(grandiose::ast::ConstKind::Quantity) => 2,
+                _ => 0,
+            });
             push_string(output, &parameter.name);
         }
         push_string(output, &constraint.longer.name);
@@ -471,7 +474,9 @@ fn encode_effect_row_alias(
     program: &grandiose::ast::Program,
     declaration: &grandiose::ast::EffectRowAliasDecl,
 ) -> Result<(), ()> {
-    output.push(u8::from(program.visibility(declaration.span) == Visibility::Public));
+    output.push(u8::from(
+        program.visibility(declaration.span) == Visibility::Public,
+    ));
     push_string(output, &declaration.name);
     encode_effect_row(output, source, &declaration.row)?;
     push_span(output, declaration.span);
@@ -513,7 +518,10 @@ fn encode_use(output: &mut Vec<u8>, source: &str, declaration: &ast::UseDecl) {
     encode_generics(output, declaration.generics.as_ref()).unwrap();
     push_u64(output, declaration.quantity.lower as u64);
     match declaration.quantity.upper {
-        Some(upper) => { output.push(1); push_u64(output, upper as u64); }
+        Some(upper) => {
+            output.push(1);
+            push_u64(output, upper as u64);
+        }
         None => output.push(0),
     }
     push_span(output, declaration.target.span);
@@ -531,18 +539,16 @@ fn bootstrap_header_error_code(source: &str, error: &grandiose::diagnostic::Diag
         (_, "expected `:` and a parameter type") => 7,
         (_, "expected `,` between quantity bounds") => 19,
         (_, "expected `]` after quantity bounds") => 21,
-        ("invalid resumption quantity", message)
-            if message.contains("lower bound") => 22,
-        ("invalid resumption quantity", message)
-            if message.contains("upper bound") => 20,
+        ("invalid resumption quantity", message) if message.contains("lower bound") => 22,
+        ("invalid resumption quantity", message) if message.contains("upper bound") => 20,
         ("duplicate associated binding", _) => 26,
         ("duplicate generic parameter", _) => 27,
         (_, _) if prefix.ends_with("where") => 23,
         (_, message) if message.contains("expected `{`") || message == "expected a block" => 9,
         ("expected a name", _) => 1,
-        (title, message) => panic!(
-            "unmapped bootstrap header diagnostic `{title}` / `{message}` at {span:?}"
-        ),
+        (title, message) => {
+            panic!("unmapped bootstrap header diagnostic `{title}` / `{message}` at {span:?}")
+        }
     }
 }
 
@@ -626,12 +632,41 @@ fn encode_rust_headers(output: &mut Vec<u8>, source: &str) {
 
 fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
     let program = grandiose::parser::parse(grandiose::lexer::lex(source).unwrap()).unwrap();
-    enum Item { Trait(usize), Struct(usize), Impl(usize), Function(usize) }
+    enum Item {
+        Trait(usize),
+        Struct(usize),
+        Impl(usize),
+        Function(usize),
+    }
     let mut items = Vec::new();
-    items.extend(program.traits.iter().enumerate().map(|(i, d)| (d.span.start, Item::Trait(i))));
-    items.extend(program.structs.iter().enumerate().map(|(i, d)| (d.span.start, Item::Struct(i))));
-    items.extend(program.impls.iter().enumerate().map(|(i, d)| (d.span.start, Item::Impl(i))));
-    items.extend(program.functions.iter().enumerate().map(|(i, d)| (d.span.start, Item::Function(i))));
+    items.extend(
+        program
+            .traits
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.span.start, Item::Trait(i))),
+    );
+    items.extend(
+        program
+            .structs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.span.start, Item::Struct(i))),
+    );
+    items.extend(
+        program
+            .impls
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.span.start, Item::Impl(i))),
+    );
+    items.extend(
+        program
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (d.span.start, Item::Function(i))),
+    );
     items.sort_by_key(|(start, _)| *start);
     push_u32(output, items.len().try_into().unwrap());
     for (_, item) in items {
@@ -639,7 +674,9 @@ fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
             Item::Trait(index) => {
                 output.push(15);
                 let declaration = &program.traits[index];
-                output.push(u8::from(program.visibility(declaration.span) == Visibility::Public));
+                output.push(u8::from(
+                    program.visibility(declaration.span) == Visibility::Public,
+                ));
                 push_string(output, &declaration.name);
                 encode_generics(output, declaration.generics.as_ref()).unwrap();
                 push_span(output, declaration.span);
@@ -651,7 +688,9 @@ fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
             Item::Struct(index) => {
                 output.push(8);
                 let declaration = &program.structs[index];
-                output.push(u8::from(program.visibility(declaration.span) == Visibility::Public));
+                output.push(u8::from(
+                    program.visibility(declaration.span) == Visibility::Public,
+                ));
                 push_string(output, &declaration.name);
                 encode_generics(output, declaration.generics.as_ref()).unwrap();
                 push_u32(output, declaration.fields.len().try_into().unwrap());
@@ -666,7 +705,9 @@ fn encode_rust_trait_impl_interfaces(output: &mut Vec<u8>, source: &str) {
                 let declaration = &program.impls[index];
                 encode_generics(output, declaration.generics.as_ref()).unwrap();
                 push_u32(output, declaration.trait_ref.path.len().try_into().unwrap());
-                for segment in &declaration.trait_ref.path { push_string(output, &segment.name); }
+                for segment in &declaration.trait_ref.path {
+                    push_string(output, &segment.name);
+                }
                 push_span(output, declaration.self_ty.span);
                 encode_type(output, source, &declaration.self_ty).unwrap();
                 encode_where_contract(output, source, declaration.where_clause.as_ref());
@@ -713,7 +754,9 @@ fn self_host_header_malformed_nested_types_match_bootstrap() {
 
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &self_host_bundle("probe::headers::application"),
-        CompileOptions { optimization_level: OptimizationLevel::O2 },
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
     )
     .unwrap();
     let entry = phases.artifact.entry_function.unwrap();
@@ -800,14 +843,19 @@ fn self_host_header_duplicate_generic_parameter_matches_rust_oracle() {
 
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &self_host_bundle("probe::headers::application"),
-        CompileOptions { optimization_level: OptimizationLevel::O2 },
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
     )
     .unwrap();
     let entry = phases.artifact.entry_function.unwrap();
     let vm = Vm::with_host(
         verify(phases.artifact).unwrap(),
         ["process.args", "fs.read", "fs.write", "diagnostic"],
-        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+        SystemHost::new(vec![
+            output.clone().into_os_string(),
+            input.into_os_string(),
+        ]),
     )
     .unwrap();
     assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
@@ -913,16 +961,27 @@ fn self_host_trait_and_impl_method_headers_match_bootstrap() {
 
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &self_host_bundle("probe::headers::legacy_interface_application"),
-        CompileOptions { optimization_level: OptimizationLevel::O2 },
-    ).unwrap();
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
     let entry = phases.artifact.entry_function.unwrap();
     let vm = Vm::with_host(
         verify(phases.artifact).unwrap(),
         ["process.args", "fs.read", "fs.write", "diagnostic"],
-        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
-    ).unwrap();
+        SystemHost::new(vec![
+            output.clone().into_os_string(),
+            input.into_os_string(),
+        ]),
+    )
+    .unwrap();
     assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-    assert_wire_eq(&fs::read(&output).unwrap(), &expected, "trait and implementation method interfaces diverged");
+    assert_wire_eq(
+        &fs::read(&output).unwrap(),
+        &expected,
+        "trait and implementation method interfaces diverged",
+    );
 }
 
 #[test]
@@ -1007,10 +1066,7 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
                     assert_eq!(focused.run(entry, vec![]).unwrap(), Value::Unit);
                     let mut expected_one = Vec::new();
                     push_u32(&mut expected_one, 1);
-                    encode_rust_headers(
-                        &mut expected_one,
-                        &fs::read_to_string(path).unwrap(),
-                    );
+                    encode_rust_headers(&mut expected_one, &fs::read_to_string(path).unwrap());
                     assert_wire_eq(
                         &fs::read(&focused_path).unwrap(),
                         &expected_one,
@@ -1135,7 +1191,10 @@ fn self_host_header_reference_lifetimes_match_bootstrap() {
             .unwrap();
             let entry = phases.artifact.entry_function.unwrap();
             let vm_path = directory.path().join("vm.bin");
-            let vm_args = vec![vm_path.clone().into_os_string(), input.clone().into_os_string()];
+            let vm_args = vec![
+                vm_path.clone().into_os_string(),
+                input.clone().into_os_string(),
+            ];
             let vm = Vm::with_host(
                 verify(phases.artifact.clone()).unwrap(),
                 ["process.args", "fs.read", "fs.write", "diagnostic"],
@@ -1143,7 +1202,11 @@ fn self_host_header_reference_lifetimes_match_bootstrap() {
             )
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM reference contract diverged");
+            assert_eq!(
+                fs::read(&vm_path).unwrap(),
+                expected,
+                "VM reference contract diverged"
+            );
 
             let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
             let llvm = directory.path().join("self-host-headers.ll");
@@ -1175,7 +1238,11 @@ fn self_host_header_reference_lifetimes_match_bootstrap() {
                 native.status,
                 String::from_utf8_lossy(&native.stderr)
             );
-            assert_eq!(fs::read(native_path).unwrap(), expected, "native contract diverged");
+            assert_eq!(
+                fs::read(native_path).unwrap(),
+                expected,
+                "native contract diverged"
+            );
         })
         .unwrap()
         .join()
@@ -1347,14 +1414,19 @@ fn self_host_header_effect_row_aliases_match_bootstrap() {
 
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &self_host_bundle("probe::headers::application"),
-        CompileOptions { optimization_level: OptimizationLevel::O2 },
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
     )
     .unwrap();
     let entry = phases.artifact.entry_function.unwrap();
     let vm = Vm::with_host(
         verify(phases.artifact).unwrap(),
         ["process.args", "fs.read", "fs.write", "diagnostic"],
-        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+        SystemHost::new(vec![
+            output.clone().into_os_string(),
+            input.into_os_string(),
+        ]),
     )
     .unwrap();
     assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
@@ -1371,6 +1443,7 @@ fn self_host_header_higher_ranked_binders_match_bootstrap() {
                 "check() -> Text where ",
                 "for<Item, 'scope> Text:Rel<Item, 'scope>, ",
                 "for<const N: u32> Text:Every<N>, ",
+                "for<const Q: Quantity> Text:QuantityEvery<Q>, ",
                 "for<'long, 'short> 'long: 'short { \"ok\" } ",
                 "main() -> { () }"
             );
@@ -1451,7 +1524,6 @@ fn self_host_header_higher_ranked_binders_match_bootstrap() {
 fn self_host_header_nested_type_spans_match_bootstrap() {
     self_hosted_headers_match_rust_in_vm_and_native_execution();
 }
-
 
 /// Type-syntax parity entry point covering lifetimes, consts, effect rows,
 /// generic where clauses, and nested nominal spans.

@@ -534,6 +534,10 @@ write_generics(
             output,
             super::super::frontend::headers::generic_param_kind_code(parameter)
         );
+        ByteBuf::push(
+            output,
+            super::super::frontend::headers::generic_param_const_kind_code(parameter)
+        );
         write_name(
             output,
             super::super::frontend::headers::parsed_source(parsed),
