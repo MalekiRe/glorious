@@ -55435,6 +55435,18 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 *instruction = Instruction::Nop;
             }
         }
+        // A constant immediately followed by a unit return cannot be
+        // observed. Constants have no runtime effect beyond defining their
+        // destination, and this also remains true when the constant is a
+        // branch target: every path that reaches it returns immediately.
+        for pc in 0..folded.len().saturating_sub(1) {
+            if matches!(
+                (&folded[pc], &folded[pc + 1]),
+                (Instruction::Const { .. }, Instruction::Return { src: None })
+            ) {
+                folded[pc] = Instruction::Nop;
+            }
+        }
         let mut state_renames = vec![Vec::new(); code.len()];
         // Late edge lowering can leave a constant in a one-use transfer
         // temporary even after MIR sparse propagation has finished. Retarget
@@ -58058,7 +58070,7 @@ mod mir_edge_emission_tests {
         });
 
         assert!(layout_and_peephole(&mut artifact));
-        assert_eq!(artifact.functions[0].code_len, 3);
+        assert_eq!(artifact.functions[0].code_len, 2);
         assert_eq!(
             artifact.code,
             vec![
@@ -58287,6 +58299,54 @@ mod mir_edge_emission_tests {
         assert_eq!(
             Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
             Value::I64(7)
+        );
+    }
+
+    #[test]
+    fn peephole_removes_constants_dead_before_unit_return_and_repatches_targets() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(1)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Jump { target: 2 },
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Return { src: None },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_unit_constant".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].code_len, 2);
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Return { src: None },
+            ]
+        );
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::Unit
         );
     }
 
