@@ -4441,6 +4441,25 @@ validate_trait_body_terminator(
     } else { Result::Ok(()) }
 }
 
+// The semantic trait database does not yet consume parent evidence, but
+// retaining a single ordinary parent keeps declaration/header parity with the
+// bootstrap parser and lets interface scanning continue.
+parse_trait_supertrait(
+    value: &mut Parser,
+    related: usize,
+    header_end: usize
+) -> Result<(), HeaderError> {
+    if(value.tokens.position == header_end) { Result::Ok(()) } else {
+        try(expect_colon(value, related), @parse_trait_supertrait);
+        try(parse_type(value, related), @parse_trait_supertrait);
+        if(value.tokens.position == header_end) { Result::Ok(()) } else {
+            Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
+                value.tokens.position, related
+            ))
+        }
+    }
+}
+
 parse_trait_header(
     original: &String,
     declarations: &super::scanner::DeclarationIndex,
@@ -4461,6 +4480,7 @@ parse_trait_header(
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_trait_header);
     let generics = try(parse_generics(value, start), @parse_trait_header);
+    try(parse_trait_supertrait(value, start, header_end), @parse_trait_header);
     if(value.tokens.position == header_end) {
         let method_start = Vec::len(&value.output.callables);
         let methods = try(parse_trait_methods(

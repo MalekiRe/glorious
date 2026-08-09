@@ -1020,6 +1020,30 @@ fn self_host_operator_trait_requirements_reach_the_header_oracle_in_vm() {
 }
 
 #[test]
+fn self_host_single_supertrait_header_reaches_the_header_oracle_in_vm() {
+    let source = "trait Parent {} trait Child: Parent {}";
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("supertrait.glorious");
+    let output = directory.path().join("supertrait.bin");
+    fs::write(&input, source).unwrap();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_headers(&mut expected, source);
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle("probe::headers::application"),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    ).unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    ).unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap(), expected);
+}
+
+#[test]
 fn self_host_header_drop_and_use_declarations_match_bootstrap() {
     self_hosted_headers_match_rust_in_vm_and_native_execution();
 }
