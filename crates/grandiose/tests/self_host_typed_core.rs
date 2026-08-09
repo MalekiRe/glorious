@@ -2103,6 +2103,49 @@ fn self_hosted_monomorphic_perform_elaborates_like_bootstrap() {
 }
 
 #[test]
+fn self_hosted_nested_perform_payload_elaborates_in_release_vm() {
+    // A payload can itself suspend. The outer operation must therefore retain
+    // the inner `Perform` as an embedded Core operand rather than requiring a
+    // pre-existing value local.
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64 } \
+        nested() -> i64 / {Ask} { perform Ask::ask(perform Ask::ask(40)) }";
+    let bootstrap = SourceBundle::distributed(
+        Segment::new(INPUT_NAME, format!("{source}{WRAPPER}")),
+        [],
+    );
+    assert!(
+        grandiose::compile_bundle_to_phases_with_options(
+            &bootstrap,
+            CompileOptions { optimization_level: OptimizationLevel::O2 },
+        )
+        .is_ok(),
+        "bootstrap compiler must accept nested perform payloads"
+    );
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("nested-perform.glorious");
+    let output = directory.path().join("nested-perform.bin");
+    fs::write(&input, source).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let encoded = fs::read(output).unwrap();
+    assert_eq!(&encoded[..4], &1_u32.to_le_bytes());
+    assert_eq!(encoded.get(4).copied(), Some(0));
+}
+
+#[test]
 fn self_hosted_generic_struct_literals_infer_field_arguments_in_vm() {
     // The local initializer has no expected type.  Its `Box` application must
     // therefore be inferred from the field value itself, then agree with the
