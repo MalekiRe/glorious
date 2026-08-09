@@ -1160,6 +1160,50 @@ fn self_host_body_numeric_source_payloads_match_bootstrap_ast() {
         .unwrap();
 }
 
+/// Float syntax is a frontend contract even though Typed Core does not yet
+/// lower float constants. Keep this VM-only probe focused on the self-host
+/// lexer/body parser's exact AST payloads, including exponent notation.
+#[test]
+fn self_host_float_syntax_matches_bootstrap_ast_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("float-syntax.glorious");
+            let output = directory.path().join("float-syntax-vm.bin");
+            let source = "fixed() -> f64 { 2.5 } exponent() -> f32 { 1.25e2 } \
+                signed_exponent() -> f64 { 3E-4 } main() -> { () }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn self_host_body_contextual_blocks_match_bootstrap_ast() {
     std::thread::Builder::new()
@@ -2065,4 +2109,3 @@ fn self_host_parser_conformance_syntax_core_matches_rust_oracle() {
 fn self_host_source_numeric_literals_syntax_core_match_rust_oracle() {
     self_host_body_numeric_source_payloads_match_bootstrap_ast();
 }
-
