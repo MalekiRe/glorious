@@ -206,11 +206,6 @@ pub struct Vm {
     /// built lazily on the first EnumTag dispatch for each type. `None`
     /// until a tag is requested for (or computed for) that type id.
     enum_tag_cache: RefCell<Vec<Option<Box<[u32]>>>>,
-    /// Per-constant resolved `Value` cache, built lazily on the first
-    /// Const/Switch dispatch for each constant index. Resolving once turns
-    /// the per-dispatch `Rc::from(text)` allocation of text constants into a
-    /// refcount bump and skips the bounds-checked constant lookup entirely.
-    constant_cache: RefCell<Vec<Option<Value>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -763,7 +758,6 @@ impl Vm {
             ))
         };
         let enum_tag_cache = RefCell::new(vec![None; artifact.image().types.len()]);
-        let constant_cache = RefCell::new(vec![None; artifact.image().constants.len()]);
         Self {
             artifact,
             host: None,
@@ -771,7 +765,6 @@ impl Vm {
             slots: SlotStore::default(),
             last_location: Cell::new(None),
             enum_tag_cache,
-            constant_cache,
         }
     }
     pub fn from_artifact(artifact: Artifact) -> Result<Self, VerifyError> {
@@ -803,7 +796,6 @@ impl Vm {
             .collect::<BTreeSet<_>>();
         let imports = link_imports(artifact.image(), &grants)?;
         let enum_tag_cache = RefCell::new(vec![None; artifact.image().types.len()]);
-        let constant_cache = RefCell::new(vec![None; artifact.image().constants.len()]);
         Ok(Self {
             artifact,
             host: Some(Box::new(host)),
@@ -811,7 +803,6 @@ impl Vm {
             slots: SlotStore::default(),
             last_location: Cell::new(None),
             enum_tag_cache,
-            constant_cache,
         })
     }
 
@@ -932,8 +923,10 @@ impl Vm {
                 Instruction::Nop => frame.pc += 1,
                 Instruction::Const { dst, constant } => {
                     let (dst, constant) = (*dst, *constant);
-                    let value = self.resolved_constant(constant)?;
-                    put(frame, dst, value)?;
+                    let constant = a
+                        .checked_constant(constant)
+                        .ok_or(RuntimeError::TypeConfusion)?;
+                    put(frame, dst, constant_value(constant)?)?;
                     frame.pc += 1;
                 }
                 Instruction::Move { dst, src } => {
@@ -1332,7 +1325,10 @@ impl Vm {
                     let value = get(frame, discr)?;
                     let mut target = otherwise;
                     for (constant, case_target) in cases {
-                        if value == self.resolved_constant(*constant)? {
+                        let constant = a
+                            .checked_constant(*constant)
+                            .ok_or(RuntimeError::TypeConfusion)?;
+                        if constant_eq(&value, constant) {
                             target = *case_target;
                             break;
                         }
@@ -4072,26 +4068,6 @@ fn remap_shared_reference_target(
     })
 }
 
-impl Vm {
-    /// Resolve the runtime `Value` for a raw constant id, caching the result
-    /// in the VM so repeated Const/Switch dispatches skip the bounds-checked
-    /// constant lookup and (for text/bytes payloads) the per-dispatch backing
-    /// allocation. A cached clone is returned; scalars copy, immutable text
-    /// and bytes handles bump their refcount.
-    fn resolved_constant(&self, raw: u32) -> Result<Value, RuntimeError> {
-        let a = self.artifact.image();
-        let id = a.constant_id(raw).ok_or(RuntimeError::TypeConfusion)?;
-        let index = id.index();
-        let mut cache = self.constant_cache.borrow_mut();
-        if let Some(value) = &cache[index] {
-            return Ok(value.clone());
-        }
-        let value = constant_value(a.constant(id))?;
-        cache[index] = Some(value.clone());
-        Ok(value)
-    }
-}
-
 fn constant_value(c: ImageConstant<'_>) -> Result<Value, RuntimeError> {
     match c {
         ImageConstant::Text(text) => Ok(Value::Text(Rc::from(text))),
@@ -4121,6 +4097,37 @@ fn inline_constant_value(c: &Constant) -> Result<Value, RuntimeError> {
         Constant::Text(x) => Value::Text(Rc::from(x.as_str())),
         Constant::Bytes(x) => Value::Bytes(Rc::from(x.as_slice())),
     })
+}
+fn constant_eq(v: &Value, c: ImageConstant<'_>) -> bool {
+    match c {
+        ImageConstant::Text(text) => matches!(v, Value::Text(value) if value.as_ref() == text),
+        ImageConstant::Bytes(bytes) => matches!(v, Value::Bytes(value) if value.as_ref() == bytes),
+        ImageConstant::Inline(constant) => inline_constant_eq(v, constant),
+    }
+}
+
+fn inline_constant_eq(v: &Value, c: &Constant) -> bool {
+    match (v, c) {
+        (Value::Unit, Constant::Unit) => true,
+        (Value::U64(x), Constant::U8(y)) => *x == u64::from(*y),
+        (Value::U64(x), Constant::U16(y)) => *x == u64::from(*y),
+        (Value::U64(x), Constant::U32(y)) => *x == u64::from(*y),
+        (Value::U64(x), Constant::U64(y)) => x == y,
+        (Value::U128(x), Constant::U128(y)) => x == y,
+        (Value::I64(x), Constant::I8(y)) => *x == i64::from(*y),
+        (Value::I64(x), Constant::I16(y)) => *x == i64::from(*y),
+        (Value::I64(x), Constant::I32(y)) => *x == i64::from(*y),
+        (Value::I64(x), Constant::I64(y)) => x == y,
+        (Value::I128(x), Constant::I128(y)) => x == y,
+        (Value::U64(x), Constant::Usize(y)) => x == y,
+        (Value::I64(x), Constant::Isize(y)) => x == y,
+        (Value::F32(x), Constant::F32(y)) => x.to_bits() == y.to_bits(),
+        (Value::F64(x), Constant::F64(y)) => x.to_bits() == y.to_bits(),
+        (Value::U64(x), Constant::Char(y)) => *x == u64::from(*y as u32),
+        (Value::Text(x), Constant::Text(y)) => x.as_ref() == y,
+        (Value::Bytes(x), Constant::Bytes(y)) => x.as_ref() == y,
+        _ => false,
+    }
 }
 fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
     let Some(ty_descriptor) = a.checked_type(ty) else {
