@@ -1885,6 +1885,45 @@ fn self_hosted_effect_control_headers_match_rust_oracle() {
 }
 
 #[test]
+// Trait associated items are header-only at this stage: the bootstrap parser
+// accepts their generic declarations/definitions even though the self-host
+// trait database has not yet lowered their values.  Keep this oracle at the
+// parser boundary so later semantic work cannot accidentally regress the
+// declaration scan needed to compile trait-heavy sources.
+fn self_hosted_trait_associated_item_headers_match_rust_oracle() {
+    let corpus = [
+        "trait Family<T> { type Member<U>; }",
+        "trait Family { type Member<U>; } impl<T> Family for T { type Member<U> = U; }",
+        "trait Carrier { type Effects<U>: EffectRow; } \
+         impl<T> Carrier for T { type Effects<U> = {}; }",
+    ];
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_effect_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":effect_interface_bytes");
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    for declaration in corpus {
+        let source = format!("{declaration}\nmain() -> {{ () }}");
+        let rust = grandiose::lexer::lex(&source)
+            .ok()
+            .and_then(|tokens| grandiose::parser::parse(tokens).ok())
+            .and_then(|program| grandiose::validate::validate(&program).ok())
+            .is_some();
+        assert!(rust, "bad Rust-oracle fixture: {source}");
+        let value = vm.run(function, vec![Value::Text(source.clone().into())]).unwrap();
+        let Value::Bytes(bytes) = value else { panic!("trait probe returned non-bytes"); };
+        assert_eq!(bytes.first().copied(), Some(0), "source: {source}");
+    }
+}
+
+#[test]
 // Resumption-quantity interface parity distilled from the finite-resumption,
 // multishot, quantity-breadth, nested-handler, and late-resumption integration
 // suites. The self-host frontend currently elaborates effect interfaces

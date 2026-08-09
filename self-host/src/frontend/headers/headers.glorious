@@ -2,7 +2,7 @@
 // Ordinary callables and type aliases are the first consumers of the shared
 // generic/type arenas. Bodies remain unparsed.
 
-use super::lexer::{TokenKind, TokenPattern};
+use super::lexer::{Keyword, TokenKind, TokenPattern};
 use super::scanner::ShellId;
 
 pub struct HeaderRangeTag {}
@@ -1701,6 +1701,13 @@ at_ident(value: &Parser, expected: &String) -> Bool {
             } else { false },
             _ => false
         }
+    } else { false }
+}
+
+at_type_keyword(value: &Parser) -> Bool {
+    if(value.tokens.position < value.tokens.limit) {
+        super::lexer::token_kind_at(&value.source, value.tokens.position)
+            is TokenKind::Keyword(Keyword::Type)
     } else { false }
 }
 
@@ -4342,8 +4349,17 @@ parse_trait_methods(
     if(current < limit) {
         let end = trait_method_semicolon(&*value, current, limit);
         value.tokens.position = current;
-        value.tokens.limit = end;
-        try(parse_callable(original, value, shell, false, current), @parse_trait_methods);
+        value.tokens.limit = limit;
+        // Associated item declarations are interface members, not callable
+        // signatures.  Their semantic collection is deliberately a later
+        // stage, but the header pass must preserve their boundary so a trait
+        // containing a GAT can participate in the same declaration scan as
+        // ordinary marker traits.
+        if(not(at_type_keyword(&*value))) {
+            value.tokens.position = current;
+            value.tokens.limit = end;
+            try(parse_callable(original, value, shell, false, current), @parse_trait_methods)
+        } else { () };
         parse_trait_methods(original, value, shell, end + 1, limit, start)
     } else { Result::Ok(header_range(start, Vec::len(&value.output.callables))) }
 }
@@ -4366,7 +4382,22 @@ parse_impl_methods(
     start: usize
 ) -> Result<HeaderRange, HeaderError> {
     if(current < limit) {
-        handle impl_method_body_open(&*value, current, limit) {
+        value.tokens.position = current;
+        value.tokens.limit = limit;
+        if(at_type_keyword(&*value)) {
+            // As with trait declarations, retain the top-level item boundary
+            // for an associated-type definition.  This lets generic impl
+            // headers be parsed before associated-item lowering is wired into
+            // the semantic trait database.
+            let end = trait_method_semicolon(&*value, current, limit);
+            if(end == limit) {
+                Result::Err(HeaderError::ExpectedSemicolon(limit, current))
+            } else {
+                parse_impl_methods(
+                    original, declarations, value, shell, end + 1, limit, start
+                )
+            }
+        } else { handle impl_method_body_open(&*value, current, limit) {
             None => Result::Err(HeaderError::UnexpectedTrailingHeaderToken(current, current)),
             Option::Some(open) => {
                 value.tokens.position = current;
@@ -4381,7 +4412,7 @@ parse_impl_methods(
                     )
                 }
             }
-        }
+        } }
     } else { Result::Ok(header_range(start, Vec::len(&value.output.callables))) }
 }
 
