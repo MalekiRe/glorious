@@ -985,6 +985,41 @@ fn self_host_trait_and_impl_method_headers_match_bootstrap() {
 }
 
 #[test]
+fn self_host_operator_trait_requirements_reach_the_header_oracle_in_vm() {
+    // The header pass does not yet record an operator's callable identity, but
+    // it must retain the member boundary so standard-library traits such as
+    // `Add` do not reject the entire source bundle.
+    let source = "trait Add { +(self: Self, other: Self) -> Self; }";
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("operator-trait.glorious");
+    let output = directory.path().join("operator-trait.bin");
+    fs::write(&input, source).unwrap();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_headers(&mut expected, source);
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle("probe::headers::application"),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![
+            output.clone().into_os_string(),
+            input.into_os_string(),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap(), expected);
+}
+
+#[test]
 fn self_host_header_drop_and_use_declarations_match_bootstrap() {
     self_hosted_headers_match_rust_in_vm_and_native_execution();
 }
