@@ -9235,6 +9235,8 @@ elaborate_struct_fields(
     expression: u32,
     nominal: u32,
     instance: TypeId,
+    generics: SignatureScope,
+    substitutions: &mut Vec<Option<TypeId>>,
     ordinal: u32,
     seen: &mut Vec<u32>,
     values: &mut Vec<Option<CoreValueId>>
@@ -9276,12 +9278,23 @@ elaborate_struct_fields(
                     nominal,
                     field
                 );
+                // A generic product literal is allowed to establish its
+                // nominal arguments from its fields.  Before a field binds a
+                // parameter it must be elaborated without that parameter as
+                // an expected type; afterwards the instantiated declaration
+                // type keeps later fields consistent with the first one.
                 let field_type = nominal_instance_member_type(
                     headers,
                     interfaces,
                     instance,
                     type_id_from_u32(declared_field_type)
                 );
+                let field_expected = if(call_type_has_unbound_parameter(
+                    &*interfaces,
+                    field_type,
+                    generics.owner,
+                    substitutions
+                )) { None } else { Option::Some(field_type) };
                 let field_value = try(elaborate_expression(
                     original,
                     headers,
@@ -9295,8 +9308,23 @@ elaborate_struct_fields(
                         expression,
                         ordinal
                     ),
-                    Option::Some(field_type)
+                    field_expected
                 ), @elaborate_struct_fields);
+                if(infer_call_substitutions(
+                    &*interfaces,
+                    type_id_from_u32(declared_field_type),
+                    field_value.type_id,
+                    generics.owner,
+                    substitutions
+                )) { () } else {
+                    @elaborate_struct_fields(Result::Err(
+                        ElaborationError::TypeMismatch(
+                            token,
+                            Id::to_u32(field_type),
+                            Id::to_u32(field_value.type_id)
+                        )
+                    ))
+                };
                 // Construction fields are canonicalized into declaration
                 // order. Embed computations so their evaluation follows that
                 // same canonical order, matching ordinary Core construction.
@@ -9320,6 +9348,8 @@ elaborate_struct_fields(
                     expression,
                     nominal,
                     instance,
+                    generics,
+                    substitutions,
                     ordinal + 1,
                     seen,
                     values
@@ -9329,6 +9359,58 @@ elaborate_struct_fields(
             ) }
         }
     } else { Result::Ok(()) }
+}
+
+collect_nominal_type_arguments(
+    headers: &super::headers::ParsedHeaders,
+    scope: SignatureScope,
+    substitutions: &Vec<Option<TypeId>>,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) -> Bool {
+    if(ordinal < scope.count) {
+        let parameter = handle super::headers::generic_param_at(
+            super::headers::parsed_index(headers),
+            usize_from_u32(scope.start + ordinal)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(super::headers::generic_param_kind_code(parameter) == 1) {
+            handle call_substitution_at(substitutions, ordinal) {
+                None => false,
+                Option::Some(found) => {
+                    Vec::push(&mut *output, Id::to_u32(found));
+                    collect_nominal_type_arguments(
+                        headers, scope, substitutions, ordinal + 1, output
+                    )
+                }
+            }
+        } else {
+            collect_nominal_type_arguments(
+                headers, scope, substitutions, ordinal + 1, output
+            )
+        }
+    } else { true }
+}
+
+nominal_instance_from_fields(
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &mut TypedInterfaces,
+    base: TypeId,
+    scope: SignatureScope,
+    substitutions: &Vec<Option<TypeId>>
+) -> Option<TypeId> {
+    let arguments = Vec::new();
+    if(collect_nominal_type_arguments(
+        headers, scope, substitutions, 0, &mut arguments
+    )) {
+        if(Vec::is_empty(&arguments)) { Option::Some(base) } else {
+            Option::Some(type_id_from_u32(intern_application_type(
+                interfaces, base, &arguments
+            )))
+        }
+    } else { None }
 }
 
 elaborate_struct(
@@ -9371,17 +9453,18 @@ elaborate_struct(
                     Result::Ok(found) => found
                 };
                 let nominal = Id::to_u32(nominal_id);
-                let instance = nominal_instance_for_expected(
+                let nominal_node = *interface_nominal_at(
+                    interfaces,
+                    nominal_id
+                );
+                let base_instance = nominal_instance_for_expected(
                     &*interfaces,
                     ty_id,
                     nominal_id,
                     expected
                 );
-                if(expected_matches(expected, instance)) {
-                    let nominal_node = *interface_nominal_at(
-                        interfaces,
-                        nominal_id
-                    );
+                let generics = nominal_node.generics;
+                if(expected_matches(expected, base_instance)) {
                     let count = handle nominal_node.kind {
                         InterfaceNominalKind::Struct(range) => range.count,
                         _ => unreachable()
@@ -9393,6 +9476,7 @@ elaborate_struct(
                         &mut values,
                         usize_from_u32(count)
                     );
+                    let substitutions = new_call_substitutions(generics.count);
                     try(elaborate_struct_fields(
                         original,
                         headers,
@@ -9403,12 +9487,28 @@ elaborate_struct(
                         value,
                         expression,
                         nominal,
-                        instance,
+                        base_instance,
+                        generics,
+                        &mut substitutions,
                         0,
                         &mut seen,
                         &mut values
                     ), @elaborate_struct);
-                    if(ordered_fields_complete(&seen, 0)) {
+                    let instance = if(Option::is_none(&expected)) {
+                        nominal_instance_from_fields(
+                            headers,
+                            interfaces,
+                            ty_id,
+                            generics,
+                            &substitutions
+                        )
+                    } else { Option::Some(base_instance) };
+                    if(ordered_fields_complete(&seen, 0)
+                        and { Option::is_some(&instance) }) {
+                        let instance = handle instance {
+                            Option::Some(found) => found,
+                            None => unreachable()
+                        };
                         let fields = Vec::new();
                         append_ordered_fields(
                             &mut fields,
@@ -9433,8 +9533,8 @@ elaborate_struct(
                         ) }
                 } else { Result::Err(ElaborationError::TypeMismatch(
                     token,
-                    expected_word_or(expected, instance),
-                    Id::to_u32(instance)
+                    expected_word_or(expected, base_instance),
+                    Id::to_u32(base_instance)
                 )) }
             }
         },
