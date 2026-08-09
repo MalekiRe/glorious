@@ -16,6 +16,8 @@ pub type TypeId = Id<TypeTag>;
 
 pub struct NameUse { name: Id<String>, token: usize }
 
+impl Use<[0, *]> for NameUse {}
+
 pub struct TypeEdge { value: TypeId, position: u32 }
 
 // Regions do not affect runtime type identity, but their source positions are
@@ -28,6 +30,7 @@ enum HeaderTypeKind {
     UniqueReference(Option<NameUse>, TypeId),
     Tuple(HeaderRange),
     Application(TypeId, HeaderRange, HeaderRange, u32),
+    Projection(TypeId, HeaderRange, NameUse),
     Never
 }
 
@@ -46,6 +49,7 @@ pub enum HeaderTypeView<'a> {
     UniqueReference(usize, usize, Option<usize>, TypeId),
     Tuple(usize, usize, Slice<'a, TypeEdge>),
     Application(usize, usize, TypeId, Slice<'a, LifetimeArgument>, Slice<'a, TypeEdge>, u32),
+    Projection(usize, usize, TypeId, Slice<'a, NameUse>, NameUse),
     Never(usize, usize)
 }
 
@@ -1019,6 +1023,9 @@ pub header_type_view<'a>(
             type_edges(value, &children),
             const_arguments
         ),
+        HeaderTypeKind::Projection(subject, relation, item) => HeaderTypeView::Projection(
+            token, end, subject, header_slice(&value.names, &relation), item
+        ),
         HeaderTypeKind::Never => HeaderTypeView::Never(token, end)
     }
 }
@@ -1728,6 +1735,7 @@ copy_type_kind(
         HeaderTypeKind::Tuple(elements) => HeaderTypeKind::Tuple(elements),
         HeaderTypeKind::Application(constructor, lifetimes, arguments, const_arguments) =>
             HeaderTypeKind::Application(constructor, lifetimes, arguments, const_arguments),
+        HeaderTypeKind::Projection(subject, relation, item) => HeaderTypeKind::Projection(subject, relation, item),
         HeaderTypeKind::Never => HeaderTypeKind::Never
     }
 }
@@ -2071,12 +2079,47 @@ finish_tuple(
 
 parse_type(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
     let start = value.tokens.position;
-    if(eat_token(value, TokenPattern::Amp)) { parse_reference(value, related, start) } else { if(eat_token(value, TokenPattern::LParen)) { parse_tuple(value, related, start) } else { if(eat_token(value, TokenPattern::Bang)) { push_type(
+    if(eat_token(value, TokenPattern::Lt)) { parse_projection(value, related, start) } else { if(eat_token(value, TokenPattern::Amp)) { parse_reference(value, related, start) } else { if(eat_token(value, TokenPattern::LParen)) { parse_tuple(value, related, start) } else { if(eat_token(value, TokenPattern::Bang)) { push_type(
                     value,
                     HeaderTypeKind::Never,
                     start,
                     related
-                ) } else { parse_path(value, related) } } }
+                ) } else { parse_path(value, related) } } } }
+}
+
+parse_projection(value: &mut Parser, related: usize, start: usize) -> Result<TypeId, HeaderError> {
+    let subject = try(parse_type(value, related), @parse_projection);
+    try(expect_projection_as(value, related), @parse_projection);
+    let relation_start = super::syntax::range_mark(&value.output.names);
+    let first = try(ident(value, related), @parse_projection);
+    Vec::push(&mut value.output.names, first);
+    try(parse_projection_relation_tail(value, related), @parse_projection);
+    let relation_end = Vec::len(&value.output.names);
+    try(expect_right_angle(value, related), @parse_projection);
+    try(expect_projection_separator(value, related), @parse_projection);
+    let item = try(ident(value, related), @parse_projection);
+    let projection = try(push_type(value, HeaderTypeKind::Projection(subject, header_range(relation_start, relation_end), item), start, related), @parse_projection);
+    parse_application(value, related, start, projection)
+}
+
+expect_projection_as(value: &mut Parser, related: usize) -> Result<(), HeaderError> {
+    if(at_ident(&*value, &"as")) { value.tokens.position = value.tokens.position + 1; Result::Ok(()) } else {
+        Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related))
+    }
+}
+
+expect_projection_separator(value: &mut Parser, related: usize) -> Result<(), HeaderError> {
+    if(eat_token(value, TokenPattern::DoubleColon)) { Result::Ok(()) } else {
+        Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related))
+    }
+}
+
+parse_projection_relation_tail(value: &mut Parser, related: usize) -> Result<(), HeaderError> {
+    if(eat_token(value, TokenPattern::DoubleColon)) {
+        let name = try(ident(value, related), @parse_projection_relation_tail);
+        Vec::push(&mut value.output.names, name);
+        parse_projection_relation_tail(value, related)
+    } else { Result::Ok(()) }
 }
 
 parse_generics(value: &mut Parser, related: usize) -> Result<HeaderRange, HeaderError> {

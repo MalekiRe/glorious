@@ -289,6 +289,19 @@ write_header_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             );
             write_header_type_edges(output, parsed, arguments)
         },
+        HeaderTypeView::Projection(start, end, subject, relation, item) => {
+            ByteBuf::push(output, 7);
+            write_type_node_span(output, source, start, end);
+            write_header_type(output, parsed, subject);
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(relation)));
+            for_range(Range::new(0, Slice::len(relation)), { current => {
+                let name = handle Slice::get(relation, current) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+                write_name(output, source, super::super::frontend::headers::name_use_name(name));
+                write_name_use_span(output, source, name)
+            }});
+            write_name(output, source, super::super::frontend::headers::name_use_name(&item));
+            write_name_use_span(output, source, &item)
+        },
         HeaderTypeView::Never(start, end) => {
             ByteBuf::push(output, 6);
             write_type_node_span(output, source, start, end)
@@ -363,6 +376,16 @@ write_interface_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
             }});
             ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(arguments)));
             write_interface_type_edges(output, parsed, arguments)
+        },
+        HeaderTypeView::Projection(_, _, subject, relation, item) => {
+            ByteBuf::push(output, 7);
+            write_interface_type(output, parsed, subject);
+            ByteBuf::write_u32_le(output, wrapping_convert_to_u32(Slice::len(relation)));
+            for_range(Range::new(0, Slice::len(relation)), { current => {
+                let name = handle Slice::get(relation, current) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+                write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::name_use_name(name))
+            }});
+            write_name(output, super::super::frontend::headers::parsed_source(parsed), super::super::frontend::headers::name_use_name(&item))
         },
         HeaderTypeView::Never(_, _) => ByteBuf::push(output, 6)
     }

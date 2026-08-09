@@ -175,7 +175,34 @@ fn encode_type(output: &mut Vec<u8>, _source: &str, ty: &TypeSyntax) -> Result<(
             push_u32(output, ty.span.start.try_into().unwrap());
             push_u32(output, ty.span.end.try_into().unwrap());
         }
-        TypeSyntaxKind::Projection { .. } => return Err(()),
+        TypeSyntaxKind::Projection {
+            subject,
+            trait_ref,
+            item,
+            arguments,
+            const_arguments,
+        } => {
+            if !trait_ref.arguments.is_empty()
+                || !trait_ref.bindings.is_empty()
+                || !arguments.is_empty()
+                || !const_arguments.is_empty()
+            {
+                return Err(());
+            }
+            output.push(7);
+            push_u32(output, ty.span.start.try_into().unwrap());
+            push_u32(output, ty.span.end.try_into().unwrap());
+            encode_type(output, _source, subject)?;
+            push_u32(output, trait_ref.path.len().try_into().unwrap());
+            for segment in &trait_ref.path {
+                push_string(output, &segment.name);
+                push_u32(output, segment.span.start.try_into().unwrap());
+                push_u32(output, segment.span.end.try_into().unwrap());
+            }
+            push_string(output, &item.name);
+            push_u32(output, item.span.start.try_into().unwrap());
+            push_u32(output, item.span.end.try_into().unwrap());
+        }
     }
     Ok(())
 }
@@ -1244,7 +1271,7 @@ fn self_host_header_generic_where_effect_rows_match_bootstrap() {
             let input = directory.path().join("focused.glorious");
             let vm_output = directory.path().join("vm.bin");
             let native_output = directory.path().join("native.bin");
-            let source = "run<E, S, F, R>(body: F) -> R / {Ask, Trace<i32>} where F: Fn<(), Output = R>, F: RunsIn<E, (), After = S>, E: Use<[0, 0]> { body() }";
+            let source = "run<F, e: EffectRow>(body: F) -> i64 / {<Carrier as Capability>::Effects<e>} where F: Fn<(), Output = i64>, F: RunsIn<e> { body() }";
             fs::write(&input, source).unwrap();
 
             let mut expected = Vec::new();
