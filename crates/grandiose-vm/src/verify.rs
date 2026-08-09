@@ -556,9 +556,6 @@ impl ExecutionImage {
         }
     }
 
-    pub(crate) fn checked_constant(&self, raw: u32) -> Option<ImageConstant<'_>> {
-        self.constant_id(raw).map(|id| self.constant(id))
-    }
 
     fn materialize_constant(&self, index: usize) -> Constant {
         match self.constant(ImageConstantId(index)) {

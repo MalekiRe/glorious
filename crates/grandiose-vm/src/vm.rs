@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt, fs,
@@ -202,6 +202,15 @@ pub struct Vm {
     imports: Result<Vec<ResolvedImport>, HostLinkError>,
     slots: SlotStore,
     last_location: Cell<Option<(u32, u32)>>,
+    /// Per-type enumeration tag tables (variant index -> runtime tag),
+    /// built lazily on the first EnumTag dispatch for each type. `None`
+    /// until a tag is requested for (or computed for) that type id.
+    enum_tag_cache: RefCell<Vec<Option<Box<[u32]>>>>,
+    /// Per-constant resolved `Value` cache, built lazily on the first
+    /// Const/Switch dispatch for each constant index. Resolving once turns
+    /// the per-dispatch `Rc::from(text)` allocation of text constants into a
+    /// refcount bump and skips the bounds-checked constant lookup entirely.
+    constant_cache: RefCell<Vec<Option<Value>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,11 +365,20 @@ struct VmMemoryProfile {
 
 /// Opt-in per-instruction-class execution counter used to profile hot VM
 /// dispatch paths (`G1_VM_INSTR_PROFILE=1`). Disabled runs take one
-/// never-taken branch per instruction and no allocations.
+/// never-taken branch per instruction and no allocations. When enabled,
+/// per-class wall-time is also sampled every 64 instructions so expensive
+/// arms (deep copies, hashing, drops) can be separated from merely frequent
+/// ones; the sampler attributes each 64-instruction window to the class of
+/// the first instruction of the window.
 struct InstructionProfile {
     counts: Vec<u64>,
     steps: u64,
+    time_ns: Vec<u64>,
+    window_class: usize,
+    window_started: Option<Instant>,
 }
+
+const INSTR_PROFILE_SAMPLE_WINDOW: u64 = 64;
 
 impl InstructionProfile {
     fn from_env() -> Option<Self> {
@@ -369,12 +387,24 @@ impl InstructionProfile {
             .then(|| Self {
                 counts: vec![0; 49],
                 steps: 0,
+                time_ns: vec![0; 49],
+                window_class: 0,
+                window_started: None,
             })
     }
 
     fn observe(&mut self, instruction: &Instruction) {
+        let class = instruction_class(instruction);
         self.steps = self.steps.saturating_add(1);
-        self.counts[instruction_class(instruction)] += 1;
+        self.counts[class] += 1;
+        if self.steps % INSTR_PROFILE_SAMPLE_WINDOW == 0 {
+            if let Some(started) = self.window_started.take() {
+                self.time_ns[self.window_class] =
+                    self.time_ns[self.window_class].saturating_add(started.elapsed().as_nanos() as u64);
+            }
+            self.window_class = class;
+            self.window_started = Some(Instant::now());
+        }
     }
 
     fn report(&self) {
@@ -399,6 +429,30 @@ impl InstructionProfile {
                     INSTRUCTION_CLASS_NAMES[class],
                     count as f64 * 100.0 / total as f64,
                     count
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let sampled_time = self.time_ns.iter().sum::<u64>().max(1);
+        let mut time_ranked = self
+            .time_ns
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, ns)| *ns != 0)
+            .collect::<Vec<_>>();
+        time_ranked.sort_unstable_by_key(|(class, ns)| (std::cmp::Reverse(*ns), *class));
+        eprintln!(
+            "g1-vm-instruction-time sampled_ns={} hot=[{}]",
+            sampled_time,
+            time_ranked
+                .into_iter()
+                .take(20)
+                .map(|(class, ns)| format!(
+                    "{}={:.2}%({}ns)",
+                    INSTRUCTION_CLASS_NAMES[class],
+                    ns as f64 * 100.0 / sampled_time as f64,
+                    ns
                 ))
                 .collect::<Vec<_>>()
                 .join(",")
@@ -708,12 +762,16 @@ impl Vm {
                 artifact.image().import_capability(first).to_owned(),
             ))
         };
+        let enum_tag_cache = RefCell::new(vec![None; artifact.image().types.len()]);
+        let constant_cache = RefCell::new(vec![None; artifact.image().constants.len()]);
         Self {
             artifact,
             host: None,
             imports,
             slots: SlotStore::default(),
             last_location: Cell::new(None),
+            enum_tag_cache,
+            constant_cache,
         }
     }
     pub fn from_artifact(artifact: Artifact) -> Result<Self, VerifyError> {
@@ -744,12 +802,16 @@ impl Vm {
             .map(|grant| grant.as_ref().to_owned())
             .collect::<BTreeSet<_>>();
         let imports = link_imports(artifact.image(), &grants)?;
+        let enum_tag_cache = RefCell::new(vec![None; artifact.image().types.len()]);
+        let constant_cache = RefCell::new(vec![None; artifact.image().constants.len()]);
         Ok(Self {
             artifact,
             host: Some(Box::new(host)),
             imports: Ok(imports),
             slots: SlotStore::default(),
             last_location: Cell::new(None),
+            enum_tag_cache,
+            constant_cache,
         })
     }
 
@@ -870,10 +932,8 @@ impl Vm {
                 Instruction::Nop => frame.pc += 1,
                 Instruction::Const { dst, constant } => {
                     let (dst, constant) = (*dst, *constant);
-                    let constant = a
-                        .checked_constant(constant)
-                        .ok_or(RuntimeError::TypeConfusion)?;
-                    put(frame, dst, constant_value(constant)?)?;
+                    let value = self.resolved_constant(constant)?;
+                    put(frame, dst, value)?;
                     frame.pc += 1;
                 }
                 Instruction::Move { dst, src } => {
@@ -1158,18 +1218,19 @@ impl Vm {
                 }
                 Instruction::EnumTag { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let raw = match get(frame, src)? {
-                        Value::Aggregate(aggregate) => aggregate
-                            .borrow()
-                            .variant
-                            .ok_or(RuntimeError::TypeConfusion)?,
-                        Value::Reference { target, .. } => reference_target_enum_tag(&target)?,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
+                    // Peek the stored variant without cloning the register
+                    // value (the old path copied the whole Value first).
+                    let raw = peek_variant(frame, src)?;
                     // The stored aggregate tag is the variant's position; the
                     // emitted runtime tag is the explicit discriminant when the
-                    // variant declares one, else its index.
-                    let tag = enum_variant_tag(a, fun.register_types[src as usize], raw)?;
+                    // variant declares one, else its index. The per-type tag
+                    // table is resolved once and cached in the VM.
+                    let tag = enum_runtime_tag(
+                        &self.enum_tag_cache,
+                        a,
+                        fun.register_types[src as usize],
+                        raw,
+                    )?;
                     put(frame, dst, Value::U64(u64::from(tag)))?;
                     frame.pc += 1;
                 }
@@ -1183,8 +1244,29 @@ impl Vm {
                         None => None,
                     };
                     if let Some(value) = value {
-                        let expected = fun.register_types[register as usize];
-                        self.destroy_typed(expected, value)?;
+                        match value {
+                            // Fast path: destruction of scalar, unit,
+                            // text, bytes, and reference values is
+                            // type-independent — destroy_structural treats
+                            // them as plain no-ops and the Rc handles are
+                            // released when `value` drops here. Skipping
+                            // destroy_typed avoids the drop-glue scan and
+                            // the structural-destruction match entirely.
+                            Value::Unit
+                            | Value::I64(_)
+                            | Value::I128(_)
+                            | Value::U64(_)
+                            | Value::U128(_)
+                            | Value::F32(_)
+                            | Value::F64(_)
+                            | Value::Text(_)
+                            | Value::Bytes(_)
+                            | Value::Reference { .. } => {}
+                            other => {
+                                let expected = fun.register_types[register as usize];
+                                self.destroy_typed(expected, other)?;
+                            }
+                        }
                     }
                     frame.pc += 1;
                 }
@@ -1250,10 +1332,7 @@ impl Vm {
                     let value = get(frame, discr)?;
                     let mut target = otherwise;
                     for (constant, case_target) in cases {
-                        let constant = a
-                            .checked_constant(*constant)
-                            .ok_or(RuntimeError::TypeConfusion)?;
-                        if constant_eq(&value, constant) {
+                        if value == self.resolved_constant(*constant)? {
                             target = *case_target;
                             break;
                         }
@@ -2692,32 +2771,72 @@ fn observe_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeEr
 /// `variant_index` in the enum type `ty` (which may be a reference wrapper).
 /// An explicit `EnumVariant.tag` overrides the index-derived tag; unwrapping a
 /// reference keeps the referent enum's discriminant set authoritative.
-fn enum_variant_tag(
+/// Read the stored variant position of the aggregate in register `r`
+/// without cloning the register value. Mirrors the dispatch's former
+/// `get(frame, r)` + match sequence, including the `Value::Place` deref.
+fn peek_variant(frame: &Frame, r: u32) -> Result<u32, RuntimeError> {
+    let value = frame.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Aggregate(aggregate) => aggregate
+            .borrow()
+            .variant
+            .ok_or(RuntimeError::TypeConfusion),
+        Value::Reference { target, .. } => reference_target_enum_tag(target),
+        Value::Place(slot) => {
+            let stored = slot.get().map_err(|_| RuntimeError::EmptyRegister(r))?;
+            let Value::Aggregate(aggregate) = stored else {
+                return Err(RuntimeError::TypeConfusion);
+            };
+            aggregate.borrow().variant.ok_or(RuntimeError::TypeConfusion)
+        }
+        _ => Err(RuntimeError::TypeConfusion),
+    }
+}
+
+/// Resolve the runtime tag for an aggregate variant position, caching the
+/// per-type tag table in the VM so repeated EnumTag dispatches on the same
+/// type skip the type-descriptor resolution and variant lookup entirely.
+fn enum_runtime_tag(
+    cache: &RefCell<Vec<Option<Box<[u32]>>>>,
     a: &ExecutionImage,
     ty: TypeId,
     variant_index: u32,
 ) -> Result<u32, RuntimeError> {
-    fn resolve(t: &Type, variant_index: u32) -> Result<u32, RuntimeError> {
-        let Type::Enum { variants, .. } = t else {
-            return Err(RuntimeError::TypeConfusion);
-        };
-        variants
-            .get(variant_index as usize)
-            .map(|variant| variant.discriminant(variant_index))
-            .ok_or(RuntimeError::TypeConfusion)
-    }
-    match a.checked_type(ty).map(Type::representation) {
+    // Resolve shared/unique reference wrappers to the underlying enum type,
+    // mirroring enum_variant_tag's type-resolution rules.
+    let representation = match a.checked_type(ty).map(Type::representation) {
         Some(Type::RefShared { referent }) | Some(Type::RefUnique { referent }) => {
-            let referent = a
-                .checked_type(*referent)
+            a.checked_type(*referent)
                 .map(Type::representation)
-                .ok_or(RuntimeError::TypeConfusion)?;
-            resolve(referent, variant_index)
+                .ok_or(RuntimeError::TypeConfusion)?
         }
-        Some(other) => resolve(other, variant_index),
-        None => Err(RuntimeError::TypeConfusion),
-    }
+        Some(other) => other,
+        None => return Err(RuntimeError::TypeConfusion),
+    };
+    let Type::Enum { variants, .. } = representation else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    let mut cache = cache.borrow_mut();
+    let entry = &mut cache[ty as usize];
+    let table = match entry {
+        Some(table) => table,
+        None => {
+            let table = variants
+                .iter()
+                .enumerate()
+                .map(|(index, variant)| variant.discriminant(index as u32))
+                .collect::<Box<[u32]>>();
+            entry.insert(table)
+        }
+    };
+    table
+        .get(variant_index as usize)
+        .copied()
+        .ok_or(RuntimeError::TypeConfusion)
 }
+
 
 fn reference_target_enum_tag(target: &ReferenceTarget) -> Result<u32, RuntimeError> {
     fn value_tag(value: &Value) -> Result<u32, RuntimeError> {
@@ -3119,7 +3238,23 @@ fn copy_register(a: &ExecutionImage, f: &Frame, r: u32, ty: TypeId) -> Result<Va
             let stored = slot.get().map_err(|_| RuntimeError::EmptyRegister(r))?;
             copy_value(a, ty, &stored)
         }
-        value => copy_value(a, ty, value),
+        // Fast path: scalar, unit, and immutable-handle copies are
+        // type-independent for verified artifacts (the scoped register type
+        // always matches the stored value kind), so skip the type-descriptor
+        // resolution copy_value performs per copy. Text/Bytes copy by Rc
+        // bump, exactly as copy_value's Type::Text/Type::Bytes arms do.
+        value => match value {
+            Value::Unit => Ok(Value::Unit),
+            Value::I64(value) => Ok(Value::I64(*value)),
+            Value::I128(value) => Ok(Value::I128(*value)),
+            Value::U64(value) => Ok(Value::U64(*value)),
+            Value::U128(value) => Ok(Value::U128(*value)),
+            Value::F32(value) => Ok(Value::F32(*value)),
+            Value::F64(value) => Ok(Value::F64(*value)),
+            Value::Text(value) => Ok(Value::Text(value.clone())),
+            Value::Bytes(value) => Ok(Value::Bytes(value.clone())),
+            _ => copy_value(a, ty, value),
+        },
     }
 }
 
@@ -3937,6 +4072,26 @@ fn remap_shared_reference_target(
     })
 }
 
+impl Vm {
+    /// Resolve the runtime `Value` for a raw constant id, caching the result
+    /// in the VM so repeated Const/Switch dispatches skip the bounds-checked
+    /// constant lookup and (for text/bytes payloads) the per-dispatch backing
+    /// allocation. A cached clone is returned; scalars copy, immutable text
+    /// and bytes handles bump their refcount.
+    fn resolved_constant(&self, raw: u32) -> Result<Value, RuntimeError> {
+        let a = self.artifact.image();
+        let id = a.constant_id(raw).ok_or(RuntimeError::TypeConfusion)?;
+        let index = id.index();
+        let mut cache = self.constant_cache.borrow_mut();
+        if let Some(value) = &cache[index] {
+            return Ok(value.clone());
+        }
+        let value = constant_value(a.constant(id))?;
+        cache[index] = Some(value.clone());
+        Ok(value)
+    }
+}
+
 fn constant_value(c: ImageConstant<'_>) -> Result<Value, RuntimeError> {
     match c {
         ImageConstant::Text(text) => Ok(Value::Text(Rc::from(text))),
@@ -3966,37 +4121,6 @@ fn inline_constant_value(c: &Constant) -> Result<Value, RuntimeError> {
         Constant::Text(x) => Value::Text(Rc::from(x.as_str())),
         Constant::Bytes(x) => Value::Bytes(Rc::from(x.as_slice())),
     })
-}
-fn constant_eq(v: &Value, c: ImageConstant<'_>) -> bool {
-    match c {
-        ImageConstant::Text(text) => matches!(v, Value::Text(value) if value.as_ref() == text),
-        ImageConstant::Bytes(bytes) => matches!(v, Value::Bytes(value) if value.as_ref() == bytes),
-        ImageConstant::Inline(constant) => inline_constant_eq(v, constant),
-    }
-}
-
-fn inline_constant_eq(v: &Value, c: &Constant) -> bool {
-    match (v, c) {
-        (Value::Unit, Constant::Unit) => true,
-        (Value::U64(x), Constant::U8(y)) => *x == u64::from(*y),
-        (Value::U64(x), Constant::U16(y)) => *x == u64::from(*y),
-        (Value::U64(x), Constant::U32(y)) => *x == u64::from(*y),
-        (Value::U64(x), Constant::U64(y)) => x == y,
-        (Value::U128(x), Constant::U128(y)) => x == y,
-        (Value::I64(x), Constant::I8(y)) => *x == i64::from(*y),
-        (Value::I64(x), Constant::I16(y)) => *x == i64::from(*y),
-        (Value::I64(x), Constant::I32(y)) => *x == i64::from(*y),
-        (Value::I64(x), Constant::I64(y)) => x == y,
-        (Value::I128(x), Constant::I128(y)) => x == y,
-        (Value::U64(x), Constant::Usize(y)) => x == y,
-        (Value::I64(x), Constant::Isize(y)) => x == y,
-        (Value::F32(x), Constant::F32(y)) => x.to_bits() == y.to_bits(),
-        (Value::F64(x), Constant::F64(y)) => x.to_bits() == y.to_bits(),
-        (Value::U64(x), Constant::Char(y)) => *x == u64::from(*y as u32),
-        (Value::Text(x), Constant::Text(y)) => x.as_ref() == y,
-        (Value::Bytes(x), Constant::Bytes(y)) => x.as_ref() == y,
-        _ => false,
-    }
 }
 fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
     let Some(ty_descriptor) = a.checked_type(ty) else {
@@ -10006,5 +10130,82 @@ mod tests {
             clone_resumption_snapshot(&image(artifact.clone()), &source),
             Err(RuntimeError::TypeConfusion)
         ));
+    }
+
+    /// Manual dispatch-kernel benchmark: a tight loop whose body is N Nops
+    /// plus one decrement/move/switch. Measures the fixed per-instruction
+    /// dispatch cost (pc advance, decode, match, feature checks) in
+    /// isolation from heavyweight arm bodies. `G1_KERNEL_NOPS` and
+    /// `G1_KERNEL_ITERATIONS` override the defaults.
+    #[test]
+    #[ignore = "manual perf kernel"]
+    fn instr_kernel_nop_dispatch_bench() {
+        use std::time::Instant;
+        let nops: usize = std::env::var("G1_KERNEL_NOPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256);
+        let iterations: u64 = std::env::var("G1_KERNEL_ITERATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_000_000);
+        let mut code: Vec<Instruction> = Vec::with_capacity(nops + 5);
+        code.push(Instruction::Const {
+            dst: 1,
+            constant: 0,
+        });
+        code.push(Instruction::Const {
+            dst: 2,
+            constant: 1,
+        });
+        let top = code.len() as u32;
+        code.extend(std::iter::repeat_n(Instruction::Nop, nops));
+        code.push(Instruction::Primitive {
+            dst: 3,
+            op: Primitive::IntWrappingSub,
+            args: vec![1, 2],
+        });
+        code.push(Instruction::Move { dst: 1, src: 3 });
+        let exit = code.len() as u32;
+        code.push(Instruction::Switch {
+            discr: 1,
+            cases: vec![(2, exit)],
+            otherwise: top,
+        });
+        code.push(Instruction::Return { src: None });
+        let artifact = Artifact {
+            required_features: crate::bytecode::used_features(&[], &code, false, false),
+            entry_function: Some(0),
+            constants: vec![
+                Constant::U64(iterations),
+                Constant::U64(1),
+                Constant::U64(0),
+            ],
+            functions: vec![Function {
+                flags: 0,
+                name: "kernel".into(),
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, U64, U64, U64],
+                code_start: 0,
+                code_len: code.len() as u32,
+                label_slot_count: 0,
+            }],
+            code,
+            ..Artifact::default()
+        };
+        let vm = Vm::from_artifact(artifact).unwrap();
+        let steps = iterations * (nops as u64 + 3);
+        let started = Instant::now();
+        let result = vm.run(0, vec![]).unwrap();
+        let secs = started.elapsed().as_secs_f64();
+        eprintln!(
+            "KERNEL_STEPS={steps} KERNEL_SECS={secs:.3} KERNEL_STEPS_PER_SEC={:.0} KERNEL_NS_PER_STEP={:.1}",
+            steps as f64 / secs,
+            secs * 1e9 / steps as f64
+        );
+        assert_eq!(result, Value::Unit);
     }
 }
