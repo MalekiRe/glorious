@@ -115,7 +115,12 @@ fn declares_test(source: &str, test: &str) -> bool {
     source[..offset]
         .lines()
         .rev()
-        .take_while(|line| line.trim().is_empty() || line.trim_start().starts_with("#["))
+        .take_while(|line| {
+            let trimmed = line.trim();
+            trimmed.is_empty()
+                || trimmed.starts_with("#[")
+                || trimmed.starts_with("//")
+        })
         .any(|line| line.trim() == "#[test]")
 }
 
