@@ -55426,6 +55426,15 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
         }
 
         let mut folded = code.to_vec();
+        // A self-copy cannot change either the register value or its ownership
+        // state. These show up after generic forwarding has been specialized
+        // to an already-selected destination; removing them also lets the
+        // ordinary ordinal compaction reclaim their bytecode slot.
+        for instruction in &mut folded {
+            if matches!(instruction, Instruction::Copy { dst, src } if *dst == *src) {
+                *instruction = Instruction::Nop;
+            }
+        }
         let mut state_renames = vec![Vec::new(); code.len()];
         // Late edge lowering can leave a constant in a one-use transfer
         // temporary even after MIR sparse propagation has finished. Retarget
@@ -58233,6 +58242,52 @@ mod mir_edge_emission_tests {
         ));
         let targeted = grandiose_vm::verify::with_generated_cleanup_plans(targeted).unwrap();
         verify(targeted).unwrap();
+    }
+
+    #[test]
+    fn peephole_removes_self_copies_and_repatches_targets() {
+        let mut artifact = Artifact::default();
+        artifact.constants.push(Constant::I64(7));
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Jump { target: 3 },
+            Instruction::Copy { dst: 1, src: 1 },
+            Instruction::Copy { dst: 1, src: 1 },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "self_copy".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Jump { target: 2 },
+                Instruction::Return { src: Some(1) },
+            ]
+        );
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(7)
+        );
     }
 
     #[test]
