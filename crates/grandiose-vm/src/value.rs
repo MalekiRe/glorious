@@ -252,7 +252,7 @@ fn track_control_graph(control: &ArenaObject<ControlRecord>, visited: &mut BTree
 
 use crate::{
     arena::{Arena, ArenaError, Handle, PlaceHandle, PlaceSlots},
-    bytecode::TypeId,
+    bytecode::{TypeId, U8},
 };
 
 type ValueSlots = PlaceSlots<Value>;
@@ -768,6 +768,12 @@ impl<T: ControlPayload + PartialEq> PartialEq for ControlHandle<T> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArrayValue {
     pub element_type: TypeId,
+    /// Compact backing for mutable `Array<u8>` values. Bytecode represents an
+    /// octet as `Value::U64`, which makes a compiler byte writer consume tens
+    /// of bytes of host memory per emitted byte when it uses `slots`. Keeping
+    /// the byte-only case packed is an internal representation detail; any
+    /// operation requiring a first-class element reference materializes it.
+    pub packed_bytes: Option<Vec<Option<u8>>>,
     pub slots: Vec<Option<Value>>,
     pub logical_capacity: usize,
 }
@@ -898,9 +904,19 @@ impl Value {
     pub fn array(element_type: TypeId, values: impl IntoIterator<Item = Value>) -> Self {
         let slots = values.into_iter().map(Some).collect::<Vec<_>>();
         let logical_capacity = slots.len();
+        let packed_bytes = (element_type == U8).then(|| {
+            slots
+                .iter()
+                .map(|slot| match slot {
+                    Some(Value::U64(value)) => u8::try_from(*value).ok().map(Some),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        }).flatten();
         Self::Array(ArenaObject::new_tracked(ArrayValue {
             element_type,
-            slots,
+            slots: if packed_bytes.is_some() { Vec::new() } else { slots },
+            packed_bytes,
             logical_capacity,
         }))
     }
@@ -947,6 +963,9 @@ impl RuntimeEdges for ArrayValue {
     }
 
     fn clear_edges(&mut self) {
+        if let Some(bytes) = &mut self.packed_bytes {
+            bytes.iter_mut().for_each(|slot| *slot = None);
+        }
         self.slots.iter_mut().for_each(|slot| *slot = None);
     }
 }
@@ -1203,6 +1222,7 @@ mod slot_tests {
     fn array_and_aggregate_object_handles_check_staleness_and_store_identity() {
         let array = ArenaObject::new(ArrayValue {
             element_type: 1,
+            packed_bytes: None,
             slots: vec![Some(Value::I64(1))],
             logical_capacity: 1,
         });
@@ -1231,11 +1251,13 @@ mod slot_tests {
     fn inline_storage_preserves_store_identity_across_reclamation() {
         let array = ArenaObject::new(ArrayValue {
             element_type: 1,
+            packed_bytes: None,
             slots: vec![Some(Value::I64(5))],
             logical_capacity: 1,
         });
         let other = ArenaObject::new(ArrayValue {
             element_type: 2,
+            packed_bytes: None,
             slots: vec![Some(Value::I64(6))],
             logical_capacity: 1,
         });

@@ -2263,6 +2263,13 @@ impl Vm {
                 if array.element_type != *element {
                     return Err(RuntimeError::TypeConfusion);
                 }
+                if array.packed_bytes.is_some() {
+                    return if *element == U8 {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::TypeConfusion)
+                    };
+                }
                 while let Some(slot) = array.slots.pop() {
                     if let Some(value) = slot {
                         self.destroy_typed(*element, value)?;
@@ -2553,6 +2560,7 @@ fn take_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeError
                 &mut *array,
                 crate::value::ArrayValue {
                     element_type,
+                    packed_bytes: None,
                     slots: Vec::new(),
                     logical_capacity: 0,
                 },
@@ -3018,6 +3026,9 @@ impl SnapshotValidationContext {
                 if array.element_type != *element {
                     return Err(RuntimeError::TypeConfusion);
                 }
+                if array.packed_bytes.is_some() {
+                    return if *element == U8 { Ok(()) } else { Err(RuntimeError::TypeConfusion) };
+                }
                 for value in array.slots.iter().flatten() {
                     self.validate_value(a, *element, value, true)?;
                 }
@@ -3175,6 +3186,7 @@ impl SnapshotCloneContext {
                     key,
                     ArenaObject::new_tracked(ArrayValue {
                         element_type: source.element_type,
+                        packed_bytes: source.packed_bytes.as_ref().map(|_| Vec::new()),
                         slots: vec![],
                         logical_capacity: source.logical_capacity,
                     }),
@@ -3477,6 +3489,16 @@ fn snapshot_clone_value(
                 let source = array
                     .try_borrow()
                     .map_err(|_| RuntimeError::TypeConfusion)?;
+                if let Some(bytes) = &source.packed_bytes {
+                    let mut copied = Vec::new();
+                    reserve_packed_bytes(&mut copied, bytes.len())?;
+                    copied.extend_from_slice(bytes);
+                    cloned
+                        .try_borrow_mut()
+                        .map_err(|_| RuntimeError::TypeConfusion)?
+                        .packed_bytes = Some(copied);
+                    return Ok(Value::Array(cloned));
+                }
                 let mut slots = Vec::new();
                 reserve_output(&mut slots, source.slots.len())?;
                 for slot in &source.slots {
@@ -3762,6 +3784,9 @@ fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
             .is_some(),
         (Type::Array { element }, Value::Array(array)) => {
             let array = array.borrow();
+            if array.packed_bytes.is_some() {
+                return array.element_type == U8 && *element == U8;
+            }
             array.element_type == *element
                 && array.logical_capacity >= array.slots.len()
                 && array.slots.iter().all(|slot| {
@@ -4090,6 +4115,14 @@ fn primitive_typed(
         Primitive::BytesFromArrayMove => match v {
             [Value::Array(array)] => {
                 let array = array.borrow();
+                if let Some(slots) = &array.packed_bytes {
+                    let mut bytes = Vec::new();
+                    reserve_output(&mut bytes, slots.len())?;
+                    for slot in slots {
+                        bytes.push(slot.ok_or(RuntimeError::EmptyArraySlot)?);
+                    }
+                    return Ok(Value::Bytes(bytes.into()));
+                }
                 let mut bytes = Vec::new();
                 reserve_output(&mut bytes, array.slots.len())?;
                 for slot in &array.slots {
@@ -4108,13 +4141,17 @@ fn primitive_typed(
         Primitive::BytesToArray => match v {
             [Value::Bytes(bytes)] => {
                 let element_type = array_element_type(a, result_type)?;
-                let mut slots = Vec::new();
-                reserve_output(&mut slots, bytes.len())?;
-                slots.extend(bytes.iter().map(|byte| Some(Value::U64(u64::from(*byte)))));
+                if element_type != U8 {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                let mut packed_bytes = Vec::new();
+                reserve_packed_bytes(&mut packed_bytes, bytes.len())?;
+                packed_bytes.extend(bytes.iter().copied().map(Some));
                 Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
                     element_type,
-                    logical_capacity: slots.len(),
-                    slots,
+                    packed_bytes: Some(packed_bytes),
+                    logical_capacity: bytes.len(),
+                    slots: Vec::new(),
                 })))
             }
             _ => Err(RuntimeError::TypeConfusion),
@@ -4123,6 +4160,21 @@ fn primitive_typed(
             [Value::U64(length), fill] => {
                 let length = to_index(*length)?;
                 let element_type = array_element_type(a, result_type)?;
+                if element_type == U8 {
+                    let Value::U64(byte) = fill else {
+                        return Err(RuntimeError::TypeConfusion);
+                    };
+                    let byte = u8::try_from(*byte).map_err(|_| RuntimeError::TypeConfusion)?;
+                    let mut packed_bytes = Vec::new();
+                    reserve_packed_bytes(&mut packed_bytes, length)?;
+                    packed_bytes.resize(length, Some(byte));
+                    return Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
+                        element_type,
+                        packed_bytes: Some(packed_bytes),
+                        slots: Vec::new(),
+                        logical_capacity: length,
+                    })));
+                }
                 let mut slots = Vec::new();
                 reserve_output(&mut slots, length)?;
                 for _ in 0..length {
@@ -4130,6 +4182,7 @@ fn primitive_typed(
                 }
                 Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
                     element_type,
+                    packed_bytes: None,
                     slots,
                     logical_capacity: length,
                 })))
@@ -4142,7 +4195,7 @@ fn primitive_typed(
         )),
         Primitive::ArrayLen => {
             let array = referenced_array(v, false)?;
-            let length = array.borrow().slots.len();
+            let length = array_len(&array.borrow());
             Ok(Value::U64(length as u64))
         }
         Primitive::ArrayCapacity => {
@@ -4155,6 +4208,13 @@ fn primitive_typed(
                 let array = reference_array(reference, false)?;
                 let index = to_index(*index)?;
                 let array = array.borrow();
+                if let Some(slots) = &array.packed_bytes {
+                    return slots
+                        .get(index)
+                        .ok_or(RuntimeError::IndexOutOfBounds)?
+                        .map(|byte| Value::U64(u64::from(byte)))
+                        .ok_or(RuntimeError::EmptyArraySlot);
+                }
                 let value = array
                     .slots
                     .get(index)
@@ -4169,8 +4229,16 @@ fn primitive_typed(
             [reference, Value::U64(index)] => {
                 let array = reference_array(reference, true)?;
                 let index = to_index(*index)?;
+                let mut array = array.borrow_mut();
+                if let Some(slots) = &mut array.packed_bytes {
+                    return slots
+                        .get_mut(index)
+                        .ok_or(RuntimeError::IndexOutOfBounds)?
+                        .take()
+                        .map(|byte| Value::U64(u64::from(byte)))
+                        .ok_or(RuntimeError::EmptyArraySlot);
+                }
                 array
-                    .borrow_mut()
                     .slots
                     .get_mut(index)
                     .ok_or(RuntimeError::IndexOutOfBounds)?
@@ -4184,6 +4252,7 @@ fn primitive_typed(
                 let unique = op == Primitive::ArrayGetBorrowUnique;
                 let array = reference_array(reference, unique)?;
                 let index = to_index(*index)?;
+                materialize_packed_bytes(&mut array.borrow_mut())?;
                 if array
                     .borrow()
                     .slots
@@ -4211,6 +4280,16 @@ fn primitive_typed(
                 let array = reference_array(reference, true)?;
                 let index = to_index(*index)?;
                 let mut array = array.borrow_mut();
+                if let Some(slots) = &mut array.packed_bytes {
+                    let byte = match value {
+                        Value::U64(value) => u8::try_from(*value).map_err(|_| RuntimeError::TypeConfusion)?,
+                        _ => return Err(RuntimeError::TypeConfusion),
+                    };
+                    let slot = slots.get_mut(index).ok_or(RuntimeError::IndexOutOfBounds)?;
+                    if slot.is_some() { return Err(RuntimeError::ArraySlotAlreadyInitialized); }
+                    *slot = Some(byte);
+                    return Ok(Value::Unit);
+                }
                 let slot = array
                     .slots
                     .get_mut(index)
@@ -4227,6 +4306,16 @@ fn primitive_typed(
             [reference, value] => {
                 let array = reference_array(reference, true)?;
                 let mut array = array.borrow_mut();
+                if array.packed_bytes.is_some() {
+                    let byte = match value {
+                        Value::U64(value) => u8::try_from(*value).map_err(|_| RuntimeError::TypeConfusion)?,
+                        _ => return Err(RuntimeError::TypeConfusion),
+                    };
+                    let required = array_len(&array).checked_add(1).ok_or(RuntimeError::AllocationOverflow)?;
+                    grow_packed_bytes(&mut array, required)?;
+                    array.packed_bytes.as_mut().expect("packed representation was retained").push(Some(byte));
+                    return Ok(Value::Unit);
+                }
                 let required = array
                     .slots
                     .len()
@@ -4240,8 +4329,11 @@ fn primitive_typed(
         },
         Primitive::ArrayPopMove => {
             let array = referenced_array(v, true)?;
+            let mut array = array.borrow_mut();
+            if let Some(slots) = &mut array.packed_bytes {
+                return slots.pop().ok_or(RuntimeError::IndexOutOfBounds)?.map(|byte| Value::U64(u64::from(byte))).ok_or(RuntimeError::EmptyArraySlot);
+            }
             array
-                .borrow_mut()
                 .slots
                 .pop()
                 .ok_or(RuntimeError::IndexOutOfBounds)?
@@ -4252,18 +4344,18 @@ fn primitive_typed(
                 let array = reference_array(reference, true)?;
                 let mut array = array.borrow_mut();
                 let required = array
-                    .slots
-                    .len()
+                    .packed_bytes.as_ref().map_or_else(|| array.slots.len(), Vec::len)
                     .checked_add(to_index(*additional)?)
                     .ok_or(RuntimeError::AllocationOverflow)?;
-                grow_array(&mut array, required)?;
+                if array.packed_bytes.is_some() { grow_packed_bytes(&mut array, required)?; } else { grow_array(&mut array, required)?; }
                 Ok(Value::Unit)
             }
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::ArrayFinishDrained => match v {
             [Value::Array(array)] => {
-                if array.borrow().slots.iter().any(Option::is_some) {
+                let array = array.borrow();
+                if array.packed_bytes.as_ref().map_or_else(|| array.slots.iter().any(Option::is_some), |slots| slots.iter().any(Option::is_some)) {
                     Err(RuntimeError::ArrayNotDrained)
                 } else {
                     Ok(Value::Unit)
@@ -4380,6 +4472,44 @@ fn grow_array(array: &mut ArrayValue, required: usize) -> Result<(), RuntimeErro
             .map_err(|_| RuntimeError::AllocationLimit)?;
     }
     Ok(())
+}
+
+fn array_len(array: &ArrayValue) -> usize {
+    array.packed_bytes.as_ref().map_or_else(|| array.slots.len(), Vec::len)
+}
+
+/// Materialize only at the bytecode-visible reference boundary. Most compiler
+/// emission uses push/reserve/finalize and never pays this representation
+/// expansion.
+fn materialize_packed_bytes(array: &mut ArrayValue) -> Result<(), RuntimeError> {
+    let Some(bytes) = array.packed_bytes.take() else {
+        return Ok(());
+    };
+    let mut slots = Vec::new();
+    reserve_output(&mut slots, bytes.len())?;
+    slots.extend(bytes.into_iter().map(|byte| byte.map(|byte| Value::U64(u64::from(byte)))));
+    array.slots = slots;
+    Ok(())
+}
+
+fn grow_packed_bytes(array: &mut ArrayValue, required: usize) -> Result<(), RuntimeError> {
+    let bytes = array.packed_bytes.as_mut().ok_or(RuntimeError::TypeConfusion)?;
+    if required > array.logical_capacity {
+        let capacity = required.max(4).checked_next_power_of_two().ok_or(RuntimeError::AllocationOverflow)?;
+        checked_output_bytes::<Option<u8>>(capacity)?;
+        if capacity > bytes.capacity() {
+            bytes.try_reserve_exact(capacity.saturating_sub(bytes.len())).map_err(|_| RuntimeError::AllocationLimit)?;
+        }
+        array.logical_capacity = capacity;
+    } else if required > bytes.capacity() {
+        bytes.try_reserve_exact(required.saturating_sub(bytes.len())).map_err(|_| RuntimeError::AllocationLimit)?;
+    }
+    Ok(())
+}
+
+fn reserve_packed_bytes(values: &mut Vec<Option<u8>>, count: usize) -> Result<(), RuntimeError> {
+    checked_output_bytes::<Option<u8>>(count)?;
+    values.try_reserve_exact(count).map_err(|_| RuntimeError::AllocationLimit)
 }
 
 fn bool_value(value: bool) -> Value {
@@ -6858,7 +6988,20 @@ mod tests {
             panic!("BytesToArray returned a non-Array value")
         };
         assert_eq!(storage.borrow().logical_capacity, 3);
-        storage.borrow_mut().slots[0] = Some(Value::U64(9));
+        assert!(storage.borrow().packed_bytes.is_some());
+        let byte_unique = Value::Reference {
+            referent_type: 22,
+            unique: true,
+            target: ReferenceTarget::Array(storage.clone()),
+        };
+        assert_eq!(
+            primitive(&artifact, U64, Primitive::ArrayGetMove, &[byte_unique.clone(), Value::U64(0)]),
+            Ok(Value::U64(1))
+        );
+        assert_eq!(
+            primitive(&artifact, UNIT, Primitive::ArraySetMove, &[byte_unique, Value::U64(0), Value::U64(9)]),
+            Ok(Value::Unit)
+        );
         assert_eq!(backing.as_ref(), &[1, 2, 3]);
         assert_eq!(
             primitive(
@@ -6869,6 +7012,28 @@ mod tests {
             ),
             Ok(Value::Bytes(vec![9, 2, 3].into()))
         );
+    }
+
+    #[test]
+    fn packed_byte_arrays_keep_large_compiler_artifacts_below_the_value_slot_limit() {
+        let mut types = Type::predefined();
+        types.push(Type::Array { element: U8 });
+        let artifact = image(Artifact {
+            types,
+            ..Artifact::default()
+        });
+        // At this size the former `Vec<Option<Value>>` backing alone exceeds
+        // the VM's 64 MiB per-allocation limit on supported targets. The
+        // compact byte backing remains linear in emitted artifact bytes.
+        let payload: Rc<[u8]> = vec![0x5a; 2_000_000].into();
+        let array = primitive(&artifact, 19, Primitive::BytesToArray, &[Value::Bytes(payload)])
+            .expect("packed byte array must fit below the allocation guard");
+        let Value::Array(array) = array else { panic!("expected array") };
+        let array = array.borrow();
+        assert!(array.packed_bytes.is_some());
+        assert!(array.slots.is_empty());
+        assert_eq!(array_len(&array), 2_000_000);
+        assert!(std::mem::size_of::<Option<Value>>() * 2_000_000 > MAX_PRIMITIVE_ALLOCATION_BYTES);
     }
 
     #[test]
@@ -9327,6 +9492,7 @@ mod tests {
         });
         let array = Value::Array(ArenaObject::new(ArrayValue {
             element_type: I64,
+            packed_bytes: None,
             slots: vec![None, Some(Value::I64(1))],
             logical_capacity: 2,
         }));
