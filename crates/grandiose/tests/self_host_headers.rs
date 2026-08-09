@@ -1414,6 +1414,46 @@ fn self_host_header_mixed_nominal_arguments_match_bootstrap() {
 }
 
 #[test]
+fn self_host_mixed_lifetime_nominal_header_matches_rust_in_release_vm() {
+    // The positive mixed_lifetime_nominals frontier: regions and type
+    // arguments alternate in both the nominal definition and its use.
+    let source = "struct Brand<'left, T, 'right, U> { value: &'left T } \
+        pass<'scope, V, 'tail, W>(value: Brand<'scope, V, 'tail, W>) \
+        -> Brand<'scope, V, 'tail, W> { move value } main() -> { () }";
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("mixed-lifetime-nominal.glorious");
+    let output = directory.path().join("mixed-lifetime-nominal.bin");
+    fs::write(&input, source).unwrap();
+
+    // Validate the fixture with the Rust oracle before invoking the self-host.
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_headers(&mut expected, source);
+    assert_eq!(expected.get(4).copied(), Some(0));
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle("probe::headers::application"),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_wire_eq(
+        &fs::read(output).unwrap(),
+        &expected,
+        "VM mixed lifetime nominal headers diverged",
+    );
+}
+
+#[test]
 fn self_host_header_generic_where_effect_rows_match_bootstrap() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
