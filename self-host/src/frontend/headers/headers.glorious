@@ -4355,7 +4355,14 @@ parse_trait_methods(
         // stage, but the header pass must preserve their boundary so a trait
         // containing a GAT can participate in the same declaration scan as
         // ordinary marker traits.
-        if(not(at_type_keyword(&*value))) {
+        // Operator-named trait requirements (for example `Add`'s `+`) are
+        // declarations, not identifier-named callables.  The current header
+        // arena has no operator-name identity yet, so retain their boundary
+        // for this pass and let interface collection ignore them rather than
+        // misparse the leading symbol as a missing identifier.
+        if(not(at_type_keyword(&*value)) and {
+            not(operator_symbol(&*value, current))
+        }) {
             value.tokens.position = current;
             value.tokens.limit = end;
             try(parse_callable(original, value, shell, false, current), @parse_trait_methods)
