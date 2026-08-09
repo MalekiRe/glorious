@@ -350,6 +350,9 @@ enum CoreValueKind {
     // Retaining that stable identity keeps typed Core compact while probes can
     // serialize its already-decoded UTF-8 bytes without reconstructing tokens.
     Text(Id<String>),
+    // Byte strings retain their decoded bytes directly.  Unlike text they may
+    // contain non-UTF-8 data, so they cannot share the source text interner.
+    Bytes(Bytes),
     Local(CoreLocalId, Bool),
     Projection(CoreValueId, u32),
     Embedded(CoreComputationId)
@@ -720,6 +723,7 @@ pub enum CoreValueView {
     Unit(TypeId),
     Integer(TypeId, IntegerConstantId),
     Text(TypeId, Id<String>),
+    Bytes(TypeId, Bytes),
     Local(TypeId, CoreLocalId, Bool, Bool),
     Projection(TypeId, CoreValueId, u32),
     Embedded(TypeId, CoreComputationId)
@@ -761,6 +765,7 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
             CoreValueView::Unit(ty) => ty,
             CoreValueView::Integer(ty, _) => ty,
             CoreValueView::Text(ty, _) => ty,
+            CoreValueView::Bytes(ty, _) => ty,
             CoreValueView::Local(ty, _, _, _) => ty,
             CoreValueView::Projection(ty, _, _) => ty,
             CoreValueView::Embedded(ty, _) => ty
@@ -2648,6 +2653,7 @@ pub typed_body_value_at(
         CoreValueKind::Integer(constant) =>
             CoreValueView::Integer(ty, constant),
         CoreValueKind::Text(spelling) => CoreValueView::Text(ty, spelling),
+        CoreValueKind::Bytes(bytes) => CoreValueView::Bytes(ty, bytes),
         CoreValueKind::Local(local, forced) => CoreValueView::Local(
             ty,
             local,
@@ -10697,7 +10703,17 @@ elaborate_expression(
                 form: ElaboratedForm::Value(core)
             }, expected, token)
         },
-        super::bodies::BodyExpressionView::ByteString(_, _) => unreachable(),
+        super::bodies::BodyExpressionView::ByteString(bytes, token) => {
+            let core = push_value(
+                &mut value.core,
+                type_id_from_u32(18),
+                CoreValueKind::Bytes(bytes)
+            );
+            check_expected(Elaborated {
+                type_id: type_id_from_u32(18),
+                form: ElaboratedForm::Value(core)
+            }, expected, super::syntax::token_start(&token))
+        },
         super::bodies::BodyExpressionView::Unit(_) => {
             let token = super::bodies::expression_token_start_at(
                 body,

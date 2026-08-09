@@ -1166,6 +1166,16 @@ write_value_expression(
             write_string(output, text);
             Result::Ok(())
         },
+        CoreValueView::Bytes(ty, bytes) => {
+            // Tag 11 distinguishes raw bytes from UTF-8 text (tag 8).  This
+            // writes the decoded payload, including escapes, exactly as the
+            // Rust Typed-Core oracle does.
+            ByteBuf::push(output, 11);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
+            ByteBuf::append_bytes(output, &bytes);
+            Result::Ok(())
+        },
         CoreValueView::Integer(ty, constant_id) => {
             let constant =
                 super::super::frontend::elaboration::typed_body_integer_constant_at(

@@ -916,6 +916,13 @@ impl Encoder<'_> {
                     push_string(output, value);
                     return Ok(());
                 }
+                if let Constant::Bytes(value) = value {
+                    output.push(11);
+                    self.write_type(output, expression.ty)?;
+                    push_u32(output, value.len().try_into().unwrap());
+                    output.extend(value);
+                    return Ok(());
+                }
                 output.push(1);
                 self.write_type(output, expression.ty)?;
                 let raw = match value {
@@ -1421,7 +1428,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_false() -> Bool { false }",
         "probe_bool_identity(value: Bool) -> Bool { value }",
         "probe_i64() -> i64 { 7 } probe_u64() -> u64 { 7 }",
-        "probe_text() -> Text { \"hello, 🌍\" } probe_character() -> char { '💩' } \\
+        "probe_text() -> Text { \"hello, 🌍\" } probe_character() -> char { '💩' } \
          probe_byte() -> u8 { b'\\xff' }",
         // Full-width integer literals exercise the fourth Core word.  Before
         // the probe's 128-bit wire correction this valid native-oracle case
@@ -1454,6 +1461,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          probe_generic_interfaces() { () }",
         "struct CharacterSlot { value: char } \
          probe_character_interface() { () }",
+        // Keep decoded escapes on the Typed-Core wire: bytes are not text and
+        // must retain a NUL payload rather than source spelling.
+        "probe_bytes() -> Bytes { b\"ok\\x00\" }",
         "mod imported { pub struct TokenSpan { start: usize } } \
          use imported::TokenSpan; \
          struct ImportedHolder { span: TokenSpan } \
