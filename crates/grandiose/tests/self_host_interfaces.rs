@@ -493,6 +493,17 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "struct Unsupported<const N: u32> { value: u8 }",
         "enum ConstEnum<const N: u32> { One }",
         "const_generic<const Q: Quantity>() -> () { () }",
+        // `const_nominals.rs`: retain the suite's declaration forms in the
+        // self-host interface oracle, rather than relying on the adjacent
+        // structural-const coverage above.
+        "struct Tag<const N: u32> { marker: i64 }",
+        "enum Tagged<const N: u32> { One, Value(i64) }",
+        "type ConstAlias<const N: u32> = Tag<N>;",
+        "read<const N: u32>(value: Tag<N>) -> i64 { value.marker }",
+        "struct QuantityTag<const Q: Quantity> { marker: i64 }",
+        "impl<const N: u32> Tag<N> { marker(self: &Tag<N>) -> i64 { self.marker } }",
+        "impl<const N: u32> Drop for Tag<N> { drop(self: Tag<N>) { () } }",
+        "impl<const N: u32> Use<[0, 1]> for Tag<N> {}",
     ];
     let malformed = [
         "type Missing = ;",

@@ -14,7 +14,7 @@ character_public_surface.rs	standard_library	unported	-
 collection_extended_surface.rs	standard_library	unported	-
 collection_foundations.rs	standard_library	unported	-
 compiler.rs	modules_cli_sessions	partial	self_host_compiler_pipeline.rs#self_hosted_compiler_pipeline_accept_reject_matches_rust_in_vm
-const_nominals.rs	types_traits_generics	unported	-
+const_nominals.rs	types_traits_generics	partial	self_host_interfaces.rs#self_hosted_interfaces_match_rust_in_vm_and_native_execution
 control_kernel_lints.rs	compiler_pipeline	unported	-
 custom_drop_breadth.rs	ownership_lifetimes	unported	-
 deconstruction.rs	ownership_lifetimes	unported	-
