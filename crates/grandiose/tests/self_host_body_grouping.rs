@@ -1160,6 +1160,49 @@ fn self_host_body_numeric_source_payloads_match_bootstrap_ast() {
         .unwrap();
 }
 
+/// Keep the scalar `is` refinement path independently runnable in the VM;
+/// unlike the broader recursive-pattern oracle this deliberately has no
+/// native/LLVM stage.
+#[test]
+fn self_host_is_refinement_scalar_pattern_matches_bootstrap_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("is-refinement.glorious");
+            let output = directory.path().join("is-refinement-vm.bin");
+            let source = "main() { value is 42 }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 /// Float syntax is a frontend contract even though Typed Core does not yet
 /// lower float constants. Keep this VM-only probe focused on the self-host
 /// lexer/body parser's exact AST payloads, including exponent notation.
