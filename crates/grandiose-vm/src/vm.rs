@@ -203,9 +203,10 @@ pub struct Vm {
     slots: SlotStore,
     last_location: Cell<Option<(u32, u32)>>,
     /// Per-type enumeration tag tables (variant index -> runtime tag),
-    /// built lazily on the first EnumTag dispatch for each type. `None`
-    /// until a tag is requested for (or computed for) that type id.
-    enum_tag_cache: RefCell<Vec<Option<Box<[u32]>>>>,
+    /// Per-type runtime tag tables, resolved eagerly at construction from the
+    /// artifact image. EnumTag dispatch is then a borrow-free table lookup:
+    /// `tables[ty][variant_index]` returns the emitted runtime tag.
+    enum_tag_tables: Vec<Box<[u32]>>,
     /// Per-constant resolved `Value` cache, built lazily on the first
     /// Const/Switch dispatch for each constant index. Resolving once turns
     /// the per-dispatch `Rc::from(text)` allocation of text constants into a
@@ -762,7 +763,7 @@ impl Vm {
                 artifact.image().import_capability(first).to_owned(),
             ))
         };
-        let enum_tag_cache = RefCell::new(vec![None; artifact.image().types.len()]);
+        let enum_tag_tables = build_enum_tag_tables(artifact.image());
         let constant_cache = RefCell::new(vec![None; artifact.image().constants.len()]);
         Self {
             artifact,
@@ -770,7 +771,7 @@ impl Vm {
             imports,
             slots: SlotStore::default(),
             last_location: Cell::new(None),
-            enum_tag_cache,
+            enum_tag_tables,
             constant_cache,
         }
     }
@@ -802,7 +803,7 @@ impl Vm {
             .map(|grant| grant.as_ref().to_owned())
             .collect::<BTreeSet<_>>();
         let imports = link_imports(artifact.image(), &grants)?;
-        let enum_tag_cache = RefCell::new(vec![None; artifact.image().types.len()]);
+        let enum_tag_tables = build_enum_tag_tables(artifact.image());
         let constant_cache = RefCell::new(vec![None; artifact.image().constants.len()]);
         Ok(Self {
             artifact,
@@ -810,7 +811,7 @@ impl Vm {
             imports: Ok(imports),
             slots: SlotStore::default(),
             last_location: Cell::new(None),
-            enum_tag_cache,
+            enum_tag_tables,
             constant_cache,
         })
     }
@@ -877,21 +878,38 @@ impl Vm {
                 a.functions.len()
             );
         }
+        // Hot-loop optimization: when no diagnostics/tracing/profiling tool is
+        // active, all per-instruction `if let Some(...)` guards are loop
+        // invariant, so gate them behind a single precomputed branch. The
+        // inner checks then run only when at least one tool is enabled,
+        // preserving their exact behavior.
+        let diagnostics_active = memory_profile.is_some()
+            || progress_trace.is_some()
+            || hot_functions.is_some()
+            || breakpoint.is_some()
+            || trace_errors
+            || traced_function.is_some()
+            || instruction_profile_enabled;
+        let mut stack_depth = 0usize;
         loop {
-            if let Some(profile) = &mut memory_profile {
-                profile.observe(&stack, &self.slots, a);
-            }
-            let stack_depth = stack.len();
-            if breakpoint.as_ref().is_some_and(|breakpoint| {
-                stack
-                    .last()
-                    .is_some_and(|frame| breakpoint.matches(frame))
-            }) {
-                breakpoint.as_ref().unwrap().report(&stack, a);
+            if diagnostics_active {
+                if let Some(profile) = &mut memory_profile {
+                    profile.observe(&stack, &self.slots, a);
+                }
+                stack_depth = stack.len();
+                if breakpoint.as_ref().is_some_and(|breakpoint| {
+                    stack
+                        .last()
+                        .is_some_and(|frame| breakpoint.matches(frame))
+                }) {
+                    breakpoint.as_ref().unwrap().report(&stack, a);
+                }
             }
             let frame = stack.last_mut().expect("execution stack cannot be empty");
-            if let Some(profile) = &mut hot_functions {
-                profile.observe(frame.function, a);
+            if diagnostics_active {
+                if let Some(profile) = &mut hot_functions {
+                    profile.observe(frame.function, a);
+                }
             }
             let (fun, decoded) = match cached_function {
                 Some((cached_id, fun, decoded)) if cached_id == frame.function => (fun, decoded),
@@ -913,20 +931,27 @@ impl Vm {
             // instruction slice indexed by its function-local pc.
             let ins =
                 unsafe { decoded.get_unchecked(frame.pc as usize) };
-            if instruction_profile_enabled {
-                instruction_profile.as_mut().unwrap().observe(ins);
-            }
-            if let Some(trace) = &mut progress_trace {
-                trace.observe(frame.function, &fun.name, frame.pc, stack_depth);
-            }
-            if trace_errors {
-                self.last_location.set(Some((frame.function, frame.pc)));
-            }
-            if traced_function.as_deref() == Some(fun.name.as_str()) {
-                eprintln!(
-                    "g1-vm function {} `{}` pc {}: {ins:?}",
-                    frame.function, fun.name, frame.pc
-                );
+            if diagnostics_active {
+                if instruction_profile_enabled {
+                    instruction_profile.as_mut().unwrap().observe(ins);
+                }
+                if let Some(trace) = &mut progress_trace {
+                    trace.observe(
+                        frame.function,
+                        &fun.name,
+                        frame.pc,
+                        stack_depth
+                    );
+                }
+                if trace_errors {
+                    self.last_location.set(Some((frame.function, frame.pc)));
+                }
+                if traced_function.as_deref() == Some(fun.name.as_str()) {
+                    eprintln!(
+                        "g1-vm function {} `{}` pc {}: {ins:?}",
+                        frame.function, fun.name, frame.pc
+                    );
+                }
             }
             match ins {
                 Instruction::Nop => frame.pc += 1,
@@ -1224,13 +1249,12 @@ impl Vm {
                     // The stored aggregate tag is the variant's position; the
                     // emitted runtime tag is the explicit discriminant when the
                     // variant declares one, else its index. The per-type tag
-                    // table is resolved once and cached in the VM.
-                    let tag = enum_runtime_tag(
-                        &self.enum_tag_cache,
-                        a,
-                        fun.register_types[src as usize],
-                        raw,
-                    )?;
+                    // table is resolved once at VM construction, so dispatch is
+                    // a borrow-free, branch-free table lookup.
+                    let tag = self.enum_tag_tables[fun.register_types[src as usize] as usize]
+                        .get(raw as usize)
+                        .copied()
+                        .ok_or(RuntimeError::TypeConfusion)?;
                     put(frame, dst, Value::U64(u64::from(tag)))?;
                     frame.pc += 1;
                 }
@@ -1331,10 +1355,25 @@ impl Vm {
                     let (discr, otherwise) = (*discr, *otherwise);
                     let value = get(frame, discr)?;
                     let mut target = otherwise;
-                    for (constant, case_target) in cases {
-                        if value == self.resolved_constant(*constant)? {
-                            target = *case_target;
-                            break;
+                    // Resolve every case constant under a single RefCell
+                    // borrow so multi-case switches pay one borrow-check
+                    // instead of one per case; comparisons use the cached
+                    // values in place without an extra clone.
+                    {
+                        let mut cache = self.constant_cache.borrow_mut();
+                        let image = self.artifact.image();
+                        for (constant, case_target) in cases {
+                            let id = image
+                                .constant_id(*constant)
+                                .ok_or(RuntimeError::TypeConfusion)?;
+                            let index = id.index();
+                            if cache[index].is_none() {
+                                cache[index] = Some(constant_value(image.constant(id))?);
+                            }
+                            if value == *cache[index].as_ref().unwrap() {
+                                target = *case_target;
+                                break;
+                            }
                         }
                     }
                     frame.pc = target;
@@ -2795,46 +2834,32 @@ fn peek_variant(frame: &Frame, r: u32) -> Result<u32, RuntimeError> {
     }
 }
 
-/// Resolve the runtime tag for an aggregate variant position, caching the
-/// per-type tag table in the VM so repeated EnumTag dispatches on the same
-/// type skip the type-descriptor resolution and variant lookup entirely.
-fn enum_runtime_tag(
-    cache: &RefCell<Vec<Option<Box<[u32]>>>>,
-    a: &ExecutionImage,
-    ty: TypeId,
-    variant_index: u32,
-) -> Result<u32, RuntimeError> {
-    // Resolve shared/unique reference wrappers to the underlying enum type,
-    // mirroring enum_variant_tag's type-resolution rules.
-    let representation = match a.checked_type(ty).map(Type::representation) {
-        Some(Type::RefShared { referent }) | Some(Type::RefUnique { referent }) => {
-            a.checked_type(*referent)
-                .map(Type::representation)
-                .ok_or(RuntimeError::TypeConfusion)?
-        }
-        Some(other) => other,
-        None => return Err(RuntimeError::TypeConfusion),
-    };
-    let Type::Enum { variants, .. } = representation else {
-        return Err(RuntimeError::TypeConfusion);
-    };
-    let mut cache = cache.borrow_mut();
-    let entry = &mut cache[ty as usize];
-    let table = match entry {
-        Some(table) => table,
-        None => {
-            let table = variants
-                .iter()
-                .enumerate()
-                .map(|(index, variant)| variant.discriminant(index as u32))
-                .collect::<Box<[u32]>>();
-            entry.insert(table)
-        }
-    };
-    table
-        .get(variant_index as usize)
-        .copied()
-        .ok_or(RuntimeError::TypeConfusion)
+/// Precompute the per-type EnumTag tables once at VM construction.
+/// `tables[ty][variant_index]` is the emitted runtime tag for an aggregate at
+/// variant position `variant_index` whose register type is `ty`. Mirroring
+/// the previous lazy resolver's rules, shared/unique reference wrappers are
+/// unwrapped one level to the underlying enum type and every other (or
+/// missing) type gets an empty table, so a dispatch on it still fails with
+/// `TypeConfusion`, exactly as before.
+fn build_enum_tag_tables(a: &ExecutionImage) -> Vec<Box<[u32]>> {
+    (0..a.types.len())
+        .map(|ty| {
+            let representation = match a.checked_type(ty as TypeId).map(Type::representation) {
+                Some(Type::RefShared { referent }) | Some(Type::RefUnique { referent }) => {
+                    a.checked_type(*referent).map(Type::representation)
+                }
+                other => other,
+            };
+            match representation {
+                Some(Type::Enum { variants, .. }) => variants
+                    .iter()
+                    .enumerate()
+                    .map(|(index, variant)| variant.discriminant(index as u32))
+                    .collect::<Box<[u32]>>(),
+                _ => Box::new([]),
+            }
+        })
+        .collect()
 }
 
 
