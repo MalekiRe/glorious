@@ -2148,6 +2148,48 @@ fn self_hosted_generic_struct_literals_infer_field_arguments_in_vm() {
 }
 
 #[test]
+fn self_hosted_full_width_integer_literals_match_bootstrap_in_release_vm() {
+    // Preserve all four Core integer words for the maximum `u128` value.
+    // This is the widest contextual literal accepted by the current focused
+    // self-host Typed Core corpus.
+    let source = "u128_max() -> u128 { 340282366920938463463374607431768211455 }";
+    let bootstrap = SourceBundle::distributed(
+        Segment::new(INPUT_NAME, format!("{source}{WRAPPER}")),
+        [],
+    );
+    assert!(
+        grandiose::compile_bundle_to_phases_with_options(
+            &bootstrap,
+            CompileOptions { optimization_level: OptimizationLevel::O2 },
+        )
+        .is_ok(),
+        "bootstrap compiler must accept the full-width literal corpus"
+    );
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("full-width-integers.glorious");
+    let output = directory.path().join("full-width-integers.bin");
+    fs::write(&input, source).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let encoded = fs::read(output).unwrap();
+    assert_eq!(&encoded[..4], &1_u32.to_le_bytes());
+    assert_eq!(encoded.get(4).copied(), Some(0));
+}
+
+#[test]
 fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
