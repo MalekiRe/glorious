@@ -188,7 +188,7 @@ fn encode_generics(output: &mut Vec<u8>, generics: Option<&GenericParams>) -> Re
             GenericParamKind::Type => 1,
             GenericParamKind::Lifetime => 2,
             GenericParamKind::EffectRow => 3,
-            GenericParamKind::Const(_) => return Err(()),
+            GenericParamKind::Const(_) => 4,
         };
         output.push(kind);
         push_string(output, &parameter.name);
@@ -243,7 +243,7 @@ fn encode_where_contract(
                 GenericParamKind::Type => 1,
                 GenericParamKind::Lifetime => 2,
                 GenericParamKind::EffectRow => 3,
-                GenericParamKind::Const(_) => return,
+                GenericParamKind::Const(_) => 4,
             };
             output.push(kind);
             push_string(output, &parameter.name);
@@ -306,7 +306,7 @@ fn encode_where_contract(
                 GenericParamKind::Type => 1,
                 GenericParamKind::Lifetime => 2,
                 GenericParamKind::EffectRow => 3,
-                GenericParamKind::Const(_) => return,
+                GenericParamKind::Const(_) => 4,
             };
             output.push(kind);
             push_string(output, &parameter.name);
@@ -1343,6 +1343,7 @@ fn self_host_header_higher_ranked_binders_match_bootstrap() {
             let source = concat!(
                 "check() -> Text where ",
                 "for<Item, 'scope> Text:Rel<Item, 'scope>, ",
+                "for<const N: u32> Text:Every<N>, ",
                 "for<'long, 'short> 'long: 'short { \"ok\" } ",
                 "main() -> { () }"
             );
