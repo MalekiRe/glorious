@@ -1020,8 +1020,8 @@ fn self_host_operator_trait_requirements_reach_the_header_oracle_in_vm() {
 }
 
 #[test]
-fn self_host_single_supertrait_header_reaches_the_header_oracle_in_vm() {
-    let source = "trait Parent {} trait Child: Parent {}";
+fn self_host_multiple_supertrait_headers_reach_the_header_oracle_in_vm() {
+    let source = "trait Parent {} trait Quota {} trait Index {} trait Child: Parent + Quota + Index {}";
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("supertrait.glorious");
     let output = directory.path().join("supertrait.bin");

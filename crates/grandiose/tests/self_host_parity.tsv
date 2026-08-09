@@ -127,7 +127,7 @@ stored_lifetime_nominals.rs	types_traits_generics	unported	-
 string_builder_integer_format.rs	standard_library	unported	-
 structural_consts.rs	compiler_pipeline	partial	self_host_interfaces.rs#rust_interface_oracle_classifies_the_focused_corpus,self_host_interfaces.rs#self_hosted_interfaces_match_rust_in_vm_and_native_execution
 structural_fundamental_traits.rs	types_traits_generics	unported	-
-supertraits.rs	types_traits_generics	unported	-
+supertraits.rs	types_traits_generics	partial	self_host_headers.rs#self_host_multiple_supertrait_headers_reach_the_header_oracle_in_vm
 surface_call_redesign.rs	syntax_frontend	unported	-
 surface_simplifications.rs	syntax_frontend	unported	-
 tail_calls.rs	mir_lowering	unported	-

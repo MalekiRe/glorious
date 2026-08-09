@@ -4442,7 +4442,7 @@ validate_trait_body_terminator(
 }
 
 // The semantic trait database does not yet consume parent evidence, but
-// retaining a single ordinary parent keeps declaration/header parity with the
+// retaining ordinary parents keeps declaration/header parity with the
 // bootstrap parser and lets interface scanning continue.
 parse_trait_supertrait(
     value: &mut Parser,
@@ -4451,10 +4451,26 @@ parse_trait_supertrait(
 ) -> Result<(), HeaderError> {
     if(value.tokens.position == header_end) { Result::Ok(()) } else {
         try(expect_colon(value, related), @parse_trait_supertrait);
-        try(parse_type(value, related), @parse_trait_supertrait);
-        if(value.tokens.position == header_end) { Result::Ok(()) } else {
+        parse_trait_supertrait_list(value, related, header_end)
+    }
+}
+
+parse_trait_supertrait_list(
+    value: &mut Parser,
+    related: usize,
+    header_end: usize
+) -> Result<(), HeaderError> {
+    try(parse_type(value, related), @parse_trait_supertrait_list);
+    if(value.tokens.position == header_end) { Result::Ok(()) } else {
+        let token = value.tokens.position;
+        handle super::lexer::token_kind_at(&value.source, token) {
+            TokenKind::Plus => {
+                value.tokens.position = token + 1;
+                parse_trait_supertrait_list(value, related, header_end)
+            },
+            _ =>
             Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
-                value.tokens.position, related
+                token, related
             ))
         }
     }
