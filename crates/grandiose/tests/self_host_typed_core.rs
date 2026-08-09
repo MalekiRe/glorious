@@ -1825,6 +1825,18 @@ fn self_hosted_effect_control_headers_match_rust_oracle() {
             "effect Fail<E> { fail(error: E) -> ! }\nselected() -> / {Fail<i64>} { () }",
             true,
         ),
+        // Generic effect heads and generic operations are required by the
+        // compiler's own collection protocols. Keep a nested generic result,
+        // an operation-local where clause, and a following operation together:
+        // the header cursor must not consume the latter as part of `where`.
+        (
+            "effect Convert<T> { convert<U>(value: U) -> U where U: Copy; finish(value: T) -> T }",
+            true,
+        ),
+        (
+            "effect Relay<'scope, const N: u32, E: EffectRow> { [0,1] forward<U>(value: U) -> U where U: Copy; stop() -> ! }",
+            true,
+        ),
         // shared_handler_resumption_quantities.rs: shared terminal/resumptive
         // alternatives carry [0,1], [1,1], or [2,2] resumption quantities plus
         // multi-operation terminal-only Gate heads.
