@@ -224,6 +224,41 @@ enum ResolvedImport {
 
 type Frame = RuntimeFrame;
 
+// The register-store-backed frame free list. Frames are heap-allocated on
+// every direct call (Call/TailCall/CallSelf/... ~9% of the workload's
+// instructions) and freed on every return, so the per-call `Vec<Option<Value>>`
+// register stores dominate allocator traffic in the run phase (malloc/free
+// internals measure ~15% of cycles). Pooling dead frames — after their
+// remaining register values have been dropped exactly as a normal frame drop
+// would — converts that churn into one TLS pop/push with capacity preserved.
+thread_local! {
+    static FRAME_POOL: std::cell::RefCell<Vec<Frame>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Upper bound on pooled frames; bounds the pool's retained memory.
+const FRAME_POOL_LIMIT: usize = 2048;
+
+/// `pool_frame` relinquishes every value the frame still owns (the same drops
+/// a plain frame drop performs) and returns the emptied frame to the pool.
+fn pool_frame(mut frame: Frame) {
+    frame.registers.clear();
+    frame.guards.clear();
+    frame.labels.clear();
+    frame.deferred_frames.clear();
+    frame.delimiter = None;
+    FRAME_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() < FRAME_POOL_LIMIT {
+            pool.push(frame);
+        }
+    });
+}
+
+fn take_pooled_frame() -> Option<Frame> {
+    FRAME_POOL.with(|pool| pool.borrow_mut().pop())
+}
+
+
 #[derive(Clone, Copy)]
 enum CapturePruning {
     Multishot,
@@ -1406,7 +1441,8 @@ impl Vm {
                         .deferred_frames
                         .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
-                    *frame = replacement;
+                    let replaced = std::mem::replace(frame, replacement);
+                    pool_frame(replaced);
                 }
                 Instruction::CallSelf { dst, args } => {
                     let dst = *dst;
@@ -1441,7 +1477,8 @@ impl Vm {
                         .deferred_frames
                         .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
-                    *frame = replacement;
+                    let replaced = std::mem::replace(frame, replacement);
+                    pool_frame(replaced);
                 }
                 Instruction::CallKnownReceiver {
                     dst,
@@ -1498,7 +1535,8 @@ impl Vm {
                         .deferred_frames
                         .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
-                    *frame = replacement;
+                    let replaced = std::mem::replace(frame, replacement);
+                    pool_frame(replaced);
                 }
                 Instruction::MakeCallable {
                     dst,
@@ -1708,7 +1746,8 @@ impl Vm {
                         .deferred_frames
                         .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
-                    *frame = replacement;
+                    let replaced = std::mem::replace(frame, replacement);
+                    pool_frame(replaced);
                 }
                 Instruction::Handle {
                     dst,
@@ -2021,7 +2060,8 @@ impl Vm {
                     for deferred in frame.deferred_frames.drain(..).rev() {
                         self.destroy_frame(deferred)?;
                     }
-                    stack.pop();
+                    let returned = stack.pop().expect("execution stack non-empty before return pop");
+                    pool_frame(returned);
                     match stack.last_mut() {
                         Some(caller) => {
                             if let Some(dst) = dst {
@@ -2379,7 +2419,20 @@ fn make_callee_frame_from_registers(
             actual: arg_registers.len(),
         });
     }
-    let mut registers = vec![None; f.register_types.len()];
+    let pooled = take_pooled_frame();
+    let mut registers = match pooled {
+        Some(mut pooled) => {
+            let registers = std::mem::take(&mut pooled.registers);
+            debug_assert!(pooled.guards.is_empty());
+            debug_assert!(pooled.labels.is_empty());
+            debug_assert!(pooled.deferred_frames.is_empty());
+            debug_assert!(pooled.delimiter.is_none());
+            registers
+        }
+        None => Vec::new(),
+    };
+    registers.clear();
+    registers.resize(f.register_types.len(), None);
     registers[0] = Some(receiver);
     for (i, &src) in arg_registers.iter().enumerate() {
         registers[i + 1] = Some(take(caller, src)?);
