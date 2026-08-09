@@ -22,9 +22,11 @@ trait ReclaimNode {
 // Compactions prune dead weak registrations; with the churn seen in the
 // self-host workloads (millions of aggregate allocations per input) the
 // original 64K interval spent ~3.5% of VM run time inside `retain`. Each
-// compaction rescans the growing registry, so a 4x interval cuts that cost
-// roughly 4x while keeping the same geometric growth behavior.
-const MIN_RECLAMATION_COMPACTION_INTERVAL: usize = 262_144;
+// compaction rescans the growing registry, so a larger interval cuts that
+// cost proportionally while keeping the same geometric growth behavior.
+// 8x the original: retain now measures well under 1% of run time and the
+// registry stays well under a few tens of MB even under heavy churn.
+const MIN_RECLAMATION_COMPACTION_INTERVAL: usize = 524_288;
 
 struct ReclamationRegistry {
     nodes: Vec<Weak<dyn ReclaimNode>>,

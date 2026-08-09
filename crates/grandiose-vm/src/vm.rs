@@ -993,7 +993,7 @@ impl Vm {
                 Instruction::Const { dst, constant } => {
                     let (dst, constant) = (*dst, *constant);
                     let value = self.resolved_constant(constant)?;
-                    put(frame, dst, value)?;
+                    unsafe { put_unchecked(frame, dst, value) };
                     frame.pc += 1;
                 }
                 Instruction::Move { dst, src } => {
@@ -1005,16 +1005,15 @@ impl Vm {
                     // here would leave those references dangling at runtime.
                     // Destructive consumers continue to use `take`, which
                     // unwraps the place once its borrow lifetime has ended.
-                    let v = frame.registers[src as usize]
-                        .take()
+                    let v = unsafe { take_unchecked(frame, src) }
                         .ok_or(RuntimeError::EmptyRegister(src))?;
-                    put(frame, dst, v)?;
+                    unsafe { put_unchecked(frame, dst, v) };
                     frame.pc += 1;
                 }
                 Instruction::Copy { dst, src } => {
                     let (dst, src) = (*dst, *src);
                     let v = copy_register(a, frame, src, fun.register_types[src as usize])?;
-                    put(frame, dst, v)?;
+                    unsafe { put_unchecked(frame, dst, v) };
                     frame.pc += 1;
                 }
                 Instruction::BorrowShared { dst, src } => {
@@ -1290,12 +1289,12 @@ impl Vm {
                         .get(raw as usize)
                         .copied()
                         .ok_or(RuntimeError::TypeConfusion)?;
-                    put(frame, dst, Value::U64(u64::from(tag)))?;
+                    unsafe { put_unchecked(frame, dst, Value::U64(u64::from(tag))) };
                     frame.pc += 1;
                 }
                 Instruction::Drop { register } => {
                     let register = *register;
-                    let value = match frame.registers[register as usize].take() {
+                    let value = match unsafe { take_unchecked(frame, register) } {
                         Some(Value::Place(slot)) => slot
                             .take_and_reclaim_if_initialized()
                             .map_err(|_| RuntimeError::EmptyRegister(register))?,
@@ -2764,6 +2763,28 @@ fn put(f: &mut Frame, r: u32, v: Value) -> Result<(), RuntimeError> {
     } else {
         Ok(())
     }
+}
+
+// Bounds-check-free register helpers for the hottest instruction classes.
+// Artifact verification guarantees every decoded `Const`/`Move`/`Copy`/
+// `EnumTag`/`Drop` register operand is a valid index into the frame's
+// register file, so the checked indexing in `get`/`take`/`put` is redundant
+// on that hot path. `debug_assert!` keeps the invariant auditable in debug
+// builds; the release hot loop skips the two bounds checks per instruction.
+#[inline(always)]
+unsafe fn take_unchecked(f: &mut Frame, r: u32) -> Option<Value> {
+    debug_assert!((r as usize) < f.registers.len());
+    // SAFETY: caller guarantees `r` is a verified in-range register index.
+    unsafe { f.registers.get_unchecked_mut(r as usize) }.take()
+}
+
+#[inline(always)]
+unsafe fn put_unchecked(f: &mut Frame, r: u32, v: Value) {
+    debug_assert!((r as usize) < f.registers.len());
+    // SAFETY: caller guarantees `r` is a verified in-range, currently-empty
+    // destination register (the verifier's move/const/copy/place rules).
+    debug_assert!(unsafe { f.registers.get_unchecked(r as usize) }.is_none());
+    *unsafe { f.registers.get_unchecked_mut(r as usize) } = Some(v);
 }
 
 fn whole_place(slots: &SlotStore, f: &mut Frame, r: u32) -> Result<ReferenceTarget, RuntimeError> {
