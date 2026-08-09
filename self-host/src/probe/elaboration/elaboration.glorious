@@ -1119,7 +1119,14 @@ computation_uses_local(
                 true
             } else {
                 match_arms_use_local(body, arms, 0, local)
-            }
+            },
+        CoreComputationView::Perform(_, _, operands) =>
+            values_use_local(body, operands, 0, local),
+        CoreComputationView::Resume(_, resumption, result) =>
+            value_uses_local(body, resumption, local)
+                or { value_uses_local(body, result, local) },
+        CoreComputationView::Handle(_, handled, _) =>
+            computation_uses_local(body, handled, local)
     }
 }
 
@@ -1580,6 +1587,19 @@ write_computation_expression(
                     computation
                 )
             }
+        },
+        // Effect-control bytecode lowering is intentionally still gated, but
+        // the Typed Core probe must be able to observe a successfully
+        // elaborated perform without treating it as an ordinary call.
+        CoreComputationView::Perform(ty, operation, operands) => {
+            ByteBuf::push(output, 11);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, Id::to_u32(operation));
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(operands)));
+            write_call_operands(
+                output, source, declarations, resolved, body,
+                source_local_limit, operands
+            )
         }
     }
 }
@@ -1714,7 +1734,10 @@ write_block_expression(
         CoreComputationView::Call(found, _, _, _) => found,
         CoreComputationView::Primitive(found, _, _) => found,
         CoreComputationView::Construct(found, _, _) => found,
-        CoreComputationView::VariantDispatch(found, _, _) => found
+        CoreComputationView::VariantDispatch(found, _, _) => found,
+        CoreComputationView::Perform(found, _, _) => found,
+        CoreComputationView::Resume(found, _, _) => found,
+        CoreComputationView::Handle(found, _, _) => found
     };
     write_type_id(output, Id::to_u32(ty));
     ByteBuf::write_u32_le(

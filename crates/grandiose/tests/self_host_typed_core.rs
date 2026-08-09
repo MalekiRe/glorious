@@ -2001,6 +2001,47 @@ fn self_host_effect_core_foundation_retains_control_and_rejects_lowering() {
 }
 
 #[test]
+fn self_hosted_monomorphic_perform_elaborates_like_bootstrap() {
+    // Keep the first executable effect-body parity case intentionally narrow:
+    // a monomorphic operation has no continuation lowering requirement, but
+    // it must reach Typed Core as `Perform` with its checked payload/result.
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64 } \
+        answer(value: i64) -> i64 / {Ask} { perform Ask::ask(value) }";
+    let bootstrap = SourceBundle::distributed(
+        Segment::new(INPUT_NAME, format!("{source}{WRAPPER}")),
+        [],
+    );
+    assert!(
+        grandiose::compile_bundle_to_phases_with_options(
+            &bootstrap,
+            CompileOptions { optimization_level: OptimizationLevel::O0 },
+        )
+        .is_ok(),
+        "bootstrap compiler must accept the focused perform fixture"
+    );
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O0 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("perform.glorious");
+    let output = directory.path().join("perform.bin");
+    fs::write(&input, source).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap().first().copied(), Some(0));
+}
+
+#[test]
 fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)

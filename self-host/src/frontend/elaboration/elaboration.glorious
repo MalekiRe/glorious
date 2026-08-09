@@ -6926,7 +6926,8 @@ resolved_target_kind(target: Option<ResolvedTarget>) -> u32 {
         Option::Some(ResolvedTarget::Function(_)) => 3,
         Option::Some(ResolvedTarget::FunctionAlias(_)) => 6,
         Option::Some(ResolvedTarget::Struct(_)) => 4,
-        Option::Some(ResolvedTarget::Variant(_)) => 5
+        Option::Some(ResolvedTarget::Variant(_)) => 5,
+        Option::Some(ResolvedTarget::EffectOperation(_)) => 7
     }
 }
 
@@ -8284,6 +8285,150 @@ elaborate_call_arguments(
             operands
         )
     } else { Result::Ok(()) }
+}
+
+// `perform` has no callable callee child: its children are exactly its
+// payload expressions.  Keep this separate from ordinary-call inference so
+// the Core operation identity remains an effect operation, rather than an
+// accidentally callable-looking shell.  Generic operation instantiation is
+// deliberately left to the later effect-polymorphism pass; this path is the
+// concrete, monomorphic foundation used by the compiler itself.
+elaborate_perform_arguments(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    operation: InterfaceEffectOperationId,
+    ordinal: u32,
+    operands: &mut Vec<CoreValueId>
+) -> Result<(), ElaborationError> {
+    let count = interface_effect_operation_payload_count(&*interfaces, operation);
+    if(ordinal < count) {
+        let expected = handle interface_effect_operation_payload_at(
+            &*interfaces,
+            operation,
+            ordinal
+        ) {
+            None => unreachable(),
+            Option::Some(found) => found
+        };
+        let child = super::bodies::expression_child_at(body, expression, ordinal);
+        let argument = try(elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            child,
+            Option::Some(expected)
+        ), @elaborate_perform_arguments);
+        try(check_expected_type(
+            argument.type_id,
+            Option::Some(expected),
+            super::bodies::expression_token_start_at(body, child)
+        ), @elaborate_perform_arguments);
+        Vec::push(&mut *operands, embed_operand(&mut value.core, argument));
+        elaborate_perform_arguments(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            expression,
+            operation,
+            ordinal + 1,
+            operands
+        )
+    } else { Result::Ok(()) }
+}
+
+elaborate_perform(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    let identity = handle resolved_target_at(map, expression) {
+        Option::Some(ResolvedTarget::EffectOperation(found)) => found,
+        _ => @elaborate_perform(Result::Err(
+            ElaborationError::UnsupportedExpression(token)
+        ))
+    };
+    let effect_shell = super::resolution::effect_operation_effect(&identity);
+    let interface_effect = handle interface_effect_for_shell(
+        &*interfaces,
+        effect_shell
+    ) {
+        None => @elaborate_perform(Result::Err(
+            ElaborationError::MissingEffectType(effect_shell)
+        )),
+        Option::Some(found) => found
+    };
+    let operation = handle interface_effect_operation_id(
+        &*interfaces,
+        interface_effect,
+        super::resolution::effect_operation_ordinal(&identity)
+    ) {
+        None => @elaborate_perform(Result::Err(
+            ElaborationError::MissingEffectOperationHeader(token)
+        )),
+        Option::Some(found) => found
+    };
+    if(interface_effect_generic_count(&*interfaces, interface_effect) != 0
+        or { interface_effect_operation_generic_count(&*interfaces, operation) != 0 }) {
+        @elaborate_perform(Result::Err(ElaborationError::UnsupportedExpression(token)))
+    } else { () };
+    let found_count = super::bodies::expression_child_count_at(body, expression);
+    let expected_count = interface_effect_operation_payload_count(&*interfaces, operation);
+    if(found_count != expected_count) {
+        @elaborate_perform(Result::Err(ElaborationError::ArgumentCountMismatch(
+            token,
+            expected_count,
+            found_count
+        )))
+    } else { () };
+    let result = interface_effect_operation_result(&*interfaces, operation);
+    try(check_expected_type(result, expected, token), @elaborate_perform);
+    let operands = Vec::new();
+    try(elaborate_perform_arguments(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        map,
+        value,
+        expression,
+        operation,
+        0,
+        &mut operands
+    ), @elaborate_perform);
+    let operand_start = super::syntax::range_mark(&value.core.operands);
+    append_core_values(&mut value.core.operands, &operands, 0);
+    let operand_end = Vec::len(&value.core.operands);
+    let perform_computation = push_computation(
+        &mut value.core,
+        result,
+        CoreComputationKind::Perform(operation, operand_range(operand_start, operand_end))
+    );
+    Result::Ok(Elaborated {
+        type_id: result,
+        form: ElaboratedForm::Computation(perform_computation)
+    })
 }
 
 wrap_lets_reverse(
@@ -10699,6 +10844,17 @@ elaborate_expression(
         ),
         super::bodies::BodyExpressionView::Projection(_, _) =>
             elaborate_projection(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            expression,
+            expected
+        ),
+        super::bodies::BodyExpressionView::Perform(_, _) => elaborate_perform(
             original,
             headers,
             declarations,
