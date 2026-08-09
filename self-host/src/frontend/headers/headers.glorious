@@ -4404,6 +4404,21 @@ parse_impl_methods(
                     original, declarations, value, shell, end + 1, limit, start
                 )
             }
+        } else if(operator_symbol(&*value, current)) {
+            // Operator implementations use a symbolic member name.  Keep
+            // their body boundary while the callable arena remains
+            // identifier-named.
+            handle impl_method_body_open(&*value, current, limit) {
+                None => Result::Err(HeaderError::UnexpectedTrailingHeaderToken(current, current)),
+                Option::Some(open) => handle super::syntax::delimiter_partner(
+                    super::scanner::delimiter_map(declarations), open
+                ) {
+                    None => Result::Err(HeaderError::ExpectedRightBrace(open, current)),
+                    Option::Some(close) => parse_impl_methods(
+                        original, declarations, value, shell, close + 1, limit, start
+                    )
+                }
+            }
         } else { handle impl_method_body_open(&*value, current, limit) {
             None => Result::Err(HeaderError::UnexpectedTrailingHeaderToken(current, current)),
             Option::Some(open) => {

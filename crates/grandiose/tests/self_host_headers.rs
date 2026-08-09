@@ -1020,6 +1020,31 @@ fn self_host_operator_trait_requirements_reach_the_header_oracle_in_vm() {
 }
 
 #[test]
+fn self_host_operator_impl_members_reach_the_header_oracle_in_vm() {
+    let source = "trait Add { +(self: Self, other: Self) -> Self; } \
+        impl Add for u8 { +(self: u8, other: u8) -> u8 { 0 } }";
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("operator-impl.glorious");
+    let output = directory.path().join("operator-impl.bin");
+    fs::write(&input, source).unwrap();
+    let mut expected = Vec::new();
+    push_u32(&mut expected, 1);
+    encode_rust_headers(&mut expected, source);
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle("probe::headers::application"),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    ).unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    ).unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap(), expected);
+}
+
+#[test]
 fn self_host_multiple_supertrait_headers_reach_the_header_oracle_in_vm() {
     let source = "trait Parent {} trait Quota {} trait Index {} trait Child: Parent + Quota + Index {}";
     let directory = tempfile::tempdir().unwrap();
