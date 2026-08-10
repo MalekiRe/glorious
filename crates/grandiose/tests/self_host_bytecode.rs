@@ -11,7 +11,7 @@ use grandiose::{
 use grandiose_vm::{
     Artifact, SystemHost, Type, Value, Vm,
     bytecode::{I64, Instruction, U64},
-    verify::load_verified,
+    verify::{VerifiedArtifact, load_verified},
 };
 
 const FIXTURE: &str = r#"
@@ -957,6 +957,32 @@ fn function_id(artifact: &Artifact, name: &str) -> u32 {
         .unwrap_or_else(|| panic!("self-hosted artifact is missing `{name}`")) as u32
 }
 
+fn bootstrap_self_host_release_vm() -> (VerifiedArtifact, u32, u32) {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let classify = function_id(&phases.artifact, "classify_compile_error");
+    let diagnostic = function_id(&phases.artifact, "diagnostic_fingerprint");
+    let bytes = phases.artifact.encode();
+    drop(phases);
+    (load_verified(&bytes).unwrap(), classify, diagnostic)
+}
+
+fn run_self_host_source_probe(compiler: &VerifiedArtifact, function: u32, source: &str) -> Value {
+    Vm::with_host(
+        compiler.clone(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![]),
+    )
+    .unwrap()
+    .run(function, vec![Value::Text(source.into())])
+    .unwrap()
+}
+
 fn assert_diagnostic_contracts(mut run: impl FnMut(&str, Vec<Value>) -> Value) {
     let frontend = [
         (1_u64, 1_u64, 1016_u64, 1_u64, 0_u64),
@@ -1229,9 +1255,11 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
                 panic!("{errors:#?}")
             });
             let terminal_artifact = function_id(&artifact, "effect_backend_terminal_artifact");
-            let nonterminal_artifact = function_id(&artifact, "effect_backend_nonterminal_artifact");
+            let nonterminal_artifact =
+                function_id(&artifact, "effect_backend_nonterminal_artifact");
             let invalid_terminal = function_id(&artifact, "effect_backend_invalid_terminal_reason");
-            let invalid_resumption = function_id(&artifact, "effect_backend_invalid_resumption_reasons");
+            let invalid_resumption =
+                function_id(&artifact, "effect_backend_invalid_resumption_reasons");
             let compiler_bytes = artifact.encode();
             drop(artifact);
             let compiler = load_verified(&compiler_bytes).unwrap();
@@ -1573,53 +1601,6 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
 }
 
 #[test]
-#[ignore = "expensive release VM gate"]
-fn self_hosted_terminal_u32_handler_classifier_reaches_scalar_dispatch() {
-    // This is deliberately the narrow terminal-handler form accepted by the
-    // self-host scalar-dispatch path: one terminal operation, one u32 payload,
-    // literal tests followed by a wildcard, and branch bodies with one common
-    // scalar result. The selected literal proves the source is not merely a
-    // generic wildcard handler.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let source = "effect Stop { stop(value: u32) -> ! } \
-                selected() -> u32 { \
-                    handle Stop::stop(2) { \
-                        Stop::stop(0) => 10, \
-                        Stop::stop(2) => 20, \
-                        Stop::stop(_) => 30 \
-                    } \
-                } \
-                main() { () }";
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
-                },
-            )
-            .unwrap();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
-            let compiler = load_verified(&phases.artifact.encode()).unwrap();
-            assert_eq!(
-                Vm::with_host(
-                    compiler,
-                    ["process.args", "fs.read", "fs.write", "diagnostic"],
-                    SystemHost::new(vec![]),
-                )
-                .unwrap()
-                .run(classify, vec![Value::Text(source.into())])
-                .unwrap(),
-                Value::U64(0),
-                "the constrained terminal-u32 handler must reach scalar dispatch"
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
 #[ignore = "expensive release VM diagnostic gate"]
 fn self_hosted_effect_elaboration_diagnostic_returns_without_abort() {
     std::thread::Builder::new()
@@ -1663,24 +1644,101 @@ fn self_hosted_effect_elaboration_diagnostic_returns_without_abort() {
 }
 
 #[test]
-#[ignore = "expensive release VM gate"]
-fn self_hosted_terminal_bool_handler_classifier_reaches_variant_dispatch() {
-    std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(|| {
-        let source = "effect Branch { select(condition: Bool) -> ! } \
-            choose(value: Bool) -> u32 { \
-                handle Branch::select(value) { \
-                    Branch::select(true) => 10, \
-                    Branch::select(false) => 20 \
+#[ignore = "expensive release VM source-capability batch"]
+fn self_hosted_source_capabilities_in_release_vm() {
+    #[derive(Clone, Copy)]
+    enum Probe {
+        Classify,
+        Diagnostic,
+    }
+
+    struct Case {
+        name: &'static str,
+        probe: Probe,
+        source: &'static str,
+        expected: u64,
+    }
+
+    let cases = [
+        Case {
+            // One terminal operation, one u32 payload, literal tests followed
+            // by a wildcard, and one common scalar result.
+            name: "terminal u32 handler scalar dispatch",
+            probe: Probe::Classify,
+            source: "effect Stop { stop(value: u32) -> ! } \
+                selected() -> u32 { \
+                    handle Stop::stop(2) { \
+                        Stop::stop(0) => 10, \
+                        Stop::stop(2) => 20, \
+                        Stop::stop(_) => 30 \
+                    } \
                 } \
-            } main() { () }";
-        let phases = grandiose::compile_bundle_to_phases_with_options(
-            &self_host_bundle(), CompileOptions { optimization_level: OptimizationLevel::O2 }
-        ).unwrap();
-        let classify = function_id(&phases.artifact, "classify_compile_error");
-        let compiler = load_verified(&phases.artifact.encode()).unwrap();
-        assert_eq!(Vm::with_host(compiler, ["process.args", "fs.read", "fs.write", "diagnostic"],
-            SystemHost::new(vec![])).unwrap().run(classify, vec![Value::Text(source.into())]).unwrap(), Value::U64(0));
-    }).unwrap().join().unwrap();
+                main() { () }",
+            expected: 0,
+        },
+        Case {
+            name: "terminal Bool handler variant dispatch",
+            probe: Probe::Classify,
+            source: "effect Branch { select(condition: Bool) -> ! } \
+                choose(value: Bool) -> u32 { \
+                    handle Branch::select(value) { \
+                        Branch::select(true) => 10, \
+                        Branch::select(false) => 20 \
+                    } \
+                } main() { () }",
+            expected: 0,
+        },
+        Case {
+            // Abstract trait and generic-impl callables must defer, while the
+            // concrete implementation members remain seedable and lowerable.
+            name: "abstract trait and generic impl callable deferral",
+            probe: Probe::Classify,
+            source: "trait Measure { measure(self: &Self) -> i64; } \
+                struct Wrapper<T> { value: T } \
+                impl<T> Measure for Wrapper<T> { \
+                    measure(self: &Self) -> i64 { 1 } \
+                } \
+                trait Entry { main() -> (); } \
+                impl Entry for i64 { main() -> () { () } } \
+                trait Route { first(value: i64) -> i64; second(other: i64) -> i64; } \
+                impl Route for i64 { \
+                    first(value: i64) -> i64 { value } \
+                    second(other: i64) -> i64 { other } \
+                } \
+                main() { () }",
+            expected: 0,
+        },
+        Case {
+            // Effect MIR is intentionally not implemented, but its structured
+            // lowering diagnostic must return rather than aborting.
+            name: "residual effect control lowering diagnostic",
+            probe: Probe::Diagnostic,
+            source: "effect Ask { [1,1] ask(value: i64) -> i64 } \
+                answer(value: i64) -> i64 / {Ask} { perform Ask::ask(value) }",
+            expected: 10_710_026_103,
+        },
+    ];
+
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let (compiler, classify, diagnostic) = bootstrap_self_host_release_vm();
+            for case in cases {
+                let function = match case.probe {
+                    Probe::Classify => classify,
+                    Probe::Diagnostic => diagnostic,
+                };
+                assert_eq!(
+                    run_self_host_source_probe(&compiler, function, case.source),
+                    Value::U64(case.expected),
+                    "{}",
+                    case.name
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -1689,8 +1747,8 @@ fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let source = "text_value() -> Text { \"hello\" } \
-                bytes_value() -> Bytes { b\"\\x00\\xff\" } \
+            let source = "text_value() -> Text { \"hello\" } \\
+                bytes_value() -> Bytes { b\"\\x00\\xff\" } \\
                 main() { () }";
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
@@ -1712,104 +1770,6 @@ fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
                 .unwrap(),
                 Value::U64(0),
                 "literal Core values must lower to executable bytecode constants"
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
-#[ignore = "expensive release VM gate"]
-fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm() {
-    // Trait requirements and generic implementation members are retained in
-    // the callable interface arena. Their exposed signatures still contain
-    // TraitSelf or the impl's T, however, so the initial no-substitution seed
-    // must leave them alone. The concrete Entry implementation does have a
-    // body and an artifact-representable signature, so successful compilation
-    // also proves that concrete impl members are still seeded and lowered.
-    // Its method is deliberately named `main`: the real top-level main must
-    // remain the only eligible entry point.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let source = "trait Measure { measure(self: &Self) -> i64; } \
-                struct Wrapper<T> { value: T } \
-                impl<T> Measure for Wrapper<T> { \
-                    measure(self: &Self) -> i64 { 1 } \
-                } \
-                trait Entry { main() -> (); } \
-                impl Entry for i64 { main() -> () { () } } \
-                trait Route { first(value: i64) -> i64; second(other: i64) -> i64; } \
-                impl Route for i64 { \
-                    first(value: i64) -> i64 { value } \
-                    second(other: i64) -> i64 { other } \
-                } \
-                main() { () }";
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
-                },
-            )
-            .unwrap();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
-            let compiler = load_verified(&phases.artifact.encode()).unwrap();
-            assert_eq!(
-                Vm::with_host(
-                    compiler,
-                    ["process.args", "fs.read", "fs.write", "diagnostic"],
-                    SystemHost::new(vec![]),
-                )
-                .unwrap()
-                .run(classify, vec![Value::Text(source.into())])
-                .unwrap(),
-                Value::U64(0),
-                "abstract trait/generic-impl callables must defer without blocking correctly routed concrete impl lowering"
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
-#[ignore = "expensive release VM diagnostic gate"]
-fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
-    // Reuse the parser-valid monomorphic `perform` specimen from the typed
-    // Core self-host tests. Effect MIR is intentionally not implemented, so
-    // this complete compiler pipeline must report its bounded lowering error
-    // rather than aborting in the earlier place-flow pass.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let source = "effect Ask { [1,1] ask(value: i64) -> i64 } \
-                answer(value: i64) -> i64 / {Ask} { perform Ask::ask(value) }";
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
-                },
-            )
-            .unwrap();
-            let diagnostic = function_id(&phases.artifact, "diagnostic_fingerprint");
-            let compiler = load_verified(&phases.artifact.encode()).unwrap();
-            assert_eq!(
-                Vm::with_host(
-                    compiler,
-                    ["process.args", "fs.read", "fs.write", "diagnostic"],
-                    SystemHost::new(vec![]),
-                )
-                .unwrap()
-                .run(diagnostic, vec![Value::Text(source.into())])
-                .unwrap(),
-                // phase=Lowering (10), class=Internal (7), diagnostic code
-                // 10026 (Lowering's phase prefix plus local code 26),
-                // primary=CoreComputation (10), owner=Declaration (3).
-                // Going through diagnostics::compile_source exercises the
-                // renderer that previously fell through to `unreachable`.
-                Value::U64(10_710_026_103),
-                "residual nonterminal effect control must render as a structured lowering diagnostic"
             );
         })
         .unwrap()
