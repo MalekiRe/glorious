@@ -55564,8 +55564,19 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 break;
             }
         }
+        // The snapshot guard below used to scan `folded[..first]` for every
+        // transfer candidate. Self-host compilation produces several very
+        // large functions with long forwarding runs, turning that guard into
+        // a quadratic bytecode-emission cost. A transfer is only rewritten at
+        // its own ordinal (never retrospectively), so this set is exactly the
+        // set of Copy/Move destinations in the already-visited prefix.
+        let mut preceding_transfer_destinations = BTreeSet::new();
         for first in 0..folded.len().saturating_sub(1) {
             if protected[first] {
+                if let Instruction::Copy { dst, .. } | Instruction::Move { dst, .. } = folded[first]
+                {
+                    preceding_transfer_destinations.insert(dst);
+                }
                 continue;
             }
             let (copied, temporary, source) = match &folded[first] {
@@ -55577,13 +55588,8 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             // transfer whose source was itself produced by an earlier
             // transfer changes the register identity at a MIR cleanup
             // boundary even when the final value is equal.
-            if folded[..first].iter().any(|instruction| {
-                matches!(
-                    instruction,
-                    Instruction::Copy { dst, .. } | Instruction::Move { dst, .. }
-                        if *dst == source
-                )
-            }) {
+            if preceding_transfer_destinations.contains(&source) {
+                preceding_transfer_destinations.insert(temporary);
                 continue;
             }
             for second in first + 1..folded.len() {
@@ -55652,6 +55658,9 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 }
                 folded[second] = Instruction::Nop;
                 break;
+            }
+            if let Instruction::Copy { dst, .. } | Instruction::Move { dst, .. } = folded[first] {
+                preceding_transfer_destinations.insert(dst);
             }
         }
         let mut removed = folded
@@ -58233,6 +58242,41 @@ mod mir_edge_emission_tests {
                     args: vec![5, 6],
                 },
                 Instruction::Return { src: Some(7) },
+            ]
+        );
+    }
+
+    #[test]
+    fn peephole_keeps_second_stage_snapshot_transfer_unfolded() {
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Move { dst: 3, src: 2 },
+                Instruction::Move { dst: 4, src: 3 },
+                Instruction::Return { src: Some(4) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "snapshot_chain".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64, I64],
+            code_start: 0,
+            code_len: 4,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Move { dst: 3, src: 1 },
+                Instruction::Move { dst: 4, src: 3 },
+                Instruction::Return { src: Some(4) },
             ]
         );
     }
