@@ -359,6 +359,12 @@ pub type CoreComputationId = Id<CoreComputationTag>;
 pub struct CoreLocalTag {}
 pub type CoreLocalId = Id<CoreLocalTag>;
 
+// A label identity is generative within one typed body.  It deliberately does
+// not reuse the source spelling: nested destinations may use the same label
+// name, while a Leave must retain the exact active destination it selected.
+pub struct LabelDestinationTag {}
+pub type LabelDestinationId = Id<LabelDestinationTag>;
+
 pub struct IntegerConstantTag {}
 pub type IntegerConstantId = Id<IntegerConstantTag>;
 
@@ -423,6 +429,13 @@ enum CoreComputationKind {
     // A resume consumes the resumption value exactly once. Quantity checking
     // and MIR cleanup remain deliberately unimplemented in this foundation.
     Resume(CoreValueId, CoreValueId),
+    // Both ordinary completion of `body` and a matching Leave produce this
+    // computation's result.  MIR owns the eventual protected-control CFG.
+    LabelDestination(LabelDestinationId, CoreComputationId),
+    // A terminal transfer to an active generative destination.  Its payload
+    // is a value rather than a computation so it has exactly one child in the
+    // typed Core walker and rewriter.
+    Leave(LabelDestinationId, CoreValueId),
     // `handle body { ... }`: each clause owns fresh payload/resumption locals
     // and its typed computation. The body is a computation to preserve its
     // suspension point rather than embedding it as a value.
@@ -433,6 +446,10 @@ enum CoreComputationKind {
 struct CoreComputation { ty: TypeId, kind: CoreComputationKind }
 
 impl Use<[0, *]> for CoreComputation {}
+
+pub struct CoreLabelDestination { result_type: TypeId }
+
+impl Use<[0, *]> for CoreLabelDestination {}
 
 pub struct ConstructionField { field: u32, value: CoreValueId }
 
@@ -498,6 +515,7 @@ pub struct TypedBody {
     match_arms: Vec<CoreMatchArm>,
     match_bindings: Vec<CoreMatchBinding>,
     integer_arms: Vec<CoreIntegerArm>,
+    label_destinations: Vec<CoreLabelDestination>,
     handler_clauses: Vec<CoreHandlerClause>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
@@ -782,6 +800,8 @@ pub enum CoreComputationView<'a> {
     IntegerDispatch(TypeId, CoreValueId, Slice<'a, CoreIntegerArm>),
     Perform(TypeId, InterfaceEffectOperationId, Slice<'a, CoreValueId>),
     Resume(TypeId, CoreValueId, CoreValueId),
+    LabelDestination(TypeId, LabelDestinationId, CoreComputationId),
+    Leave(TypeId, LabelDestinationId, CoreValueId),
     Handle(TypeId, CoreComputationId, Slice<'a, CoreHandlerClause>)
 }
 
@@ -822,6 +842,8 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
             CoreComputationView::IntegerDispatch(ty, _, _) => ty,
             CoreComputationView::Perform(ty, _, _) => ty,
             CoreComputationView::Resume(ty, _, _) => ty,
+            CoreComputationView::LabelDestination(ty, _, _) => ty,
+            CoreComputationView::Leave(ty, _, _) => ty,
             CoreComputationView::Handle(ty, _, _) => ty
         }
     }
@@ -863,6 +885,8 @@ core_node_child_count(
                 Slice::len(arms) + 1,
             CoreComputationView::Perform(_, _, operands) => Slice::len(operands),
             CoreComputationView::Resume(_, _, _) => 2,
+            CoreComputationView::LabelDestination(_, _, _) => 1,
+            CoreComputationView::Leave(_, _, _) => 1,
             CoreComputationView::Handle(_, _, clauses) => Slice::len(clauses) + 1
         }
     }
@@ -937,6 +961,9 @@ core_node_child_at(
             CoreComputationView::Resume(_, resumption, result) => if(index == 0) {
                 CoreNodeId::Value(resumption)
             } else { CoreNodeId::Value(result) },
+            CoreComputationView::LabelDestination(_, _, body) =>
+                CoreNodeId::Computation(body),
+            CoreComputationView::Leave(_, _, payload) => CoreNodeId::Value(payload),
             CoreComputationView::Handle(_, handled, clauses) => if(index == 0) {
                 CoreNodeId::Computation(handled)
             } else {
@@ -1166,6 +1193,16 @@ core_node_child_set(
                 CoreComputationKind::Resume(resumption, result) => if(index == 0) {
                     CoreComputationKind::Resume(core_rewrite_value(replacement), result)
                 } else { CoreComputationKind::Resume(resumption, core_rewrite_value(replacement)) },
+                CoreComputationKind::LabelDestination(label, body) =>
+                    CoreComputationKind::LabelDestination(
+                        label,
+                        core_rewrite_computation(replacement)
+                    ),
+                CoreComputationKind::Leave(label, payload) =>
+                    CoreComputationKind::Leave(
+                        label,
+                        core_rewrite_value(replacement)
+                    ),
                 CoreComputationKind::Handle(handled, clauses) => {
                     if(index == 0) {
                         CoreComputationKind::Handle(core_rewrite_computation(replacement), clauses)
@@ -1372,8 +1409,19 @@ struct BodyContext {
     parameter_count: u32,
     next_source_local: u32,
     place_flow: PlaceFlow,
+    active_labels: Vec<ActiveLabelDestination>,
     core: CoreBuilder
 }
+
+// The source spelling is only a lookup key while elaborating a lexical
+// region.  The Core and later lowering stages receive `destination`, never
+// this spelling, so shadowing cannot alias label control edges.
+struct ActiveLabelDestination {
+    name: Id<String>,
+    destination: LabelDestinationId
+}
+
+impl Use<[0, *]> for ActiveLabelDestination {}
 
 struct CoreBuilder {
     local_types: IndexVec<CoreLocalTag, Option<TypeId>>,
@@ -1385,6 +1433,7 @@ struct CoreBuilder {
     match_arms: Vec<CoreMatchArm>,
     match_bindings: Vec<CoreMatchBinding>,
     integer_arms: Vec<CoreIntegerArm>,
+    label_destinations: Vec<CoreLabelDestination>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
@@ -1401,6 +1450,7 @@ new_core_builder(
         match_arms: Vec::new(),
         match_bindings: Vec::new(),
         integer_arms: Vec::new(),
+        label_destinations: Vec::new(),
         integer_constants: Arena::new()
     }
 }
@@ -1414,6 +1464,7 @@ new_body_context(
         parameter_count: parameter_count,
         next_source_local: 0,
         place_flow: place_flow,
+        active_labels: Vec::new(),
         core: new_core_builder(local_types)
     }
 }
@@ -2331,6 +2382,13 @@ core_local_id_from_u32(value: u32) -> CoreLocalId {
     Id::from_u32(value)
 }
 
+label_destination_id_from_usize(value: usize) -> LabelDestinationId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
 integer_constant_id_from_usize(value: usize) -> IntegerConstantId {
     handle Id::from_usize(value) {
         Result::Err(_) => unreachable(),
@@ -3010,10 +3068,32 @@ pub typed_body_computation_at<'a>(
             CoreComputationView::Perform(ty, operation, typed_body_operands(value, range)),
         CoreComputationKind::Resume(resumption, result) =>
             CoreComputationView::Resume(ty, resumption, result),
+        CoreComputationKind::LabelDestination(label, body) =>
+            CoreComputationView::LabelDestination(ty, label, body),
+        CoreComputationKind::Leave(label, payload) =>
+            CoreComputationView::Leave(ty, label, payload),
         CoreComputationKind::Handle(handled, range) => CoreComputationView::Handle(
             ty, handled, typed_body_handler_clauses(value, range)
         )
     }
+}
+
+pub typed_body_label_destination_count(value: &TypedBody) -> usize {
+    Vec::len(&value.label_destinations)
+}
+
+pub typed_body_label_destination_result_type(
+    value: &TypedBody,
+    id: LabelDestinationId
+) -> TypeId {
+    let destination = handle Vec::get(
+        &value.label_destinations,
+        Id::to_usize(id)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    };
+    destination.result_type
 }
 
 pub typed_body_computation_type(
@@ -7343,6 +7423,66 @@ push_computation(
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
     }
+}
+
+// Allocate the stable Core identity before elaborating a destination body.
+// This is what makes recursive/nested label references bind to a generative
+// slot instead of a source-name lookup in a later phase.
+push_label_destination(
+    value: &mut CoreBuilder,
+    result_type: TypeId
+) -> LabelDestinationId {
+    let id = label_destination_id_from_usize(Vec::len(&value.label_destinations));
+    Vec::push(&mut value.label_destinations, CoreLabelDestination {
+        result_type: result_type
+    });
+    id
+}
+
+push_active_label(
+    value: &mut BodyContext,
+    name: Id<String>,
+    destination: LabelDestinationId
+) {
+    Vec::push(&mut value.active_labels, ActiveLabelDestination {
+        name: name,
+        destination: destination
+    })
+}
+
+pop_active_label(value: &mut BodyContext) {
+    handle Vec::pop(&mut value.active_labels) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(_) => ()
+    }
+}
+
+active_label_destination_at(
+    labels: &Vec<ActiveLabelDestination>,
+    name: Id<String>,
+    index: usize
+) -> Option<LabelDestinationId> {
+    if(index == 0) { None } else {
+        let current = index - 1;
+        let found = handle Vec::get(labels, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(found.name == name) {
+            Option::Some(found.destination)
+        } else { active_label_destination_at(labels, name, current) }
+    }
+}
+
+active_label_destination(
+    value: &BodyContext,
+    name: Id<String>
+) -> Option<LabelDestinationId> {
+    active_label_destination_at(
+        &value.active_labels,
+        name,
+        Vec::len(&value.active_labels)
+    )
 }
 
 pure(
@@ -12107,6 +12247,7 @@ pub elaborate_function_instance_body(
                 parameter_count: _,
                 next_source_local: _,
                 place_flow: _,
+                active_labels: _,
                 core
             } = builder;
             let CoreBuilder {
@@ -12119,6 +12260,7 @@ pub elaborate_function_instance_body(
                 match_arms,
                 match_bindings,
                 integer_arms,
+                label_destinations,
                 integer_constants
             } = core;
             let output = TypedBody {
@@ -12134,6 +12276,7 @@ pub elaborate_function_instance_body(
                 match_arms: match_arms,
                 match_bindings: match_bindings,
                 integer_arms: integer_arms,
+                label_destinations: label_destinations,
                 handler_clauses: Vec::new(),
                 integer_constants: integer_constants
             };
