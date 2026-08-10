@@ -1689,7 +1689,7 @@ fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let source = "text_value() -> String { \"hello\" } \
+            let source = "text_value() -> Text { \"hello\" } \
                 bytes_value() -> Bytes { b\"\\x00\\xff\" } \
                 main() { () }";
             let phases = grandiose::compile_bundle_to_phases_with_options(
