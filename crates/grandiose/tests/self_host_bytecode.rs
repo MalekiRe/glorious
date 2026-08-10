@@ -2098,3 +2098,42 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
         .join()
         .unwrap();
 }
+
+#[test]
+#[ignore = "diagnostic release gate: replay a captured stage-one compiler in the VM"]
+fn self_hosted_stage_one_replay_emits_stage_two_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let stage_one = PathBuf::from(
+                std::env::var_os("G1_SELF_HOST_REPLAY_STAGE1")
+                    .expect("G1_SELF_HOST_REPLAY_STAGE1 must name a stage-one artifact"),
+            );
+            let input = PathBuf::from(
+                std::env::var_os("G1_SELF_HOST_REPLAY_INPUT")
+                    .expect("G1_SELF_HOST_REPLAY_INPUT must name self-host source"),
+            );
+            let compiler = load_verified(&fs::read(&stage_one).unwrap())
+                .expect("the captured stage-one artifact must verify");
+            let entry = compiler
+                .entry_function()
+                .expect("the captured stage-one artifact must have an entry function");
+            let directory = tempfile::tempdir().unwrap();
+            let output = directory.path().join("stage2-replay.grbc");
+            let vm = Vm::with_host(
+                compiler,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.as_os_str().to_owned(),
+                    input.into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            let bytes = fs::read(output).expect("stage one must emit a stage-two artifact");
+            load_verified(&bytes).expect("the replayed stage-two artifact must verify");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
