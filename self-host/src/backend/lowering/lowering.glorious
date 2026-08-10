@@ -4128,6 +4128,16 @@ validate_mir_instruction<'a>(
         } else {
             Result::Err(LoweringError::InvalidMirFunction(function))
         }
+    } else if(*instruction is MirInstruction::Perform(target, _, _, pack)) {
+        // Protocol/operation metadata is validated by emission against the
+        // completed program. At this builder stage validate the only local
+        // invariants: an optional result register and every transferred
+        // payload register. Terminal lowering supplies `None` here.
+        try(validate_optional_mir_register(
+            value,
+            target
+        ), @validate_mir_instruction);
+        validate_mir_register_pack(value, pack, 0)
     } else if(*instruction is MirInstruction::Return(source)) {
         validate_optional_mir_register(value, source)
     } else {
