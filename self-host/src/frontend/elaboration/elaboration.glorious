@@ -365,10 +365,10 @@ pub type IntegerConstantId = Id<IntegerConstantTag>;
 enum CoreValueKind {
     Unit,
     Integer(IntegerConstantId),
-    // A string literal's spelling is interned by the immutable lexed source.
-    // Retaining that stable identity keeps typed Core compact while probes can
-    // serialize its already-decoded UTF-8 bytes without reconstructing tokens.
-    Text(Id<String>),
+    // Retain decoded UTF-8 bytes rather than a lexer-local interner ID. Typed
+    // Core outlives parsed syntax during backend lowering, where the lexed
+    // source is intentionally unavailable.
+    Text(Bytes),
     // Byte strings retain their decoded bytes directly.  Unlike text they may
     // contain non-UTF-8 data, so they cannot share the source text interner.
     Bytes(Bytes),
@@ -763,7 +763,7 @@ impl Use<[0, *]> for InterfaceFieldView {}
 pub enum CoreValueView {
     Unit(TypeId),
     Integer(TypeId, IntegerConstantId),
-    Text(TypeId, Id<String>),
+    Text(TypeId, Bytes),
     Bytes(TypeId, Bytes),
     Local(TypeId, CoreLocalId, Bool, Bool),
     Projection(TypeId, CoreValueId, u32),
@@ -2753,7 +2753,7 @@ pub typed_body_value_at(
         CoreValueKind::Unit => CoreValueView::Unit(ty),
         CoreValueKind::Integer(constant) =>
             CoreValueView::Integer(ty, constant),
-        CoreValueKind::Text(spelling) => CoreValueView::Text(ty, spelling),
+        CoreValueKind::Text(bytes) => CoreValueView::Text(ty, bytes),
         CoreValueKind::Bytes(bytes) => CoreValueView::Bytes(ty, bytes),
         CoreValueKind::Local(local, forced) => CoreValueView::Local(
             ty,
@@ -11448,10 +11448,17 @@ elaborate_expression(
         ),
         super::bodies::BodyExpressionView::Float(_) => unreachable(),
         super::bodies::BodyExpressionView::Text(spelling, token) => {
+            let text = handle super::lexer::lexeme(
+                super::headers::parsed_source(headers),
+                spelling
+            ) {
+                None => unreachable(),
+                Option::Some(found) => found
+            };
             let core = push_value(
                 &mut value.core,
                 type_id_from_u32(17),
-                CoreValueKind::Text(spelling)
+                CoreValueKind::Text(String::as_bytes(text))
             );
             check_expected(Elaborated {
                 type_id: type_id_from_u32(17),

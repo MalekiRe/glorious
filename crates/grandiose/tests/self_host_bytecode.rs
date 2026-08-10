@@ -1684,6 +1684,42 @@ fn self_hosted_terminal_bool_handler_classifier_reaches_variant_dispatch() {
 }
 
 #[test]
+#[ignore = "expensive release VM literal-lowering gate"]
+fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "text_value() -> String { \"hello\" } \
+                bytes_value() -> Bytes { b\"\\x00\\xff\" } \
+                main() { () }";
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap(),
+                Value::U64(0),
+                "literal Core values must lower to executable bytecode constants"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "expensive release VM gate"]
 fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm() {
     // Trait requirements and generic implementation members are retained in

@@ -1286,14 +1286,11 @@ write_value_expression(
             write_type_id(output, Id::to_u32(ty));
             Result::Ok(())
         },
-        CoreValueView::Text(ty, spelling) => {
+        CoreValueView::Text(ty, bytes) => {
             ByteBuf::push(output, 8);
             write_type_id(output, Id::to_u32(ty));
-            let text = handle super::super::frontend::lexer::lexeme(source, spelling) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            };
-            write_string(output, text);
+            ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
+            ByteBuf::append_bytes(output, &bytes);
             Result::Ok(())
         },
         CoreValueView::Bytes(ty, bytes) => {

@@ -1803,6 +1803,28 @@ u32_constant_key(value: u32) -> Bytes {
     Bytes::from_vec(output)
 }
 
+append_literal_bytes(
+    output: &mut Vec<u8>,
+    bytes: &Bytes,
+    index: usize
+) {
+    if(index < Bytes::len(bytes)) {
+        let byte = handle Bytes::get(bytes, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        Vec::push(output, byte);
+        append_literal_bytes(output, bytes, index + 1)
+    } else { () }
+}
+
+literal_constant_key(tag: u8, bytes: &Bytes) -> Bytes {
+    let output = Vec::new();
+    Vec::push(&mut output, tag);
+    append_literal_bytes(&mut output, bytes, 0);
+    Bytes::from_vec(output)
+}
+
 push_missing_locals(
     output: &mut Vec<Option<RegisterId>>,
     remaining: usize
@@ -2547,6 +2569,16 @@ lower_value<'a>(
                 @lower_value
             );
             emit_const(value, target, key);
+            Result::Ok(Option::Some(target))
+        },
+        CoreValueView::Text(_, bytes) => {
+            let target = alloc_register(value);
+            emit_const(value, target, literal_constant_key(17, &bytes));
+            Result::Ok(Option::Some(target))
+        },
+        CoreValueView::Bytes(_, bytes) => {
+            let target = alloc_register(value);
+            emit_const(value, target, literal_constant_key(18, &bytes));
             Result::Ok(Option::Some(target))
         },
         CoreValueView::Local(type_id, local, _, _) => {
