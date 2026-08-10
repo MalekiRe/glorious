@@ -2179,6 +2179,9 @@ fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
         "CoreValueView::Closure",
         "CoreComputationView::CallIndirect",
         "interface_callable_signature_effect_tail",
+        "signature: CallableSignature\n) -> Slice<'a, TypeId>",
+        "callable_signature_parameter_slice",
+        "callable_signature_effect_slice",
     ] {
         assert!(core.contains(required), "missing callable Typed Core foundation: {required}");
     }

@@ -711,7 +711,7 @@ F: Use<[0, 0]> {
             let callable = interface_callable_signature_at(interfaces, signature);
             __g1_walk_type_elements(
                 interfaces,
-                interface_callable_signature_parameters(interfaces, callable),
+                interface_callable_signature_parameters(interfaces, *callable),
                 0,
                 stop,
                 visitor
@@ -724,7 +724,7 @@ F: Use<[0, 0]> {
             );
             __g1_walk_type_elements(
                 interfaces,
-                interface_callable_signature_effects(interfaces, callable),
+                interface_callable_signature_effects(interfaces, *callable),
                 0,
                 stop,
                 visitor
@@ -823,7 +823,7 @@ F: Use<[0, 0]> {
             let callable = interface_callable_signature_at(interfaces, signature);
             let after_parameters = __g1_fold_type_elements(
                 interfaces,
-                interface_callable_signature_parameters(interfaces, callable),
+                interface_callable_signature_parameters(interfaces, *callable),
                 0,
                 accumulator,
                 stop,
@@ -838,7 +838,7 @@ F: Use<[0, 0]> {
             );
             __g1_fold_type_elements(
                 interfaces,
-                interface_callable_signature_effects(interfaces, callable),
+                interface_callable_signature_effects(interfaces, *callable),
                 0,
                 after_result,
                 stop,
@@ -2787,12 +2787,22 @@ pub interface_callable_signature_at<'a>(
 
 pub interface_callable_signature_parameters<'a>(
     value: &'a TypedInterfaces,
-    signature: &'a CallableSignature
+    signature: CallableSignature
+) -> Slice<'a, TypeId> {
+    let range = signature.parameters;
+    callable_signature_parameter_slice(value, range)
+}
+
+// See `callable_signature_effect_slice`: the borrowed result is rooted only
+// in the interface storage, while the descriptor range is copied first.
+callable_signature_parameter_slice<'a>(
+    value: &'a TypedInterfaces,
+    range: TypeElementRange
 ) -> Slice<'a, TypeId> {
     handle Slice::subslice(
         Vec::as_slice(&value.callable_signature_parameters),
-        usize_from_u32(signature.parameters.start),
-        usize_from_u32(signature.parameters.count)
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
     ) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
@@ -2805,12 +2815,24 @@ pub interface_callable_signature_result(
 
 pub interface_callable_signature_effects<'a>(
     value: &'a TypedInterfaces,
-    signature: &'a CallableSignature
+    signature: CallableSignature
+) -> Slice<'a, TypeId> {
+    let range = signature.effects;
+    callable_signature_effect_slice(value, range)
+}
+
+// Keep the borrowed vector and the by-value range in the same shape as the
+// established TypedBody slice accessors.  In particular, do not retain the
+// signature projection across `Slice::subslice`: the cleanup oracle needs the
+// descriptor borrow to end before the borrowed result is constructed.
+callable_signature_effect_slice<'a>(
+    value: &'a TypedInterfaces,
+    range: TypeElementRange
 ) -> Slice<'a, TypeId> {
     handle Slice::subslice(
         Vec::as_slice(&value.callable_signature_effects),
-        usize_from_u32(signature.effects.start),
-        usize_from_u32(signature.effects.count)
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
     ) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
