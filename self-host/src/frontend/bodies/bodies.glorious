@@ -211,6 +211,10 @@ pub struct ExprNode { kind: ExprKind, tokens: BodyTokenRange }
 
 pub struct ParsedBody {
     shell: ShellId,
+    // Ordinary functions are identified by their scanner shell. Nominal
+    // members share the enclosing trait/impl shell, so preserve the callable
+    // header index selected by the bounded method-body parser.
+    callable_index: Option<usize>,
     root: ExprId,
     nodes: Arena<ExprTag, ExprNode>,
     edges: Vec<ExprEdge>,
@@ -1154,6 +1158,10 @@ pub expression_at<'a>(
 }
 
 pub body_shell(value: &ParsedBody) -> ShellId { value.shell }
+
+pub body_callable_index(value: &ParsedBody) -> Option<usize> {
+    value.callable_index
+}
 
 pub body_root_index(value: &ParsedBody) -> u32 { Id::to_u32(value.root) }
 
@@ -5974,6 +5982,7 @@ pub parse_function_body(
                     } = parser;
                     let output = ParsedBody {
                         shell: shell,
+                        callable_index: None,
                         root: root,
                         nodes: nodes,
                         edges: edges,
@@ -6072,6 +6081,7 @@ pub parse_impl_method_body(
                     } = parser;
                     let output = ParsedBody {
                         shell: super::headers::callable_shell(callable),
+                        callable_index: Option::Some(method),
                         root: root,
                         nodes: nodes,
                         edges: edges,

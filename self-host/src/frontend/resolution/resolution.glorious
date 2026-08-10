@@ -2263,6 +2263,21 @@ push_missing_resolved_handle_arms(
     }
 }
 
+body_callable_for_parsed_body<'a>(
+    index: &ResolutionIndex,
+    headers: &'a super::headers::HeaderIndex,
+    body: &super::bodies::ParsedBody
+) -> Option<&'a super::headers::CallableHeader> {
+    handle super::bodies::body_callable_index(body) {
+        // Nominal members share their enclosing shell. Their parsed body
+        // therefore carries the exact header selected by the method parser.
+        Option::Some(method) => super::headers::callable_at(headers, method),
+        Option::None => body_callable(
+            index, headers, super::bodies::body_shell(body)
+        )
+    }
+}
+
 pub resolve_function_body_indexed(
     index: &ResolutionIndex,
     headers: &super::headers::ParsedHeaders,
@@ -2280,10 +2295,10 @@ pub resolve_function_body_indexed(
                 shell_index
             )
         ),
-        Result::Ok(shell) => handle body_callable(
+        Result::Ok(shell) => handle body_callable_for_parsed_body(
             index,
             headers_index,
-            shell_index
+            body
         ) {
             Result::Err(_) => Result::Err(
                 ResolutionError::MissingBodyCallable(

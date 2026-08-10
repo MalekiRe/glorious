@@ -1593,6 +1593,11 @@ fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm()
                 } \
                 trait Entry { main() -> (); } \
                 impl Entry for i64 { main() -> () { () } } \
+                trait Route { first(value: i64) -> i64; second(other: i64) -> i64; } \
+                impl Route for i64 { \
+                    first(value: i64) -> i64 { value } \
+                    second(other: i64) -> i64 { other } \
+                } \
                 main() { () }";
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
@@ -1613,7 +1618,7 @@ fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm()
                 .run(classify, vec![Value::Text(source.into())])
                 .unwrap(),
                 Value::U64(0),
-                "abstract trait/generic-impl callables must defer without blocking concrete impl lowering"
+                "abstract trait/generic-impl callables must defer without blocking correctly routed concrete impl lowering"
             );
         })
         .unwrap()
