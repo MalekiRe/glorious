@@ -1620,6 +1620,45 @@ fn self_hosted_terminal_u32_handler_classifier_reaches_scalar_dispatch() {
 }
 
 #[test]
+#[ignore = "expensive release VM diagnostic gate"]
+fn self_hosted_effect_elaboration_diagnostic_returns_without_abort() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("invalid-terminal-effect.glorious");
+            let output = directory.path().join("unexpected-output.grbc");
+            fs::write(
+                &input,
+                "effect Stop { [1,1] stop() -> ! } main() { () }",
+            )
+            .unwrap();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let bytes = phases.artifact.encode();
+            drop(phases);
+            let compiler = load_verified(&bytes).unwrap();
+            drop(bytes);
+            let vm = Vm::with_host(
+                compiler,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![output.into_os_string(), input.into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "expensive release VM gate"]
 fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm() {
     // Trait requirements and generic implementation members are retained in

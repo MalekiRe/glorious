@@ -859,6 +859,23 @@ elaboration_local_code(error: &ElaborationError) -> u32 {
         ElaborationError::MissingCallableHeader(_) => 16,
         ElaborationError::UnsupportedCallableSignature(_) => 17,
         ElaborationError::MissingCallableType(_) => 18,
+        ElaborationError::MissingEffectHeader(_) => 50,
+        ElaborationError::MissingEffectOperationHeader(_) => 51,
+        ElaborationError::MissingEffectType(_) => 52,
+        ElaborationError::DuplicateEffectGeneric(_, _) => 53,
+        ElaborationError::DuplicateEffectOperation(_, _) => 54,
+        ElaborationError::DuplicateEffectOperationGeneric(_, _) => 55,
+        ElaborationError::MissingConstraintGoal(_) => 56,
+        ElaborationError::MissingConstraintArgument(_) => 57,
+        ElaborationError::MissingConstraintBinding(_) => 58,
+        ElaborationError::UnknownConstraintRelation(_) => 59,
+        ElaborationError::InvalidConstraintRelation(_, _) => 60,
+        ElaborationError::InvalidHigherRankedConstraintBinder(_) => 61,
+        ElaborationError::ConstraintIntegerOverflow(_) => 62,
+        ElaborationError::UnknownConstraintLifetime(_) => 63,
+        ElaborationError::TerminalOperationResumptionQuantity(_) => 64,
+        ElaborationError::InvalidResumptionInterval(_) => 65,
+        ElaborationError::ResumptionQuantityOverflow(_) => 66,
         ElaborationError::MissingNominalDeclaration(_) => 19,
         ElaborationError::MissingFieldHeader(_) => 20,
         ElaborationError::MissingVariantHeader(_) => 21,
@@ -905,6 +922,9 @@ elaboration_arguments(error: &ElaborationError) -> (u32, u32) {
             (expected, found),
         ElaborationError::IntegerLiteralOutOfRange(_, ty) => (ty, ty),
         ElaborationError::MissingCallableInterface(_, shell) =>
+            (0, Id::to_u32(shell)),
+        ElaborationError::MissingEffectType(shell) => (0, Id::to_u32(shell)),
+        ElaborationError::InvalidConstraintRelation(_, shell) =>
             (0, Id::to_u32(shell)),
         ElaborationError::ArgumentCountMismatch(_, expected, found) =>
             (expected, found),
@@ -1027,6 +1047,82 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             Id::to_usize(shell),
             expected,
             found
+        ),
+        ElaborationError::MissingEffectHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingEffectOperationHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingEffectType(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            expected,
+            found
+        ),
+        ElaborationError::DuplicateEffectGeneric(token, related) =>
+            token_pair_shape(DiagnosticClass::Type, token, related, expected, found),
+        ElaborationError::DuplicateEffectOperation(token, related) =>
+            token_pair_shape(DiagnosticClass::Type, token, related, expected, found),
+        ElaborationError::DuplicateEffectOperationGeneric(token, related) =>
+            token_pair_shape(DiagnosticClass::Type, token, related, expected, found),
+        ElaborationError::MissingConstraintGoal(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingConstraintArgument(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingConstraintBinding(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::UnknownConstraintRelation(token) => token_shape(
+            DiagnosticClass::Type, token, expected, found
+        ),
+        ElaborationError::InvalidConstraintRelation(token, shell) => argument_shape(
+            DiagnosticClass::Type,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(DiagnosticSpace::Declaration, Id::to_usize(shell))),
+            expected,
+            found
+        ),
+        ElaborationError::InvalidHigherRankedConstraintBinder(token) => token_shape(
+            DiagnosticClass::Type, token, expected, found
+        ),
+        ElaborationError::ConstraintIntegerOverflow(token) => token_shape(
+            DiagnosticClass::ResourceLimit, token, expected, found
+        ),
+        ElaborationError::UnknownConstraintLifetime(token) => token_shape(
+            DiagnosticClass::Type, token, expected, found
+        ),
+        ElaborationError::TerminalOperationResumptionQuantity(token) => token_shape(
+            DiagnosticClass::Type, token, expected, found
+        ),
+        ElaborationError::InvalidResumptionInterval(token) => token_shape(
+            DiagnosticClass::Type, token, expected, found
+        ),
+        ElaborationError::ResumptionQuantityOverflow(token) => token_shape(
+            DiagnosticClass::ResourceLimit, token, expected, found
         ),
         ElaborationError::MissingNominalDeclaration(index) => indexed_shape(
             DiagnosticClass::Internal,
