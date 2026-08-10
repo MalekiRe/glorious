@@ -1674,7 +1674,7 @@ fn self_hosted_terminal_text_perform_emits_vm_effect_and_is_unhandled() {
             let vm = Vm::with_host(
                 compiler,
                 ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(vec![output.into_os_string(), input.into_os_string()]),
+                SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
             )
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
