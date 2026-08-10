@@ -1611,6 +1611,45 @@ fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
 }
 
 #[test]
+fn self_hosted_generic_alias_enum_construction_reaches_backend_in_release_vm() {
+    // A constructor through nested aliases must adopt the expected nominal
+    // application.  This is the small form of the compiler prelude's Bool
+    // constructors (`Bool = Option<()> = Result<(), ()>`).
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "enum Result<T, E> { Ok(T), Err(E) } \
+                type Option<T> = Result<T, ()>; \
+                type Bool = Option<()>; \
+                make_true() -> Bool { Result::Ok(()) }";
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap(),
+                Value::U64(0),
+                "generic enum construction through a nested alias must compile"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "expensive release gate: bootstrap and run two complete self-compilation stages"]
 fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
     std::thread::Builder::new()

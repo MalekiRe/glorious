@@ -4720,30 +4720,39 @@ resolve_signature_type(
                             ElaborationError::UnknownTypeName(token)
                         )
                     }
-                } else { if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle named_builtin_type(output, name) {
-                    Result::Ok(ty) => Result::Ok(ty),
-                    Result::Err(_) => handle scalar_kind(name) {
-                        Result::Err(_) => handle type_name_target(
+                } else { if(String::eq(name, &"Unit")) { Result::Ok(0) } else {
+                    // The distributed prelude declares `Bool` as a normal
+                    // alias.  Resolve source declarations before falling
+                    // back to the focused-probe builtins so that alias has
+                    // the same nominal identity as its constructors.
+                    handle type_name_target(
+                        headers,
+                        declarations,
+                        raw,
+                        module
+                    ) {
+                        Result::Ok(found) => resolve_type_name_target(
                             headers,
                             declarations,
-                            raw,
-                            module
+                            output,
+                            found,
+                            token
+                        ),
+                        Result::Err(_) => handle named_builtin_type(
+                            output, name
                         ) {
-                            Result::Err(_) => Result::Err(
-                                ElaborationError::UnknownTypeName(token)
-                            ),
-                            Result::Ok(found) => resolve_type_name_target(
-                                headers,
-                                declarations,
-                                output,
-                                found,
-                                token
-                            )
-                        },
-                        Result::Ok(kind) => Result::Ok(
-                            signature_scalar_type(output, kind)
-                        )
-                    } } } }
+                            Result::Ok(ty) => Result::Ok(ty),
+                            Result::Err(_) => handle scalar_kind(name) {
+                                Result::Err(_) => Result::Err(
+                                    ElaborationError::UnknownTypeName(token)
+                                ),
+                                Result::Ok(kind) => Result::Ok(
+                                    signature_scalar_type(output, kind)
+                                )
+                            }
+                        }
+                    }
+                } }
             } }
         } else {
             let type_name = handle Slice::get(
