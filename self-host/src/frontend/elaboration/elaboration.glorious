@@ -6067,6 +6067,28 @@ collect_callables(
                 Result::Err(ElaborationError::MissingCallableHeader(index)),
             Result::Ok(callable) => {
                 let shell = super::headers::callable_shell(callable);
+                let trait_member = handle super::scanner::shell_at(
+                    declarations,
+                    shell
+                ) {
+                    Result::Err(_) => false,
+                    Result::Ok(owner) => super::scanner::shell_kind(owner)
+                        is super::scanner::DeclarationKind::Trait
+                };
+                if(trait_member) {
+                    // Trait requirements are retained by the header parser,
+                    // but trait-interface collection is a later semantic
+                    // stage. They cannot enter the ordinary callable arena:
+                    // their `Self` receiver is meaningful only in the trait
+                    // scope and would otherwise be resolved as an unknown
+                    // top-level type.
+                    collect_callables(
+                        headers,
+                        declarations,
+                        output,
+                        index + 1
+                    )
+                } else {
                 let scope = signature_scope(
                     shell,
                     super::headers::callable_generics(callable)
@@ -6110,6 +6132,7 @@ collect_callables(
                         )
                         }
                     }
+                }
             }
         } } else { Result::Ok(()) }
 }

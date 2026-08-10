@@ -113,6 +113,33 @@ fn inspect_self_host_interface_type_metadata() {
     }
 }
 
+#[test]
+fn self_hosted_trait_self_requirements_do_not_enter_callable_interfaces() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":interface_collection_status");
+    let verified = verify(phases.artifact).unwrap();
+    let source = "trait Eq { eq(self: &Self, other: &Self) -> Bool; } \
+        trait Ord: Eq { compare(self: &Self, other: &Self) -> i64; } \
+        main() { () }";
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    let Value::U64(status) = vm.run(function, vec![Value::Text(source.into())]).unwrap()
+    else {
+        panic!("interface_collection_status did not return u8");
+    };
+    assert_eq!(status, 0, "trait Self requirements must remain header-only");
+}
+
 fn push_u32(output: &mut Vec<u8>, value: u32) {
     output.extend(value.to_le_bytes());
 }
