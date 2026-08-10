@@ -791,6 +791,78 @@ const EFFECT_BACKEND_PROBES: &str = r#"
             + effect_backend_invalid_resumption_reason(4) * 10000
             + effect_backend_invalid_handler_resumption_reason() * 100000
     }
+
+    callable_backend_direct_mir_artifact() -> Bytes {
+        let types = backend::lowering::mir_types();
+        let type_names = Vec::new();
+        Vec::push(&mut type_names, "direct callable");
+        let callable = backend::lowering::push_callable_type(
+            &mut types,
+            0,
+            backend::lowering::artifact_type_id(0),
+            backend::lowering::mir_signature(
+                Vec::new(), backend::lowering::artifact_type_id(0), Vec::new()
+            ),
+            2,
+            0,
+            false
+        );
+        let callable_type = backend::lowering::mir_type_artifact_id(callable);
+        let target = backend::lowering::new_mir_callable_function(
+            "direct_callable_target", Vec::new(),
+            backend::lowering::artifact_type_id(0), Vec::new(), 2,
+            backend::lowering::artifact_type_id(0), 1
+        );
+        backend::lowering::push_mir_instruction(
+            &mut target, backend::lowering::MirInstruction::Return(None)
+        );
+        let receiver_cleanup = Vec::new();
+        Vec::push(&mut receiver_cleanup, Id::from_u32(0));
+        backend::lowering::push_mir_cleanup(
+            &mut target, 0, 1, receiver_cleanup
+        );
+        let caller = backend::lowering::new_mir_function(
+            "direct_callable_entry", Vec::new(),
+            backend::lowering::artifact_type_id(0), Vec::new(), 2
+        );
+        let captures = backend::lowering::alloc_mir_register_pack(
+            &mut caller, Vec::new()
+        );
+        backend::lowering::push_mir_instruction(&mut caller,
+            backend::lowering::MirInstruction::MakeCallable(
+                Id::from_u32(1), callable_type, Id::from_u32(1), captures
+            ));
+        let arguments = backend::lowering::alloc_mir_register_pack(
+            &mut caller, Vec::new()
+        );
+        backend::lowering::push_mir_instruction(&mut caller,
+            backend::lowering::MirInstruction::CallIndirect(
+                None, Id::from_u32(1), 2, arguments
+            ));
+        backend::lowering::push_mir_instruction(
+            &mut caller, backend::lowering::MirInstruction::Return(None)
+        );
+        backend::lowering::push_mir_cleanup(&mut caller, 0, 1, Vec::new());
+        let callable_cleanup = Vec::new();
+        Vec::push(&mut callable_cleanup, Id::from_u32(1));
+        backend::lowering::push_mir_cleanup(
+            &mut caller, 1, 2, callable_cleanup
+        );
+        backend::lowering::push_mir_cleanup(&mut caller, 2, 3, Vec::new());
+        let functions = Arena::new();
+        handle Arena::alloc(&mut functions, caller) {
+            Result::Err(_) => unreachable(), Result::Ok(_) => ()
+        };
+        handle Arena::alloc(&mut functions, target) {
+            Result::Err(_) => unreachable(), Result::Ok(_) => ()
+        };
+        let program = backend::lowering::finish_program(
+            functions, types, type_names
+        );
+        handle backend::emission::encode(&program, Option::Some(Id::from_u32(0))) {
+            Result::Err(_) => unreachable(), Result::Ok(bytes) => bytes
+        }
+    }
 "#;
 
 fn repository_root() -> PathBuf {
@@ -1217,7 +1289,7 @@ fn assert_compiled_artifact(bytes: &[u8]) {
 }
 
 #[test]
-fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentable_metadata() {
+fn self_host_callable_backend_direct_mir_emits_vm_callable_wire_format() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
@@ -1251,6 +1323,8 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
             let invalid_terminal = function_id(&artifact, "effect_backend_invalid_terminal_reason");
             let invalid_resumption =
                 function_id(&artifact, "effect_backend_invalid_resumption_reasons");
+            let callable_artifact =
+                function_id(&artifact, "callable_backend_direct_mir_artifact");
             let compiler_bytes = artifact.encode();
             drop(artifact);
             let compiler = load_verified(&compiler_bytes).unwrap();
@@ -1261,6 +1335,7 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
                     "effect_backend_nonterminal_artifact" => nonterminal_artifact,
                     "effect_backend_invalid_terminal_reason" => invalid_terminal,
                     "effect_backend_invalid_resumption_reasons" => invalid_resumption,
+                    "callable_backend_direct_mir_artifact" => callable_artifact,
                     _ => unreachable!("unknown effect-backend probe {name}"),
                 };
                 Vm::new(compiler.clone()).run(function, vec![]).unwrap()
@@ -1396,6 +1471,35 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
                     .is_empty()
             );
             load_verified(bytes.as_ref()).expect("nonterminal effect artifact must verify");
+
+            let Value::Bytes(bytes) = run("callable_backend_direct_mir_artifact") else {
+                panic!("callable backend probe did not return artifact bytes")
+            };
+            let decoded = Artifact::decode(bytes.as_ref())
+                .expect("callable MIR artifact must decode");
+            assert_eq!(decoded.encode(), bytes.as_ref(),
+                "bootstrap and self-host callable encoders must agree");
+            assert!(matches!(decoded.types[19].representation(),
+                Type::Callable {
+                    signature, capture_type: grandiose_vm::UNIT,
+                    receiver_mode: 2, identity_name, copy: false,
+                    zero_use_allowed: false,
+                } if signature.params.is_empty()
+                    && signature.result == grandiose_vm::UNIT
+                    && signature.outward_protocols.is_empty()
+                    && identity_name == "direct callable"
+            ));
+            assert!(matches!(decoded.code.as_slice(), [
+                Instruction::MakeCallable { callable_type: 19, function: 1,
+                    captures, .. },
+                Instruction::CallIndirect { dst: None, callable: 1,
+                    receiver_mode: 2, args },
+                Instruction::Return { src: None },
+                Instruction::Return { src: None },
+            ] if captures.is_empty() && args.is_empty()));
+            let verified = load_verified(bytes.as_ref())
+                .expect("callable MIR artifact must verify");
+            assert_eq!(Vm::new(verified).run(0, vec![]).unwrap(), Value::Unit);
 
             assert_eq!(
                 run("effect_backend_invalid_terminal_reason"),

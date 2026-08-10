@@ -119,6 +119,11 @@ pub enum MirInstruction {
     Leave(u32, RegisterId),
     Switch(RegisterId, MirSwitchPackId, MirBlockId),
     Call(Option<RegisterId>, MirFunctionId, RegisterPackId),
+    // The lifted closure scheduler owns choosing `function`. This MIR form is
+    // deliberately available to that later phase, but Core lowering continues
+    // to reject closures until such a schedule exists.
+    MakeCallable(RegisterId, ArtifactTypeId, MirFunctionId, RegisterPackId),
+    CallIndirect(Option<RegisterId>, RegisterId, u32, RegisterPackId),
     MakeHandler(
         RegisterId,
         MirHandlerDefinitionId,
@@ -173,7 +178,8 @@ pub enum MirTypeKind {
     UniqueReference,
     Struct,
     Enum,
-    Resumption
+    Resumption,
+    Callable
 }
 
 impl Use<[0, *]> for MirTypeKind {}
@@ -187,7 +193,9 @@ pub struct MirType {
     copy_flag: u32,
     effect_signature: MirSignature,
     resumption_lower: u32,
-    resumption_upper: Option<u32>
+    resumption_upper: Option<u32>,
+    callable_receiver_mode: u32,
+    callable_zero_use_allowed: Bool
 }
 
 struct MirTypeFacts {
@@ -448,6 +456,19 @@ F: Use<[0, 0]> {
                 stop,
                 visitor
             )
+        },
+        MirInstruction::MakeCallable(target, _, _, captures) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            __g1_walk_mir_register_pack(function, instruction, captures,
+                MirPlaceRole::Transfer, 0, stop, visitor)
+        },
+        MirInstruction::CallIndirect(target, callable, _, pack) => {
+            handle target { None => (), Option::Some(found) => visitor(
+                instruction, found, MirPlaceRole::Definition, stop
+            ) };
+            visitor(instruction, callable, MirPlaceRole::Transfer, stop);
+            __g1_walk_mir_register_pack(function, instruction, pack,
+                MirPlaceRole::Transfer, 0, stop, visitor)
         },
         MirInstruction::MakeHandler(target, _, clauses) => {
             visitor(instruction, target, MirPlaceRole::Definition, stop);
@@ -1146,7 +1167,9 @@ pub reserve_mir_type(value: &mut MirTypes) -> MirTypeId {
             Vec::new(), artifact_type_id(0), Vec::new()
         ),
         resumption_lower: 0,
-        resumption_upper: Option::Some(0)
+        resumption_upper: Option::Some(0),
+        callable_receiver_mode: 0,
+        callable_zero_use_allowed: false
     })
 }
 
@@ -1172,6 +1195,8 @@ set_mir_type(
     );
     (*slot).resumption_lower = 0;
     (*slot).resumption_upper = Option::Some(0);
+    (*slot).callable_receiver_mode = 0;
+    (*slot).callable_zero_use_allowed = false;
     ()
 }
 
@@ -1199,7 +1224,54 @@ pub set_resumption_type(
     (*slot).effect_signature = effect_signature;
     (*slot).resumption_lower = lower_uses;
     (*slot).resumption_upper = upper_uses;
+    (*slot).callable_receiver_mode = 0;
+    (*slot).callable_zero_use_allowed = false;
     ()
+}
+
+// Callable metadata is intentionally a single opaque descriptor. Its
+// `fields[0]` is the aggregate capture layout and its effect signature is the
+// exact call signature. The scheduler supplies the matching receiver ABI.
+pub set_callable_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    identity_name_index: u32,
+    capture_type: ArtifactTypeId,
+    signature: MirSignature,
+    receiver_mode: u32,
+    copy_flag: u32,
+    zero_use_allowed: Bool
+) {
+    let fields = Vec::new();
+    Vec::push(&mut fields, capture_type);
+    let slot = Arena::index_mut(&mut *value, id);
+    (*slot).kind = MirTypeKind::Callable;
+    (*slot).name_index = identity_name_index;
+    (*slot).field_names = Vec::new();
+    (*slot).fields = fields;
+    (*slot).variants = Vec::new();
+    (*slot).copy_flag = copy_flag;
+    (*slot).effect_signature = signature;
+    (*slot).resumption_lower = 0;
+    (*slot).resumption_upper = Option::Some(0);
+    (*slot).callable_receiver_mode = receiver_mode;
+    (*slot).callable_zero_use_allowed = zero_use_allowed;
+    ()
+}
+
+pub push_callable_type(
+    value: &mut MirTypes,
+    identity_name_index: u32,
+    capture_type: ArtifactTypeId,
+    signature: MirSignature,
+    receiver_mode: u32,
+    copy_flag: u32,
+    zero_use_allowed: Bool
+) -> MirTypeId {
+    let id = reserve_mir_type(value);
+    set_callable_type(value, id, identity_name_index, capture_type, signature,
+        receiver_mode, copy_flag, zero_use_allowed);
+    id
 }
 
 pub set_tuple_type(
@@ -1441,6 +1513,37 @@ pub mir_program_resumption_upper(
 ) -> Option<u32> {
     Arena::index(&value.types, id).resumption_upper
 }
+
+pub mir_program_callable_identity_name(
+    value: &MirProgram,
+    id: MirTypeId
+) -> u32 { Arena::index(&value.types, id).name_index }
+
+pub mir_program_callable_capture_type(
+    value: &MirProgram,
+    id: MirTypeId
+) -> ArtifactTypeId {
+    let found = Arena::index(&value.types, id);
+    *Vec::index(&found.fields, 0)
+}
+
+pub mir_program_callable_signature<'a>(
+    value: &'a MirProgram,
+    id: MirTypeId
+) -> &'a MirSignature {
+    let found = Arena::index(&value.types, id);
+    &found.effect_signature
+}
+
+pub mir_program_callable_receiver_mode(
+    value: &MirProgram,
+    id: MirTypeId
+) -> u32 { Arena::index(&value.types, id).callable_receiver_mode }
+
+pub mir_program_callable_zero_use_allowed(
+    value: &MirProgram,
+    id: MirTypeId
+) -> Bool { Arena::index(&value.types, id).callable_zero_use_allowed }
 
 pub mir_program_type_copy_flag(value: &MirProgram, id: MirTypeId) -> u32 {
     Arena::index(&value.types, id).copy_flag
@@ -5036,6 +5139,10 @@ derive_type_facts(
         MirTypeKind::Resumption => MirTypeFacts {
             zero_sized: false,
             permits_zero_use: mir_type.resumption_lower == 0
+        },
+        MirTypeKind::Callable => MirTypeFacts {
+            zero_sized: false,
+            permits_zero_use: mir_type.callable_zero_use_allowed
         }
     }
 }
@@ -5178,6 +5285,26 @@ pub new_mir_function(
         blocks: Arena::new(),
         switch_packs: Arena::new()
     }
+}
+
+// Only manually scheduled/lifted closure bodies use this constructor. Ordinary
+// Core functions retain `None`, preventing `MakeCallable` from targeting one
+// accidentally.
+pub new_mir_callable_function(
+    name: String,
+    parameters: Vec<ArtifactTypeId>,
+    result: ArtifactTypeId,
+    outward_protocols: Vec<u32>,
+    receiver_mode: u32,
+    receiver_type: ArtifactTypeId,
+    register_count: u32
+) -> MirFunction {
+    let value = new_mir_function(
+        name, parameters, result, outward_protocols, register_count
+    );
+    value.receiver_mode = Option::Some(receiver_mode);
+    value.receiver_type = receiver_type;
+    value
 }
 
 pub mir_function_receiver_mode(value: &MirFunction) -> Option<u32> {

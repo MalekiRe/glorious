@@ -24,6 +24,8 @@ enum Opcode {
     Leave,
     Switch,
     Call,
+    MakeCallable,
+    CallIndirect,
     MakeHandler,
     MakeHandlerShared,
     Handle,
@@ -63,6 +65,8 @@ opcode_spec(opcode: Opcode) -> OpcodeSpec {
         Opcode::Leave => OpcodeSpec { code: 42, operand_words: 2 },
         Opcode::Switch => OpcodeSpec { code: 33, operand_words: 4 },
         Opcode::Call => OpcodeSpec { code: 34, operand_words: 4 },
+        Opcode::MakeCallable => OpcodeSpec { code: 15, operand_words: 5 },
+        Opcode::CallIndirect => OpcodeSpec { code: 35, operand_words: 5 },
         Opcode::MakeHandler => OpcodeSpec { code: 16, operand_words: 4 },
         Opcode::MakeHandlerShared => OpcodeSpec { code: 71, operand_words: 6 },
         Opcode::Handle => OpcodeSpec { code: 64, operand_words: 5 },
@@ -193,6 +197,7 @@ pub enum EmissionError {
     UnsupportedInstruction,
     MissingName(EmissionName),
     MissingSignature(super::lowering::MirFunctionId),
+    MissingTypeSignature(super::lowering::MirTypeId),
     StructFieldNameCount(
         super::lowering::MirTypeId,
         usize,
@@ -589,6 +594,16 @@ collect_type_names(
                     *super::lowering::mir_program_type_name_at(
                         program,
                         usize_from_u32(name_index)
+                    )
+                )
+            },
+            MirTypeKind::Callable => {
+                let name_index = super::lowering::mir_program_callable_identity_name(
+                    program, type_id
+                );
+                Vec::push(&mut *output,
+                    *super::lowering::mir_program_type_name_at(
+                        program, usize_from_u32(name_index)
                     )
                 )
             },
@@ -998,6 +1013,39 @@ resumption_type_record(
     }
 }
 
+callable_type_record(
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
+    index: usize,
+    mir_type: super::lowering::MirTypeId,
+    copy_flag: u32
+) -> Result<super::artifact::Record, EmissionError> {
+    let identity = try(require_program_name(program, names,
+        super::lowering::mir_program_callable_identity_name(program, mir_type),
+        EmissionName::Type(mir_type)), @callable_type_record);
+    let signature_key = mir_signature_key(
+        super::lowering::mir_program_callable_signature(program, mir_type)
+    );
+    handle canonical_id(signatures, &signature_key) {
+        Result::Err(_) => Result::Err(EmissionError::MissingTypeSignature(mir_type)),
+        Result::Ok(signature) => {
+            let payload = ByteBuf::new();
+            ByteBuf::write_u32_le(&mut payload, signature);
+            ByteBuf::write_u32_le(&mut payload,
+                super::lowering::artifact_type_raw(
+                    super::lowering::mir_program_callable_capture_type(program, mir_type)
+                ));
+            ByteBuf::write_u32_le(&mut payload,
+                super::lowering::mir_program_callable_receiver_mode(program, mir_type));
+            ByteBuf::write_u32_le(&mut payload, identity);
+            Result::Ok(super::artifact::record(38,
+                wrapping_convert_to_u8(4 + custom_type_flags(program, index, copy_flag)),
+                ByteBuf::finish(payload)))
+        }
+    }
+}
+
 custom_type_record(
     program: &super::lowering::MirProgram,
     names: &CanonicalPool<String>,
@@ -1067,6 +1115,9 @@ custom_type_record(
             copy_flag
         ),
         MirTypeKind::Resumption => resumption_type_record(
+            program, names, signatures, index, mir_type, copy_flag
+        ),
+        MirTypeKind::Callable => callable_type_record(
             program, names, signatures, index, mir_type, copy_flag
         )
     }
@@ -1291,6 +1342,9 @@ collect_type_signatures(
                     )
                 )
             ),
+            MirTypeKind::Callable => Vec::push(&mut *output, mir_signature_key(
+                super::lowering::mir_program_callable_signature(program, type_id)
+            )),
             _ => ()
         }
     } })
@@ -1856,6 +1910,39 @@ write_instruction(
             code,
             super::lowering::register_pack_count(arguments)
         );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::MakeCallable(
+        target, callable_type, function, captures_id
+    )) {
+        let captures = super::lowering::mir_function_register_pack(
+            mir_function, captures_id);
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(captures, 0, operands);
+        write_opcode(&mut *code, Opcode::MakeCallable);
+        ByteBuf::write_u32_le(&mut *code, super::lowering::register_raw(target));
+        ByteBuf::write_u32_le(&mut *code, super::lowering::artifact_type_raw(callable_type));
+        ByteBuf::write_u32_le(&mut *code, super::lowering::mir_function_raw(function));
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(&mut *code,
+            super::lowering::register_pack_count(captures));
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::CallIndirect(
+        target, callable, receiver_mode, arguments_id
+    )) {
+        let arguments = super::lowering::mir_function_register_pack(
+            mir_function, arguments_id);
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(arguments, 0, operands);
+        write_opcode(&mut *code, Opcode::CallIndirect);
+        ByteBuf::write_u32_le(&mut *code, handle target {
+            None => super::artifact::absent_id(),
+            Option::Some(found) => super::lowering::register_raw(found)
+        });
+        ByteBuf::write_u32_le(&mut *code, super::lowering::register_raw(callable));
+        ByteBuf::write_u32_le(&mut *code, receiver_mode);
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(&mut *code,
+            super::lowering::register_pack_count(arguments));
         Result::Ok(())
     } else if(*instruction is MirInstruction::MakeHandler(
         target,
