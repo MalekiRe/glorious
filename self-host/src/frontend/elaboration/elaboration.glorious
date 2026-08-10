@@ -9918,7 +9918,7 @@ elaborate_label_destination(
     let name = super::bodies::label_name(&label);
     push_active_label(value, name, destination);
     let elaborated = elaborate_expression(
-        original, headers, declarations, interfaces, body, map, value,
+        original, headers, declarations, &mut *interfaces, body, map, value,
         Id::to_u32(child), Option::Some(result_type)
     );
     pop_active_label(value);
@@ -12346,6 +12346,13 @@ find_refinement_variant(
     } else { None }
 }
 
+refinement_variant_payloads(
+    interfaces: &TypedInterfaces,
+    variant: InterfaceVariantId
+) -> VariantPayloadRange {
+    interface_variant_at(interfaces, variant).payloads
+}
+
 append_core_pattern_ids(
     output: &mut Vec<CorePatternId>,
     source: &Vec<CorePatternId>,
@@ -12355,6 +12362,36 @@ append_core_pattern_ids(
         Vec::push(&mut *output, *Vec::index(source, ordinal));
         append_core_pattern_ids(output, source, ordinal + 1)
     } else { () }
+}
+
+pub append_core_pattern_fields(
+    output: &mut Vec<CorePatternField>,
+    fields: &Vec<CorePatternField>,
+    ordinal: usize
+) {
+    if(ordinal < Vec::len(fields)) {
+        Vec::push(&mut *output, *Vec::index(fields, ordinal));
+        append_core_pattern_fields(output, fields, ordinal + 1)
+    } else { () }
+}
+
+core_pattern_path_range(start: usize, end: usize) -> CorePatternPathRange {
+    super::syntax::id_range(start, end)
+}
+
+core_pattern_range(start: usize, end: usize) -> CorePatternRange {
+    super::syntax::id_range(start, end)
+}
+
+core_pattern_field_range(start: usize, end: usize) -> CorePatternFieldRange {
+    super::syntax::id_range(start, end)
+}
+
+core_refinement_binding_range(
+    start: usize,
+    end: usize
+) -> CoreRefinementBindingRange {
+    super::syntax::id_range(start, end)
 }
 
 append_type_elements(
@@ -12384,9 +12421,11 @@ append_variant_payload_types(
             &*interfaces, usize_from_u32(range.start + ordinal)
         );
         Vec::push(&mut *output, nominal_instance_member_type(
-            headers, interfaces, instance, declared
+            headers, &mut *interfaces, instance, declared
         ));
-        append_variant_payload_types(headers, interfaces, instance, range, ordinal + 1, output)
+        append_variant_payload_types(
+            headers, &mut *interfaces, instance, range, ordinal + 1, output
+        )
     } else { () }
 }
 
@@ -12414,17 +12453,18 @@ elaborate_refinement_struct_fields(
                     &*interfaces, Id::to_u32(nominal), index
                 ));
                 let field_ty = nominal_instance_member_type(
-                    headers, interfaces, instance, declared
+                    headers, &mut *interfaces, instance, declared
                 );
                 Vec::push(&mut *path, CorePatternPathSegment::Field(index));
                 let pattern = try(elaborate_refinement_pattern(
-                    original, headers, interfaces, body, value,
+                    original, headers, &mut *interfaces, body, value,
                     super::bodies::pattern_field_pattern(field), field_ty, path
                 ), @elaborate_refinement_struct_fields);
-                Vec::truncate(path, Vec::len(path) - 1);
+                let path_end = Vec::len(path);
+                Vec::truncate(path, path_end - 1);
                 Vec::push(&mut *output, CorePatternField { field: index, pattern: pattern });
                 elaborate_refinement_struct_fields(
-                    original, headers, interfaces, body, value, fields, nominal,
+                    original, headers, &mut *interfaces, body, value, fields, nominal,
                     instance, path, ordinal + 1, output
                 )
             }
@@ -12455,7 +12495,8 @@ elaborate_refinement_pattern_children<'a>(
                 original, headers, interfaces, body, value, child,
                 *Vec::index(field_types, usize_from_u32(ordinal)), path
             ), @elaborate_refinement_pattern_children);
-            Vec::truncate(path, Vec::len(path) - 1);
+            let path_end = Vec::len(path);
+            Vec::truncate(path, path_end - 1);
             Vec::push(&mut *output, core);
             elaborate_refinement_pattern_children(
                 original, headers, interfaces, body, value, children,
@@ -12473,6 +12514,169 @@ elaborate_refinement_pattern_children<'a>(
     } else { Result::Err(ElaborationError::VariantPayloadCountMismatch(
         0, u32_from_usize(Vec::len(field_types)), ordinal
     )) }
+}
+
+// Keeping the enum arm in its own typed helper matters here: PatternView
+// carries the parser's PatternRange, whereas the recursive child walker is
+// polymorphic over its slice view.  The helper fixes that result boundary
+// before the enclosing PatternView dispatch chooses its other result arms.
+elaborate_refinement_variant<'a>(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    value: &mut BodyContext,
+    pattern: super::bodies::PatternId,
+    children: Slice<'a, super::bodies::PatternId>,
+    rest: Bool,
+    ty: TypeId,
+    token: usize,
+    path: &mut Vec<CorePatternPathSegment>
+) -> Result<CorePatternId, ElaborationError> {
+    let found_nominal = nominal_id_for_type(&*interfaces, ty);
+    handle found_nominal {
+        None => Result::Err(ElaborationError::ExpectedEnumType(token, Id::to_u32(ty))),
+        Option::Some(nominal) => {
+            let nominal_node = *interface_nominal_at(&*interfaces, nominal);
+            handle nominal_node.kind {
+            InterfaceNominalKind::Struct(_) => Result::Err(
+                ElaborationError::ExpectedEnumType(token, Id::to_u32(ty))
+            ),
+            InterfaceNominalKind::Enum(variants) => {
+                let shell = nominal_node.shell;
+                handle find_enum_shell(
+                    super::headers::nominal_index(headers), shell, 0
+                ) {
+                    Result::Err(_) => Result::Err(ElaborationError::MissingEnumHeader(shell)),
+                    Result::Ok(header) => {
+                        let names = super::bodies::pattern_name_count(body, pattern);
+                        let name = super::bodies::pattern_name_value(body, pattern, names - 1);
+                        let owner_matches = if(names == 1) { true } else {
+                            super::headers::enum_name_raw(header) == Id::to_u32(
+                                super::bodies::pattern_name_value(body, pattern, names - 2)
+                            )
+                        };
+                        let resolved_variant = if(owner_matches) {
+                            find_refinement_variant(&*interfaces, variants, Id::to_u32(name), 0)
+                        } else { None };
+                        handle resolved_variant {
+                            None => Result::Err(ElaborationError::MissingVariant(
+                                token, Id::to_u32(name)
+                            )),
+                            Option::Some(variant_id) => {
+                                let payloads = refinement_variant_payloads(
+                                    &*interfaces, variant_id
+                                );
+                                let field_types = Vec::new();
+                                append_variant_payload_types(
+                                    headers, &mut *interfaces, ty, payloads, 0, &mut field_types
+                                );
+                                let output = Vec::new();
+                                let tag = Id::to_u32(variant_id) - variants.start;
+                                Vec::push(&mut *path, CorePatternPathSegment::Variant(tag));
+                                try(elaborate_refinement_pattern_children(
+                                    original, headers, &mut *interfaces, body, value, children,
+                                    &field_types, rest, path, 0, &mut output
+                                ), @elaborate_refinement_variant);
+                                let path_end = Vec::len(path);
+                                Vec::truncate(path, path_end - 1);
+                                let start = super::syntax::range_mark(
+                                    &value.core.pattern_children
+                                );
+                                append_core_pattern_ids(
+                                    &mut value.core.pattern_children, &output, 0
+                                );
+                                let end = Vec::len(&value.core.pattern_children);
+                                let range = core_pattern_range(start, end);
+                                Result::Ok(push_core_pattern(
+                                    &mut value.core, ty,
+                                    CorePatternKind::Variant(ty, tag, range, rest)
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+            }
+        }
+    }
+}
+
+refinement_struct_target(
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    pattern: super::bodies::PatternId,
+    ty: TypeId,
+    token: usize
+) -> Result<InterfaceNominalId, ElaborationError> {
+    let found_nominal = nominal_id_for_type(interfaces, ty);
+    handle found_nominal {
+        None => Result::Err(ElaborationError::InvalidStructTarget(token, Id::to_u32(ty))),
+        Option::Some(nominal) => if(interface_nominal_is_struct(interfaces, nominal)) {
+            let shell = interface_nominal_at(interfaces, nominal).shell;
+            handle find_struct_shell(super::headers::nominal_index(headers), shell, 0) {
+                Result::Err(_) => Result::Err(ElaborationError::MissingStructHeader(shell)),
+                Result::Ok(header) => {
+                    let names = super::bodies::pattern_name_count(body, pattern);
+                    let name = super::bodies::pattern_name_value(body, pattern, names - 1);
+                    if(super::headers::struct_name_raw(header) == Id::to_u32(name)) {
+                        Result::Ok(nominal)
+                    } else { Result::Err(ElaborationError::InvalidStructTarget(token, Id::to_u32(ty))) }
+                }
+            }
+        } else { Result::Err(ElaborationError::InvalidStructTarget(token, Id::to_u32(ty))) }
+    }
+}
+
+elaborate_refinement_struct(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    value: &mut BodyContext,
+    pattern: super::bodies::PatternId,
+    fields: super::bodies::PatternFieldRange,
+    rest: Bool,
+    ty: TypeId,
+    token: usize,
+    path: &mut Vec<CorePatternPathSegment>
+) -> Result<CorePatternId, ElaborationError> {
+    let target = refinement_struct_target(
+        headers, &*interfaces, body, pattern, ty, token
+    );
+    handle target {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(nominal) => finish_refinement_struct_fields(
+            original, headers, &mut *interfaces, body, value, fields,
+            nominal, ty, rest, path
+        )
+    }
+}
+
+finish_refinement_struct_fields(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    value: &mut BodyContext,
+    fields: super::bodies::PatternFieldRange,
+    nominal: InterfaceNominalId,
+    ty: TypeId,
+    rest: Bool,
+    path: &mut Vec<CorePatternPathSegment>
+) -> Result<CorePatternId, ElaborationError> {
+    let output = Vec::new();
+    try(elaborate_refinement_struct_fields(
+        original, headers, &mut *interfaces, body, value, fields, nominal,
+        ty, path, 0, &mut output
+    ), @finish_refinement_struct_fields);
+    let start = super::syntax::range_mark(&value.core.pattern_fields);
+    append_core_pattern_fields(&mut value.core.pattern_fields, &output, 0);
+    let end = Vec::len(&value.core.pattern_fields);
+    let range = core_pattern_field_range(start, end);
+    Result::Ok(push_core_pattern(&mut value.core, ty,
+        CorePatternKind::Struct(ty, range, rest)))
 }
 
 elaborate_refinement_pattern(
@@ -12494,7 +12698,9 @@ elaborate_refinement_pattern(
             let local = push_local_type(&mut value.core.local_types, Option::Some(ty));
             let start = super::syntax::range_mark(&value.core.pattern_paths);
             append_refinement_path(&mut value.core.pattern_paths, path, 0);
-            let range = super::syntax::id_range(start, Vec::len(&value.core.pattern_paths));
+            let range = core_pattern_path_range(
+                start, Vec::len(&value.core.pattern_paths)
+            );
             push_refinement_binding(&mut value.core, local, ty, range);
             Result::Ok(push_core_pattern(&mut value.core, ty, CorePatternKind::Binding))
         },
@@ -12505,13 +12711,8 @@ elaborate_refinement_pattern(
             ), @elaborate_refinement_pattern);
             Result::Ok(push_core_pattern(&mut value.core, ty, CorePatternKind::Integer(constant)))
         } else { Result::Err(ElaborationError::TypeMismatch(token, Id::to_u32(ty), 10)) },
-        super::bodies::PatternView::Float(spelling) => Result::Ok(push_core_pattern(
-            &mut value.core, ty, CorePatternKind::Float(String::as_bytes(
-                handle super::lexer::lexeme(super::headers::parsed_source(headers), spelling) {
-                    Result::Err(_) => unreachable(), Result::Ok(found) => found
-                }
-            ))
-        )),
+        super::bodies::PatternView::Float(_) =>
+            Result::Err(ElaborationError::FloatLiteralUnsupported(token)),
         super::bodies::PatternView::Text(spelling, _) => Result::Ok(push_core_pattern(
             &mut value.core, ty, CorePatternKind::Text(String::as_bytes(
                 handle super::lexer::lexeme(super::headers::parsed_source(headers), spelling) {
@@ -12535,102 +12736,34 @@ elaborate_refinement_pattern(
                 let field_types = Vec::new();
                 append_type_elements(&*interfaces, elements, 0, &mut field_types);
                 let output = Vec::new();
+                let elements = super::bodies::pattern_elements(body, children);
                 try(elaborate_refinement_pattern_children(
-                    original, headers, interfaces, body, value, children, &field_types,
+                    original, headers, interfaces, body, value, elements, &field_types,
                     rest, path, 0, &mut output
                 ), @elaborate_refinement_pattern);
                 let start = super::syntax::range_mark(&value.core.pattern_children);
                 append_core_pattern_ids(&mut value.core.pattern_children, &output, 0);
+                let end = Vec::len(&value.core.pattern_children);
+                let range = core_pattern_range(start, end);
                 Result::Ok(push_core_pattern(&mut value.core, ty, CorePatternKind::Tuple(
-                    super::syntax::id_range(start, Vec::len(&value.core.pattern_children)), rest
+                    range, rest
                 )))
             },
             _ => Result::Err(ElaborationError::ExpectedTupleType(token, Id::to_u32(ty)))
         },
-        super::bodies::PatternView::Variant(_, children, rest) => handle nominal_id_for_type(
-            &*interfaces, ty
-        ) {
-            None => Result::Err(ElaborationError::ExpectedEnumType(token, Id::to_u32(ty))),
-            Option::Some(nominal) => handle interface_nominal_at(&*interfaces, nominal).kind {
-                InterfaceNominalKind::Struct(_) => Result::Err(ElaborationError::ExpectedEnumType(token, Id::to_u32(ty))),
-                InterfaceNominalKind::Enum(variants) => {
-                    let names = super::bodies::pattern_name_count(body, pattern);
-                    let name = super::bodies::pattern_name_value(body, pattern, names - 1);
-                    let header = find_enum_shell(
-                        super::headers::nominal_index(headers),
-                        interface_nominal_at(&*interfaces, nominal).shell,
-                        0
-                    ) else { unreachable() };
-                    let owner_matches = if(names == 1) { true } else {
-                        super::headers::enum_name_raw(header) ==
-                            Id::to_u32(super::bodies::pattern_name_value(body, pattern, names - 2))
-                    };
-                    let resolved_variant = if(owner_matches) {
-                        find_refinement_variant(&*interfaces, variants, Id::to_u32(name), 0)
-                    } else { None };
-                    handle resolved_variant {
-                        None => Result::Err(ElaborationError::MissingVariant(token, Id::to_u32(name))),
-                        Option::Some(variant_id) => {
-                            let variant = *interface_variant_at(&*interfaces, variant_id);
-                            let field_types = Vec::new();
-                            append_variant_payload_types(headers, interfaces, ty, variant.payloads, 0, &mut field_types);
-                            let output = Vec::new();
-                            Vec::push(&mut *path, CorePatternPathSegment::Variant(
-                                Id::to_u32(variant_id) - variants.start
-                            ));
-                            try(elaborate_refinement_pattern_children(
-                                original, headers, interfaces, body, value, children, &field_types,
-                                rest, path, 0, &mut output
-                            ), @elaborate_refinement_pattern);
-                            Vec::truncate(path, Vec::len(path) - 1);
-                            let start = super::syntax::range_mark(&value.core.pattern_children);
-                            append_core_pattern_ids(&mut value.core.pattern_children, &output, 0);
-                            Result::Ok(push_core_pattern(&mut value.core, ty, CorePatternKind::Variant(
-                                ty, Id::to_u32(variant_id) - variants.start,
-                                super::syntax::id_range(start, Vec::len(&value.core.pattern_children)), rest
-                            )))
-                        }
-                    }
-                }
-            },
-        super::bodies::PatternView::Struct(_, fields, rest) => handle nominal_id_for_type(
-            &*interfaces, ty
-        ) {
-            None => Result::Err(ElaborationError::InvalidStructTarget(token, Id::to_u32(ty))),
-            Option::Some(nominal) => if(interface_nominal_is_struct(&*interfaces, nominal)) {
-                let names = super::bodies::pattern_name_count(body, pattern);
-                let header = find_struct_shell(
-                    super::headers::nominal_index(headers),
-                    interface_nominal_at(&*interfaces, nominal).shell,
-                    0
-                ) else { unreachable() };
-                let name = super::bodies::pattern_name_value(body, pattern, names - 1);
-                if(super::headers::struct_name_raw(header) == Id::to_u32(name)) {
-                    let output = Vec::new();
-                    try(elaborate_refinement_struct_fields(
-                        original, headers, interfaces, body, value, fields, nominal,
-                        ty, path, 0, &mut output
-                    ), @elaborate_refinement_pattern);
-                    let start = super::syntax::range_mark(&value.core.pattern_fields);
-                    append_core_pattern_fields(&mut value.core.pattern_fields, &output, 0);
-                    Result::Ok(push_core_pattern(&mut value.core, ty, CorePatternKind::Struct(
-                        ty, super::syntax::id_range(start, Vec::len(&value.core.pattern_fields)), rest
-                    )))
-                } else { Result::Err(ElaborationError::InvalidStructTarget(token, Id::to_u32(ty))) }
-            } else { Result::Err(ElaborationError::InvalidStructTarget(token, Id::to_u32(ty))) }
-        }
+        super::bodies::PatternView::Variant(_, children, rest) => {
+            let elements = super::bodies::pattern_elements(body, children);
+            elaborate_refinement_variant(
+                original, headers, &mut *interfaces, body, value, pattern, elements,
+                rest, ty, token, path
+            )
+        },
+        super::bodies::PatternView::Struct(_, fields, rest) =>
+            elaborate_refinement_struct(
+                original, headers, &mut *interfaces, body, value, pattern, fields,
+                rest, ty, token, path
+            )
     }
-}
-
-append_core_pattern_fields(
-    output: &mut Vec<CorePatternField>,
-    source: &Vec<CorePatternField>,
-    ordinal: usize
-) {
-    if(ordinal < Vec::len(source)) {
-        Vec::push(&mut *output, *Vec::index(source, ordinal));
-        append_core_pattern_fields(output, source, ordinal + 1)
-    } else { () }
 }
 
 elaborate_is(
@@ -12647,7 +12780,7 @@ elaborate_is(
     expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let subject = try(elaborate_expression(
-        original, headers, declarations, interfaces, body, map, value,
+        original, headers, declarations, &mut *interfaces, body, map, value,
         Id::to_u32(subject_expression), None
     ), @elaborate_is);
     let prefix = new_core_prefix();
@@ -12655,19 +12788,23 @@ elaborate_is(
     let path = Vec::new();
     let start = super::syntax::range_mark(&value.core.refinement_bindings);
     let core_pattern = try(elaborate_refinement_pattern(
-        original, headers, interfaces, body, value, pattern, subject.type_id, &mut path
+        original, headers, &mut *interfaces, body, value, pattern, subject.type_id, &mut path
     ), @elaborate_is);
     // Pattern elaboration appends the success-only bindings while walking its
     // leaves.  Its start/end range is the explicit lexical scope boundary.
+    let end = Vec::len(&value.core.refinement_bindings);
+    let bindings = core_refinement_binding_range(start, end);
     let refinement = push_computation(&mut value.core, type_id_from_u32(4),
-        CoreComputationKind::Refinement(subject_value, core_pattern,
-            super::syntax::id_range(start, Vec::len(&value.core.refinement_bindings))));
+        CoreComputationKind::Refinement(subject_value, core_pattern, bindings));
     let converted = try(wrap_raw_bool(
-        headers, declarations, interfaces, value, refinement, expected,
+        headers, declarations, &mut *interfaces, value, refinement, expected,
         super::bodies::expression_token_start_at(body, expression)
     ), @elaborate_is);
-    Result::Ok(finish_computation(&mut value.core, converted.type_id,
-        as_computation(&mut value.core, converted), &prefix))
+    let converted_type = converted.type_id;
+    let converted_computation = as_computation(&mut value.core, converted);
+    Result::Ok(finish_computation(
+        &mut value.core, converted_type, converted_computation, &prefix
+    ))
 }
 
 elaborate_integer_infix(
