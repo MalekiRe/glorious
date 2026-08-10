@@ -2012,9 +2012,9 @@ analyze_match_arms(
 // still form control-flow branches. Keep their backwards liveness join
 // identical to enum-match arms so later scalar lowering can restore the same
 // pre-dispatch state on every edge.
-analyze_integer_arms(
+analyze_integer_arms<'a>(
     body: &super::super::frontend::elaboration::TypedBody,
-    arms: Slice<super::super::frontend::elaboration::CoreIntegerArm>,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
     live_out: &Vec<Bool>,
     joined: &mut Vec<Bool>,
     ordinal: usize,
@@ -3279,6 +3279,232 @@ lower_match<'a>(
     }
 }
 
+integer_dispatch_has_returning_arm<'a>(
+    body: &super::super::frontend::elaboration::TypedBody,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
+    index: usize
+) -> Bool {
+    if(index < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        if(Id::to_u32(super::super::frontend::elaboration::
+            typed_body_computation_type(
+                body,
+                super::super::frontend::elaboration::core_integer_arm_body(arm)
+            )) == 1) {
+            integer_dispatch_has_returning_arm(body, arms, index + 1)
+        } else { true }
+    } else { false }
+}
+
+build_integer_switch_cases<'a>(
+    body: &super::super::frontend::elaboration::TypedBody,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
+    blocks: &Vec<MirBlockId>,
+    index: usize,
+    output: &mut Vec<MirSwitchCase>
+) -> Result<(), LoweringError> {
+    if(index + 1 < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        let constant = handle super::super::frontend::elaboration::
+            core_integer_arm_constant(arm) {
+            None => @build_integer_switch_cases(Result::Err(
+                LoweringError::MatchStateMismatch
+            )),
+            Option::Some(found) => found
+        };
+        let key = handle constant_key(body, Id::from_u32(4), constant) {
+            Result::Err(error) => @build_integer_switch_cases(Result::Err(
+                move error
+            )),
+            Result::Ok(found) => found
+        };
+        if(integer_switch_has_key(&*output, &key, 0)) {
+            @build_integer_switch_cases(Result::Err(
+                LoweringError::MatchStateMismatch
+            ))
+        } else { () };
+        Vec::push(&mut *output, MirSwitchCase {
+            key: key, target: *Vec::index(blocks, index)
+        });
+        build_integer_switch_cases(body, arms, blocks, index + 1, output)
+    } else { Result::Ok(()) }
+}
+
+integer_switch_has_key(
+    cases: &Vec<MirSwitchCase>,
+    key: &Bytes,
+    index: usize
+) -> Bool {
+    if(index < Vec::len(cases)) {
+        if(Eq::eq(mir_switch_case_key(Vec::index(cases, index)), key)) {
+            true
+        } else { integer_switch_has_key(cases, key, index + 1) }
+    } else { false }
+}
+
+lower_integer_arms<'a>(
+    interfaces: &super::super::frontend::elaboration::TypedInterfaces,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
+    blocks: &Vec<MirBlockId>,
+    subject: RegisterId,
+    result: Option<RegisterId>,
+    join: MirBlockId,
+    baseline_locals: &Vec<Option<RegisterId>>,
+    baseline_live: &Vec<RegisterId>,
+    dispatch_live_out: &Vec<Bool>,
+    canonical_locals: &mut Vec<Option<RegisterId>>,
+    canonical_live: &mut Vec<RegisterId>,
+    canonical_set: &mut Bool,
+    index: usize
+) -> Result<(), LoweringError> {
+    if(index < Slice::len(arms)) {
+        restore_match_state(value, baseline_locals, baseline_live);
+        bind_block(value, *Vec::index(blocks, index));
+        emit_drop(value, subject);
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        let computation = super::super::frontend::elaboration::
+            core_integer_arm_body(arm);
+        let lowered = handle lower_computation(
+            interfaces, body, value, computation
+        ) {
+            Result::Err(error) => @lower_integer_arms(Result::Err(move error)),
+            Result::Ok(found) => found
+        };
+        handle lowered {
+            None => lower_integer_arms(
+                interfaces, body, value, arms, blocks, subject, result, join,
+                baseline_locals, baseline_live, dispatch_live_out,
+                canonical_locals, canonical_live, canonical_set, index + 1
+            ),
+            Option::Some(branch_result) => {
+                let result_register = handle result {
+                    None => @lower_integer_arms(Result::Err(
+                        LoweringError::MissingMatchResult(computation)
+                    )),
+                    Option::Some(found) => found
+                };
+                retire_dead_match_locals(
+                    value, baseline_locals, dispatch_live_out, 0
+                );
+                emit_move(value, result_register, branch_result);
+                emit_jump(value, join);
+                if(*canonical_set) {
+                    let locals_match = optional_registers_equal(
+                        &value.locals, canonical_locals, 0
+                    );
+                    let live_match = if(locals_match) {
+                        registers_equal(&value.live_order, canonical_live, 0)
+                    } else { false };
+                    if(live_match) {
+                        lower_integer_arms(
+                            interfaces, body, value, arms, blocks, subject,
+                            result, join, baseline_locals, baseline_live,
+                            dispatch_live_out, canonical_locals, canonical_live,
+                            canonical_set, index + 1
+                        )
+                    } else { Result::Err(LoweringError::MatchStateMismatch) }
+                } else {
+                    Vec::clear(canonical_locals);
+                    append_optional_registers(
+                        &value.locals, canonical_locals, 0
+                    );
+                    Vec::clear(canonical_live);
+                    append_registers(&value.live_order, canonical_live, 0);
+                    *canonical_set = true;
+                    lower_integer_arms(
+                        interfaces, body, value, arms, blocks, subject, result,
+                        join, baseline_locals, baseline_live, dispatch_live_out,
+                        canonical_locals, canonical_live, canonical_set, index + 1
+                    )
+                }
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+lower_integer_dispatch<'a>(
+    interfaces: &super::super::frontend::elaboration::TypedInterfaces,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
+    computation: CoreComputationId,
+    subject: CoreValueId,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>
+) -> Result<Option<RegisterId>, LoweringError> {
+    let flow_index = handle match_flow_index(&value.place_flow, computation, 0) {
+        None => @lower_integer_dispatch(Result::Err(
+            LoweringError::MissingMatchFlow(computation)
+        )),
+        Option::Some(found) => found
+    };
+    let flow = Vec::index(&value.place_flow.matches, flow_index);
+    let dispatch_live = copy_liveness(&flow.live_out);
+    if(Slice::len(arms) == 0) {
+        @lower_integer_dispatch(Result::Err(LoweringError::MatchStateMismatch))
+    } else { () };
+    let final_arm = handle Slice::get(arms, Slice::len(arms) - 1) {
+        Result::Err(_) => unreachable(), Result::Ok(found) => found
+    };
+    if(Option::is_none(&super::super::frontend::elaboration::
+        core_integer_arm_constant(final_arm))) { () } else {
+        @lower_integer_dispatch(Result::Err(LoweringError::MatchStateMismatch))
+    };
+    let lowered_subject = handle lower_value(
+        interfaces, body, value, subject
+    ) {
+        Result::Err(error) => @lower_integer_dispatch(Result::Err(move error)),
+        Result::Ok(found) => found
+    };
+    let subject_register = handle lowered_subject {
+        None => @lower_integer_dispatch(Result::Err(
+            LoweringError::MissingMatchSubject(subject)
+        )),
+        Option::Some(found) => found
+    };
+    let result = if(integer_dispatch_has_returning_arm(body, arms, 0)) {
+        Option::Some(alloc_register(value))
+    } else { None };
+    let blocks = Vec::new();
+    alloc_match_blocks(value, Slice::len(arms), 0, &mut blocks);
+    let cases = Vec::new();
+    handle build_integer_switch_cases(body, arms, &blocks, 0, &mut cases) {
+        Result::Err(error) => @lower_integer_dispatch(Result::Err(move error)),
+        Result::Ok(_) => ()
+    };
+    emit_switch(
+        value,
+        subject_register,
+        cases,
+        *Vec::index(&blocks, Slice::len(arms) - 1)
+    );
+    let baseline_locals = snapshot_locals(&*value);
+    let baseline_live = snapshot_live(&*value);
+    let canonical_locals = Vec::new();
+    let canonical_live = Vec::new();
+    let canonical_set = false;
+    let join = alloc_block(value);
+    handle lower_integer_arms(
+        interfaces, body, value, arms, &blocks, subject_register, result, join,
+        &baseline_locals, &baseline_live, &dispatch_live,
+        &mut canonical_locals, &mut canonical_live, &mut canonical_set, 0
+    ) {
+        Result::Err(error) => @lower_integer_dispatch(Result::Err(move error)),
+        Result::Ok(_) => ()
+    };
+    if(canonical_set) {
+        restore_match_state(value, &canonical_locals, &canonical_live)
+    } else { restore_match_state(value, &baseline_locals, &baseline_live) };
+    bind_block(value, join);
+    if(canonical_set) { Result::Ok(result) } else { Result::Ok(None) }
+}
+
 lower_nominal_construct<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
@@ -3502,6 +3728,8 @@ lower_computation<'a>(
         },
         CoreComputationView::VariantDispatch(_, subject, arms) =>
             lower_match(interfaces, body, value, id, subject, arms),
+        CoreComputationView::IntegerDispatch(_, subject, arms) =>
+            lower_integer_dispatch(interfaces, body, value, id, subject, arms),
         CoreComputationView::Perform(_, _, _) =>
             Result::Err(LoweringError::EffectControlNotLowered(id)),
         CoreComputationView::Resume(_, _, _) =>

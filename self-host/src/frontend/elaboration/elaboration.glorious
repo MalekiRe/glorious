@@ -396,6 +396,9 @@ type MatchArmRange = super::syntax::IdRange<MatchArmRangeTag>;
 struct MatchBindingRangeTag {}
 type MatchBindingRange = super::syntax::IdRange<MatchBindingRangeTag>;
 
+struct IntegerArmRangeTag {}
+type IntegerArmRange = super::syntax::IdRange<IntegerArmRangeTag>;
+
 pub enum ConstructionFlavor {
     Product,
     Variant(u32)
@@ -410,6 +413,9 @@ enum CoreComputationKind {
     Primitive(u32, OperandRange),
     Construct(ConstructionFlavor, ConstructionFieldRange),
     VariantDispatch(CoreValueId, MatchArmRange),
+    // A constrained terminal u32 handler is erased into an ordinary scalar
+    // switch before effect lowering.  Its final arm is the required wildcard.
+    IntegerDispatch(CoreValueId, IntegerArmRange),
     // Operation identity is an interface identity, never a spelling or a
     // callable shell. This keeps a future lowering from accidentally treating
     // `perform` as an ordinary call.
@@ -439,6 +445,21 @@ pub struct CoreMatchArm {
 }
 
 impl Use<[0, *]> for CoreMatchArm {}
+
+pub struct CoreIntegerArm {
+    constant: Option<IntegerConstantId>,
+    body: CoreComputationId
+}
+
+impl Use<[0, *]> for CoreIntegerArm {}
+
+core_integer_arm_set_body(
+    value: &mut CoreIntegerArm,
+    body: CoreComputationId
+) {
+    value.body = body;
+    ()
+}
 
 pub struct CoreMatchBinding {
     field: u32,
@@ -476,6 +497,7 @@ pub struct TypedBody {
     construction_fields: Vec<ConstructionField>,
     match_arms: Vec<CoreMatchArm>,
     match_bindings: Vec<CoreMatchBinding>,
+    integer_arms: Vec<CoreIntegerArm>,
     handler_clauses: Vec<CoreHandlerClause>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
@@ -757,6 +779,7 @@ pub enum CoreComputationView<'a> {
     Primitive(TypeId, u32, Slice<'a, CoreValueId>),
     Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>),
     VariantDispatch(TypeId, CoreValueId, Slice<'a, CoreMatchArm>),
+    IntegerDispatch(TypeId, CoreValueId, Slice<'a, CoreIntegerArm>),
     Perform(TypeId, InterfaceEffectOperationId, Slice<'a, CoreValueId>),
     Resume(TypeId, CoreValueId, CoreValueId),
     Handle(TypeId, CoreComputationId, Slice<'a, CoreHandlerClause>)
@@ -796,6 +819,7 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
             CoreComputationView::Primitive(ty, _, _) => ty,
             CoreComputationView::Construct(ty, _, _) => ty,
             CoreComputationView::VariantDispatch(ty, _, _) => ty,
+            CoreComputationView::IntegerDispatch(ty, _, _) => ty,
             CoreComputationView::Perform(ty, _, _) => ty,
             CoreComputationView::Resume(ty, _, _) => ty,
             CoreComputationView::Handle(ty, _, _) => ty
@@ -834,6 +858,8 @@ core_node_child_count(
                 Slice::len(operands),
             CoreComputationView::Construct(_, _, fields) => Slice::len(fields),
             CoreComputationView::VariantDispatch(_, _, arms) =>
+                Slice::len(arms) + 1,
+            CoreComputationView::IntegerDispatch(_, _, arms) =>
                 Slice::len(arms) + 1,
             CoreComputationView::Perform(_, _, operands) => Slice::len(operands),
             CoreComputationView::Resume(_, _, _) => 2,
@@ -890,6 +916,15 @@ core_node_child_at(
                         Result::Ok(found) => found
                     };
                     CoreNodeId::Computation(core_match_arm_body(arm))
+                }
+            },
+            CoreComputationView::IntegerDispatch(_, subject, arms) => {
+                if(index == 0) { CoreNodeId::Value(subject) } else {
+                    let arm = handle Slice::get(arms, index - 1) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(found) => found
+                    };
+                    CoreNodeId::Computation(core_integer_arm_body(arm))
                 }
             },
             CoreComputationView::Perform(_, _, operands) => {
@@ -1159,6 +1194,22 @@ core_node_child_set(
                         );
                         CoreComputationKind::VariantDispatch(subject, arms)
                     }
+                },
+                CoreComputationKind::IntegerDispatch(subject, arms) => {
+                    if(index == 0) {
+                        CoreComputationKind::IntegerDispatch(
+                            core_rewrite_value(replacement), arms
+                        )
+                    } else {
+                        core_integer_arm_set_body(
+                            Vec::index_mut(
+                                &mut body.integer_arms,
+                                usize_from_u32(arms.start) + index - 1
+                            ),
+                            core_rewrite_computation(replacement)
+                        );
+                        CoreComputationKind::IntegerDispatch(subject, arms)
+                    }
                 }
             };
             core_computation_set_kind(
@@ -1333,6 +1384,7 @@ struct CoreBuilder {
     construction_fields: Vec<ConstructionField>,
     match_arms: Vec<CoreMatchArm>,
     match_bindings: Vec<CoreMatchBinding>,
+    integer_arms: Vec<CoreIntegerArm>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
@@ -1348,6 +1400,7 @@ new_core_builder(
         construction_fields: Vec::new(),
         match_arms: Vec::new(),
         match_bindings: Vec::new(),
+        integer_arms: Vec::new(),
         integer_constants: Arena::new()
     }
 }
@@ -2770,6 +2823,20 @@ typed_body_match_arms<'a>(
     }
 }
 
+typed_body_integer_arms<'a>(
+    value: &'a TypedBody,
+    range: IntegerArmRange
+) -> Slice<'a, CoreIntegerArm> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.integer_arms),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
 pub typed_body_handler_clauses<'a>(
     value: &'a TypedBody,
     range: CoreHandlerClauseRange
@@ -2805,6 +2872,14 @@ pub core_match_arm_variant(value: &CoreMatchArm) -> u32 {
 }
 
 pub core_match_arm_body(value: &CoreMatchArm) -> CoreComputationId {
+    value.body
+}
+
+pub core_integer_arm_constant(
+    value: &CoreIntegerArm
+) -> Option<IntegerConstantId> { value.constant }
+
+pub core_integer_arm_body(value: &CoreIntegerArm) -> CoreComputationId {
     value.body
 }
 
@@ -2895,6 +2970,12 @@ pub typed_body_computation_at<'a>(
                 ty,
                 subject,
                 typed_body_match_arms(value, range)
+            ),
+        CoreComputationKind::IntegerDispatch(subject, range) =>
+            CoreComputationView::IntegerDispatch(
+                ty,
+                subject,
+                typed_body_integer_arms(value, range)
             ),
         CoreComputationKind::Perform(operation, range) =>
             CoreComputationView::Perform(ty, operation, typed_body_operands(value, range)),
@@ -3091,6 +3172,16 @@ append_match_arms_rebased(
     }})
 }
 
+append_integer_arms(
+    output: &mut Vec<CoreIntegerArm>,
+    source: &Vec<CoreIntegerArm>,
+    index: usize
+) {
+    for_range(Range::new(index, Vec::len(source)), { current =>
+        Vec::push(&mut *output, *Vec::index(source, current))
+    })
+}
+
 operand_range(start: usize, end: usize) -> OperandRange {
     super::syntax::id_range(start, end)
 }
@@ -3107,6 +3198,10 @@ match_arm_range(start: usize, end: usize) -> MatchArmRange {
 }
 
 match_binding_range(start: usize, end: usize) -> MatchBindingRange {
+    super::syntax::id_range(start, end)
+}
+
+integer_arm_range(start: usize, end: usize) -> IntegerArmRange {
     super::syntax::id_range(start, end)
 }
 
@@ -10459,6 +10554,186 @@ elaborate_handle_arms(
     }
 }
 
+// A direct terminal operation with one u32 payload can be represented without
+// allocating a handler or continuation: its clauses are a total scalar
+// decision.  This is deliberately narrower than general effects.  In
+// particular, binder locals, multiple payloads, generic effects, and a
+// missing final wildcard remain on the ordinary effect-control path.
+elaborate_terminal_u32_arms(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    identity: super::resolution::EffectOperationIdentity,
+    ordinal: usize,
+    expected: Option<TypeId>,
+    inferred: Option<TypeId>,
+    found_wildcard: Bool,
+    output: &mut Vec<CoreIntegerArm>
+) -> Result<TypeId, ElaborationError> {
+    let source_arms = super::bodies::expression_handle_arms(body, expression);
+    if(ordinal < Slice::len(source_arms)) {
+        let source_arm = handle Slice::get(source_arms, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let token = super::bodies::handle_arm_variant_token(source_arm);
+        let arm_id = super::bodies::expression_handle_arm_id(
+            body, expression, ordinal
+        );
+        let resolved = super::resolution::resolved_handle_arm(map, arm_id);
+        let same_operation = handle super::resolution::resolved_handle_target(
+            resolved
+        ) {
+            super::resolution::ResolvedHandleTarget::EffectOperation(found) =>
+                super::resolution::effect_operation_effect(&found) ==
+                    super::resolution::effect_operation_effect(&identity)
+                and { super::resolution::effect_operation_ordinal(&found) ==
+                    super::resolution::effect_operation_ordinal(&identity) },
+            _ => false
+        };
+        if(same_operation) { () } else {
+            @elaborate_terminal_u32_arms(Result::Err(
+                ElaborationError::UnsupportedExpression(token)
+            ))
+        };
+        let binders = super::resolution::resolved_handle_binders(map, resolved);
+        if(Slice::len(binders) == 1) { () } else {
+            @elaborate_terminal_u32_arms(Result::Err(
+                ElaborationError::VariantPayloadCountMismatch(
+                    token, 1, u32_from_usize(Slice::len(binders))
+                )
+            ))
+        };
+        let binder = *handle Slice::get(binders, 0) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let constant = handle binder {
+            ResolvedPatternBinder::Integer(integer_token) => Option::Some(try(
+                integer_constant_for_token(
+                    original,
+                    super::headers::parsed_source(headers),
+                    &mut value.core,
+                    integer_token,
+                    type_id_from_u32(4)
+                ),
+                @elaborate_terminal_u32_arms
+            )),
+            ResolvedPatternBinder::Wildcard => {
+                if(ordinal + 1 == Slice::len(source_arms)) {
+                    None
+                } else {
+                    @elaborate_terminal_u32_arms(Result::Err(
+                        ElaborationError::UnsupportedExpression(token)
+                    ))
+                }
+            },
+            ResolvedPatternBinder::Local(_) =>
+                @elaborate_terminal_u32_arms(Result::Err(
+                    ElaborationError::UnsupportedExpression(token)
+                ))
+        };
+        let arm_body = try(elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            Id::to_u32(super::bodies::handle_arm_body(source_arm)),
+            branch_expected(expected, inferred)
+        ), @elaborate_terminal_u32_arms);
+        let arm_type = arm_body.type_id;
+        Vec::push(&mut *output, CoreIntegerArm {
+            constant: constant,
+            body: as_computation(&mut value.core, arm_body)
+        });
+        elaborate_terminal_u32_arms(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            expression,
+            identity,
+            ordinal + 1,
+            expected,
+            join_branch_type(inferred, arm_type),
+            found_wildcard or { Option::is_none(&constant) },
+            output
+        )
+    } else {
+        if(found_wildcard) { handle inferred {
+            Result::Ok(found) => Result::Ok(found),
+            Result::Err(_) => Result::Err(ElaborationError::UnsupportedExpression(
+                super::bodies::expression_token_start_at(body, expression)
+            ))
+        }} else { Result::Err(ElaborationError::UnsupportedExpression(
+            super::bodies::expression_token_start_at(body, expression)
+        )) }
+    }
+}
+
+terminal_u32_operation(
+    interfaces: &TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    subject: u32
+) -> Option<super::resolution::EffectOperationIdentity> {
+    handle super::bodies::expression_view(body, subject) {
+        super::bodies::BodyExpressionView::Perform(_, _) => handle
+            resolved_target_at(map, subject) {
+            Option::Some(ResolvedTarget::EffectOperation(identity)) => {
+                let effect_shell = super::resolution::effect_operation_effect(
+                    &identity
+                );
+                handle interface_effect_for_shell(interfaces, effect_shell) {
+                    None => None,
+                    Option::Some(effect_id) => handle interface_effect_operation_id(
+                        interfaces,
+                        effect_id,
+                        super::resolution::effect_operation_ordinal(&identity)
+                    ) {
+                        None => None,
+                        Option::Some(operation) => if(
+                            interface_effect_generic_count(interfaces, effect_id) == 0
+                            and { interface_effect_operation_generic_count(
+                                interfaces, operation
+                            ) == 0 }
+                            and { interface_effect_operation_is_terminal(
+                                interfaces, operation
+                            ) }
+                            and { interface_effect_operation_payload_count(
+                                interfaces, operation
+                            ) == 1 }
+                            and { interface_effect_operation_payload_at(
+                                interfaces, operation, 0
+                            ) == Option::Some(type_id_from_u32(4)) }
+                            and { interface_effect_operation_result(
+                                interfaces, operation
+                            ) == type_id_from_u32(1) }
+                            and { super::bodies::expression_child_count_at(
+                                body, subject
+                            ) == 1 }) {
+                                Option::Some(identity)
+                            } else { None }
+                    }
+                }
+            },
+            _ => None
+        },
+        _ => None
+    }
+}
+
 elaborate_handle(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -10471,6 +10746,56 @@ elaborate_handle(
     expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
+    let immediate = super::bodies::expression_child_at(body, expression, 0);
+    handle terminal_u32_operation(&*interfaces, body, map, immediate) {
+        None => (),
+        Option::Some(identity) => {
+            let payload = try(elaborate_expression(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                super::bodies::expression_child_at(body, immediate, 0),
+                Option::Some(type_id_from_u32(4))
+            ), @elaborate_handle);
+            let prefix = new_core_prefix();
+            let subject = bind_operand(&mut value.core, payload, &mut prefix);
+            let arms = Vec::new();
+            let result = try(elaborate_terminal_u32_arms(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                expression,
+                identity,
+                0,
+                expected,
+                None,
+                false,
+                &mut arms
+            ), @elaborate_handle);
+            let start = super::syntax::range_mark(&value.core.integer_arms);
+            append_integer_arms(&mut value.core.integer_arms, &arms, 0);
+            let range = integer_arm_range(start, Vec::len(&value.core.integer_arms));
+            let dispatch = push_computation(
+                &mut value.core,
+                result,
+                CoreComputationKind::IntegerDispatch(subject, range)
+            );
+            @elaborate_handle(Result::Ok(finish_computation(
+                &mut value.core,
+                result,
+                dispatch,
+                &prefix
+            )))
+        }
+    };
     let subject = try(elaborate_expression(
         original,
         headers,
@@ -11607,6 +11932,7 @@ pub elaborate_function_instance_body(
                 construction_fields,
                 match_arms,
                 match_bindings,
+                integer_arms,
                 integer_constants
             } = core;
             let output = TypedBody {
@@ -11621,6 +11947,7 @@ pub elaborate_function_instance_body(
                 construction_fields: construction_fields,
                 match_arms: match_arms,
                 match_bindings: match_bindings,
+                integer_arms: integer_arms,
                 handler_clauses: Vec::new(),
                 integer_constants: integer_constants
             };
