@@ -2234,6 +2234,44 @@ fn self_host_label_elaboration_retains_generative_lexical_control_in_core() {
 }
 
 #[test]
+fn self_host_label_lowering_preserves_protected_cfg_and_artifact_namespace() {
+    // This is deliberately structural until the bootstrap VM gate is run: a
+    // label is not an ordinary jump.  Its normal edge must pop then enter the
+    // protected join, while Leave remains terminal and the GRBC metadata must
+    // bound every emitted slot.
+    let root = repository_root();
+    let lowering = fs::read_to_string(
+        root.join("self-host/src/backend/lowering/lowering.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "active_labels: Vec<LabelDestinationId>",
+        "leaving_labels: Vec<LabelDestinationId>",
+        "emit_label_push",
+        "emit_label_pop",
+        "emit_leave",
+        "CoreComputationView::LabelDestination(_, destination, child)",
+        "CoreComputationView::Leave(_, destination, payload)",
+        "emit_move(value, result, found)",
+        "emit_label_pop(value, slot)",
+        "emit_jump(value, join)",
+        "bind_block(value, join)",
+        "MirInstruction::Leave(slot, payload)",
+        "mir_function_label_slot_count",
+    ] {
+        assert!(lowering.contains(required), "missing protected label lowering: {required}");
+    }
+    let emission = fs::read_to_string(
+        root.join("self-host/src/backend/emission/emission.glorious"),
+    )
+    .unwrap();
+    assert!(
+        emission.contains("super::lowering::mir_function_label_slot_count(function)"),
+        "function records must carry the MIR-derived label namespace bound"
+    );
+}
+
+#[test]
 fn self_host_is_refinement_core_retains_decision_shape_and_scoped_bindings() {
     // This is a structural Typed-Core gate.  `is` has no MIR lowering yet,
     // but it must already remain a decision with its pattern and success-edge

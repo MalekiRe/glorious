@@ -2231,7 +2231,9 @@ write_functions(
         );
         ByteBuf::write_u32_le(&mut *output, span.cleanup_start);
         ByteBuf::write_u32_le(&mut *output, span.cleanup_count);
-        ByteBuf::write_u32_le(&mut *output, 0);
+        ByteBuf::write_u32_le(&mut *output,
+            super::lowering::mir_function_label_slot_count(function)
+        );
         ByteBuf::write_u32_le(&mut *output,
             super::lowering::artifact_type_raw(
                 super::lowering::mir_function_receiver_type(function)
