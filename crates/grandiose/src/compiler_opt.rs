@@ -13217,6 +13217,15 @@ pub(crate) fn optimize_program_with_control_tables(
         }
     }
 
+    // Sparse/global simplification and inlining can turn a Switch into a
+    // Goto or expose an unreachable continuation after the mandatory early
+    // normalization has run. Normalize once more before representation
+    // lowering so those dead blocks are not serialized into the VM artifact.
+    if level.at_least(OptimizationLevel::O1) {
+        let normalize = run_mandatory_normalize(program);
+        push_checked(&mut passes, normalize, program, types)?;
+    }
+
     // Proof-only references are a mandatory representation lowering at every
     // optimization level, not an optional O2 profitability transform.
     let erasure = run_mandatory_loan_erasure(program);
@@ -14683,9 +14692,17 @@ mod tests {
         let report = optimize_program(&mut program, &types, OptimizationLevel::O1).unwrap();
         let body = &program.functions[0];
         assert!(!body.features.contains(FeatureBits::SWITCHES));
+        assert_eq!(
+            body.blocks.len(),
+            1,
+            "dead switch arm and trivial surviving join must be removed"
+        );
         assert!(body.blocks.iter().all(|block| block.statements.is_empty()));
         assert!(report.passes.iter().any(
             |pass| pass.pass == PassId::SparseSimplify && pass.outcome == PassOutcome::Changed
+        ));
+        assert!(report.passes.iter().any(
+            |pass| pass.pass == PassId::NormalizeCfg && pass.outcome == PassOutcome::Changed
         ));
     }
 
@@ -19769,6 +19786,7 @@ mod tests {
             NormalizeCfg,
         ];
         let o1 = [SparseSimplify, ScalarizeLocals, SimplifyCleanup];
+        let post_simplify = [NormalizeCfg];
         let o2 = [
             GlobalSimplify,
             ScalarizeCallables,
@@ -19807,6 +19825,7 @@ mod tests {
             mandatory
                 .into_iter()
                 .chain(o1)
+                .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(bytecode_input)
                 .collect::<Vec<_>>()
@@ -19817,6 +19836,7 @@ mod tests {
                 .into_iter()
                 .chain(o1)
                 .chain(o2)
+                .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(tail)
                 .chain(bytecode_input)
@@ -19829,6 +19849,7 @@ mod tests {
                 .chain(o1)
                 .chain(o2)
                 .chain(o3_second)
+                .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(tail)
                 .chain(bytecode_input)
