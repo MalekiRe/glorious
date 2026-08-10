@@ -6072,16 +6072,18 @@ collect_callables(
                     shell
                 ) {
                     Result::Err(_) => false,
-                    Result::Ok(owner) => super::scanner::shell_kind(owner)
-                        is super::scanner::DeclarationKind::Trait
+                    Result::Ok(owner) => handle super::scanner::shell_kind(owner) {
+                        super::scanner::DeclarationKind::Trait => true,
+                        super::scanner::DeclarationKind::Impl => true,
+                        _ => false
+                    }
                 };
                 if(trait_member) {
-                    // Trait requirements are retained by the header parser,
-                    // but trait-interface collection is a later semantic
-                    // stage. They cannot enter the ordinary callable arena:
-                    // their `Self` receiver is meaningful only in the trait
-                    // scope and would otherwise be resolved as an unknown
-                    // top-level type.
+                    // Trait requirements and implementation members are
+                    // retained by the header parser, but trait-interface
+                    // collection is a later semantic stage. Their enclosing
+                    // `Self` and generic binders cannot enter the ordinary
+                    // callable arena.
                     collect_callables(
                         headers,
                         declarations,
