@@ -114,7 +114,7 @@ fn inspect_self_host_interface_type_metadata() {
 }
 
 #[test]
-fn self_hosted_trait_self_requirements_do_not_enter_callable_interfaces() {
+fn self_hosted_trait_and_impl_generic_members_do_not_enter_callable_interfaces() {
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &self_host_bundle(),
         CompileOptions {
@@ -124,9 +124,12 @@ fn self_hosted_trait_self_requirements_do_not_enter_callable_interfaces() {
     .unwrap();
     let function = artifact_function_id(&phases.artifact, ":interface_collection_status");
     let verified = verify(phases.artifact).unwrap();
-    let source = "enum ReplayResult<T, E> { Ok(T), Err(E) } \
-        impl < T, E > Default for ReplayResult<T, E> where T: Default { \
-            default() -> ReplayResult<T, E> { ReplayResult::Ok(Default::default()) } \
+    let source = "trait Replay<T> { \
+            replay<U>(self: &Self, value: U) -> U; \
+        } \
+        struct Wrapper<T> { value: T } \
+        impl<T> Replay<T> for Wrapper<T> { \
+            replay<U>(self: &Wrapper<T>, value: U) -> U { value } \
         } \
         main() { () }";
     let vm = Vm::with_host(
@@ -139,7 +142,7 @@ fn self_hosted_trait_self_requirements_do_not_enter_callable_interfaces() {
     else {
         panic!("interface_collection_status did not return u8");
     };
-    assert_eq!(status, 0, "trait members and impl binders must remain header-only");
+    assert_eq!(status, 0, "trait and impl member scopes must remain header-only");
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
