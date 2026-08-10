@@ -2479,8 +2479,8 @@ emit_host_call<'a>(
 }
 
 // A terminal perform consumes its payloads and never returns to this block.
-// The following unreachable terminator records that fact for the MIR block
-// validator; the VM transfers control to the selected handler clause.
+// Perform itself is the MIR block terminator: emission validates that a
+// terminal operation has no destination and is the final instruction.
 emit_terminal_perform<'a>(
     value: &mut MirBuilder<'a>,
     protocol: MirProtocolId,
@@ -2492,8 +2492,7 @@ emit_terminal_perform<'a>(
     let pack = alloc_register_pack(value, payloads);
     Vec::push(&mut value.instructions, MirInstruction::Perform(
         None, protocol, operation, pack
-    ));
-    emit_unreachable(value)
+    ))
 }
 
 emit_jump<'a>(value: &mut MirBuilder<'a>, target: MirBlockId) {
@@ -3885,19 +3884,18 @@ lower_product_fields_at<'a>(
             super::super::frontend::elaboration::
                 construction_field_value(&entry);
         if(field == checked_u32(Vec::len(output))) {
-            let lowered = try(
-                lower_value(interfaces, body, value, operand),
-                @lower_product_fields_at
-            );
-            handle lowered {
-                Result::Err(_) =>
-                    Result::Err(LoweringError::MissingValue(operand)),
-            Result::Ok(register) => {
-                Vec::push(&mut *output, register);
-                lower_product_fields_at(
-                    interfaces, body, value, fields, ordinal + 1, output
-                )
-            }
+            handle lower_value(interfaces, body, value, operand) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(lowered) => handle lowered {
+                    Result::Err(_) =>
+                        Result::Err(LoweringError::MissingValue(operand)),
+                    Result::Ok(register) => {
+                        Vec::push(&mut *output, register);
+                        lower_product_fields_at(
+                            interfaces, body, value, fields, ordinal + 1, output
+                        )
+                    }
+                }
             }
         } else {
             Result::Err(LoweringError::ConstructionFieldOrder(

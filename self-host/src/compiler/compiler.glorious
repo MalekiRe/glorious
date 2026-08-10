@@ -1702,6 +1702,49 @@ effect_operation_name(
     }
 }
 
+effect_operation_payload_type(
+    session: &CompilerSession,
+    operation: elaboration::InterfaceEffectOperationId,
+    ordinal: u32
+) -> elaboration::TypeId {
+    handle elaboration::interface_effect_operation_payload_at(
+        &session.interfaces, operation, ordinal
+    ) { None => unreachable(), Option::Some(found) => found }
+}
+
+effect_operation_result_type(
+    session: &CompilerSession,
+    operation: elaboration::InterfaceEffectOperationId
+) -> elaboration::TypeId {
+    elaboration::interface_effect_operation_result(&session.interfaces, operation)
+}
+
+lower_effect_operation_payloads(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    operation: elaboration::InterfaceEffectOperationId,
+    ordinal: u32,
+    count: u32,
+    output: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<(), CompileError> {
+    if(ordinal < count) {
+        let semantic = effect_operation_payload_type(&*session, operation, ordinal);
+        handle lower_concrete_type(
+            &mut *session, &mut *map, &mut *types, &mut *type_names, semantic
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(artifact) => {
+                Vec::push(&mut *output, artifact);
+                lower_effect_operation_payloads(
+                    session, map, types, type_names, operation, ordinal + 1, count, output
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
 lower_effect_operations(
     session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
@@ -1721,31 +1764,39 @@ lower_effect_operations(
         let count = elaboration::interface_effect_operation_payload_count(
             &session.interfaces, operation
         );
-        for_range(Range::new(0, usize_from_u32(count)), { index => {
-            let semantic = handle elaboration::interface_effect_operation_payload_at(
-                &session.interfaces, operation, checked_u32(index)
-            ) { None => unreachable(), Option::Some(found) => found };
-            let artifact = try(lower_concrete_type(
-                &mut *session, &mut *map, &mut *types, &mut *type_names, semantic
-            ), @lower_effect_operations);
-            Vec::push(&mut *payloads, artifact)
-        } });
-        let result = try(lower_concrete_type(
+        handle lower_effect_operation_payloads(
             &mut *session, &mut *map, &mut *types, &mut *type_names,
-            elaboration::interface_effect_operation_result(&session.interfaces, operation)
-        ), @lower_effect_operations);
-        let name = try(effect_operation_name(&*session, operation), @lower_effect_operations);
-        Vec::push(&mut *output, lowering::mir_operation(
-            name,
-            lowering::mir_signature(
-                payloads, lowering::artifact_type_id(0), Vec::new()
-            ),
-            result,
-            elaboration::interface_effect_operation_resumption_lower(&session.interfaces, operation),
-            elaboration::interface_effect_operation_resumption_upper(&session.interfaces, operation),
-            elaboration::interface_effect_operation_is_terminal(&session.interfaces, operation)
-        ));
-        lower_effect_operations(session, map, types, type_names, protocol, ordinal + 1, output)
+            operation, 0, count, &mut payloads
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(()) => {
+                let result_semantic = effect_operation_result_type(&*session, operation);
+                handle lower_concrete_type(
+                    &mut *session, &mut *map, &mut *types, &mut *type_names,
+                    result_semantic
+                ) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(result) => handle effect_operation_name(&*session, operation) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(name) => {
+                        Vec::push(&mut *output, lowering::mir_operation(
+                            name,
+                            lowering::mir_signature(
+                                payloads, lowering::artifact_type_id(0), Vec::new()
+                            ),
+                            result,
+                            elaboration::interface_effect_operation_resumption_lower(&session.interfaces, operation),
+                            elaboration::interface_effect_operation_resumption_upper(&session.interfaces, operation),
+                            elaboration::interface_effect_operation_is_terminal(&session.interfaces, operation)
+                        ));
+                        lower_effect_operations(
+                            session, map, types, type_names, protocol, ordinal + 1, output
+                        )
+                    }
+                }
+            }
+            }
+        }
     } else { Result::Ok(()) }
 }
 
@@ -1765,27 +1816,37 @@ lower_effect_protocols(
         // terminal-perform slice; their declarations still reserve a stable
         // protocol ordinal for later specialization work.
         if(elaboration::interface_effect_generic_count(&session.interfaces, protocol) != 0) {
-            let name = try(function_name(
+            handle function_name(
                 &*session, elaboration::interface_effect_shell(&session.interfaces, protocol)
-            ), @lower_effect_protocols);
-            lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
-                name,
-                Vec::new(), Vec::new()
-            ));
+            ) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(name) => {
+                    lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
+                        name, Vec::new(), Vec::new()
+                    ));
+                    lower_effect_protocols(session, map, types, type_names, index + 1, output)
+                }
+            }
         } else {
             let operations = Vec::new();
-            try(lower_effect_operations(
+            handle lower_effect_operations(
                 &mut *session, &mut *map, &mut *types, &mut *type_names,
                 protocol, 0, &mut operations
-            ), @lower_effect_protocols);
-            let name = try(function_name(
-                &*session, elaboration::interface_effect_shell(&session.interfaces, protocol)
-            ), @lower_effect_protocols);
-            lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
-                name, Vec::new(), operations
-            ));
-        };
-        lower_effect_protocols(session, map, types, type_names, index + 1, output)
+            ) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(()) => handle function_name(
+                    &*session, elaboration::interface_effect_shell(&session.interfaces, protocol)
+                ) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(name) => {
+                        lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
+                            name, Vec::new(), operations
+                        ));
+                        lower_effect_protocols(session, map, types, type_names, index + 1, output)
+                    }
+                }
+            }
+        }
     } else { Result::Ok(()) }
 }
 
@@ -1808,22 +1869,24 @@ compile_session<'a>(
     try({
         let session = session;
         seed_concrete_callables(&mut session, 0);
-        try(lower_effect_protocols(
+        handle lower_effect_protocols(
             &mut session,
             &mut type_map,
             &mut types,
             &mut type_names,
             0,
             &mut protocols
-        ), @compile_session);
-        lower_functions(
-            &mut session,
-            &mut type_map,
-            &mut types,
-            &mut type_names,
-            0,
-            &mut functions
-        )
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(()) => lower_functions(
+                &mut session,
+                &mut type_map,
+                &mut types,
+                &mut type_names,
+                0,
+                &mut functions
+            )
+        }
     }, @compile_session);
     let program = lowering::finish_effect_program(
         functions,
