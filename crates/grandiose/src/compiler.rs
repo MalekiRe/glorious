@@ -55486,14 +55486,18 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 *instruction = Instruction::Nop;
             }
         }
-        // A constant immediately followed by a unit return cannot be
-        // observed. Constants have no runtime effect beyond defining their
-        // destination, and this also remains true when the constant is a
-        // branch target: every path that reaches it returns immediately.
+        // A constant immediately followed by a return of another register
+        // cannot be observed. Constants have no runtime effect beyond
+        // defining their destination, and this also remains true when the
+        // constant is a branch target: every path that reaches it returns
+        // immediately.
         for pc in 0..folded.len().saturating_sub(1) {
             if matches!(
                 (&folded[pc], &folded[pc + 1]),
-                (Instruction::Const { .. }, Instruction::Return { src: None })
+                (
+                    Instruction::Const { dst, .. },
+                    Instruction::Return { src }
+                ) if *src != Some(*dst)
             ) {
                 folded[pc] = Instruction::Nop;
             }
@@ -58399,6 +58403,86 @@ mod mir_edge_emission_tests {
         assert_eq!(
             Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
             Value::Unit
+        );
+    }
+
+    #[test]
+    fn peephole_removes_constants_dead_before_other_return_values() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(7)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 2,
+                constant: 0,
+            },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_value_constant".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, [Instruction::Return { src: Some(1) }]);
+        assert!(prune_unused_constants(&mut artifact));
+        assert!(artifact.constants.is_empty());
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(0, vec![Value::I64(42)])
+                .unwrap(),
+            Value::I64(42)
+        );
+    }
+
+    #[test]
+    fn peephole_keeps_a_constant_returned_from_its_destination() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(7)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "returned_constant".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(!layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(1) },
+            ]
+        );
+        assert!(!prune_unused_constants(&mut artifact));
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(7)
         );
     }
 
