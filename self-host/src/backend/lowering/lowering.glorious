@@ -3877,16 +3877,13 @@ lower_product_fields_at<'a>(
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
     if(ordinal < Slice::len(fields)) {
-        let entry = handle Slice::get(fields, ordinal) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
+        let entry = Slice::index(fields, ordinal);
         let field =
             super::super::frontend::elaboration::
-                construction_field_ordinal(entry);
+                construction_field_ordinal(&entry);
         let operand =
             super::super::frontend::elaboration::
-                construction_field_value(entry);
+                construction_field_value(&entry);
         if(field == checked_u32(Vec::len(output))) {
             let lowered = try(
                 lower_value(interfaces, body, value, operand),
