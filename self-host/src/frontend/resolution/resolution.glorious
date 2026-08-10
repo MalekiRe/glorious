@@ -1350,36 +1350,45 @@ resolve_identifier(
                     );
                     Result::Ok(())
                 },
-                Result::Err(_) => if(bare_bool_literal(headers, raw)) {
-                    // `true`/`false` are prelude values, but the focused
-                    // self-host probe intentionally has no prelude index.
-                    // Leave them unresolved for elaboration's literal path.
-                    Result::Ok(())
-                } else {
-                    let found = handle resolve_global_alias(
-                        headers,
-                        index,
-                        declarations,
-                        raw,
-                        None,
-                        module,
-                        token
-                    ) {
-                        Option::Some(found) => found,
-                        None => try(resolve_function_name(
+                Result::Err(_) => handle resolve_global_alias(
+                    headers,
+                    index,
+                    declarations,
+                    raw,
+                    None,
+                    module,
+                    token
+                ) {
+                    // The distributed prelude binds `true` and `false` to
+                    // Result-backed global factories. Prefer that binding so
+                    // their type stays identical to the declared Bool alias.
+                    Option::Some(found) => {
+                        push_resolution(
+                            output,
+                            Id::from_u32(expression),
+                            found
+                        );
+                        Result::Ok(())
+                    },
+                    None => if(bare_bool_literal(headers, raw)) {
+                        // Focused self-host probes intentionally omit the
+                        // prelude. Preserve their unresolved literal path.
+                        Result::Ok(())
+                    } else {
+                        let found = try(resolve_function_name(
                             index,
                             declarations,
                             raw,
                             module,
                             token
-                        ), @resolve_identifier)
-                    };
-                    push_resolution(
-                        output,
-                        Id::from_u32(expression),
-                        found
-                    );
-                    Result::Ok(())
+                        ), @resolve_identifier);
+                        push_resolution(
+                            output,
+                            Id::from_u32(expression),
+                            found
+                        );
+                        Result::Ok(())
+                    }
                 }
             }
         },

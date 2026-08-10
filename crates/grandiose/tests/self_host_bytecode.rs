@@ -1611,6 +1611,48 @@ fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
 }
 
 #[test]
+fn self_hosted_prelude_bool_alias_resolves_before_literal_fallback_in_release_vm() {
+    // The production prelude models Bool as Result<(), ()> and then exports
+    // `true` as a global factory alias. Resolution must use that alias when
+    // present; otherwise elaboration treats the identifier as the focused
+    // probe's private scalar Bool and rejects the declared result type.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "enum Result<T, E> { Ok(T), Err(E) } \
+                type Option<T> = Result<T, ()>; \
+                type Bool = Option<()>; \
+                make_true() -> Bool { Result::Ok(()) } \
+                let true = make_true(); \
+                use_true() -> Bool { true }";
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap(),
+                Value::U64(0),
+                "a source Bool factory alias must override bare-literal fallback"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_hosted_generic_alias_enum_construction_reaches_backend_in_release_vm() {
     // A constructor through nested aliases must adopt the expected nominal
     // application.  This is the small form of the compiler prelude's Bool
