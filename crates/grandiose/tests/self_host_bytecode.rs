@@ -1981,6 +1981,107 @@ fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
 }
 
 #[test]
+#[ignore = "expensive release VM label-control gate"]
+fn self_hosted_compiler_executes_protected_labels_and_nested_leave_in_release_vm() {
+    // Keep this an end-to-end VM check.  The source program deliberately uses
+    // both protected-region exits: `normal_label` reaches its join through
+    // LabelPop, while `nested_leave` skips the inner region and reaches the
+    // outer typed destination through Leave.  This is the executable core of
+    // the bootstrap labels_leave.rs regressions, including lexical shadowing
+    // of the active destination stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+                normal_label() -> i64 {
+                    @done: i64 { 7 }
+                }
+                nested_leave() -> i64 {
+                    @outer: i64 {
+                        @inner: i64 {
+                            @outer(42)
+                        }
+                    }
+                }
+                main() { () }
+            "#;
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("labels-input.glorious");
+            let output = directory.path().join("labels-output.grbc");
+            fs::write(&input, source).unwrap();
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            drop(phases);
+
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        output.clone().into_os_string(),
+                        input.into_os_string(),
+                    ]),
+                )
+                .unwrap()
+                .run(entry, vec![])
+                .unwrap(),
+                Value::Unit,
+                "the self-host compiler must emit a label program"
+            );
+
+            let bytes = fs::read(output).unwrap();
+            let artifact = Artifact::decode(&bytes).expect("label artifact must decode");
+            load_verified(&bytes).expect("label artifact must pass VM verification");
+            assert!(
+                artifact
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::LabelPush { .. })),
+                "the emitted program must preserve protected label entry"
+            );
+            assert!(
+                artifact
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::LabelPop { .. })),
+                "the normal label edge must pop its protected destination"
+            );
+            assert!(
+                artifact
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::Leave { .. })),
+                "the nested outer transfer must remain a VM Leave"
+            );
+
+            let verified = load_verified(&bytes).unwrap();
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(function_id(&artifact, "normal_label"), vec![])
+                    .unwrap(),
+                Value::I64(7)
+            );
+            assert_eq!(
+                Vm::new(verified)
+                    .run(function_id(&artifact, "nested_leave"), vec![])
+                    .unwrap(),
+                Value::I64(42)
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn bootstrap_self_host_bytecode_prunes_dead_constants_in_release_vm() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)

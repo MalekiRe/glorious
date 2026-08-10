@@ -2673,6 +2673,43 @@ program_has_effect_instruction(
     } else { false }
 }
 
+function_has_label_instruction(
+    function: &super::lowering::MirFunction,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_function_instruction_count(function)) {
+        let instruction = super::lowering::mir_function_instruction_at(
+            function, index
+        );
+        let found = handle *instruction {
+            MirInstruction::LabelPush(_, _, _) => true,
+            MirInstruction::LabelPop(_) => true,
+            MirInstruction::Leave(_, _) => true,
+            _ => false
+        };
+        if(found) { true } else {
+            function_has_label_instruction(function, index + 1)
+        }
+    } else { false }
+}
+
+program_has_label_instruction(
+    program: &super::lowering::MirProgram,
+    index: usize
+) -> Bool {
+    if(index < super::lowering::mir_program_function_count(program)) {
+        if(function_has_label_instruction(
+            super::lowering::mir_program_function_at(
+                program,
+                super::lowering::mir_function_id_from_usize(index)
+            ),
+            0
+        )) { true } else {
+            program_has_label_instruction(program, index + 1)
+        }
+    } else { false }
+}
+
 program_has_handler_resumption_type(
     program: &super::lowering::MirProgram,
     index: usize
@@ -3742,7 +3779,11 @@ pub encode(
     let multishot_features = if(program_has_multishot_resumption_type(
         context.program, 0
     )) { 16 } else { 0 };
+    let label_features = if(program_has_label_instruction(
+        context.program, 0
+    )) { 4 } else { 0 };
     let required_features = 1
+        + wrapping_convert_to_u64(label_features)
         + wrapping_convert_to_u64(handler_features)
         + wrapping_convert_to_u64(multishot_features)
         + wrapping_convert_to_u64(host_features);

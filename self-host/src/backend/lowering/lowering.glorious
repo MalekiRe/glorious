@@ -877,6 +877,9 @@ struct MirBuilder<'a> {
     // while its generative destination is active, and keeps nested same-name
     // labels distinct by their Core identity.
     active_labels: Vec<LabelDestinationId>,
+    // Parallel to `active_labels`: a Leave cleanup replaces its transferred
+    // payload with this protected destination register at the join anchor.
+    active_label_results: Vec<RegisterId>,
     // A body which only exits through Leave still reaches its destination at
     // runtime.  Remember those transfers so the destination joins with its
     // dynamically-installed result register rather than being mistaken for
@@ -2443,6 +2446,44 @@ record_cleanup<'a>(value: &mut MirBuilder<'a>) {
     })
 }
 
+replace_cleanup_register(
+    registers: &mut Vec<RegisterId>,
+    source: RegisterId,
+    target: RegisterId,
+    index: usize
+) {
+    if(index < Vec::len(registers)) {
+        if(*Vec::index(registers, index) == source) {
+            *Vec::index_mut(registers, index) = target;
+        } else { () };
+        replace_cleanup_register(registers, source, target, index + 1)
+    } else { () }
+}
+
+record_leave_cleanup<'a>(
+    value: &mut MirBuilder<'a>,
+    payload: RegisterId,
+    protected_result: RegisterId
+) {
+    let instruction = checked_u32(Vec::len(&value.instructions));
+    let registers = Vec::new();
+    reverse_registers(
+        &value.live_order,
+        &mut registers,
+        Vec::len(&value.live_order)
+    );
+    // The VM transfers `payload` into `protected_result` before entering the
+    // label target, so the seeded source anchor must already name the target
+    // register.  That makes its suffix equal to the destination cleanup while
+    // preserving the ownership substitution for verifier and runtime.
+    replace_cleanup_register(&mut registers, payload, protected_result, 0);
+    Vec::push(&mut value.cleanups, MirCleanup {
+        first_instruction: instruction,
+        end_instruction: instruction + 1,
+        registers: registers
+    })
+}
+
 alloc_register<'a>(value: &mut MirBuilder<'a>) -> RegisterId {
     let found = value.register_count;
     value.register_count = found + 1;
@@ -2714,8 +2755,13 @@ emit_label_pop<'a>(value: &mut MirBuilder<'a>, slot: u32) {
     Vec::push(&mut value.instructions, MirInstruction::LabelPop(slot))
 }
 
-emit_leave<'a>(value: &mut MirBuilder<'a>, slot: u32, payload: RegisterId) {
-    record_cleanup(value);
+emit_leave<'a>(
+    value: &mut MirBuilder<'a>,
+    slot: u32,
+    payload: RegisterId,
+    protected_result: RegisterId
+) {
+    record_leave_cleanup(value, payload, protected_result);
     // Leave transfers its payload atomically to the protected result
     // register.  It is terminal in this block, so it must consume the local
     // ownership token exactly like every other transfer instruction.
@@ -2741,6 +2787,22 @@ label_was_left(
     index: usize
 ) -> Bool {
     active_label_contains(labels, target, index)
+}
+
+active_label_result(
+    labels: &Vec<LabelDestinationId>,
+    results: &Vec<RegisterId>,
+    target: LabelDestinationId,
+    index: usize
+) -> Option<RegisterId> {
+    if(index < Vec::len(labels)) {
+        let current = Vec::len(labels) - index - 1;
+        if(Id::to_u32(*Vec::index(labels, current)) == Id::to_u32(target)) {
+            Option::Some(*Vec::index(results, current))
+        } else {
+            active_label_result(labels, results, target, index + 1)
+        }
+    } else { None }
 }
 
 emit_switch<'a>(
@@ -3864,6 +3926,56 @@ lower_nominal_construct<'a>(
     }
 }
 
+// A label that cannot complete normally and has no transfer addressed to it
+// never installs a value in its result register.  The GRBC format recovers
+// register types from value flow, so allocating a protected destination for
+// that dead region leaves an uninferred register even though the label can
+// never be selected at runtime.  Keep this predicate deliberately
+// conservative: anything beyond the simple control shapes below retains its
+// runtime label until its reachability is modeled explicitly.
+label_body_may_leave_to(
+    body: &super::super::frontend::elaboration::TypedBody,
+    id: CoreComputationId,
+    destination: LabelDestinationId
+) -> Bool {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body, id
+    ) {
+        CoreComputationView::Let(_, _, initializer, remainder) =>
+            label_body_may_leave_to(body, initializer, destination)
+                or { label_body_may_leave_to(body, remainder, destination) },
+        CoreComputationView::LabelDestination(_, _, child) =>
+            label_body_may_leave_to(body, child, destination),
+        CoreComputationView::Leave(_, target, _) =>
+            Id::to_u32(target) == Id::to_u32(destination),
+        // A pure value cannot contain control at this lowering boundary.
+        CoreComputationView::Pure(_, _) => false,
+        // Do not erase a label through a shape whose nested control has not
+        // been inspected here.  This preserves the lexical VM destination in
+        // the face of future embedded computations, dispatches, and handlers.
+        _ => true
+    }
+}
+
+label_body_is_terminal_leave(
+    body: &super::super::frontend::elaboration::TypedBody,
+    id: CoreComputationId
+) -> Bool {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body, id
+    ) {
+        CoreComputationView::Let(_, _, initializer, remainder) => {
+            if(label_body_is_terminal_leave(body, initializer)) {
+                true
+            } else { label_body_is_terminal_leave(body, remainder) }
+        },
+        CoreComputationView::LabelDestination(_, _, child) =>
+            label_body_is_terminal_leave(body, child),
+        CoreComputationView::Leave(_, _, _) => true,
+        _ => false
+    }
+}
+
 lower_computation<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
@@ -4037,6 +4149,18 @@ lower_computation<'a>(
         CoreComputationView::IntegerDispatch(_, subject, arms) =>
             lower_integer_dispatch(interfaces, body, value, id, subject, arms),
         CoreComputationView::LabelDestination(_, destination, child) => {
+            // If this lexical destination only contains a transfer to an
+            // enclosing label, it can never receive a normal or dynamic
+            // result of its own.  Erase that inert runtime frame rather than
+            // allocating a GRBC result register with no possible type flow.
+            let needs_runtime_label = if(
+                label_body_is_terminal_leave(body, child)
+            ) {
+                if(label_body_may_leave_to(body, child, destination)) {
+                    true
+                } else { false }
+            } else { true };
+            if(needs_runtime_label) {
             // The join is a protected CFG root: normal completion takes the
             // explicit LabelPop/Jump path, whereas a nested Leave is routed
             // there by the VM after it restores this result register.
@@ -4045,10 +4169,14 @@ lower_computation<'a>(
             let slot = Id::to_u32(destination);
             emit_label_push(value, slot, result, join);
             Vec::push(&mut value.active_labels, destination);
+            Vec::push(&mut value.active_label_results, result);
             let lowered = lower_computation(interfaces, body, value, child);
             // Lexical lowering has now exited this destination even if its
             // runtime body diverges through Leave.
             handle Vec::pop(&mut value.active_labels) {
+                Result::Ok(_) => (), Result::Err(_) => unreachable()
+            };
+            handle Vec::pop(&mut value.active_label_results) {
                 Result::Ok(_) => (), Result::Err(_) => unreachable()
             };
             let was_left = label_was_left(&value.leaving_labels, destination, 0);
@@ -4075,6 +4203,9 @@ lower_computation<'a>(
                     }
                 }
             }
+            } else {
+                lower_computation(interfaces, body, value, child)
+            }
         },
         CoreComputationView::Leave(_, destination, payload) => {
             if(active_label_contains(&value.active_labels, destination, 0)) {
@@ -4085,9 +4216,29 @@ lower_computation<'a>(
                 handle lowered {
                     None => Result::Err(LoweringError::MissingValue(payload)),
                     Option::Some(found) => {
-                        emit_leave(value, Id::to_u32(destination), found);
-                        Vec::push(&mut value.leaving_labels, destination);
-                        Result::Ok(None)
+                        handle active_label_result(
+                            &value.active_labels,
+                            &value.active_label_results,
+                            destination,
+                            0
+                        ) {
+                            None => Result::Err(
+                                LoweringError::LabelControlNotLowered(id)
+                            ),
+                            Option::Some(result) => {
+                                emit_leave(
+                                    value,
+                                    Id::to_u32(destination),
+                                    found,
+                                    result
+                                );
+                                Vec::push(
+                                    &mut value.leaving_labels,
+                                    destination
+                                );
+                                Result::Ok(None)
+                            }
+                        }
                     }
                 }
             } else { Result::Err(LoweringError::LabelControlNotLowered(id)) }
@@ -4617,6 +4768,7 @@ pub lower_function<'a>(
         blocks: Arena::new(),
         switch_packs: Arena::new(),
         active_labels: Vec::new(),
+        active_label_results: Vec::new(),
         leaving_labels: Vec::new(),
         register_count: parameter_count + 1
     };
@@ -4737,6 +4889,7 @@ pub lower_primitive_function<'a>(
         blocks: Arena::new(),
         switch_packs: Arena::new(),
         active_labels: Vec::new(),
+        active_label_results: Vec::new(),
         leaving_labels: Vec::new(),
         register_count: parameter_count + 1
     };
@@ -4877,6 +5030,7 @@ pub lower_host_function<'a>(
         blocks: Arena::new(),
         switch_packs: Arena::new(),
         active_labels: Vec::new(),
+        active_label_results: Vec::new(),
         leaving_labels: Vec::new(),
         register_count: parameter_count + 1
     };
