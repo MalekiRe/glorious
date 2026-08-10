@@ -1685,6 +1685,108 @@ seed_concrete_callables<'a>(
     } else { () }
 }
 
+effect_operation_name(
+    session: &CompilerSession,
+    operation: elaboration::InterfaceEffectOperationId
+) -> Result<String, CompileError> {
+    handle lexer::lexeme(
+        headers::parsed_source(&session.headers),
+        Id::from_u32(elaboration::interface_effect_operation_name(
+            &session.interfaces, operation
+        ))
+    ) {
+        Result::Err(_) => Result::Err(CompileError::InterfaceName(
+            InterfaceNameKind::Field, Id::to_u32(operation)
+        )),
+        Result::Ok(found) => Result::Ok(*found)
+    }
+}
+
+lower_effect_operations(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    effect: elaboration::InterfaceEffectId,
+    ordinal: u32,
+    output: &mut Vec<lowering::MirOperation>
+) -> Result<(), CompileError> {
+    if(ordinal < elaboration::interface_effect_operation_count(
+        &session.interfaces, effect
+    )) {
+        let operation = *handle elaboration::interface_effect_operation_id(
+            &session.interfaces, effect, ordinal
+        ) { None => unreachable(), Option::Some(found) => found };
+        let payloads = Vec::new();
+        let count = elaboration::interface_effect_operation_payload_count(
+            &session.interfaces, operation
+        );
+        for_range(Range::new(0, usize_from_u32(count)), { index => {
+            let semantic = *handle elaboration::interface_effect_operation_payload_at(
+                &session.interfaces, operation, checked_u32(index)
+            ) { None => unreachable(), Option::Some(found) => found };
+            let artifact = try(lower_concrete_type(
+                &mut *session, &mut *map, &mut *types, &mut *type_names, semantic
+            ), @lower_effect_operations);
+            Vec::push(&mut *payloads, artifact)
+        } });
+        let result = try(lower_concrete_type(
+            &mut *session, &mut *map, &mut *types, &mut *type_names,
+            elaboration::interface_effect_operation_result(&session.interfaces, operation)
+        ), @lower_effect_operations);
+        let name = try(effect_operation_name(&*session, operation), @lower_effect_operations);
+        Vec::push(&mut *output, lowering::mir_operation(
+            name,
+            lowering::mir_signature(payloads, result, Vec::new()),
+            result,
+            elaboration::interface_effect_operation_resumption_lower(&session.interfaces, operation),
+            elaboration::interface_effect_operation_resumption_upper(&session.interfaces, operation),
+            elaboration::interface_effect_operation_is_terminal(&session.interfaces, operation)
+        ));
+        lower_effect_operations(session, map, types, type_names, effect, ordinal + 1, output)
+    } else { Result::Ok(()) }
+}
+
+lower_effect_protocols(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    index: usize,
+    output: &mut Arena<lowering::MirProtocolTag, lowering::MirProtocol>
+) -> Result<(), CompileError> {
+    if(index < elaboration::interface_effect_count(&session.interfaces)) {
+        let effect = *handle elaboration::interface_effect_id_at(&session.interfaces, index) {
+            None => unreachable(), Option::Some(found) => found
+        };
+        // Generic effect instances are not materialized in this initial
+        // terminal-perform slice; their declarations still reserve a stable
+        // protocol ordinal for later specialization work.
+        if(elaboration::interface_effect_generic_count(&session.interfaces, effect) != 0) {
+            let name = try(function_name(
+                &*session, elaboration::interface_effect_shell(&session.interfaces, effect)
+            ), @lower_effect_protocols);
+            lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
+                name,
+                Vec::new(), Vec::new()
+            ));
+        } else {
+            let operations = Vec::new();
+            try(lower_effect_operations(
+                &mut *session, &mut *map, &mut *types, &mut *type_names,
+                effect, 0, &mut operations
+            ), @lower_effect_protocols);
+            let name = try(function_name(
+                &*session, elaboration::interface_effect_shell(&session.interfaces, effect)
+            ), @lower_effect_protocols);
+            lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
+                name, Vec::new(), operations
+            ));
+        };
+        lower_effect_protocols(session, map, types, type_names, index + 1, output)
+    } else { Result::Ok(()) }
+}
+
 compile_session<'a>(
     session: CompilerSession
 ) -> Result<Bytes, CompileError> {
@@ -1692,6 +1794,7 @@ compile_session<'a>(
     let types = lowering::mir_types();
     let type_map = lowering::artifact_type_map();
     let type_names = Vec::new();
+    let protocols = lowering::mir_protocols();
     // Move the frontend session (CompilerSession and its whole frontend graph:
     // parsed headers, declaration and resolution indices, and the typed
     // interface arena) into a nested scope. Its ownership therefore ends as
@@ -1703,6 +1806,14 @@ compile_session<'a>(
     try({
         let session = session;
         seed_concrete_callables(&mut session, 0);
+        try(lower_effect_protocols(
+            &mut session,
+            &mut type_map,
+            &mut types,
+            &mut type_names,
+            0,
+            &mut protocols
+        ), @compile_session);
         lower_functions(
             &mut session,
             &mut type_map,
@@ -1712,10 +1823,12 @@ compile_session<'a>(
             &mut functions
         )
     }, @compile_session);
-    let program = lowering::finish_program(
+    let program = lowering::finish_effect_program(
         functions,
         types,
-        type_names
+        type_names,
+        protocols,
+        lowering::mir_handler_definitions()
     );
     let entry = find_entry(&program, 0);
     Result::map_err(

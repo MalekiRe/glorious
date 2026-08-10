@@ -950,6 +950,16 @@ pub mir_handler_definition(
 
 pub mir_protocols() -> Arena<MirProtocolTag, MirProtocol> { Arena::new() }
 
+pub alloc_mir_protocol(
+    value: &mut Arena<MirProtocolTag, MirProtocol>,
+    protocol: MirProtocol
+) -> MirProtocolId {
+    handle Arena::alloc(value, protocol) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
 pub mir_handler_definitions()
     -> Arena<MirHandlerDefinitionTag, MirHandlerDefinition> {
     Arena::new()
@@ -2468,6 +2478,24 @@ emit_host_call<'a>(
     }
 }
 
+// A terminal perform consumes its payloads and never returns to this block.
+// The following unreachable terminator records that fact for the MIR block
+// validator; the VM transfers control to the selected handler clause.
+emit_terminal_perform<'a>(
+    value: &mut MirBuilder<'a>,
+    protocol: MirProtocolId,
+    operation: u32,
+    payloads: Vec<RegisterId>
+) {
+    record_cleanup(value);
+    consume_arguments(value, &payloads, 0);
+    let pack = alloc_register_pack(value, payloads);
+    Vec::push(&mut value.instructions, MirInstruction::Perform(
+        None, protocol, operation, pack
+    ));
+    emit_unreachable(value)
+}
+
 emit_jump<'a>(value: &mut MirBuilder<'a>, target: MirBlockId) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Jump(target))
@@ -3762,8 +3790,25 @@ lower_computation<'a>(
             lower_match(interfaces, body, value, id, subject, arms),
         CoreComputationView::IntegerDispatch(_, subject, arms) =>
             lower_integer_dispatch(interfaces, body, value, id, subject, arms),
-        CoreComputationView::Perform(_, _, _) =>
-            Result::Err(LoweringError::EffectControlNotLowered(id)),
+        CoreComputationView::Perform(_, operation, operands) => {
+            let payloads = Vec::new();
+            try(lower_arguments(
+                interfaces, body, value, operands, &mut payloads
+            ), @lower_computation);
+            if(super::super::frontend::elaboration::
+                interface_effect_operation_is_terminal(interfaces, operation)) {
+                let owner = super::super::frontend::elaboration::
+                    interface_effect_operation_owner(interfaces, operation);
+                emit_terminal_perform(
+                    value,
+                    Id::from_u32(Id::to_u32(owner)),
+                    super::super::frontend::elaboration::
+                        interface_effect_operation_ordinal(interfaces, operation),
+                    payloads
+                );
+                Result::Ok(None)
+            } else { Result::Err(LoweringError::EffectControlNotLowered(id)) }
+        },
         CoreComputationView::Resume(_, _, _) =>
             Result::Err(LoweringError::EffectControlNotLowered(id)),
         CoreComputationView::Handle(_, _, _) =>
@@ -4184,6 +4229,17 @@ validate_mir_builder<'a>(
     }
 }
 
+all_effect_protocols(
+    interfaces: &super::super::frontend::elaboration::TypedInterfaces,
+    index: usize,
+    output: &mut Vec<u32>
+) {
+    if(index < super::super::frontend::elaboration::interface_effect_count(interfaces)) {
+        Vec::push(&mut *output, checked_u32(index));
+        all_effect_protocols(interfaces, index + 1, output)
+    } else { () }
+}
+
 pub lower_function<'a>(
     name: String,
     interfaces:
@@ -4243,6 +4299,12 @@ pub lower_function<'a>(
         None => unreachable(),
         Option::Some(found) => found
     };
+    // Until effect-row specialization is lowered, retain every concrete
+    // protocol in the outward row. This is conservative and allows the VM
+    // verifier to validate a direct terminal perform without pretending its
+    // effect was pure.
+    let outward_protocols = Vec::new();
+    all_effect_protocols(interfaces, 0, &mut outward_protocols);
     handle result {
         Result::Err(_) => {
             try(validate_mir_builder(
@@ -4253,7 +4315,7 @@ pub lower_function<'a>(
                 name: name,
                 parameters: parameters,
                 result: result_type,
-                outward_protocols: Vec::new(),
+                outward_protocols: outward_protocols,
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
@@ -4277,7 +4339,7 @@ pub lower_function<'a>(
                 name: name,
                 parameters: parameters,
                 result: result_type,
-                outward_protocols: Vec::new(),
+                outward_protocols: outward_protocols,
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
