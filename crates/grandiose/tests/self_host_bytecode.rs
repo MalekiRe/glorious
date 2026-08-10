@@ -1573,6 +1573,44 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
 }
 
 #[test]
+fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
+    // Reuse the parser-valid monomorphic `perform` specimen from the typed
+    // Core self-host tests. Effect MIR is intentionally not implemented, so
+    // this complete compiler pipeline must report its bounded lowering error
+    // rather than aborting in the earlier place-flow pass.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "effect Ask { [1,1] ask(value: i64) -> i64 } \
+                answer(value: i64) -> i64 / {Ask} { perform Ask::ask(value) }";
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap(),
+                Value::U64(10),
+                "effect control must reach CompileError::Lowering"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "expensive release gate: bootstrap and run two complete self-compilation stages"]
 fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
     std::thread::Builder::new()

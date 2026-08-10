@@ -2065,11 +2065,35 @@ analyze_computation(
             output.live = joined;
             analyze_value(body, subject, output, allow_transfer)
         },
-        // No source elaboration produces these yet. Keeping this explicit
-        // makes place-flow non-authoritative until effect MIR lowering exists.
-        CoreComputationView::Perform(_, _, _) => unreachable(),
-        CoreComputationView::Resume(_, _, _) => unreachable(),
-        CoreComputationView::Handle(_, _, _) => unreachable()
+        // Effect control is deliberately rejected by `lower_computation`, but
+        // source elaboration already produces these Core shapes.  Place-flow
+        // runs before that rejection, so it must still be a total traversal:
+        // otherwise a valid source program aborts instead of receiving the
+        // promised `EffectControlNotLowered` diagnostic.
+        CoreComputationView::Perform(_, _, operands) =>
+            analyze_values_reverse(
+                body,
+                operands,
+                Slice::len(operands),
+                output,
+                allow_transfer
+            ),
+        CoreComputationView::Resume(_, resumption, result) => {
+            analyze_value(body, result, output, allow_transfer);
+            analyze_value(body, resumption, output, allow_transfer)
+        },
+        CoreComputationView::Handle(_, handled, clauses) => {
+            analyze_computation(body, handled, output, allow_transfer);
+            Slice::for_each(clauses, { clause =>
+                analyze_computation(
+                    body,
+                    super::super::frontend::elaboration::
+                        core_handler_clause_body(clause),
+                    output,
+                    allow_transfer
+                )
+            })
+        }
     }
 }
 
