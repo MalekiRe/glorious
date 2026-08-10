@@ -114,7 +114,7 @@ fn inspect_self_host_interface_type_metadata() {
 }
 
 #[test]
-fn self_hosted_trait_and_impl_generic_members_do_not_enter_callable_interfaces() {
+fn self_hosted_trait_and_impl_generic_member_signatures_collect_in_vm() {
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &self_host_bundle(),
         CompileOptions {
@@ -125,11 +125,11 @@ fn self_hosted_trait_and_impl_generic_members_do_not_enter_callable_interfaces()
     let function = artifact_function_id(&phases.artifact, ":interface_collection_status");
     let verified = verify(phases.artifact).unwrap();
     let source = "trait Replay<T> { \
-            replay<U>(self: &Self, value: U) -> U; \
+            replay<U>(value: T, other: U) -> U where U: Use<[0, *]>; \
         } \
         struct Wrapper<T> { value: T } \
         impl<T> Replay<T> for Wrapper<T> { \
-            replay<U>(self: &Wrapper<T>, value: U) -> U { value } \
+            replay<U>(value: T, other: U) -> U where U: Use<[0, *]> { other } \
         } \
         main() { () }";
     let vm = Vm::with_host(
@@ -142,7 +142,7 @@ fn self_hosted_trait_and_impl_generic_members_do_not_enter_callable_interfaces()
     else {
         panic!("interface_collection_status did not return u8");
     };
-    assert_eq!(status, 0, "trait and impl member scopes must remain header-only");
+    assert_eq!(status, 0, "trait and impl member signatures must collect");
 }
 
 #[test]

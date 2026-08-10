@@ -287,7 +287,10 @@ enum SignatureTypeScope {
         SignatureScope,
         SignatureScope,
         InterfaceEffectOperationId
-    )
+    ),
+    // A trait/impl method resolves its own binders before the enclosing
+    // declaration binders.
+    NominalMethod(SignatureScope, SignatureScope)
 }
 
 impl Use<[0, *]> for SignatureTypeScope {}
@@ -4347,6 +4350,20 @@ signature_type_parameter(
                     ordinal
                 ))
             }
+        },
+        SignatureTypeScope::NominalMethod(method, enclosing) =>
+            handle generic_type_parameter(headers, method, name, 0) {
+            Result::Ok(ordinal) => Option::Some((
+                TypeParameterOwner::Declaration(method.owner), ordinal
+            )),
+            Result::Err(_) => handle generic_type_parameter(
+                headers, enclosing, name, 0
+            ) {
+                Result::Err(_) => None,
+                Result::Ok(ordinal) => Option::Some((
+                    TypeParameterOwner::Declaration(enclosing.owner), ordinal
+                ))
+            }
         }
     }
 }
@@ -4363,6 +4380,11 @@ signature_lifetime_parameter(
             generic_lifetime_parameter(headers, operation, name, 0)
                 or { generic_lifetime_parameter(
                     headers, declaration, name, 0
+                ) },
+        SignatureTypeScope::NominalMethod(method, enclosing) =>
+            generic_lifetime_parameter(headers, method, name, 0)
+                or { generic_lifetime_parameter(
+                    headers, enclosing, name, 0
                 ) }
     }
 }
@@ -4800,7 +4822,7 @@ collect_parameter_types(
     callable: &super::headers::CallableHeader,
     output: &mut TypedInterfaces,
     module: Option<ShellId>,
-    scope: SignatureScope,
+    scope: Option<SignatureTypeScope>,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     let range = super::headers::callable_parameters(callable);
@@ -4820,7 +4842,7 @@ collect_parameter_types(
                     output,
                     super::headers::parameter_type(parameter),
                     module,
-                    Option::Some(SignatureTypeScope::Declaration(scope))
+                    scope
                 ), @collect_parameter_types);
                 Vec::push(
                     &mut output.callable_parameters,
@@ -4846,7 +4868,7 @@ collect_callable_effects(
     callable: &super::headers::CallableHeader,
     output: &mut TypedInterfaces,
     module: Option<ShellId>,
-    scope: SignatureScope
+    scope: Option<SignatureTypeScope>
 ) -> Result<(TypeElementRange, Option<u32>), ElaborationError> {
     let start = Vec::len(&output.callable_effects);
     let row_tail = handle Option::as_ref(
@@ -4864,7 +4886,7 @@ collect_callable_effects(
                     &mut *output,
                     super::headers::type_edge_type(edge),
                     module,
-                    Option::Some(SignatureTypeScope::Declaration(scope))
+                    scope
                 ), @collect_callable_effects);
                 Vec::push(
                     &mut output.callable_effects,
@@ -4902,6 +4924,33 @@ constraint_relation_in(
     } else { None }
 }
 
+// These relations are provided by the language prelude, not as ordinary
+// source declarations.  Keep their reserved shells aligned with the runtime
+// intrinsic manifest so constraint collection can represent them uniformly.
+intrinsic_relation_shell(
+    headers: &super::headers::ParsedHeaders,
+    name: u32
+) -> Option<u32> {
+    handle super::lexer::lexeme(
+        super::headers::parsed_source(headers), Id::from_u32(name)
+    ) {
+        Result::Err(_) => None,
+        Result::Ok(text) => if(String::eq(text, &"Use")) {
+            Option::Some(4294901760)
+        } else if(String::eq(text, &"Fn")) {
+            Option::Some(4294901761)
+        } else if(String::eq(text, &"Label")) {
+            Option::Some(4294901762)
+        } else if(String::eq(text, &"RunsIn")) {
+            Option::Some(4294901763)
+        } else if(String::eq(text, &"Environment")) {
+            Option::Some(4294901764)
+        } else if(String::eq(text, &"Drop")) {
+            Option::Some(4294901765)
+        } else { None }
+    }
+}
+
 resolve_constraint_relation<'a>(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -4922,6 +4971,15 @@ resolve_constraint_relation<'a>(
     };
     let token = super::headers::name_use_token(last);
     let name = Id::to_u32(super::headers::name_use_name(last));
+    let intrinsic = if(count == 1) {
+        intrinsic_relation_shell(headers, name)
+    } else { None };
+    handle intrinsic {
+        Result::Ok(shell) => @resolve_constraint_relation(Result::Ok(
+            Id::from_u32(shell)
+        )),
+        Result::Err(_) => ()
+    };
     let target_module = if(count == 1) { module } else {
         let resolved = handle resolve_type_path_module(
             headers, declarations, names, 0, count - 1, module, true
@@ -5482,6 +5540,11 @@ constraint_scope_has_lifetime(
             signature_scope_has_lifetime(headers, operation, name, 0)
                 or { signature_scope_has_lifetime(
                     headers, effect_scope, name, 0
+                ) },
+        SignatureTypeScope::NominalMethod(method, enclosing) =>
+            signature_scope_has_lifetime(headers, method, name, 0)
+                or { signature_scope_has_lifetime(
+                    headers, enclosing, name, 0
                 ) }
     }
 }
@@ -6055,6 +6118,43 @@ set_effect_constraints(
     (*semantic_effect).constraints = constraints;
 }
 
+method_resolution_scope(
+    headers: &super::headers::ParsedHeaders,
+    shell: ShellId,
+    method: SignatureScope
+) -> Option<SignatureTypeScope> {
+    let nominal = super::headers::nominal_index(headers);
+    handle super::headers::def_kind_for_shell(nominal, shell) {
+        Result::Ok(super::headers::HeaderOrder::Trait(trait_id)) => handle
+            super::headers::trait_at(nominal, Id::to_usize(trait_id)) {
+            Result::Err(_) => Option::Some(
+                SignatureTypeScope::Declaration(method)
+            ),
+            Result::Ok(declaration) => Option::Some(
+                SignatureTypeScope::NominalMethod(
+                    signature_scope(
+                        shell, super::headers::trait_generics(declaration)
+                    ),
+                    method
+                ))
+        },
+        Result::Ok(super::headers::HeaderOrder::Impl(impl_id)) => handle
+            super::headers::impl_at(nominal, Id::to_usize(impl_id)) {
+            Result::Err(_) => Option::Some(
+                SignatureTypeScope::Declaration(method)
+            ),
+            Result::Ok(declaration) => Option::Some(
+                SignatureTypeScope::NominalMethod(
+                    signature_scope(
+                        shell, super::headers::impl_generics(declaration)
+                    ),
+                    method
+                ))
+        },
+        _ => Option::Some(SignatureTypeScope::Declaration(method))
+    }
+}
+
 collect_callables(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -6067,34 +6167,11 @@ collect_callables(
                 Result::Err(ElaborationError::MissingCallableHeader(index)),
             Result::Ok(callable) => {
                 let shell = super::headers::callable_shell(callable);
-                let trait_member = handle super::scanner::shell_at(
-                    declarations,
-                    shell
-                ) {
-                    Result::Err(_) => false,
-                    Result::Ok(owner) => handle super::scanner::shell_kind(owner) {
-                        super::scanner::DeclarationKind::Trait => true,
-                        super::scanner::DeclarationKind::Impl => true,
-                        _ => false
-                    }
-                };
-                if(trait_member) {
-                    // Trait requirements and implementation members are
-                    // retained by the header parser, but trait-interface
-                    // collection is a later semantic stage. Their enclosing
-                    // `Self` and generic binders cannot enter the ordinary
-                    // callable arena.
-                    collect_callables(
-                        headers,
-                        declarations,
-                        output,
-                        index + 1
-                    )
-                } else {
                 let scope = signature_scope(
                     shell,
                     super::headers::callable_generics(callable)
                 );
+                let resolution = method_resolution_scope(headers, shell, scope);
                 let module = handle super::scanner::shell_at(
                     declarations,
                     shell
@@ -6111,6 +6188,7 @@ collect_callables(
                             index,
                             module,
                             scope,
+                            resolution,
                             type_id_from_u32(0)
                         ),
                         Result::Ok(result_type) => {
@@ -6120,7 +6198,7 @@ collect_callables(
                             output,
                             result_type,
                             module,
-                            Option::Some(SignatureTypeScope::Declaration(scope))
+                            resolution
                         ), @collect_callables);
                         collect_callable(
                             headers,
@@ -6130,11 +6208,11 @@ collect_callables(
                             index,
                             module,
                             scope,
+                            resolution,
                             type_id_from_u32(result)
                         )
                         }
                     }
-                }
             }
         } } else { Result::Ok(()) }
 }
@@ -6147,6 +6225,7 @@ collect_callable(
     index: usize,
     module: Option<ShellId>,
     scope: SignatureScope,
+    resolution: Option<SignatureTypeScope>,
     result: TypeId
 ) -> Result<(), ElaborationError> {
     let shell = super::headers::callable_shell(callable);
@@ -6158,7 +6237,7 @@ collect_callable(
         callable,
         output,
         module,
-        scope,
+        resolution,
         0
     ), @collect_callable);
     let (effects, effect_tail) = try(collect_callable_effects(
@@ -6167,7 +6246,7 @@ collect_callable(
         callable,
         output,
         module,
-        scope
+        resolution
     ), @collect_callable);
     let where_tokens = super::headers::callable_where_tokens(callable);
     let callable_id = alloc_interface_callable(
