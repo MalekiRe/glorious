@@ -9,7 +9,7 @@ use grandiose::{
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{
-    Artifact, SystemHost, Type, Value, Vm,
+    Artifact, RuntimeError, SystemHost, Type, Value, Vm,
     bytecode::{I64, Instruction, U64},
     verify::{VerifiedArtifact, load_verified},
 };
@@ -1641,6 +1641,96 @@ fn self_hosted_effect_elaboration_diagnostic_returns_without_abort() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM terminal-perform gate"]
+fn self_hosted_terminal_text_perform_emits_vm_effect_and_is_unhandled() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("terminal-perform.glorious");
+            let output = directory.path().join("terminal-perform.grbc");
+            fs::write(
+                &input,
+                "effect Stop { stop(message: Text) -> ! } \
+                 trigger() -> ! / {Stop} { perform Stop::stop(\"terminal\") } \
+                 main() { () }",
+            )
+            .unwrap();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let compiler_bytes = phases.artifact.encode();
+            drop(phases);
+            let compiler = load_verified(&compiler_bytes).unwrap();
+            drop(compiler_bytes);
+            let vm = Vm::with_host(
+                compiler,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![output.into_os_string(), input.into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+
+            let bytes = fs::read(&output).unwrap();
+            let artifact = Artifact::decode(&bytes).unwrap();
+            assert_eq!(artifact.protocols.len(), 1);
+            let operation = &artifact.protocols[0].operations[0];
+            assert_eq!(operation.name, "stop");
+            assert_eq!(operation.payload_signature.params.len(), 1);
+            assert_eq!(operation.payload_signature.result, grandiose_vm::UNIT);
+            assert!(operation.terminal);
+            let trigger = function_id(&artifact, "trigger");
+            assert_eq!(artifact.functions[trigger as usize].outward_protocols, [0]);
+            assert!(artifact.code.iter().any(|instruction| matches!(
+                instruction,
+                Instruction::Perform {
+                    dst: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads,
+                } if payloads.len() == 1
+            )));
+            let verified = load_verified(&bytes).unwrap();
+            assert_eq!(
+                Vm::new(verified).run(trigger, vec![]),
+                Err(RuntimeError::UnhandledEffect {
+                    protocol: 0,
+                    operation: 0,
+                })
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM gate"]
+fn self_hosted_terminal_bool_handler_classifier_reaches_variant_dispatch() {
+    std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(|| {
+        let source = "effect Branch { select(condition: Bool) -> ! } \
+            choose(value: Bool) -> u32 { \
+                handle Branch::select(value) { \
+                    Branch::select(true) => 10, \
+                    Branch::select(false) => 20 \
+                } \
+            } main() { () }";
+        let phases = grandiose::compile_bundle_to_phases_with_options(
+            &self_host_bundle(), CompileOptions { optimization_level: OptimizationLevel::O2 }
+        ).unwrap();
+        let classify = function_id(&phases.artifact, "classify_compile_error");
+        let compiler = load_verified(&phases.artifact.encode()).unwrap();
+        assert_eq!(Vm::with_host(compiler, ["process.args", "fs.read", "fs.write", "diagnostic"],
+            SystemHost::new(vec![])).unwrap().run(classify, vec![Value::Text(source.into())]).unwrap(), Value::U64(0));
+    }).unwrap().join().unwrap();
 }
 
 #[test]
