@@ -307,6 +307,61 @@ copy_bytes_after(
     })
 }
 
+append_u32_le(output: &mut Vec<u8>, value: u32, remaining: usize) {
+    if(remaining == 0) {
+        ()
+    } else {
+        Vec::push(&mut *output, wrapping_convert_to_u8(value));
+        append_u32_le(output, shift_right(value, 8), remaining - 1)
+    }
+}
+
+literal_text_name(key: &Vec<u8>) -> Option<String> {
+    if(Vec::len(key) != 0 and { *Vec::index(key, 0) == 17 }) {
+        let text = Vec::new();
+        copy_bytes_after(key, 1, &mut text);
+        handle String::from_utf8(Bytes::from_vec(text)) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => Option::Some(found)
+        }
+    } else { None }
+}
+
+wire_constant_key(
+    key: &Vec<u8>,
+    names: &CanonicalPool<String>
+) -> Bytes {
+    let tag = *Vec::index(key, 0);
+    let output = Vec::new();
+    Vec::push(&mut output, wrapping_convert_to_u8(tag));
+    if(tag == 17) {
+        let text = handle literal_text_name(key) {
+            None => unreachable(),
+            Option::Some(found) => found
+        };
+        let name = handle canonical_id(names, &text) {
+            None => unreachable(),
+            Option::Some(found) => found
+        };
+        append_u32_le(&mut output, name, 4)
+    } else if(tag == 18) {
+        let length = Vec::len(key) - 1;
+        append_u32_le(&mut output, checked_u32(length), 4);
+        copy_bytes_after(key, 1, &mut output)
+    } else {
+        copy_bytes_after(key, 1, &mut output)
+    };
+    Bytes::from_vec(output)
+}
+
+wire_mir_constant_key(
+    key: &Bytes,
+    names: &CanonicalPool<String>
+) -> Bytes {
+    let semantic = Bytes::to_vec(*key);
+    wire_constant_key(&semantic, names)
+}
+
 constant_records(
     constants: &CanonicalPool<Bytes>,
     index: usize,
@@ -332,6 +387,7 @@ constant_records(
 
 collect_constant_values(
     program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     index: usize,
     output: &mut Vec<Bytes>
 ) {
@@ -339,20 +395,33 @@ collect_constant_values(
         index,
         super::lowering::mir_program_constant_count(program)
     ), { current => {
-        let key = Vec::new();
-        copy_bytes_after(
+        let semantic = super::lowering::mir_program_constant_at(
+                program,
+                super::lowering::mir_constant_id_from_usize(current)
+        );
+        Vec::push(&mut *output, wire_constant_key(semantic, names))
+    } })
+}
+
+collect_constant_names(
+    program: &super::lowering::MirProgram,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    for_range(Range::new(
+        index,
+        super::lowering::mir_program_constant_count(program)
+    ), { current =>
+        handle literal_text_name(
             super::lowering::mir_program_constant_at(
                 program,
                 super::lowering::mir_constant_id_from_usize(current)
-            ),
-            0,
-            &mut key
-        );
-        Vec::push(
-            &mut *output,
-            Bytes::from_vec(key)
-        )
-    } })
+            )
+        ) {
+            None => (),
+            Option::Some(found) => Vec::push(&mut *output, found)
+        }
+    })
 }
 
 collect_names(
@@ -1430,6 +1499,7 @@ append_functions(
 
 append_switch_cases(
     program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     constants: &CanonicalPool<Bytes>,
     function: &super::lowering::MirFunction,
     pack_id: super::lowering::MirSwitchPackId,
@@ -1444,7 +1514,8 @@ append_switch_cases(
     try_for_range(Range::new(index, end), { current => {
         let case = super::lowering::mir_switch_pack_at(pack, current);
         let key = super::lowering::mir_switch_case_key(case);
-        handle canonical_bytes_id(constants, key) {
+        let wire_key = wire_mir_constant_key(key, names);
+        handle canonical_bytes_id(constants, &wire_key) {
             Result::Err(_) => Result::Err(
                 EmissionError::MissingSwitchConstant(pack_id, current)
             ),
@@ -1468,6 +1539,7 @@ append_switch_cases(
 
 write_instruction(
     program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     constants: &CanonicalPool<Bytes>,
     mir_function: &super::lowering::MirFunction,
     instruction: &MirInstruction,
@@ -1476,7 +1548,8 @@ write_instruction(
 ) -> Result<(), EmissionError> {
     if(*instruction is MirInstruction::Const(target, key)) {
         let target_raw = super::lowering::register_raw(target);
-        handle canonical_bytes_id(constants, &key) {
+        let wire_key = wire_mir_constant_key(&key, names);
+        handle canonical_bytes_id(constants, &wire_key) {
             Result::Err(_) =>
                 Result::Err(EmissionError::MissingConstant(target)),
             Result::Ok(constant) => {
@@ -1687,6 +1760,7 @@ write_instruction(
         let operand_start = checked_u32(Vec::len(&*operands));
         try(append_switch_cases(
             program,
+            names,
             constants,
             mir_function,
             pack_id,
@@ -1905,6 +1979,7 @@ write_instruction(
 
 write_function_code(
     program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     constants: &CanonicalPool<Bytes>,
     function: &super::lowering::MirFunction,
     index: usize,
@@ -1915,6 +1990,7 @@ write_function_code(
     try_for_range(Range::new(index, end), { current =>
         write_instruction(
             program,
+            names,
             constants,
             function,
             super::lowering::mir_function_instruction_at(
@@ -1929,6 +2005,7 @@ write_function_code(
 
 write_all_code(
     program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     constants: &CanonicalPool<Bytes>,
     index: usize,
     code: &mut ByteBuf,
@@ -1945,6 +2022,7 @@ write_all_code(
         let start = checked_u32(ByteBuf::len(&*code) / 4);
         try(write_function_code(
             program,
+            names,
             constants,
             function,
             0,
@@ -2133,13 +2211,15 @@ new_emission_context<'a>(
     collect_protocol_names(program, 0, &mut name_values);
     collect_type_names(program, 0, &mut name_values);
     collect_host_names(program, &mut name_values);
+    collect_constant_names(program, 0, &mut name_values);
     let signature_values = Vec::new();
     collect_signatures(program, 0, &mut signature_values);
     let constant_values = Vec::new();
-    collect_constant_values(program, 0, &mut constant_values);
+    let names = freeze_canonical_pool(name_values);
+    collect_constant_values(program, &names, 0, &mut constant_values);
     EmissionContext {
         program: program,
-        names: freeze_canonical_pool(name_values),
+        names: names,
         signatures: freeze_stable_pool(signature_values),
         constants: freeze_canonical_pool(constant_values),
         operands: Vec::new(),
@@ -2154,6 +2234,7 @@ write_context_code<'a>(
 ) -> Result<(), EmissionError> {
     write_all_code(
         value.program,
+        &value.names,
         &value.constants,
         0,
         output,

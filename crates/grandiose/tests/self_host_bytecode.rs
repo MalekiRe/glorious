@@ -9,7 +9,7 @@ use grandiose::{
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{
-    Artifact, RuntimeError, SystemHost, Type, Value, Vm,
+    Artifact, Constant, RuntimeError, SystemHost, Type, Value, Vm,
     bytecode::{I64, Instruction, U64},
     verify::{VerifiedArtifact, load_verified},
 };
@@ -1837,9 +1837,13 @@ fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let source = "text_value() -> Text { \"hello\" } \\
-                bytes_value() -> Bytes { b\"\\x00\\xff\" } \\
+            let source = "text_value() -> Text { \"hello\" } \
+                bytes_value() -> Bytes { b\"\\x00\\xff\" } \
                 main() { () }";
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("literal-input.glorious");
+            let output = directory.path().join("literal-output.grbc");
+            fs::write(&input, source).unwrap();
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
                 CompileOptions {
@@ -1847,20 +1851,34 @@ fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
                 },
             )
             .unwrap();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let entry = phases.artifact.entry_function.unwrap();
             let compiler = load_verified(&phases.artifact.encode()).unwrap();
             assert_eq!(
                 Vm::with_host(
                     compiler,
                     ["process.args", "fs.read", "fs.write", "diagnostic"],
-                    SystemHost::new(vec![]),
+                    SystemHost::new(vec![
+                        output.clone().into_os_string(),
+                        input.into_os_string(),
+                    ]),
                 )
                 .unwrap()
-                .run(classify, vec![Value::Text(source.into())])
+                .run(entry, vec![])
                 .unwrap(),
-                Value::U64(0),
-                "literal Core values must lower to executable bytecode constants"
+                Value::Unit,
+                "self-host compiler must emit literal bytecode"
             );
+            let bytes = fs::read(output).unwrap();
+            let artifact = Artifact::decode(&bytes)
+                .expect("text and bytes constants must use GRBC wire payloads");
+            assert!(artifact.constants.iter().any(
+                |constant| matches!(constant, Constant::Text(text) if text == "hello")
+            ));
+            assert!(artifact.constants.iter().any(
+                |constant| matches!(constant, Constant::Bytes(bytes) if bytes == &[0, 0xff])
+            ));
+            load_verified(&bytes)
+                .expect("literal artifact must pass VM bytecode verification");
         })
         .unwrap()
         .join()
