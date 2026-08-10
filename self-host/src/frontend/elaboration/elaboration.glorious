@@ -1243,6 +1243,14 @@ core_handler_clause_set_body(
     ()
 }
 
+// Materialize the arena projection before a rewrite mutates the capture
+// storage.  Keeping this as a separate accessor prevents the self-host
+// borrow checker from extending the immutable `TypedBody` projection across
+// the subsequent mutable Vec index.
+closure_site_capture_start(value: &TypedBody, site: ClosureSiteId) -> u32 {
+    (Arena::index(&value.closure_sites, site)).captures.start
+}
+
 core_closure_capture_set_value(
     value: &mut CoreClosureCapture,
     replacement: CoreValueId
@@ -1275,7 +1283,7 @@ core_node_child_set(
                     core_rewrite_computation(replacement)
                 ),
                 CoreValueKind::Closure(site) => {
-                    let capture_start = closure_site_at(&*body, site).captures.start;
+                    let capture_start = closure_site_capture_start(&*body, site);
                     core_closure_capture_set_value(
                         Vec::index_mut(
                             &mut body.closure_captures,
