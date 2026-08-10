@@ -58126,7 +58126,10 @@ mod mir_edge_emission_tests {
         });
 
         assert!(layout_and_peephole(&mut artifact));
-        assert_eq!(artifact.functions[0].code_len, 2);
+        // The trailing NOP remains part of this function because `otherwise`
+        // targets it. Keeping it outside the function range would leave a
+        // function-local target equal to `code_len`, which is invalid.
+        assert_eq!(artifact.functions[0].code_len, 3);
         assert_eq!(
             artifact.code,
             vec![
