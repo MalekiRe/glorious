@@ -1370,13 +1370,41 @@ lower_typed_body_types<'a>(
 // the distributed Result declaration. Keep this deliberately small until the
 // self-host driver owns the complete standard-library bundle. Appending keeps
 // every user token (and hence every reported user token index) unchanged.
-minimal_interface_prelude(original: &String) -> String {
+//
+// The scanner is authoritative here: an explicit root `Result` must not gain
+// a second declaration from this compatibility prelude, because resolution
+// correctly treats that duplicate type name as ambiguous.
+source_declares_root_result(
+    source: &lexer::LexedSource,
+    declarations: &scanner::DeclarationIndex
+) -> Bool {
+    handle lexer::lexeme_id(source, &"Result") {
+        Result::Err(_) => false,
+        Result::Ok(name) => {
+            let found = scanner::def_search(
+                declarations,
+                None,
+                name,
+                scanner::Namespace::Type
+            );
+            scanner::def_search_count(&found) != 0
+        }
+    }
+}
+
+minimal_interface_prelude(
+    original: &String,
+    source: &lexer::LexedSource,
+    declarations: &scanner::DeclarationIndex
+) -> String {
     let output = ByteBuf::new();
     ByteBuf::append_bytes(&mut output, &String::as_bytes(original));
-    ByteBuf::append_bytes(
-        &mut output,
-        &String::as_bytes(&"\nenum Result<T, E> { Ok(T), Err(E) }\n")
-    );
+    if(not(source_declares_root_result(source, declarations))) {
+        ByteBuf::append_bytes(
+            &mut output,
+            &String::as_bytes(&"\nenum Result<T, E> { Ok(T), Err(E) }\n")
+        )
+    } else { () };
     handle String::from_utf8(ByteBuf::finish(output)) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
@@ -1386,7 +1414,25 @@ minimal_interface_prelude(original: &String) -> String {
 prepare_session(
     original: &String
 ) -> Result<CompilerSession, CompileError> {
-    let original = minimal_interface_prelude(original);
+    let scanned_source = try(
+        Result::map_err(
+            lexer::lex(original),
+            { found => CompileError::Lex(found) }
+        ),
+        @prepare_session
+    );
+    let scanned_declarations = try(
+        Result::map_err(
+            scanner::scan(&scanned_source),
+            { found => CompileError::Scan(found) }
+        ),
+        @prepare_session
+    );
+    let original = minimal_interface_prelude(
+        original,
+        &scanned_source,
+        &scanned_declarations
+    );
     let source = try(
         Result::map_err(
             lexer::lex(&original),
