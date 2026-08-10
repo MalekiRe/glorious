@@ -1585,7 +1585,7 @@ fn self_hosted_terminal_u32_handler_classifier_reaches_scalar_dispatch() {
         .spawn(|| {
             let source = "effect Stop { stop(value: u32) -> ! } \
                 selected() -> u32 { \
-                    handle perform Stop::stop(2) { \
+                    handle Stop::stop(2) { \
                         Stop::stop(0) => 10 \
                         Stop::stop(2) => 20 \
                         Stop::stop(_) => 30 \
