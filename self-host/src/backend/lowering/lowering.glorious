@@ -4229,14 +4229,24 @@ validate_mir_builder<'a>(
     }
 }
 
-all_effect_protocols(
+callable_effect_protocols(
     interfaces: &super::super::frontend::elaboration::TypedInterfaces,
-    index: usize,
+    callable: InterfaceCallableId,
+    ordinal: u32,
     output: &mut Vec<u32>
 ) {
-    if(index < super::super::frontend::elaboration::interface_effect_count(interfaces)) {
-        Vec::push(&mut *output, checked_u32(index));
-        all_effect_protocols(interfaces, index + 1, output)
+    if(ordinal < super::super::frontend::elaboration::
+        interface_callable_effect_count(interfaces, callable)) {
+        let ty = *handle super::super::frontend::elaboration::
+            interface_callable_effect_at(interfaces, callable, ordinal) {
+            None => unreachable(), Option::Some(found) => found
+        };
+        handle super::super::frontend::elaboration::
+            interface_effect_for_type(interfaces, ty) {
+            None => unreachable(),
+            Option::Some(effect) => Vec::push(&mut *output, Id::to_u32(effect))
+        };
+        callable_effect_protocols(interfaces, callable, ordinal + 1, output)
     } else { () }
 }
 
@@ -4299,12 +4309,10 @@ pub lower_function<'a>(
         None => unreachable(),
         Option::Some(found) => found
     };
-    // Until effect-row specialization is lowered, retain every concrete
-    // protocol in the outward row. This is conservative and allows the VM
-    // verifier to validate a direct terminal perform without pretending its
-    // effect was pure.
+    let callable = super::super::frontend::elaboration::
+        callable_instance_callable(interfaces, instance);
     let outward_protocols = Vec::new();
-    all_effect_protocols(interfaces, 0, &mut outward_protocols);
+    callable_effect_protocols(interfaces, callable, 0, &mut outward_protocols);
     handle result {
         Result::Err(_) => {
             try(validate_mir_builder(

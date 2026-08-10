@@ -2033,6 +2033,35 @@ pub interface_callable_generic_count(
     interface_callable_generics(value, id).count
 }
 
+pub interface_callable_effect_count(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> u32 { interface_callable_at(value, id).effects.count }
+
+pub interface_callable_effect_at(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId,
+    ordinal: u32
+) -> Option<TypeId> {
+    let range = interface_callable_at(value, id).effects;
+    if(ordinal < range.count) {
+        Option::Some(*Vec::index(
+            &value.callable_effects,
+            usize_from_u32(range.start + ordinal)
+        ))
+    } else { None }
+}
+
+pub interface_effect_for_type(
+    value: &TypedInterfaces,
+    ty: TypeId
+) -> Option<InterfaceEffectId> {
+    handle type_kind_at(value, ty) {
+        TypeKind::Effect(shell) => interface_effect_for_shell(value, shell),
+        _ => None
+    }
+}
+
 callable_instance_at<'a>(
     value: &'a TypedInterfaces,
     id: CallableInstanceId

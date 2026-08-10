@@ -1737,7 +1737,9 @@ lower_effect_operations(
         let name = try(effect_operation_name(&*session, operation), @lower_effect_operations);
         Vec::push(&mut *output, lowering::mir_operation(
             name,
-            lowering::mir_signature(payloads, result, Vec::new()),
+            lowering::mir_signature(
+                payloads, lowering::artifact_type_id(0), Vec::new()
+            ),
             result,
             elaboration::interface_effect_operation_resumption_lower(&session.interfaces, operation),
             elaboration::interface_effect_operation_resumption_upper(&session.interfaces, operation),
