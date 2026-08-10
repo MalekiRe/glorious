@@ -19,6 +19,9 @@ enum Opcode {
     Abort,
     Unreachable,
     Jump,
+    LabelPush,
+    LabelPop,
+    Leave,
     Switch,
     Call,
     MakeHandler,
@@ -52,6 +55,12 @@ opcode_spec(opcode: Opcode) -> OpcodeSpec {
         Opcode::Abort => OpcodeSpec { code: 70, operand_words: 1 },
         Opcode::Unreachable => OpcodeSpec { code: 39, operand_words: 0 },
         Opcode::Jump => OpcodeSpec { code: 32, operand_words: 1 },
+        // These opcode words and fields are the GRBC VM ABI: slot,
+        // destination result register, instruction target; then slot; then
+        // slot and atomically transferred value.
+        Opcode::LabelPush => OpcodeSpec { code: 40, operand_words: 3 },
+        Opcode::LabelPop => OpcodeSpec { code: 41, operand_words: 1 },
+        Opcode::Leave => OpcodeSpec { code: 42, operand_words: 2 },
         Opcode::Switch => OpcodeSpec { code: 33, operand_words: 4 },
         Opcode::Call => OpcodeSpec { code: 34, operand_words: 4 },
         Opcode::MakeHandler => OpcodeSpec { code: 16, operand_words: 4 },
@@ -1746,6 +1755,37 @@ write_instruction(
                 mir_function,
                 target
             )
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::LabelPush(
+        slot,
+        result,
+        target
+    )) {
+        write_opcode(&mut *code, Opcode::LabelPush);
+        ByteBuf::write_u32_le(code, slot);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_raw(result)
+        );
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::mir_function_block_offset(
+                mir_function,
+                target
+            )
+        );
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::LabelPop(slot)) {
+        write_opcode(&mut *code, Opcode::LabelPop);
+        ByteBuf::write_u32_le(code, slot);
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Leave(slot, payload)) {
+        write_opcode(&mut *code, Opcode::Leave);
+        ByteBuf::write_u32_le(code, slot);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_raw(payload)
         );
         Result::Ok(())
     } else if(*instruction is MirInstruction::Switch(

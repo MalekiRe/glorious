@@ -108,6 +108,14 @@ pub enum MirInstruction {
     Abort,
     Unreachable,
     Jump(MirBlockId),
+    // Dynamic activation is deliberately distinct from a transfer. `target`
+    // is the block entered by a later Leave, while normal execution continues
+    // at the next MIR instruction.
+    LabelPush(u32, RegisterId, MirBlockId),
+    LabelPop(u32),
+    // This is terminal for its current MIR block. The VM unwinds to the
+    // active LabelPush slot and installs `value` in its result register.
+    Leave(u32, RegisterId),
     Switch(RegisterId, MirSwitchPackId, MirBlockId),
     Call(Option<RegisterId>, MirFunctionId, RegisterPackId),
     MakeHandler(
@@ -416,6 +424,11 @@ F: Use<[0, 0]> {
         },
         MirInstruction::Abort => (),
         MirInstruction::Unreachable => (),
+        MirInstruction::LabelPush(_, result, _) =>
+            visitor(instruction, result, MirPlaceRole::Read, stop),
+        MirInstruction::LabelPop(_) => (),
+        MirInstruction::Leave(_, payload) =>
+            visitor(instruction, payload, MirPlaceRole::Transfer, stop),
         MirInstruction::Switch(register, _, _) =>
             visitor(instruction, register, MirPlaceRole::Read, stop),
         MirInstruction::Call(target, _, pack) => {
@@ -719,6 +732,10 @@ pub enum LoweringError {
     InvalidMirRegisterPack(RegisterPackId),
     InvalidMirSwitchPack(MirSwitchPackId),
     InvalidMirFunction(MirFunctionId),
+    // Label Core needs CFG and cleanup construction before it can become this
+    // MIR. Keep the unsupported state explicit rather than serializing an
+    // ordinary jump or call with different cleanup semantics.
+    LabelControlNotLowered(CoreComputationId),
     // Typed Core can retain effect control before MIR learns its one-shot
     // cleanup semantics. Reject it here rather than emitting ordinary calls.
     EffectControlNotLowered(CoreComputationId),
@@ -2172,6 +2189,14 @@ analyze_computation(
             output.live = joined;
             analyze_value(body, subject, output, allow_transfer)
         },
+        // Like effects, labels are already valid Typed Core even while the
+        // backend has not built their CFG/cleanup edges. Traverse both shapes
+        // here so lowering reports the explicit diagnostic below rather than
+        // failing during place-flow.
+        CoreComputationView::LabelDestination(_, _, child) =>
+            analyze_computation(body, child, output, allow_transfer),
+        CoreComputationView::Leave(_, _, payload) =>
+            analyze_value(body, payload, output, allow_transfer),
         // Effect control is deliberately rejected by `lower_computation`, but
         // source elaboration already produces these Core shapes.  Place-flow
         // runs before that rejection, so it must still be a total traversal:
@@ -3824,6 +3849,10 @@ lower_computation<'a>(
             lower_match(interfaces, body, value, id, subject, arms),
         CoreComputationView::IntegerDispatch(_, subject, arms) =>
             lower_integer_dispatch(interfaces, body, value, id, subject, arms),
+        CoreComputationView::LabelDestination(_, _, _) =>
+            Result::Err(LoweringError::LabelControlNotLowered(id)),
+        CoreComputationView::Leave(_, _, _) =>
+            Result::Err(LoweringError::LabelControlNotLowered(id)),
         CoreComputationView::Perform(_, operation, operands) => {
             let payloads = Vec::new();
             try(lower_arguments(
@@ -4142,6 +4171,13 @@ validate_mir_instruction<'a>(
         Result::Ok(())
     } else if(*instruction is MirInstruction::Unreachable) {
         Result::Ok(())
+    } else if(*instruction is MirInstruction::LabelPush(_, result, target)) {
+        try(validate_mir_register(value, result), @validate_mir_instruction);
+        validate_mir_block(value, target)
+    } else if(*instruction is MirInstruction::LabelPop(_)) {
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Leave(_, payload)) {
+        validate_mir_register(value, payload)
     } else if(*instruction is MirInstruction::Jump(block)) {
         validate_mir_block(value, block)
     } else if(*instruction is MirInstruction::Switch(
