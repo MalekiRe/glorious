@@ -2271,8 +2271,8 @@ body_callable_for_parsed_body<'a>(
     handle super::bodies::body_callable_index(body) {
         // Nominal members share their enclosing shell. Their parsed body
         // therefore carries the exact header selected by the method parser.
-        Option::Some(method) => super::headers::callable_at(headers, method),
-        Option::None => body_callable(
+        Result::Ok(method) => super::headers::callable_at(headers, method),
+        Result::Err(_) => body_callable(
             index, headers, super::bodies::body_shell(body)
         )
     }
