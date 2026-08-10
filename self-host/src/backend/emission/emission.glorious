@@ -2192,10 +2192,16 @@ write_functions(
         ByteBuf::write_u32_le(&mut *output, span.cleanup_start);
         ByteBuf::write_u32_le(&mut *output, span.cleanup_count);
         ByteBuf::write_u32_le(&mut *output, 0);
-        ByteBuf::write_u32_le(&mut *output, 0);
-        ByteBuf::write_u32_le(
-            &mut *output,
-            super::artifact::absent_id()
+        ByteBuf::write_u32_le(&mut *output,
+            super::lowering::artifact_type_raw(
+                super::lowering::mir_function_receiver_type(function)
+            )
+        );
+        ByteBuf::write_u32_le(&mut *output, handle
+            super::lowering::mir_function_receiver_mode(function) {
+                None => super::artifact::absent_id(),
+                Option::Some(mode) => mode
+            }
         );
         ByteBuf::write_u64_le(&mut *output, 0);
         ByteBuf::write_u64_le(&mut *output, 0);

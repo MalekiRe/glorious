@@ -293,6 +293,8 @@ pub struct MirFunction {
     parameters: Vec<ArtifactTypeId>,
     result: ArtifactTypeId,
     outward_protocols: Vec<u32>,
+    receiver_mode: Option<u32>,
+    receiver_type: ArtifactTypeId,
     register_count: u32,
     instructions: Vec<MirInstruction>,
     cleanups: Vec<MirCleanup>,
@@ -4380,6 +4382,8 @@ pub lower_function<'a>(
                 parameters: parameters,
                 result: result_type,
                 outward_protocols: outward_protocols,
+                receiver_mode: None,
+                receiver_type: artifact_type_id(0),
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
@@ -4404,6 +4408,8 @@ pub lower_function<'a>(
                 parameters: parameters,
                 result: result_type,
                 outward_protocols: outward_protocols,
+                receiver_mode: None,
+                receiver_type: artifact_type_id(0),
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
@@ -4486,6 +4492,8 @@ pub lower_primitive_function<'a>(
             Option::Some(found) => found
         },
         outward_protocols: Vec::new(),
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: builder.register_count,
         instructions: builder.instructions,
         cleanups: builder.cleanups,
@@ -4535,6 +4543,8 @@ pub lower_abort_function(
             Option::Some(found) => found
         },
         outward_protocols: Vec::new(),
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: parameter_count + 1,
         instructions: instructions,
         cleanups: Vec::new(),
@@ -4618,6 +4628,8 @@ pub lower_host_function<'a>(
             Option::Some(found) => found
         },
         outward_protocols: Vec::new(),
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: builder.register_count,
         instructions: builder.instructions,
         cleanups: builder.cleanups,
@@ -4978,6 +4990,8 @@ pub new_mir_function(
         parameters: parameters,
         result: result,
         outward_protocols: outward_protocols,
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: register_count,
         instructions: Vec::new(),
         cleanups: Vec::new(),
@@ -4986,6 +5000,14 @@ pub new_mir_function(
         blocks: Arena::new(),
         switch_packs: Arena::new()
     }
+}
+
+pub mir_function_receiver_mode(value: &MirFunction) -> Option<u32> {
+    value.receiver_mode
+}
+
+pub mir_function_receiver_type(value: &MirFunction) -> ArtifactTypeId {
+    value.receiver_type
 }
 
 pub alloc_mir_register_pack(
