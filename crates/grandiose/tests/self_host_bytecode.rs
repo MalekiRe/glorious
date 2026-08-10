@@ -1574,6 +1574,53 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
 
 #[test]
 #[ignore = "expensive release VM gate"]
+fn self_hosted_terminal_u32_handler_classifier_reaches_scalar_dispatch() {
+    // This is deliberately the narrow terminal-handler form accepted by the
+    // self-host scalar-dispatch path: one terminal operation, one u32 payload,
+    // literal tests followed by a wildcard, and branch bodies with one common
+    // scalar result. The selected literal proves the source is not merely a
+    // generic wildcard handler.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "effect Stop { stop(value: u32) -> ! } \
+                selected() -> u32 { \
+                    handle perform Stop::stop(2) { \
+                        Stop::stop(0) => 10 \
+                        Stop::stop(2) => 20 \
+                        Stop::stop(_) => 30 \
+                    } \
+                } \
+                main() { () }";
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap(),
+                Value::U64(0),
+                "the constrained terminal-u32 handler must reach scalar dispatch"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM gate"]
 fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm() {
     // Trait requirements and generic implementation members are retained in
     // the callable interface arena. Their exposed signatures still contain
