@@ -9523,11 +9523,11 @@ finish_value(
 }
 
 // A label invocation is a control transfer, not an ordinary callable value.
-// Its payload supplies the value observed at the destination, so preserving
-// the expected result type here also keeps the ownership/type discipline used
-// for ordinary return paths.  The compact Core currently represents this
-// terminal transfer by its payload computation; no continuation is serialized
-// after a tail-position label invocation.
+// The lexical lookup is deliberately performed here, while the destination is
+// active, rather than in a later lowering pass that would only see a spelling.
+// Its payload is checked against the destination's declared result type; the
+// transfer itself has `Never`, which is admissible in every surrounding
+// expression position.
 elaborate_label_call(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -9542,8 +9542,19 @@ elaborate_label_call(
     let token = super::bodies::expression_token_start_at(body, expression);
     let found_count = super::bodies::expression_child_count_at(body, expression)
         - 1;
-    if(found_count == 1) {
-        elaborate_expression(
+    let callee = super::bodies::expression_child_at(body, expression, 0);
+    let name = handle super::bodies::expression_view(body, callee) {
+        super::bodies::BodyExpressionView::LabelReference(label) =>
+            super::bodies::label_name(&label),
+        _ => unreachable()
+    };
+    handle active_label_destination(value, name) {
+        None => Result::Err(ElaborationError::UnsupportedExpression(token)),
+        Option::Some(destination) => if(found_count == 1) {
+        let result_type = typed_body_label_destination_result_type_from_builder(
+            &value.core, destination
+        );
+        let payload = try(elaborate_expression(
             original,
             headers,
             declarations,
@@ -9552,11 +9563,165 @@ elaborate_label_call(
             map,
             value,
             super::bodies::expression_child_at(body, expression, 1),
-            expected
-        )
+            Option::Some(result_type)
+        ), @elaborate_label_call);
+        let payload = embed_operand(&mut value.core, payload);
+        let leave = push_computation(
+            &mut value.core,
+            type_id_from_u32(1),
+            CoreComputationKind::Leave(destination, payload)
+        );
+        check_expected(Elaborated {
+            type_id: type_id_from_u32(1),
+            form: ElaboratedForm::Computation(leave)
+        }, expected, token)
     } else { Result::Err(ElaborationError::ArgumentCountMismatch(
-        token, 1, found_count
-    )) }
+            token, 1, found_count
+        )) }
+    }
+}
+
+// This mirrors the public TypedBody accessor, but destination allocation and
+// elaboration happen before the builder is finalized into a TypedBody.
+typed_body_label_destination_result_type_from_builder(
+    value: &CoreBuilder,
+    id: LabelDestinationId
+) -> TypeId {
+    let destination = handle Vec::get(&value.label_destinations, Id::to_usize(id)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    };
+    destination.result_type
+}
+
+// Label annotations use the body-type grammar rather than signature headers.
+// Keep this deliberately small and semantic: a path or application resolves
+// through the same declaration/builtin arena used by ordinary signatures.
+// Generic label annotations will be completed alongside callable generic
+// value support; they cannot be represented by this body-local foundation.
+resolve_label_body_type(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    ty: super::bodies::BodyTypeId
+) -> Result<TypeId, ElaborationError> {
+    handle super::bodies::body_type_view(body, ty) {
+        super::bodies::BodyTypeView::Path(name, token) => handle
+            super::lexer::lexeme(super::headers::parsed_source(headers), name) {
+            Result::Err(_) => Result::Err(ElaborationError::UnknownTypeName(token)),
+            Result::Ok(text) => if(String::eq(text, &"Unit")) {
+                Result::Ok(type_id_from_u32(0))
+            } else { handle scalar_kind(text) {
+                Result::Ok(kind) => Result::Ok(type_id_from_u32(
+                    signature_scalar_type(interfaces, kind)
+                )),
+                Result::Err(_) => handle named_builtin_type(interfaces, text) {
+                    Result::Ok(found) => Result::Ok(type_id_from_u32(found)),
+                    Result::Err(_) => handle type_name_target(
+                        headers, declarations, Id::to_u32(name), None
+                    ) {
+                        Result::Ok(found) => Result::Ok(type_id_from_u32(try(
+                            resolve_type_name_target(
+                                headers, declarations, interfaces, found, token
+                            ), @resolve_label_body_type
+                        ))),
+                        Result::Err(_) => Result::Err(
+                            ElaborationError::UnknownTypeName(token)
+                        )
+                    }
+                }
+            } }
+        },
+        super::bodies::BodyTypeView::Application(constructor, arguments) => {
+            let constructor = try(resolve_label_body_type(
+                headers, declarations, interfaces, body, constructor
+            ), @resolve_label_body_type);
+            let elements = Vec::new();
+            try(resolve_label_body_type_arguments(
+                headers, declarations, interfaces, body, arguments, &mut elements, 0
+            ), @resolve_label_body_type);
+            Result::Ok(type_id_from_u32(intern_application_type(
+                interfaces, constructor, &elements
+            )))
+        }
+    }
+}
+
+resolve_label_body_type_arguments<'a>(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    arguments: Slice<'a, super::bodies::BodyTypeId>,
+    output: &mut Vec<u32>,
+    ordinal: usize
+) -> Result<(), ElaborationError> {
+    if(ordinal < Slice::len(arguments)) {
+        let argument = handle Slice::get(arguments, ordinal) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => *found
+        };
+        let resolved = try(resolve_label_body_type(
+            headers, declarations, interfaces, body, argument
+        ), @resolve_label_body_type_arguments);
+        Vec::push(output, Id::to_u32(resolved));
+        resolve_label_body_type_arguments(
+            headers, declarations, interfaces, body, arguments, output, ordinal + 1
+        )
+    } else { Result::Ok(()) }
+}
+
+elaborate_label_destination(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    label: super::bodies::LabelSyntax,
+    annotation: Option<super::bodies::BodyTypeId>,
+    child: super::bodies::ExprId,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let result_type = handle annotation {
+        Option::Some(found) => try(resolve_label_body_type(
+            headers, declarations, interfaces, body, found
+        ), @elaborate_label_destination),
+        // The bootstrap surface uses an omitted destination annotation for a
+        // unit payload (`@done: { @done() }`).  Do not accidentally borrow the
+        // enclosing expression's result type here: nested labels commonly
+        // transfer to a differently typed outer destination.
+        None => type_id_from_u32(0)
+    };
+    let destination = push_label_destination(&mut value.core, result_type);
+    let name = super::bodies::label_name(&label);
+    push_active_label(value, name, destination);
+    let elaborated = elaborate_expression(
+        original, headers, declarations, interfaces, body, map, value,
+        Id::to_u32(child), Option::Some(result_type)
+    );
+    pop_active_label(value);
+    let elaborated = try(elaborated, @elaborate_label_destination);
+    // A destination whose body cannot complete normally remains terminal in
+    // the enclosing expression even when its own payload type is `Unit`.
+    // This is the nested `@inner { @inner(); @outer(...) }` case from the
+    // bootstrap label suite: `@inner()` carries Unit, while the outer body is
+    // still allowed to continue only through the Never-typed outer transfer.
+    let computation_type = if(type_is_never(elaborated.type_id)) {
+        type_id_from_u32(1)
+    } else { result_type };
+    let child = as_computation(&mut value.core, elaborated);
+    let destination = push_computation(
+        &mut value.core,
+        computation_type,
+        CoreComputationKind::LabelDestination(destination, child)
+    );
+    check_expected(Elaborated {
+        type_id: computation_type,
+        form: ElaboratedForm::Computation(destination)
+    }, expected, super::bodies::label_token(&label))
 }
 
 elaborate_call(
@@ -12348,6 +12513,21 @@ elaborate_expression(
             expression,
             expected
         ),
+        super::bodies::BodyExpressionView::LabelDestination(label, annotation, child) =>
+            elaborate_label_destination(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                expression,
+                label,
+                annotation,
+                child,
+                expected
+            ),
         super::bodies::BodyExpressionView::Tuple(_) => elaborate_tuple(
             original,
             headers,

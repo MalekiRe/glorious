@@ -2192,6 +2192,45 @@ fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
 }
 
 #[test]
+fn self_host_label_elaboration_retains_generative_lexical_control_in_core() {
+    // This is intentionally a Typed-Core gate rather than an emitted-bytecode
+    // claim: labels must remain direct control until the later MIR protected
+    // control lowering exists.  It guards the two semantic invariants taken
+    // from labels_leave.rs: nested same-name destinations shadow lexically,
+    // and a call carries the destination identity rather than just its value.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "LabelDestination(LabelDestinationId, CoreComputationId)",
+        "Leave(LabelDestinationId, CoreValueId)",
+        "active_label_destination_at(",
+        "let current = index - 1;",
+        "push_label_destination(&mut value.core, result_type)",
+        "push_active_label(value, name, destination)",
+        "CoreComputationKind::Leave(destination, payload)",
+        "CoreComputationKind::LabelDestination(destination, child)",
+        "type_id_from_u32(1)",
+    ] {
+        assert!(core.contains(required), "missing label Typed Core behavior: {required}");
+    }
+    let label_call = core
+        .split("elaborate_label_call(")
+        .nth(1)
+        .expect("label call elaborator exists");
+    assert!(
+        label_call.contains("active_label_destination(value, name)"),
+        "label calls must resolve only against the active lexical stack"
+    );
+    assert!(
+        !label_call.contains("expected\n        )\n    } else"),
+        "a label payload must not be checked against its surrounding result type"
+    );
+}
+
+#[test]
 fn self_hosted_monomorphic_perform_elaborates_like_bootstrap() {
     // Keep the first executable effect-body parity case intentionally narrow:
     // a monomorphic operation has no continuation lowering requirement, but
