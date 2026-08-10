@@ -10048,6 +10048,15 @@ fn compile_program_with_phases(
     } else {
         Vec::new()
     };
+    // Peepholes can erase the last use of a materialized literal (for
+    // example, a constant immediately before a unit return). Constants are
+    // reachable only from Const and Switch instructions, so remove entries
+    // that became dead before final canonical ordering.
+    let unused_constants_pruned = if options.optimization_level >= mir::OptimizationLevel::O2 {
+        prune_unused_constants(&mut artifact)
+    } else {
+        false
+    };
     let peephole_changed = mir_layout_changed || peephole_pc_maps.iter().any(Option::is_some);
     timings.mark("emit-bytecode-and-peephole");
     if artifact.code.iter().any(|instruction| {
@@ -10245,6 +10254,7 @@ fn compile_program_with_phases(
             pass: mir::OptimizationPass::LayoutAndPeephole,
             outcome: if peephole_changed
                 || registers_compacted_after_peephole
+                || unused_constants_pruned
                 || artifact.constants != constants_before_canonicalization
             {
                 mir::OptimizationPassOutcome::Changed
@@ -55042,6 +55052,47 @@ fn canonicalize_constants(artifact: &mut Artifact) {
     artifact.canonicalize_constants();
 }
 
+/// Remove constant-pool entries that no instruction can observe after
+/// peephole rewriting, repairing the remaining Const and Switch IDs.
+fn prune_unused_constants(artifact: &mut Artifact) -> bool {
+    let mut used = vec![false; artifact.constants.len()];
+    for instruction in &artifact.code {
+        match instruction {
+            Instruction::Const { constant, .. } => used[*constant as usize] = true,
+            Instruction::Switch { cases, .. } => {
+                for (constant, _) in cases {
+                    used[*constant as usize] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if used.iter().all(|used| *used) {
+        return false;
+    }
+
+    let old = std::mem::take(&mut artifact.constants);
+    let mut remap = vec![0_u32; old.len()];
+    for (old_id, constant) in old.into_iter().enumerate() {
+        if used[old_id] {
+            remap[old_id] = artifact.constants.len() as u32;
+            artifact.constants.push(constant);
+        }
+    }
+    for instruction in &mut artifact.code {
+        match instruction {
+            Instruction::Const { constant, .. } => *constant = remap[*constant as usize],
+            Instruction::Switch { cases, .. } => {
+                for (constant, _) in cases {
+                    *constant = remap[*constant as usize];
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Put MIR blocks in their final emission order without changing their stable
 /// identities.  Compact G1 MIR does not retain the full lowering-time block
 /// kind, so cleanup and resumption regions are recovered only from exact
@@ -57026,7 +57077,8 @@ mod mir_edge_emission_tests {
     use super::{
         Constant, Instruction, MirBuilderItem, MirLowerer, Primitive, Span,
         compact_artifact_registers_after_peephole, constant_key, emit_mir_function,
-        layout_and_peephole, layout_mir_blocks, mir, serialize_mir_cleanup_plans,
+        layout_and_peephole, layout_mir_blocks, mir, prune_unused_constants,
+        serialize_mir_cleanup_plans,
     };
 
     #[test]

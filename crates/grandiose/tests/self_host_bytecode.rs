@@ -1611,6 +1611,55 @@ fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
 }
 
 #[test]
+fn bootstrap_self_host_bytecode_prunes_dead_constants_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let mut used = vec![false; phases.artifact.constants.len()];
+            for instruction in &phases.artifact.code {
+                match instruction {
+                    Instruction::Const { constant, .. } => used[*constant as usize] = true,
+                    Instruction::Switch { cases, .. } => {
+                        for (constant, _) in cases {
+                            used[*constant as usize] = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                used.into_iter().all(|used| used),
+                "O2 bootstrap bytecode must not retain constants removed by peepholes"
+            );
+
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text("\"".into())])
+                .unwrap(),
+                Value::U64(1),
+                "the compacted bootstrap artifact must execute in the VM"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_hosted_prelude_bool_alias_resolves_before_literal_fallback_in_release_vm() {
     // The production prelude models Bool as Result<(), ()> and then exports
     // `true` as a global factory alias. Resolution must use that alias when
