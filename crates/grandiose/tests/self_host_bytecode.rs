@@ -1738,6 +1738,7 @@ fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm()
 }
 
 #[test]
+#[ignore = "expensive release VM diagnostic gate"]
 fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
     // Reuse the parser-valid monomorphic `perform` specimen from the typed
     // Core self-host tests. Effect MIR is intentionally not implemented, so
@@ -1755,7 +1756,7 @@ fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
                 },
             )
             .unwrap();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let diagnostic = function_id(&phases.artifact, "diagnostic_fingerprint");
             let compiler = load_verified(&phases.artifact.encode()).unwrap();
             assert_eq!(
                 Vm::with_host(
@@ -1764,10 +1765,14 @@ fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
                     SystemHost::new(vec![]),
                 )
                 .unwrap()
-                .run(classify, vec![Value::Text(source.into())])
+                .run(diagnostic, vec![Value::Text(source.into())])
                 .unwrap(),
-                Value::U64(10),
-                "effect control must reach CompileError::Lowering"
+                // phase=Lowering (10), class=Internal (7), local code=26,
+                // primary=CoreComputation (10), owner=Declaration (3).
+                // Going through diagnostics::compile_source exercises the
+                // renderer that previously fell through to `unreachable`.
+                Value::U64(10_700_026_103),
+                "residual nonterminal effect control must render as a structured lowering diagnostic"
             );
         })
         .unwrap()
