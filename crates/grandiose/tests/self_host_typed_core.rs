@@ -146,6 +146,44 @@ fn self_hosted_trait_and_impl_generic_member_signatures_collect_in_vm() {
 }
 
 #[test]
+fn self_hosted_nominal_method_generic_owner_is_distinct_in_release_vm() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = artifact_function_id(
+        &phases.artifact,
+        ":nominal_method_generic_owner_status",
+    );
+    let verified = verify(phases.artifact).unwrap();
+    let source = "trait Binder<T> { \
+            select<U>(outer: T, receiver: &Self, inner: U) -> U; \
+        } \
+        struct Wrapper<T> { value: T } \
+        impl<T> Binder<T> for Wrapper<T> { \
+            select<U>(outer: T, receiver: &Self, inner: U) -> U { inner } \
+        } \
+        main() { () }";
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    let Value::U64(status) = vm.run(function, vec![Value::Text(source.into())]).unwrap()
+    else {
+        panic!("nominal_method_generic_owner_status did not return u8");
+    };
+    assert_eq!(
+        status, 0,
+        "enclosing T and method U must retain distinct generic owners"
+    );
+}
+
+#[test]
 fn self_hosted_generic_trait_headers_retain_supertrait_applications_in_vm() {
     let phases = grandiose::compile_bundle_to_phases_with_options(
         &self_host_bundle(),

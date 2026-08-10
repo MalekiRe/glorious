@@ -98,6 +98,71 @@ pub interface_collection_status(original: String) -> u8 {
     }
 }
 
+nominal_method_owner_pair_at(
+    interfaces: &TypedInterfaces,
+    method_index: usize,
+    declaration_index: usize
+) -> Bool {
+    if(declaration_index < super::super::frontend::elaboration::interface_type_count(
+        interfaces
+    )) {
+        if(super::super::frontend::elaboration::interface_type_c_at(
+            interfaces, method_index
+        ) == 2
+            and { super::super::frontend::elaboration::interface_type_c_at(
+                interfaces, declaration_index
+            ) == 0 }
+            and { super::super::frontend::elaboration::interface_type_a_at(
+                interfaces, method_index
+            ) == super::super::frontend::elaboration::interface_type_a_at(
+                interfaces, declaration_index
+            ) }) { true } else {
+            nominal_method_owner_pair_at(
+                interfaces, method_index, declaration_index + 1
+            )
+        }
+    } else { false }
+}
+
+nominal_method_owner_pair_exists(
+    interfaces: &TypedInterfaces,
+    index: usize
+) -> Bool {
+    if(index < super::super::frontend::elaboration::interface_type_count(
+        interfaces
+    )) {
+        nominal_method_owner_pair_at(interfaces, index, 0)
+            or { nominal_method_owner_pair_exists(interfaces, index + 1) }
+    } else { false }
+}
+
+// Trait/impl method binders use the enclosing shell, just like the nominal
+// binders.  This probe proves the method's generic owner remains separately
+// branded even when both binders have ordinal zero.
+pub nominal_method_generic_owner_status(original: String) -> u8 {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => 1,
+        Result::Ok(source) => handle
+            super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => 2,
+            Result::Ok(declarations) => handle
+                super::super::frontend::headers::parse(
+                    &original, source, &declarations
+                ) {
+                    Result::Err(_) => 3,
+                    Result::Ok(headers) => handle collect_interfaces(
+                        &headers, &declarations
+                    ) {
+                        Result::Err(_) => 4,
+                        Result::Ok(interfaces) => if(
+                            nominal_method_owner_pair_exists(&interfaces, 0)
+                        ) { 0 } else { 5 }
+                    }
+                }
+            }
+    }
+}
+
 // Header-only trait probe: semantic trait selection is intentionally not
 // involved.  It proves that generic trait declarations retain each parsed
 // supertrait application in the shared header type arena.

@@ -19,7 +19,11 @@ pub type InterfaceEffectOperationId = Id<InterfaceEffectOperationTag>;
 
 enum TypeParameterOwner {
     Declaration(ShellId),
-    EffectOperation(InterfaceEffectOperationId)
+    EffectOperation(InterfaceEffectOperationId),
+    // A nominal method shares its declaration shell with the enclosing trait
+    // or impl.  Its generic range start is therefore part of its identity.
+    NominalMethod(ShellId, u32),
+    TraitSelf(ShellId)
 }
 
 impl Use<[0, *]> for TypeParameterOwner {}
@@ -256,6 +260,7 @@ struct InterfaceCallable {
     result: TypeId,
     parameters: CallableParameterRange,
     generics: SignatureScope,
+    generic_owner: TypeParameterOwner,
     effects: TypeElementRange,
     effect_tail: Option<u32>,
     where_start: usize,
@@ -290,10 +295,17 @@ enum SignatureTypeScope {
     ),
     // A trait/impl method resolves its own binders before the enclosing
     // declaration binders.
-    NominalMethod(SignatureScope, SignatureScope)
+    NominalMethod(SignatureScope, SignatureScope, NominalSelfScope)
 }
 
 impl Use<[0, *]> for SignatureTypeScope {}
+
+enum NominalSelfScope {
+    Trait(ShellId),
+    Impl(super::headers::TypeId)
+}
+
+impl Use<[0, *]> for NominalSelfScope {}
 
 struct ResolvedModule { shell: Option<ShellId> }
 
@@ -1950,6 +1962,13 @@ interface_callable_generics(
     interface_callable_at(value, id).generics
 }
 
+interface_callable_generic_owner(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> TypeParameterOwner {
+    interface_callable_at(value, id).generic_owner
+}
+
 pub interface_callable_generic_count(
     value: &TypedInterfaces,
     id: InterfaceCallableId
@@ -2305,7 +2324,11 @@ pub interface_type_at<'a>(
             TypeParameterOwner::Declaration(id) =>
                 InterfaceTypeView::TypeParameter(0, Id::to_u32(id), ordinal),
             TypeParameterOwner::EffectOperation(id) =>
-                InterfaceTypeView::TypeParameter(1, Id::to_u32(id), ordinal)
+                InterfaceTypeView::TypeParameter(1, Id::to_u32(id), ordinal),
+            TypeParameterOwner::NominalMethod(id, _) =>
+                InterfaceTypeView::TypeParameter(2, Id::to_u32(id), ordinal),
+            TypeParameterOwner::TraitSelf(id) =>
+                InterfaceTypeView::TypeParameter(3, Id::to_u32(id), ordinal)
         },
         TypeKind::Tuple(range) => InterfaceTypeView::Tuple(
             handle Slice::subslice(
@@ -2367,7 +2390,9 @@ pub interface_type_a_at(value: &TypedInterfaces, index: usize) -> u32 {
         TypeKind::Scalar(kind) => u32_from_u8(kind),
         TypeKind::TypeParameter(owner, _) => handle owner {
             TypeParameterOwner::Declaration(id) => Id::to_u32(id),
-            TypeParameterOwner::EffectOperation(id) => Id::to_u32(id)
+            TypeParameterOwner::EffectOperation(id) => Id::to_u32(id),
+            TypeParameterOwner::NominalMethod(id, _) => Id::to_u32(id),
+            TypeParameterOwner::TraitSelf(id) => Id::to_u32(id)
         },
         TypeKind::Tuple(range) => range.start,
         TypeKind::Array(element) => Id::to_u32(element),
@@ -2394,7 +2419,9 @@ pub interface_type_c_at(value: &TypedInterfaces, index: usize) -> u32 {
         TypeKind::Application(_, range) => range.count,
         TypeKind::TypeParameter(owner, _) => handle owner {
             TypeParameterOwner::Declaration(_) => 0,
-            TypeParameterOwner::EffectOperation(_) => 1
+            TypeParameterOwner::EffectOperation(_) => 1,
+            TypeParameterOwner::NominalMethod(_, _) => 2,
+            TypeParameterOwner::TraitSelf(_) => 3
         },
         _ => 0
     }
@@ -3657,13 +3684,31 @@ type_parameter_owners_equal(
     handle left {
         TypeParameterOwner::Declaration(left_id) => handle right {
             TypeParameterOwner::Declaration(right_id) => left_id == right_id,
-            TypeParameterOwner::EffectOperation(_) => false
+            TypeParameterOwner::EffectOperation(_) => false,
+            TypeParameterOwner::NominalMethod(_, _) => false,
+            TypeParameterOwner::TraitSelf(_) => false
         },
         TypeParameterOwner::EffectOperation(left_id) => handle right {
             TypeParameterOwner::Declaration(_) => false,
             TypeParameterOwner::EffectOperation(right_id) =>
-                left_id == right_id
-        }
+                left_id == right_id,
+            TypeParameterOwner::NominalMethod(_, _) => false,
+            TypeParameterOwner::TraitSelf(_) => false
+        },
+        TypeParameterOwner::NominalMethod(left_shell, left_start) =>
+            handle right {
+                TypeParameterOwner::Declaration(_) => false,
+                TypeParameterOwner::EffectOperation(_) => false,
+                TypeParameterOwner::NominalMethod(right_shell, right_start) =>
+                    left_shell == right_shell and { left_start == right_start },
+                TypeParameterOwner::TraitSelf(_) => false
+            },
+        TypeParameterOwner::TraitSelf(left_shell) => handle right {
+            TypeParameterOwner::Declaration(_) => false,
+            TypeParameterOwner::EffectOperation(_) => false,
+            TypeParameterOwner::NominalMethod(_, _) => false,
+            TypeParameterOwner::TraitSelf(right_shell) => left_shell == right_shell
+            }
     }
 }
 
@@ -4351,10 +4396,12 @@ signature_type_parameter(
                 ))
             }
         },
-        SignatureTypeScope::NominalMethod(method, enclosing) =>
+        SignatureTypeScope::NominalMethod(method, enclosing, _) =>
             handle generic_type_parameter(headers, method, name, 0) {
             Result::Ok(ordinal) => Option::Some((
-                TypeParameterOwner::Declaration(method.owner), ordinal
+                TypeParameterOwner::NominalMethod(
+                    method.owner, method.start
+                ), ordinal
             )),
             Result::Err(_) => handle generic_type_parameter(
                 headers, enclosing, name, 0
@@ -4381,7 +4428,7 @@ signature_lifetime_parameter(
                 or { generic_lifetime_parameter(
                     headers, declaration, name, 0
                 ) },
-        SignatureTypeScope::NominalMethod(method, enclosing) =>
+        SignatureTypeScope::NominalMethod(method, enclosing, _) =>
             generic_lifetime_parameter(headers, method, name, 0)
                 or { generic_lifetime_parameter(
                     headers, enclosing, name, 0
@@ -4408,6 +4455,41 @@ reference_lifetime_valid(
                 _ => false
             }
         }
+    }
+}
+
+resolve_nominal_method_self_type(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    module: Option<ShellId>,
+    scope: Option<SignatureTypeScope>
+) -> Option<Result<u32, ElaborationError>> {
+    handle scope {
+        Option::Some(SignatureTypeScope::NominalMethod(
+            _, enclosing, self_scope
+        )) => handle self_scope {
+            NominalSelfScope::Trait(shell) => Option::Some(Result::Ok(
+                intern_record_type(
+                    output,
+                    TypeKind::TypeParameter(
+                        TypeParameterOwner::TraitSelf(shell), 0
+                    ),
+                    false
+                )
+            )),
+            NominalSelfScope::Impl(self_type) => Option::Some(
+                resolve_signature_type(
+                    headers,
+                    declarations,
+                    output,
+                    self_type,
+                    module,
+                    Option::Some(SignatureTypeScope::Declaration(enclosing))
+                )
+            )
+        },
+        _ => None
     }
 }
 
@@ -4585,7 +4667,7 @@ resolve_alias_application(
         Result::Ok(Id::to_u32(instantiate_call_type(
             output,
             type_id_from_u32(target),
-            scope.owner,
+            TypeParameterOwner::Declaration(scope.owner),
             &substitutions
         )))
     }
@@ -4629,7 +4711,16 @@ resolve_signature_type(
             ) {
                 Result::Err(_) =>
                     Result::Err(ElaborationError::UnknownTypeName(token)),
-                Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle named_builtin_type(output, name) {
+                Result::Ok(name) => if(String::eq(name, &"Self")) {
+                    handle resolve_nominal_method_self_type(
+                        headers, declarations, output, module, scope
+                    ) {
+                        Result::Ok(found) => found,
+                        Result::Err(_) => Result::Err(
+                            ElaborationError::UnknownTypeName(token)
+                        )
+                    }
+                } else { if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle named_builtin_type(output, name) {
                     Result::Ok(ty) => Result::Ok(ty),
                     Result::Err(_) => handle scalar_kind(name) {
                         Result::Err(_) => handle type_name_target(
@@ -4652,7 +4743,7 @@ resolve_signature_type(
                         Result::Ok(kind) => Result::Ok(
                             signature_scalar_type(output, kind)
                         )
-                    } } }
+                    } } } }
             } }
         } else {
             let type_name = handle Slice::get(
@@ -5541,7 +5632,7 @@ constraint_scope_has_lifetime(
                 or { signature_scope_has_lifetime(
                     headers, effect_scope, name, 0
                 ) },
-        SignatureTypeScope::NominalMethod(method, enclosing) =>
+        SignatureTypeScope::NominalMethod(method, enclosing, _) =>
             signature_scope_has_lifetime(headers, method, name, 0)
                 or { signature_scope_has_lifetime(
                     headers, enclosing, name, 0
@@ -6132,10 +6223,11 @@ method_resolution_scope(
             ),
             Result::Ok(declaration) => Option::Some(
                 SignatureTypeScope::NominalMethod(
+                    method,
                     signature_scope(
                         shell, super::headers::trait_generics(declaration)
                     ),
-                    method
+                    NominalSelfScope::Trait(shell)
                 ))
         },
         Result::Ok(super::headers::HeaderOrder::Impl(impl_id)) => handle
@@ -6145,13 +6237,27 @@ method_resolution_scope(
             ),
             Result::Ok(declaration) => Option::Some(
                 SignatureTypeScope::NominalMethod(
+                    method,
                     signature_scope(
                         shell, super::headers::impl_generics(declaration)
                     ),
-                    method
+                    NominalSelfScope::Impl(
+                        super::headers::impl_self_type(declaration)
+                    )
                 ))
         },
         _ => Option::Some(SignatureTypeScope::Declaration(method))
+    }
+}
+
+callable_generic_owner(
+    scope: SignatureScope,
+    resolution: Option<SignatureTypeScope>
+) -> TypeParameterOwner {
+    handle resolution {
+        Option::Some(SignatureTypeScope::NominalMethod(method, _, _)) =>
+            TypeParameterOwner::NominalMethod(method.owner, method.start),
+        _ => TypeParameterOwner::Declaration(scope.owner)
     }
 }
 
@@ -6172,6 +6278,7 @@ collect_callables(
                     super::headers::callable_generics(callable)
                 );
                 let resolution = method_resolution_scope(headers, shell, scope);
+                let generic_owner = callable_generic_owner(scope, resolution);
                 let module = handle super::scanner::shell_at(
                     declarations,
                     shell
@@ -6188,6 +6295,7 @@ collect_callables(
                             index,
                             module,
                             scope,
+                            generic_owner,
                             resolution,
                             type_id_from_u32(0)
                         ),
@@ -6208,6 +6316,7 @@ collect_callables(
                             index,
                             module,
                             scope,
+                            generic_owner,
                             resolution,
                             type_id_from_u32(result)
                         )
@@ -6225,6 +6334,7 @@ collect_callable(
     index: usize,
     module: Option<ShellId>,
     scope: SignatureScope,
+    generic_owner: TypeParameterOwner,
     resolution: Option<SignatureTypeScope>,
     result: TypeId
 ) -> Result<(), ElaborationError> {
@@ -6260,6 +6370,7 @@ collect_callable(
                     + usize_from_u32(super::headers::range_count(parameters))
             ),
             generics: scope,
+            generic_owner: generic_owner,
             effects: effects,
             effect_tail: effect_tail,
             where_start: super::syntax::token_start(where_tokens),
@@ -7699,7 +7810,7 @@ infer_call_type_elements(
     interfaces: &TypedInterfaces,
     formal: TypeElementRange,
     actual: TypeElementRange,
-    owner: ShellId,
+    owner: TypeParameterOwner,
     substitutions: &mut Vec<Option<TypeId>>,
     ordinal: u32
 ) -> Bool {
@@ -7733,14 +7844,14 @@ infer_call_substitutions(
     interfaces: &TypedInterfaces,
     formal: TypeId,
     actual: TypeId,
-    owner: ShellId,
+    owner: TypeParameterOwner,
     substitutions: &mut Vec<Option<TypeId>>
 ) -> Bool {
     handle type_kind_at(interfaces, formal) {
         TypeKind::TypeParameter(parameter_owner, ordinal) => if(
             type_parameter_owners_equal(
                 parameter_owner,
-                TypeParameterOwner::Declaration(owner)
+                owner
             )
         ) {
             handle call_substitution_at(substitutions, ordinal) {
@@ -7749,7 +7860,7 @@ infer_call_substitutions(
                     TypeKind::TypeParameter(actual_owner, actual_ordinal) => if(
                         type_parameter_owners_equal(
                             actual_owner,
-                            TypeParameterOwner::Declaration(owner)
+                            owner
                         )
                             and { actual_ordinal == ordinal }
                     ) { true } else {
@@ -7844,7 +7955,7 @@ infer_call_substitutions(
 call_type_elements_have_unbound_parameter(
     interfaces: &TypedInterfaces,
     range: TypeElementRange,
-    owner: ShellId,
+    owner: TypeParameterOwner,
     substitutions: &Vec<Option<TypeId>>,
     ordinal: u32
 ) -> Bool {
@@ -7871,14 +7982,14 @@ call_type_elements_have_unbound_parameter(
 call_type_has_unbound_parameter(
     interfaces: &TypedInterfaces,
     ty: TypeId,
-    owner: ShellId,
+    owner: TypeParameterOwner,
     substitutions: &Vec<Option<TypeId>>
 ) -> Bool {
     handle type_kind_at(interfaces, ty) {
         TypeKind::TypeParameter(parameter_owner, ordinal) =>
             type_parameter_owners_equal(
                 parameter_owner,
-                TypeParameterOwner::Declaration(owner)
+                owner
             )
                 and { Option::is_none(&call_substitution_at(
                     substitutions, ordinal
@@ -7910,7 +8021,7 @@ call_type_has_unbound_parameter(
 instantiate_call_type_elements(
     interfaces: &mut TypedInterfaces,
     range: TypeElementRange,
-    owner: ShellId,
+    owner: TypeParameterOwner,
     substitutions: &Vec<Option<TypeId>>,
     ordinal: u32,
     output: &mut Vec<u32>
@@ -7938,14 +8049,14 @@ instantiate_call_type_elements(
 instantiate_call_type(
     interfaces: &mut TypedInterfaces,
     ty: TypeId,
-    owner: ShellId,
+    owner: TypeParameterOwner,
     substitutions: &Vec<Option<TypeId>>
 ) -> TypeId {
     handle type_kind_at(&*interfaces, ty) {
         TypeKind::TypeParameter(parameter_owner, ordinal) => if(
             type_parameter_owners_equal(
                 parameter_owner,
-                TypeParameterOwner::Declaration(owner)
+                owner
             )
         ) {
             call_substitution_at(substitutions, ordinal) else { ty }
@@ -8136,7 +8247,7 @@ pub instantiate_application_member_type(
                 instantiate_call_type(
                     interfaces,
                     member,
-                    scope.owner,
+                    TypeParameterOwner::Declaration(scope.owner),
                     &substitutions
                 )
         },
@@ -8190,7 +8301,7 @@ find_callable_instance(
 append_instance_parameters(
     interfaces: &mut TypedInterfaces,
     source: CallableParameterRange,
-    owner: ShellId,
+    owner: TypeParameterOwner,
     substitutions: &Vec<Option<TypeId>>,
     ordinal: u32
 ) {
@@ -8234,9 +8345,9 @@ pub intern_callable_instance(
     ) {
         Option::Some(found) => found,
         None => {
-            let owner = interface_callable_generics(
+            let owner = interface_callable_generic_owner(
                 &*interfaces, callable
-            ).owner;
+            );
             let declared_result = interface_callable_result(
                 &*interfaces, callable
             );
@@ -8316,6 +8427,7 @@ elaborate_call_arguments(
     operands: &mut Vec<CoreValueId>
 ) -> Result<(), ElaborationError> {
     let parameters = interface_callable_parameters(interfaces, callable);
+    let generic_owner = interface_callable_generic_owner(interfaces, callable);
     if(ordinal < parameters.count) {
         let parameter = callable_parameter_type_at(
             interfaces,
@@ -8331,13 +8443,13 @@ elaborate_call_arguments(
         let instantiated = instantiate_call_type(
             interfaces,
             parameter,
-            generics.owner,
+            generic_owner,
             substitutions
         );
         let argument_expected = if(call_type_has_unbound_parameter(
             &*interfaces,
             instantiated,
-            generics.owner,
+            generic_owner,
             substitutions
         )) { None } else { Option::Some(instantiated) };
         let argument = try(elaborate_expression(
@@ -8355,7 +8467,7 @@ elaborate_call_arguments(
             &*interfaces,
             parameter,
             argument.type_id,
-            generics.owner,
+            generic_owner,
             substitutions
         )) { () } else {
             @elaborate_call_arguments(Result::Err(
@@ -8369,7 +8481,7 @@ elaborate_call_arguments(
         let checked_parameter = instantiate_call_type(
             interfaces,
             parameter,
-            generics.owner,
+            generic_owner,
             substitutions
         );
         try(check_expected_type(
@@ -8672,6 +8784,9 @@ elaborate_call(
                         interface_callable_result(interfaces, callable);
                     let generics =
                         interface_callable_generics(interfaces, callable);
+                    let generic_owner = interface_callable_generic_owner(
+                        interfaces, callable
+                    );
                     let substitutions =
                         new_call_substitutions(generics.count);
                     handle expected {
@@ -8685,7 +8800,7 @@ elaborate_call(
                                 &*interfaces,
                                 declared_result,
                                 expected_type,
-                                generics.owner,
+                                generic_owner,
                                 &mut substitutions
                             )) { () } else {
                                 @elaborate_call(Result::Err(
@@ -8717,7 +8832,7 @@ elaborate_call(
                     let result = instantiate_call_type(
                         interfaces,
                         declared_result,
-                        generics.owner,
+                        generic_owner,
                         &substitutions
                     );
                     let instance = intern_callable_instance(
@@ -9396,7 +9511,7 @@ elaborate_struct_fields(
                 let field_expected = if(call_type_has_unbound_parameter(
                     &*interfaces,
                     field_type,
-                    generics.owner,
+                    TypeParameterOwner::Declaration(generics.owner),
                     substitutions
                 )) { None } else { Option::Some(field_type) };
                 let field_value = try(elaborate_expression(
@@ -9418,7 +9533,7 @@ elaborate_struct_fields(
                     &*interfaces,
                     type_id_from_u32(declared_field_type),
                     field_value.type_id,
-                    generics.owner,
+                    TypeParameterOwner::Declaration(generics.owner),
                     substitutions
                 )) { () } else {
                     @elaborate_struct_fields(Result::Err(
