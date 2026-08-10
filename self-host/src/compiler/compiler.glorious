@@ -1707,15 +1707,15 @@ lower_effect_operations(
     map: &mut lowering::ArtifactTypeMap,
     types: &mut MirTypeArena,
     type_names: &mut Vec<String>,
-    effect: elaboration::InterfaceEffectId,
+    protocol: elaboration::InterfaceEffectId,
     ordinal: u32,
     output: &mut Vec<lowering::MirOperation>
 ) -> Result<(), CompileError> {
     if(ordinal < elaboration::interface_effect_operation_count(
-        &session.interfaces, effect
+        &session.interfaces, protocol
     )) {
         let operation = *handle elaboration::interface_effect_operation_id(
-            &session.interfaces, effect, ordinal
+            &session.interfaces, protocol, ordinal
         ) { None => unreachable(), Option::Some(found) => found };
         let payloads = Vec::new();
         let count = elaboration::interface_effect_operation_payload_count(
@@ -1745,7 +1745,7 @@ lower_effect_operations(
             elaboration::interface_effect_operation_resumption_upper(&session.interfaces, operation),
             elaboration::interface_effect_operation_is_terminal(&session.interfaces, operation)
         ));
-        lower_effect_operations(session, map, types, type_names, effect, ordinal + 1, output)
+        lower_effect_operations(session, map, types, type_names, protocol, ordinal + 1, output)
     } else { Result::Ok(()) }
 }
 
@@ -1758,15 +1758,15 @@ lower_effect_protocols(
     output: &mut Arena<lowering::MirProtocolTag, lowering::MirProtocol>
 ) -> Result<(), CompileError> {
     if(index < elaboration::interface_effect_count(&session.interfaces)) {
-        let effect = *handle elaboration::interface_effect_id_at(&session.interfaces, index) {
+        let protocol = *handle elaboration::interface_effect_id_at(&session.interfaces, index) {
             None => unreachable(), Option::Some(found) => found
         };
         // Generic effect instances are not materialized in this initial
         // terminal-perform slice; their declarations still reserve a stable
         // protocol ordinal for later specialization work.
-        if(elaboration::interface_effect_generic_count(&session.interfaces, effect) != 0) {
+        if(elaboration::interface_effect_generic_count(&session.interfaces, protocol) != 0) {
             let name = try(function_name(
-                &*session, elaboration::interface_effect_shell(&session.interfaces, effect)
+                &*session, elaboration::interface_effect_shell(&session.interfaces, protocol)
             ), @lower_effect_protocols);
             lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
                 name,
@@ -1776,10 +1776,10 @@ lower_effect_protocols(
             let operations = Vec::new();
             try(lower_effect_operations(
                 &mut *session, &mut *map, &mut *types, &mut *type_names,
-                effect, 0, &mut operations
+                protocol, 0, &mut operations
             ), @lower_effect_protocols);
             let name = try(function_name(
-                &*session, elaboration::interface_effect_shell(&session.interfaces, effect)
+                &*session, elaboration::interface_effect_shell(&session.interfaces, protocol)
             ), @lower_effect_protocols);
             lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
                 name, Vec::new(), operations

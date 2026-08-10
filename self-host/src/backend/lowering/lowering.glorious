@@ -4254,7 +4254,7 @@ callable_effect_protocols(
         handle super::super::frontend::elaboration::
             interface_effect_for_type(interfaces, ty) {
             None => unreachable(),
-            Option::Some(effect) => Vec::push(&mut *output, Id::to_u32(effect))
+            Option::Some(protocol) => Vec::push(&mut *output, Id::to_u32(protocol))
         };
         callable_effect_protocols(interfaces, callable, ordinal + 1, output)
     } else { () }
