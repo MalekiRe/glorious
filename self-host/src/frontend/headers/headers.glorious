@@ -257,6 +257,10 @@ pub struct TraitHeader {
     name: Id<String>,
     public: Bool,
     generics: HeaderRange,
+    // Supertrait applications live in the shared type arena.  This keeps
+    // their arguments owned by the trait declaration rather than reducing
+    // them to an unstructured source span before semantic collection.
+    supertraits: HeaderRange,
     methods: HeaderRange,
     tokens: HeaderTokenRange
 }
@@ -677,6 +681,7 @@ pub impl_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a ImplHeader>
 pub trait_name(value: &TraitHeader) -> Id<String> { value.name }
 pub trait_public(value: &TraitHeader) -> Bool { value.public }
 pub trait_generics(value: &TraitHeader) -> &HeaderRange { &value.generics }
+pub trait_supertraits(value: &TraitHeader) -> &HeaderRange { &value.supertraits }
 pub trait_methods(value: &TraitHeader) -> &HeaderRange { &value.methods }
 pub trait_tokens(value: &TraitHeader) -> &HeaderTokenRange { &value.tokens }
 pub impl_generics(value: &ImplHeader) -> &HeaderRange { &value.generics }
@@ -4477,25 +4482,37 @@ parse_trait_supertrait(
     value: &mut Parser,
     related: usize,
     header_end: usize
-) -> Result<(), HeaderError> {
-    if(value.tokens.position == header_end) { Result::Ok(()) } else {
+) -> Result<HeaderRange, HeaderError> {
+    let start = Vec::len(&value.output.type_edges);
+    if(value.tokens.position == header_end) {
+        Result::Ok(header_range(start, start))
+    } else {
         try(expect_colon(value, related), @parse_trait_supertrait);
-        parse_trait_supertrait_list(value, related, header_end)
+        parse_trait_supertrait_list(value, related, header_end, start, 0)
     }
 }
 
 parse_trait_supertrait_list(
     value: &mut Parser,
     related: usize,
-    header_end: usize
-) -> Result<(), HeaderError> {
-    try(parse_type(value, related), @parse_trait_supertrait_list);
-    if(value.tokens.position == header_end) { Result::Ok(()) } else {
+    header_end: usize,
+    start: usize,
+    position: u32
+) -> Result<HeaderRange, HeaderError> {
+    let parent = try(parse_type(value, related), @parse_trait_supertrait_list);
+    Vec::push(&mut value.output.type_edges, TypeEdge {
+        value: parent, position: position
+    });
+    if(value.tokens.position == header_end) {
+        Result::Ok(header_range(start, Vec::len(&value.output.type_edges)))
+    } else {
         let token = value.tokens.position;
         handle super::lexer::token_kind_at(&value.source, token) {
             TokenKind::Plus => {
                 value.tokens.position = token + 1;
-                parse_trait_supertrait_list(value, related, header_end)
+                parse_trait_supertrait_list(
+                    value, related, header_end, start, position + 1
+                )
             },
             _ =>
             Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
@@ -4525,7 +4542,9 @@ parse_trait_header(
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_trait_header);
     let generics = try(parse_generics(value, start), @parse_trait_header);
-    try(parse_trait_supertrait(value, start, header_end), @parse_trait_header);
+    let supertraits = try(
+        parse_trait_supertrait(value, start, header_end), @parse_trait_header
+    );
     if(value.tokens.position == header_end) {
         let method_start = Vec::len(&value.output.callables);
         let methods = try(parse_trait_methods(
@@ -4533,7 +4552,8 @@ parse_trait_header(
         ), @parse_trait_header);
         Vec::push(&mut traits.values, TraitHeader {
             shell: shell, name: name.name, public: public, generics: generics,
-            methods: methods, tokens: token_range(start, whole_end)
+            supertraits: supertraits, methods: methods,
+            tokens: token_range(start, whole_end)
         });
         record_header(order, shell, HeaderOrder::Trait(typed_header_id(Vec::len(&traits.values) - 1)));
         Result::Ok(())
