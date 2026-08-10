@@ -1997,13 +1997,44 @@ analyze_match_arms<'a>(
         );
         remove_match_bindings(body, arm, output);
         union_liveness(joined, &output.live);
-        analyze_match_arms(
+analyze_match_arms(
             body,
             arms,
             live_out,
             joined,
             ordinal + 1,
             output
+        )
+    } else { () }
+}
+
+// Integer-dispatch arms do not introduce payload locals, but their bodies
+// still form control-flow branches. Keep their backwards liveness join
+// identical to enum-match arms so later scalar lowering can restore the same
+// pre-dispatch state on every edge.
+analyze_integer_arms(
+    body: &super::super::frontend::elaboration::TypedBody,
+    arms: Slice<super::super::frontend::elaboration::CoreIntegerArm>,
+    live_out: &Vec<Bool>,
+    joined: &mut Vec<Bool>,
+    ordinal: usize,
+    output: &mut PlaceFlowAnalysis
+) {
+    if(ordinal < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, ordinal) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        let arm_live = copy_liveness(live_out);
+        output.live = arm_live;
+        analyze_computation(
+            body,
+            super::super::frontend::elaboration::core_integer_arm_body(arm),
+            output,
+            false
+        );
+        union_liveness(joined, &output.live);
+        analyze_integer_arms(
+            body, arms, live_out, joined, ordinal + 1, output
         )
     } else { () }
 }
@@ -2061,6 +2092,19 @@ analyze_computation(
                 &mut joined,
                 0,
                 output
+            );
+            output.live = joined;
+            analyze_value(body, subject, output, allow_transfer)
+        },
+        CoreComputationView::IntegerDispatch(_, subject, arms) => {
+            let live_out = copy_liveness(&output.live);
+            Vec::push(&mut output.facts.matches, MatchFlow {
+                computation: id,
+                live_out: copy_liveness(&live_out)
+            });
+            let joined = copy_liveness(&live_out);
+            analyze_integer_arms(
+                body, arms, &live_out, &mut joined, 0, output
             );
             output.live = joined;
             analyze_value(body, subject, output, allow_transfer)
