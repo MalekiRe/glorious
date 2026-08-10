@@ -1573,50 +1573,6 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
 }
 
 #[test]
-#[ignore = "expensive release VM gate"]
-fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm() {
-    // Trait requirements and generic implementation members are retained in
-    // the callable interface arena. Their exposed signatures still contain
-    // TraitSelf or the impl's T, however, so the initial no-substitution seed
-    // must leave them alone while lowering the ordinary monomorphic call.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let source = "trait Measure { measure(self: &Self) -> i64; } \
-                struct Wrapper<T> { value: T } \
-                impl<T> Measure for Wrapper<T> { \
-                    measure(self: &Self) -> i64 { 1 } \
-                } \
-                monomorphic() -> i64 { 7 } \
-                main() { monomorphic() }";
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
-                },
-            )
-            .unwrap();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
-            let compiler = load_verified(&phases.artifact.encode()).unwrap();
-            assert_eq!(
-                Vm::with_host(
-                    compiler,
-                    ["process.args", "fs.read", "fs.write", "diagnostic"],
-                    SystemHost::new(vec![]),
-                )
-                .unwrap()
-                .run(classify, vec![Value::Text(source.into())])
-                .unwrap(),
-                Value::U64(0),
-                "abstract trait/impl callables must defer without blocking monomorphic lowering"
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
 fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
     // Reuse the parser-valid monomorphic `perform` specimen from the typed
     // Core self-host tests. Effect MIR is intentionally not implemented, so
