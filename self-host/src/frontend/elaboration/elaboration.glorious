@@ -10742,9 +10742,10 @@ terminal_u32_operation(
 }
 
 terminal_bool_operation(
-    interfaces: &TypedInterfaces, body: &super::bodies::ParsedBody,
+    interfaces: &mut TypedInterfaces, body: &super::bodies::ParsedBody,
     map: &ResolutionMap, subject: u32
 ) -> Option<super::resolution::EffectOperationIdentity> {
+    let bool_type = type_id_from_u32(find_bool_type(interfaces, 0));
     handle super::bodies::expression_view(body, subject) {
         super::bodies::BodyExpressionView::Perform(_, _) => handle resolved_target_at(map, subject) {
             Option::Some(ResolvedTarget::EffectOperation(identity)) => {
@@ -10758,7 +10759,7 @@ terminal_bool_operation(
                             and { interface_effect_operation_generic_count(interfaces, operation) == 0 }
                             and { interface_effect_operation_is_terminal(interfaces, operation) }
                             and { interface_effect_operation_payload_count(interfaces, operation) == 1 }
-                            and { interface_effect_operation_payload_at(interfaces, operation, 0) == Option::Some(type_id_from_u32(16)) }
+                            and { interface_effect_operation_payload_at(interfaces, operation, 0) == Option::Some(bool_type) }
                             and { interface_effect_operation_result(interfaces, operation) == type_id_from_u32(1) }
                             and { super::bodies::expression_child_count_at(body, subject) == 1 }) {
                                 Option::Some(identity)
@@ -10815,6 +10816,27 @@ elaborate_terminal_bool_arms(
     } else { if(seen_true and { seen_false }) { handle inferred { Result::Ok(found) => Result::Ok(found), Result::Err(_) => Result::Err(ElaborationError::UnsupportedExpression(super::bodies::expression_token_start_at(body, expression))) } } else { Result::Err(ElaborationError::UnsupportedExpression(super::bodies::expression_token_start_at(body, expression))) } }
 }
 
+// Keep the final append in its own CoreBuilder operation.  The arm elaborator
+// receives BodyContext mutably, while the parent arms must be appended only
+// after nested dispatches.  Factoring the append gives the bootstrap place
+// checker a completed BodyContext loan before projecting match_arms again.
+finish_terminal_bool_dispatch(
+    core: &mut CoreBuilder,
+    result: TypeId,
+    subject: CoreValueId,
+    arms: &Vec<CoreMatchArm>,
+    prefix: &CorePrefix
+) -> Elaborated {
+    let binding_start = super::syntax::range_mark(&core.match_bindings);
+    let start = super::syntax::range_mark(&core.match_arms);
+    append_match_arms_rebased(&mut core.match_arms, arms,
+        u32_from_usize(binding_start), 0);
+    let end = Vec::len(&core.match_arms);
+    let dispatch = push_computation(core, result,
+        CoreComputationKind::VariantDispatch(subject, match_arm_range(start, end)));
+    finish_computation(core, result, dispatch, prefix)
+}
+
 elaborate_handle(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -10828,22 +10850,20 @@ elaborate_handle(
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     let immediate = super::bodies::expression_child_at(body, expression, 0);
-    handle terminal_bool_operation(&*interfaces, body, map, immediate) {
+    handle terminal_bool_operation(interfaces, body, map, immediate) {
         None => (),
         Option::Some(identity) => {
+            let bool_type = type_id_from_u32(find_bool_type(interfaces, 0));
             let payload = try(elaborate_expression(original, headers, declarations, interfaces, body, map, value,
-                super::bodies::expression_child_at(body, immediate, 0), Option::Some(type_id_from_u32(16))), @elaborate_handle);
+                super::bodies::expression_child_at(body, immediate, 0), Option::Some(bool_type)), @elaborate_handle);
             let prefix = new_core_prefix();
             let subject = bind_operand(&mut value.core, payload, &mut prefix);
             let arms = Vec::new();
             let result = try(elaborate_terminal_bool_arms(original, headers, declarations, interfaces, body, map, value,
                 expression, identity, 0, expected, None, false, false, &mut arms), @elaborate_handle);
-            let start = super::syntax::range_mark(&value.core.match_arms);
-            append_match_arms_rebased(&mut value.core.match_arms, &arms,
-                u32_from_usize(super::syntax::range_mark(&value.core.match_bindings)), 0);
-            let dispatch = push_computation(&mut value.core, result,
-                CoreComputationKind::VariantDispatch(subject, match_arm_range(start, Vec::len(&value.core.match_arms))));
-            @elaborate_handle(Result::Ok(finish_computation(&mut value.core, result, dispatch, &prefix)))
+            @elaborate_handle(Result::Ok(finish_terminal_bool_dispatch(
+                &mut value.core, result, subject, &arms, &prefix
+            )))
         }
     };
     handle terminal_u32_operation(&*interfaces, body, map, immediate) {
