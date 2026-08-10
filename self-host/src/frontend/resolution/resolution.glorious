@@ -1661,6 +1661,82 @@ resolve_closure<'a>(
     )
 }
 
+// Typed closures share ordinary closure lexical semantics: their parameter
+// annotations are consumed by elaboration, while their names are fresh local
+// bindings visible only inside the closure body.  Keep this separate from
+// resolve_closure because the parsed typed form stores its parameter range
+// rather than a borrowed slice.
+resolve_typed_closure_parameters(
+    body: &super::bodies::ParsedBody,
+    bindings: &mut ScopeMap,
+    output: &mut ResolvedBody,
+    expression: u32,
+    count: usize,
+    ordinal: usize
+) -> Result<(), ResolutionError> {
+    if(ordinal == count) {
+        Result::Ok(())
+    } else {
+        let token = super::bodies::typed_closure_parameter_token_at(
+            body, expression, ordinal
+        );
+        let local = try(Result::map_err(
+            local_id_from_usize(Vec::len(&output.locals)),
+            { _ => ResolutionError::LocalIdExhausted(
+                token, Vec::len(&output.locals)
+            ) }
+        ), @resolve_typed_closure_parameters);
+        Vec::push(&mut output.locals, LocalBinding {
+            name_token: token,
+            block_expression: Id::from_u32(expression)
+        });
+        scope_push(
+            bindings,
+            super::bodies::typed_closure_parameter_name_at(
+                body, expression, ordinal
+            ),
+            ResolvedTarget::Local(local)
+        );
+        resolve_typed_closure_parameters(
+            body, bindings, output, expression, count, ordinal + 1
+        )
+    }
+}
+
+resolve_typed_closure(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut ScopeMap,
+    output: &mut ResolvedBody,
+    expression: u32,
+    closure_body: super::bodies::ExprId,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    let frame = scope_frame(move bindings);
+    try(resolve_typed_closure_parameters(
+        body,
+        &mut *frame.scope,
+        output,
+        expression,
+        usize_from_u32(super::bodies::typed_closure_parameter_count(
+            body, expression
+        )),
+        0
+    ), @resolve_typed_closure);
+    resolve_expression(
+        headers,
+        index,
+        declarations,
+        body,
+        &mut *frame.scope,
+        output,
+        Id::to_u32(closure_body),
+        module
+    )
+}
+
 resolve_pattern_binders<'a>(
     bindings: &mut ScopeMap,
     output: &mut ResolvedBody,
@@ -1976,6 +2052,17 @@ resolve_expression(
         super::bodies::BodyExpressionView::Character(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::Byte(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::ByteString(_, _) => Result::Ok(()),
+        super::bodies::BodyExpressionView::Is(subject, _) =>
+            resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(subject),
+                module
+            ),
         super::bodies::BodyExpressionView::Unit(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Grouping(child) =>
             resolve_expression(
@@ -2054,6 +2141,67 @@ resolve_expression(
                 module
             )
         },
+        super::bodies::BodyExpressionView::Resume(resumption, result) => {
+            try(resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(resumption),
+                module
+            ), @resolve_expression);
+            handle result {
+                None => Result::Ok(()),
+                Option::Some(value) => resolve_expression(
+                    headers,
+                    index,
+                    declarations,
+                    body,
+                    bindings,
+                    output,
+                    Id::to_u32(value),
+                    module
+                )
+            }
+        },
+        super::bodies::BodyExpressionView::Cancel(resumption) =>
+            resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(resumption),
+                module
+            ),
+        super::bodies::BodyExpressionView::TailResume(resumption, result) => {
+            try(resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(resumption),
+                module
+            ), @resolve_expression);
+            handle result {
+                None => Result::Ok(()),
+                Option::Some(value) => resolve_expression(
+                    headers,
+                    index,
+                    declarations,
+                    body,
+                    bindings,
+                    output,
+                    Id::to_u32(value),
+                    module
+                )
+            }
+        },
         super::bodies::BodyExpressionView::Perform(path, arguments) => {
             let operation = try(resolve_effect_operation(
                 headers,
@@ -2081,6 +2229,17 @@ resolve_expression(
             )
         },
         super::bodies::BodyExpressionView::Block(children) => resolve_block(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            children,
+            module
+        ),
+        super::bodies::BodyExpressionView::ContextBlock(children) => resolve_block(
             headers,
             index,
             declarations,
@@ -2135,6 +2294,18 @@ resolve_expression(
                 output,
                 expression,
                 parameters,
+                closure_body,
+                module
+            ),
+        super::bodies::BodyExpressionView::TypedClosure(_, _, _, _, closure_body) =>
+            resolve_typed_closure(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                expression,
                 closure_body,
                 module
             ),
