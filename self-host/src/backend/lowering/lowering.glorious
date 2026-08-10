@@ -3864,7 +3864,23 @@ lower_product_fields<'a>(
     fields: Slice<'a, ConstructionField>,
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
-    Slice::try_for_each(fields, { entry => {
+    lower_product_fields_at(interfaces, body, value, fields, 0, output)
+}
+
+lower_product_fields_at<'a>(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
+    fields: Slice<'a, ConstructionField>,
+    ordinal: usize,
+    output: &mut Vec<RegisterId>
+) -> Result<(), LoweringError> {
+    if(ordinal < Slice::len(fields)) {
+        let entry = handle Slice::get(fields, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
         let field =
             super::super::frontend::elaboration::
                 construction_field_ordinal(entry);
@@ -3874,15 +3890,17 @@ lower_product_fields<'a>(
         if(field == checked_u32(Vec::len(output))) {
             let lowered = try(
                 lower_value(interfaces, body, value, operand),
-                @lower_product_fields
+                @lower_product_fields_at
             );
             handle lowered {
                 Result::Err(_) =>
                     Result::Err(LoweringError::MissingValue(operand)),
-                Result::Ok(register) => {
-                    Vec::push(&mut *output, register);
-                    Result::Ok(())
-                }
+            Result::Ok(register) => {
+                Vec::push(&mut *output, register);
+                lower_product_fields_at(
+                    interfaces, body, value, fields, ordinal + 1, output
+                )
+            }
             }
         } else {
             Result::Err(LoweringError::ConstructionFieldOrder(
@@ -3890,7 +3908,7 @@ lower_product_fields<'a>(
                 field
             ))
         }
-    } })
+    } else { Result::Ok(()) }
 }
 
 parameter_types(
