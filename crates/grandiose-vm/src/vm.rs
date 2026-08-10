@@ -1060,19 +1060,23 @@ impl Vm {
                 }
                 Instruction::Primitive { dst, op, args } => {
                     let (dst, op) = (*dst, *op);
-                    let arg_types = args
-                        .iter()
-                        .map(|register| fun.register_types[*register as usize])
-                        .collect::<Vec<_>>();
+                    // Primitive implementations only inspect the first
+                    // argument type for numeric operations; every other
+                    // primitive dispatches solely on values and result type.
+                    // Avoid materializing a short-lived type vector for each
+                    // VM primitive in the self-host compiler's hot loops.
+                    let first_arg_type = args
+                        .first()
+                        .map(|register| fun.register_types[*register as usize]);
                     let values = args
                         .iter()
                         .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let v = primitive_typed(
+                    let v = primitive_typed_first_type(
                         a,
                         fun.register_types[dst as usize],
                         op,
-                        &arg_types,
+                        first_arg_type,
                         &values,
                     )?;
                     put(frame, dst, v)?;
@@ -4014,7 +4018,9 @@ fn primitive_typed(
         | Primitive::IntConvertChecked
         | Primitive::IntConvertWrapping
         | Primitive::IntCheckedNeg
-        | Primitive::IntWrappingNeg => int_primitive(result_type, op, arg_types, v),
+        | Primitive::IntWrappingNeg => {
+            int_primitive(result_type, op, arg_types.first().copied(), v)
+        }
         Primitive::FloatAdd
         | Primitive::FloatSub
         | Primitive::FloatMul
@@ -4031,7 +4037,9 @@ fn primitive_typed(
         | Primitive::IntToFloat
         | Primitive::FloatToIntChecked
         | Primitive::FloatToBits
-        | Primitive::FloatFromBits => float_primitive(result_type, op, arg_types, v),
+        | Primitive::FloatFromBits => {
+            float_primitive(result_type, op, arg_types.first().copied(), v)
+        }
         Primitive::CharFromU32Checked => match v {
             [Value::U64(value)] => u32::try_from(*value)
                 .ok()
@@ -4363,6 +4371,67 @@ fn primitive_typed(
             }
             _ => Err(RuntimeError::TypeConfusion),
         },
+    }
+}
+
+/// Execution fast path for bytecode primitives. The verifier already proves
+/// that all argument registers are in range; numeric primitive semantics only
+/// depend on the first argument's static type, while the remaining primitive
+/// families do not inspect static argument types at all.
+fn primitive_typed_first_type(
+    a: &ExecutionImage,
+    result_type: TypeId,
+    op: Primitive,
+    first_arg_type: Option<TypeId>,
+    values: &[Value],
+) -> Result<Value, RuntimeError> {
+    match op {
+        Primitive::IntCheckedAdd
+        | Primitive::IntCheckedSub
+        | Primitive::IntCheckedMul
+        | Primitive::IntCheckedDiv
+        | Primitive::IntCheckedRem
+        | Primitive::IntWrappingAdd
+        | Primitive::IntWrappingSub
+        | Primitive::IntWrappingMul
+        | Primitive::IntBitAnd
+        | Primitive::IntBitOr
+        | Primitive::IntBitXor
+        | Primitive::IntBitNot
+        | Primitive::IntShl
+        | Primitive::IntShr
+        | Primitive::IntEq
+        | Primitive::IntNe
+        | Primitive::IntLt
+        | Primitive::IntLe
+        | Primitive::IntGt
+        | Primitive::IntGe
+        | Primitive::IntConvertChecked
+        | Primitive::IntConvertWrapping
+        | Primitive::IntCheckedNeg
+        | Primitive::IntWrappingNeg => {
+            int_primitive(result_type, op, first_arg_type, values)
+        }
+        Primitive::FloatAdd
+        | Primitive::FloatSub
+        | Primitive::FloatMul
+        | Primitive::FloatDiv
+        | Primitive::FloatRem
+        | Primitive::FloatEq
+        | Primitive::FloatNe
+        | Primitive::FloatLt
+        | Primitive::FloatLe
+        | Primitive::FloatGt
+        | Primitive::FloatGe
+        | Primitive::FloatConvert
+        | Primitive::FloatNeg
+        | Primitive::IntToFloat
+        | Primitive::FloatToIntChecked
+        | Primitive::FloatToBits
+        | Primitive::FloatFromBits => {
+            float_primitive(result_type, op, first_arg_type, values)
+        }
+        _ => primitive_typed(a, result_type, op, &[], values),
     }
 }
 
@@ -4703,10 +4772,10 @@ fn make_checked_unsigned(spec: IntSpec, value: Option<u128>) -> Result<Value, Ru
 fn int_primitive(
     result_type: TypeId,
     op: Primitive,
-    arg_types: &[TypeId],
+    source_type: Option<TypeId>,
     values: &[Value],
 ) -> Result<Value, RuntimeError> {
-    let source = int_spec(*arg_types.first().ok_or(RuntimeError::TypeConfusion)?)
+    let source = int_spec(source_type.ok_or(RuntimeError::TypeConfusion)?)
         .ok_or(RuntimeError::TypeConfusion)?;
     let unary = || values.first().ok_or(RuntimeError::TypeConfusion);
     let binary = || match values {
@@ -4864,11 +4933,11 @@ fn int_primitive(
 fn float_primitive(
     result_type: TypeId,
     op: Primitive,
-    arg_types: &[TypeId],
+    source_type: Option<TypeId>,
     values: &[Value],
 ) -> Result<Value, RuntimeError> {
     use Primitive::*;
-    let source_type = *arg_types.first().ok_or(RuntimeError::TypeConfusion)?;
+    let source_type = source_type.ok_or(RuntimeError::TypeConfusion)?;
     if op == FloatToBits {
         return match (source_type, result_type, values) {
             (F32, U32, [Value::F32(value)]) => {
@@ -5026,6 +5095,42 @@ mod tests {
     }
     fn prim(result: TypeId, op: Primitive, values: &[Value]) -> Result<Value, RuntimeError> {
         primitive(&image(Artifact::default()), result, op, values)
+    }
+
+    #[test]
+    fn primitive_first_type_fast_path_matches_typed_dispatch() {
+        let image = image(Artifact::default());
+        let text = [Value::Text("grandiose".into())];
+        // Text primitives do not inspect the static argument type, so the
+        // execution path does not need to allocate a vector for it.
+        assert_eq!(
+            primitive_typed_first_type(
+                &image,
+                USIZE,
+                Primitive::TextByteLen,
+                Some(TEXT),
+                &text,
+            ),
+            primitive_typed(&image, USIZE, Primitive::TextByteLen, &[TEXT], &text),
+        );
+
+        let integers = [Value::I64(2), Value::I64(3)];
+        assert_eq!(
+            primitive_typed_first_type(
+                &image,
+                I64,
+                Primitive::IntWrappingAdd,
+                Some(I64),
+                &integers,
+            ),
+            primitive_typed(
+                &image,
+                I64,
+                Primitive::IntWrappingAdd,
+                &[I64, I64],
+                &integers,
+            ),
+        );
     }
 
     #[test]
