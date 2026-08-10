@@ -1767,11 +1767,12 @@ fn self_hosted_effect_control_reaches_lowering_error_in_release_vm() {
                 .unwrap()
                 .run(diagnostic, vec![Value::Text(source.into())])
                 .unwrap(),
-                // phase=Lowering (10), class=Internal (7), local code=26,
+                // phase=Lowering (10), class=Internal (7), diagnostic code
+                // 10026 (Lowering's phase prefix plus local code 26),
                 // primary=CoreComputation (10), owner=Declaration (3).
                 // Going through diagnostics::compile_source exercises the
                 // renderer that previously fell through to `unreachable`.
-                Value::U64(10_700_026_103),
+                Value::U64(10_710_026_103),
                 "residual nonterminal effect control must render as a structured lowering diagnostic"
             );
         })
