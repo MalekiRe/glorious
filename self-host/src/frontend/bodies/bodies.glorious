@@ -76,7 +76,8 @@ pub type BodyTokenRange = super::syntax::TokenSpan;
 pub enum PatternBinder {
     Wildcard(usize),
     Binding(Id<String>, usize),
-    Integer(usize)
+    Integer(usize),
+    Boolean(usize, Bool)
 }
 
 enum PatternKind {
@@ -3091,6 +3092,8 @@ pattern_binder_named(
                 pattern_binder_named(value, name, index + 1),
             PatternBinder::Integer(_) =>
                 pattern_binder_named(value, name, index + 1),
+            PatternBinder::Boolean(_, _) =>
+                pattern_binder_named(value, name, index + 1),
             PatternBinder::Binding(found, _) =>
                 if(found == name) {
                     true
@@ -3135,6 +3138,14 @@ parse_pattern_binder(
                         &mut *binders,
                         PatternBinder::Wildcard(token)
                     );
+                    value.tokens.position = token + 1;
+                    Result::Ok(())
+                } else if(String::eq(text, &"true")) {
+                    Vec::push(&mut *binders, PatternBinder::Boolean(token, true));
+                    value.tokens.position = token + 1;
+                    Result::Ok(())
+                } else if(String::eq(text, &"false")) {
+                    Vec::push(&mut *binders, PatternBinder::Boolean(token, false));
                     value.tokens.position = token + 1;
                     Result::Ok(())
                 } else {

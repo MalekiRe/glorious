@@ -10324,6 +10324,7 @@ elaborate_handle_binders<'a>(
         let local = handle binder {
             ResolvedPatternBinder::Wildcard => None,
             ResolvedPatternBinder::Integer(_) => None,
+            ResolvedPatternBinder::Boolean(_, _) => None,
             ResolvedPatternBinder::Local(source) => {
                 let core = core_local_id_from_u32(
                     value.parameter_count + Id::to_u32(source)
@@ -10346,6 +10347,7 @@ elaborate_handle_binders<'a>(
                 ),
                 @elaborate_handle_binders
             )),
+            ResolvedPatternBinder::Boolean(_, _) => None,
             _ => None
         };
         Vec::push(&mut *output, CoreMatchBinding {
@@ -10379,6 +10381,7 @@ pattern_binders_irrefutable<'a>(
         };
         handle *binder {
             ResolvedPatternBinder::Integer(_) => false,
+            ResolvedPatternBinder::Boolean(_, _) => false,
             _ => pattern_binders_irrefutable(binders, index + 1)
         }
     } else { true }
@@ -10636,6 +10639,10 @@ elaborate_terminal_u32_arms(
             ResolvedPatternBinder::Local(_) =>
                 @elaborate_terminal_u32_arms(Result::Err(
                     ElaborationError::UnsupportedExpression(token)
+                )),
+            ResolvedPatternBinder::Boolean(_, _) =>
+                @elaborate_terminal_u32_arms(Result::Err(
+                    ElaborationError::UnsupportedExpression(token)
                 ))
         };
         let arm_body = try(elaborate_expression(
@@ -10734,6 +10741,80 @@ terminal_u32_operation(
     }
 }
 
+terminal_bool_operation(
+    interfaces: &TypedInterfaces, body: &super::bodies::ParsedBody,
+    map: &ResolutionMap, subject: u32
+) -> Option<super::resolution::EffectOperationIdentity> {
+    handle super::bodies::expression_view(body, subject) {
+        super::bodies::BodyExpressionView::Perform(_, _) => handle resolved_target_at(map, subject) {
+            Option::Some(ResolvedTarget::EffectOperation(identity)) => {
+                let shell = super::resolution::effect_operation_effect(&identity);
+                handle interface_effect_for_shell(interfaces, shell) {
+                    None => None,
+                    Option::Some(effect_id) => handle interface_effect_operation_id(interfaces, effect_id,
+                        super::resolution::effect_operation_ordinal(&identity)) {
+                        None => None,
+                        Option::Some(operation) => if(interface_effect_generic_count(interfaces, effect_id) == 0
+                            and { interface_effect_operation_generic_count(interfaces, operation) == 0 }
+                            and { interface_effect_operation_is_terminal(interfaces, operation) }
+                            and { interface_effect_operation_payload_count(interfaces, operation) == 1 }
+                            and { interface_effect_operation_payload_at(interfaces, operation, 0) == Option::Some(type_id_from_u32(16)) }
+                            and { interface_effect_operation_result(interfaces, operation) == type_id_from_u32(1) }
+                            and { super::bodies::expression_child_count_at(body, subject) == 1 }) {
+                                Option::Some(identity)
+                            } else { None }
+                    }
+                }
+            }, _ => None
+        }, _ => None
+    }
+}
+
+// Bool is represented by the focused scalar marker's two enum variants:
+// true is Result::Ok (0), false is Result::Err (1).  Preserve that mapping
+// only after resolution has retained the source literal in Boolean.
+elaborate_terminal_bool_arms(
+    original: &String, headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex, interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody, map: &ResolutionMap, value: &mut BodyContext,
+    expression: u32, identity: super::resolution::EffectOperationIdentity,
+    ordinal: usize, expected: Option<TypeId>, inferred: Option<TypeId>,
+    seen_true: Bool, seen_false: Bool, output: &mut Vec<CoreMatchArm>
+) -> Result<TypeId, ElaborationError> {
+    let source_arms = super::bodies::expression_handle_arms(body, expression);
+    if(ordinal < Slice::len(source_arms)) {
+        let source_arm = handle Slice::get(source_arms, ordinal) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        let token = super::bodies::handle_arm_variant_token(source_arm);
+        let resolved = super::resolution::resolved_handle_arm(map,
+            super::bodies::expression_handle_arm_id(body, expression, ordinal));
+        let same = handle super::resolution::resolved_handle_target(resolved) {
+            super::resolution::ResolvedHandleTarget::EffectOperation(found) =>
+                super::resolution::effect_operation_effect(&found) == super::resolution::effect_operation_effect(&identity)
+                and { super::resolution::effect_operation_ordinal(&found) == super::resolution::effect_operation_ordinal(&identity) },
+            _ => false
+        };
+        if(same) { () } else { @elaborate_terminal_bool_arms(Result::Err(ElaborationError::UnsupportedExpression(token))) };
+        let binders = super::resolution::resolved_handle_binders(map, resolved);
+        if(Slice::len(binders) == 1) { () } else { @elaborate_terminal_bool_arms(Result::Err(ElaborationError::VariantPayloadCountMismatch(token, 1, u32_from_usize(Slice::len(binders))))) };
+        let binder = *handle Slice::get(binders, 0) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        let flag = handle binder {
+            ResolvedPatternBinder::Boolean(_, found) => found,
+            _ => @elaborate_terminal_bool_arms(Result::Err(ElaborationError::UnsupportedExpression(token)))
+        };
+        if((flag and { seen_true }) or { not(flag) and { seen_false } }) {
+            @elaborate_terminal_bool_arms(Result::Err(ElaborationError::DuplicateMatchVariant(token, 2, u32_from_usize(Slice::len(source_arms)))))
+        } else { () };
+        let arm_body = try(elaborate_expression(original, headers, declarations, interfaces, body, map, value,
+            Id::to_u32(super::bodies::handle_arm_body(source_arm)), branch_expected(expected, inferred)), @elaborate_terminal_bool_arms);
+        let arm_type = arm_body.type_id;
+        let empty = super::syntax::empty_id_range(Vec::len(&value.core.match_bindings));
+        Vec::push(&mut *output, CoreMatchArm { variant: if(flag) { 0 } else { 1 }, bindings: empty, body: as_computation(&mut value.core, arm_body) });
+        elaborate_terminal_bool_arms(original, headers, declarations, interfaces, body, map, value,
+            expression, identity, ordinal + 1, expected, join_branch_type(inferred, arm_type),
+            seen_true or { flag }, seen_false or { not(flag) }, output)
+    } else { if(seen_true and { seen_false }) { handle inferred { Result::Ok(found) => Result::Ok(found), Result::Err(_) => Result::Err(ElaborationError::UnsupportedExpression(super::bodies::expression_token_start_at(body, expression))) } } else { Result::Err(ElaborationError::UnsupportedExpression(super::bodies::expression_token_start_at(body, expression))) } }
+}
+
 elaborate_handle(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -10747,6 +10828,24 @@ elaborate_handle(
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     let immediate = super::bodies::expression_child_at(body, expression, 0);
+    handle terminal_bool_operation(&*interfaces, body, map, immediate) {
+        None => (),
+        Option::Some(identity) => {
+            let payload = try(elaborate_expression(original, headers, declarations, interfaces, body, map, value,
+                super::bodies::expression_child_at(body, immediate, 0), Option::Some(type_id_from_u32(16))), @elaborate_handle);
+            let prefix = new_core_prefix();
+            let subject = bind_operand(&mut value.core, payload, &mut prefix);
+            let arms = Vec::new();
+            let result = try(elaborate_terminal_bool_arms(original, headers, declarations, interfaces, body, map, value,
+                expression, identity, 0, expected, None, false, false, &mut arms), @elaborate_handle);
+            let start = super::syntax::range_mark(&value.core.match_arms);
+            append_match_arms_rebased(&mut value.core.match_arms, &arms,
+                u32_from_usize(super::syntax::range_mark(&value.core.match_bindings)), 0);
+            let dispatch = push_computation(&mut value.core, result,
+                CoreComputationKind::VariantDispatch(subject, match_arm_range(start, Vec::len(&value.core.match_arms))));
+            @elaborate_handle(Result::Ok(finish_computation(&mut value.core, result, dispatch, &prefix)))
+        }
+    };
     handle terminal_u32_operation(&*interfaces, body, map, immediate) {
         None => (),
         Option::Some(identity) => {

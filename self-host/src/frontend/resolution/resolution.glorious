@@ -72,7 +72,8 @@ pub struct LocalBinding {
 pub enum ResolvedPatternBinder {
     Wildcard,
     Local(LocalId),
-    Integer(usize)
+    Integer(usize),
+    Boolean(usize, Bool)
 }
 
 impl Use<[0, *]> for ResolvedPatternBinder {}
@@ -1682,6 +1683,11 @@ resolve_pattern_binders<'a>(
                 Vec::push(
                     &mut output.pattern_binders,
                     ResolvedPatternBinder::Integer(token)
+                ),
+            PatternBinder::Boolean(token, flag) =>
+                Vec::push(
+                    &mut output.pattern_binders,
+                    ResolvedPatternBinder::Boolean(token, flag)
                 ),
             PatternBinder::Binding(name, token) => {
                 let local = try(

@@ -1664,6 +1664,27 @@ fn self_hosted_effect_elaboration_diagnostic_returns_without_abort() {
 
 #[test]
 #[ignore = "expensive release VM gate"]
+fn self_hosted_terminal_bool_handler_classifier_reaches_variant_dispatch() {
+    std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(|| {
+        let source = "effect Branch { select(condition: Bool) -> ! } \
+            choose(value: Bool) -> u32 { \
+                handle Branch::select(value) { \
+                    Branch::select(true) => 10, \
+                    Branch::select(false) => 20 \
+                } \
+            } main() { () }";
+        let phases = grandiose::compile_bundle_to_phases_with_options(
+            &self_host_bundle(), CompileOptions { optimization_level: OptimizationLevel::O2 }
+        ).unwrap();
+        let classify = function_id(&phases.artifact, "classify_compile_error");
+        let compiler = load_verified(&phases.artifact.encode()).unwrap();
+        assert_eq!(Vm::with_host(compiler, ["process.args", "fs.read", "fs.write", "diagnostic"],
+            SystemHost::new(vec![])).unwrap().run(classify, vec![Value::Text(source.into())]).unwrap(), Value::U64(0));
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM gate"]
 fn self_hosted_compiler_defers_abstract_trait_and_impl_callables_in_release_vm() {
     // Trait requirements and generic implementation members are retained in
     // the callable interface arena. Their exposed signatures still contain
