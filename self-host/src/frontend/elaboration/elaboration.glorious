@@ -450,6 +450,25 @@ type MatchArmRange = super::syntax::IdRange<MatchArmRangeTag>;
 struct MatchBindingRangeTag {}
 type MatchBindingRange = super::syntax::IdRange<MatchBindingRangeTag>;
 
+// A refinement is a decision over a subject, not a Boolean primitive.  Keep
+// its pattern in a separate, typed arena so later MIR lowering can make the
+// positive/negative CFG split without reparsing source syntax.
+pub struct CorePatternTag {}
+pub type CorePatternId = Id<CorePatternTag>;
+
+struct CorePatternRangeTag {}
+type CorePatternRange = super::syntax::IdRange<CorePatternRangeTag>;
+
+struct CorePatternFieldRangeTag {}
+type CorePatternFieldRange = super::syntax::IdRange<CorePatternFieldRangeTag>;
+
+struct CoreRefinementBindingRangeTag {}
+type CoreRefinementBindingRange =
+    super::syntax::IdRange<CoreRefinementBindingRangeTag>;
+
+struct CorePatternPathRangeTag {}
+type CorePatternPathRange = super::syntax::IdRange<CorePatternPathRangeTag>;
+
 struct IntegerArmRangeTag {}
 type IntegerArmRange = super::syntax::IdRange<IntegerArmRangeTag>;
 
@@ -469,6 +488,10 @@ enum CoreComputationKind {
     CallIndirect(CoreValueId, CallableSignatureId, OperandRange),
     Primitive(u32, OperandRange),
     Construct(ConstructionFlavor, ConstructionFieldRange),
+    // `is` remains an observational pattern decision until MIR can lower its
+    // positive/negative control edges.  The bindings name only the success
+    // edge; they are not ordinary locals visible after the decision.
+    Refinement(CoreValueId, CorePatternId, CoreRefinementBindingRange),
     VariantDispatch(CoreValueId, MatchArmRange),
     // A constrained terminal u32 handler is erased into an ordinary scalar
     // switch before effect lowering.  Its final arm is the required wildcard.
@@ -538,6 +561,53 @@ pub struct CoreMatchBinding {
 
 impl Use<[0, *]> for CoreMatchBinding {}
 
+// Pattern child and field order is source order after name resolution.  A
+// struct field is stored by its declared ordinal, never by spelling, so a
+// later lowering has a stable projection plan.
+pub struct CorePatternField { field: u32, pattern: CorePatternId }
+
+impl Use<[0, *]> for CorePatternField {}
+
+pub enum CorePatternKind {
+    Wildcard,
+    Binding,
+    Integer(IntegerConstantId),
+    // Floating and textual pattern payloads remain decoded source values;
+    // their dedicated scalar lowering is intentionally outside this first
+    // refinement foundation.
+    Float(Bytes),
+    Text(Bytes),
+    Character(u32),
+    Byte(u8),
+    Boolean(Bool),
+    Unit,
+    Variant(TypeId, u32, CorePatternRange, Bool),
+    Tuple(CorePatternRange, Bool),
+    Struct(TypeId, CorePatternFieldRange, Bool)
+}
+
+impl Use<[0, *]> for CorePatternKind {}
+
+pub struct CorePattern { ty: TypeId, kind: CorePatternKind }
+
+impl Use<[0, *]> for CorePattern {}
+
+// Paths are explicit rather than inferred from a flattened binding order.
+// Variant segments retain a constructor decision; field segments retain the
+// selected payload/tuple/struct ordinal.  This is enough to reconstruct the
+// same binding projections that bootstrap refinement lowering uses.
+pub enum CorePatternPathSegment { Variant(u32), Field(u32) }
+
+impl Use<[0, *]> for CorePatternPathSegment {}
+
+pub struct CoreRefinementBinding {
+    local: CoreLocalId,
+    path: CorePatternPathRange,
+    ty: TypeId
+}
+
+impl Use<[0, *]> for CoreRefinementBinding {}
+
 // A clause names the resolved operation and its binder locals explicitly.
 // `payloads` are the operation parameters in declaration order; `resumption`
 // is absent only for terminal operations.
@@ -563,6 +633,11 @@ pub struct TypedBody {
     computations: Arena<CoreComputationTag, CoreComputation>,
     operands: Vec<CoreValueId>,
     construction_fields: Vec<ConstructionField>,
+    patterns: Arena<CorePatternTag, CorePattern>,
+    pattern_children: Vec<CorePatternId>,
+    pattern_fields: Vec<CorePatternField>,
+    refinement_bindings: Vec<CoreRefinementBinding>,
+    pattern_paths: Vec<CorePatternPathSegment>,
     match_arms: Vec<CoreMatchArm>,
     match_bindings: Vec<CoreMatchBinding>,
     integer_arms: Vec<CoreIntegerArm>,
@@ -907,6 +982,12 @@ pub enum CoreComputationView<'a> {
     ),
     Primitive(TypeId, u32, Slice<'a, CoreValueId>),
     Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>),
+    Refinement(
+        TypeId,
+        CoreValueId,
+        CorePatternId,
+        Slice<'a, CoreRefinementBinding>
+    ),
     VariantDispatch(TypeId, CoreValueId, Slice<'a, CoreMatchArm>),
     IntegerDispatch(TypeId, CoreValueId, Slice<'a, CoreIntegerArm>),
     Perform(TypeId, InterfaceEffectOperationId, Slice<'a, CoreValueId>),
@@ -951,6 +1032,7 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
             CoreComputationView::CallIndirect(ty, _, _, _) => ty,
             CoreComputationView::Primitive(ty, _, _) => ty,
             CoreComputationView::Construct(ty, _, _) => ty,
+            CoreComputationView::Refinement(ty, _, _, _) => ty,
             CoreComputationView::VariantDispatch(ty, _, _) => ty,
             CoreComputationView::IntegerDispatch(ty, _, _) => ty,
             CoreComputationView::Perform(ty, _, _) => ty,
@@ -996,6 +1078,7 @@ core_node_child_count(
             CoreComputationView::Primitive(_, _, operands) =>
                 Slice::len(operands),
             CoreComputationView::Construct(_, _, fields) => Slice::len(fields),
+            CoreComputationView::Refinement(_, _, _, _) => 1,
             CoreComputationView::VariantDispatch(_, _, arms) =>
                 Slice::len(arms) + 1,
             CoreComputationView::IntegerDispatch(_, _, arms) =>
@@ -1068,6 +1151,8 @@ core_node_child_at(
                 };
                 CoreNodeId::Value(construction_field_value(field))
             },
+            CoreComputationView::Refinement(_, subject, _, _) =>
+                CoreNodeId::Value(subject),
             CoreComputationView::VariantDispatch(_, subject, arms) => {
                 if(index == 0) { CoreNodeId::Value(subject) } else {
                     let arm = handle Slice::get(arms, index - 1) {
@@ -1362,6 +1447,10 @@ core_node_child_set(
                     );
                     CoreComputationKind::Construct(flavor, fields)
                 },
+                CoreComputationKind::Refinement(subject, pattern, bindings) =>
+                    CoreComputationKind::Refinement(
+                        core_rewrite_value(replacement), pattern, bindings
+                    ),
                 CoreComputationKind::Perform(operation, operands) => {
                     *Vec::index_mut(
                         &mut body.operands,
@@ -1609,6 +1698,11 @@ struct CoreBuilder {
     computations: Arena<CoreComputationTag, CoreComputation>,
     operands: Vec<CoreValueId>,
     construction_fields: Vec<ConstructionField>,
+    patterns: Arena<CorePatternTag, CorePattern>,
+    pattern_children: Vec<CorePatternId>,
+    pattern_fields: Vec<CorePatternField>,
+    refinement_bindings: Vec<CoreRefinementBinding>,
+    pattern_paths: Vec<CorePatternPathSegment>,
     match_arms: Vec<CoreMatchArm>,
     match_bindings: Vec<CoreMatchBinding>,
     integer_arms: Vec<CoreIntegerArm>,
@@ -1628,6 +1722,11 @@ new_core_builder(
         computations: Arena::new(),
         operands: Vec::new(),
         construction_fields: Vec::new(),
+        patterns: Arena::new(),
+        pattern_children: Vec::new(),
+        pattern_fields: Vec::new(),
+        refinement_bindings: Vec::new(),
+        pattern_paths: Vec::new(),
         match_arms: Vec::new(),
         match_bindings: Vec::new(),
         integer_arms: Vec::new(),
@@ -3324,6 +3423,62 @@ pub typed_body_handler_clauses<'a>(
     }
 }
 
+pub typed_body_pattern_at<'a>(
+    value: &'a TypedBody,
+    id: CorePatternId
+) -> &'a CorePattern { Arena::index(&value.patterns, id) }
+
+pub typed_body_pattern_children<'a>(
+    value: &'a TypedBody,
+    range: CorePatternRange
+) -> Slice<'a, CorePatternId> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.pattern_children),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) { Result::Err(_) => unreachable(), Result::Ok(found) => found }
+}
+
+pub typed_body_pattern_fields<'a>(
+    value: &'a TypedBody,
+    range: CorePatternFieldRange
+) -> Slice<'a, CorePatternField> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.pattern_fields),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) { Result::Err(_) => unreachable(), Result::Ok(found) => found }
+}
+
+pub typed_body_refinement_bindings<'a>(
+    value: &'a TypedBody,
+    range: CoreRefinementBindingRange
+) -> Slice<'a, CoreRefinementBinding> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.refinement_bindings),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) { Result::Err(_) => unreachable(), Result::Ok(found) => found }
+}
+
+pub core_pattern_type(value: &CorePattern) -> TypeId { value.ty }
+pub core_pattern_kind(value: &CorePattern) -> CorePatternKind { value.kind }
+pub core_pattern_field_ordinal(value: &CorePatternField) -> u32 { value.field }
+pub core_pattern_field_pattern(value: &CorePatternField) -> CorePatternId { value.pattern }
+pub core_refinement_binding_local(value: &CoreRefinementBinding) -> CoreLocalId { value.local }
+pub core_refinement_binding_type(value: &CoreRefinementBinding) -> TypeId { value.ty }
+
+pub core_refinement_binding_path<'a>(
+    body: &'a TypedBody,
+    value: &CoreRefinementBinding
+) -> Slice<'a, CorePatternPathSegment> {
+    handle Slice::subslice(
+        Vec::as_slice(&body.pattern_paths),
+        usize_from_u32(value.path.start),
+        usize_from_u32(value.path.count)
+    ) { Result::Err(_) => unreachable(), Result::Ok(found) => found }
+}
+
 pub core_handler_clause_operation(
     value: &CoreHandlerClause
 ) -> InterfaceEffectOperationId { value.operation }
@@ -3501,6 +3656,13 @@ pub typed_body_computation_at<'a>(
                 ty,
                 flavor,
                 typed_body_construction_fields(value, range)
+            ),
+        CoreComputationKind::Refinement(subject, pattern, range) =>
+            CoreComputationView::Refinement(
+                ty,
+                subject,
+                pattern,
+                typed_body_refinement_bindings(value, range)
             ),
         CoreComputationKind::VariantDispatch(subject, range) =>
             CoreComputationView::VariantDispatch(
@@ -7884,6 +8046,33 @@ push_computation(
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
     }
+}
+
+// Pattern allocation is intentionally append-only.  Elaboration emits child
+// patterns before their parent and appends each child/field range in lexical
+// order, giving deterministic Core identities and projection paths.
+push_core_pattern(
+    value: &mut CoreBuilder,
+    ty: TypeId,
+    kind: CorePatternKind
+) -> CorePatternId {
+    handle Arena::alloc(&mut value.patterns, CorePattern { ty: ty, kind: kind }) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+push_refinement_binding(
+    value: &mut CoreBuilder,
+    local: CoreLocalId,
+    ty: TypeId,
+    path: CorePatternPathRange
+) {
+    Vec::push(&mut value.refinement_bindings, CoreRefinementBinding {
+        local: local,
+        path: path,
+        ty: ty
+    })
 }
 
 // Allocate the stable Core identity before elaborating a destination body.
@@ -12980,6 +13169,11 @@ pub elaborate_function_instance_body(
                 computations,
                 operands,
                 construction_fields,
+                patterns,
+                pattern_children,
+                pattern_fields,
+                refinement_bindings,
+                pattern_paths,
                 match_arms,
                 match_bindings,
                 integer_arms,
@@ -12998,6 +13192,11 @@ pub elaborate_function_instance_body(
                 computations: computations,
                 operands: operands,
                 construction_fields: construction_fields,
+                patterns: patterns,
+                pattern_children: pattern_children,
+                pattern_fields: pattern_fields,
+                refinement_bindings: refinement_bindings,
+                pattern_paths: pattern_paths,
                 match_arms: match_arms,
                 match_bindings: match_bindings,
                 integer_arms: integer_arms,

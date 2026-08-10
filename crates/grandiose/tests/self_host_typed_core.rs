@@ -2234,6 +2234,45 @@ fn self_host_label_elaboration_retains_generative_lexical_control_in_core() {
 }
 
 #[test]
+fn self_host_is_refinement_core_retains_decision_shape_and_scoped_bindings() {
+    // This is a structural Typed-Core gate.  `is` has no MIR lowering yet,
+    // but it must already remain a decision with its pattern and success-edge
+    // binding projection plan; lowering it to a subject-only Boolean here
+    // would make the later refinement CFG impossible to recover faithfully.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "CorePatternId",
+        "CorePatternKind",
+        "Float(Bytes)",
+        "Text(Bytes)",
+        "Character(u32)",
+        "Byte(u8)",
+        "Variant(TypeId, u32, CorePatternRange, Bool)",
+        "Tuple(CorePatternRange, Bool)",
+        "Struct(TypeId, CorePatternFieldRange, Bool)",
+        "CorePatternPathSegment { Variant(u32), Field(u32) }",
+        "CoreRefinementBinding",
+        "path: CorePatternPathRange",
+        "Refinement(CoreValueId, CorePatternId, CoreRefinementBindingRange)",
+        "CoreComputationView::Refinement",
+        "typed_body_refinement_bindings",
+        "core_refinement_binding_path",
+        "push_core_pattern",
+        "push_refinement_binding",
+    ] {
+        assert!(core.contains(required), "missing is-refinement Core foundation: {required}");
+    }
+    assert!(
+        !core.contains("Refinement(CoreValueId, Bool)"),
+        "an is refinement must not erase its pattern into a fabricated Boolean"
+    );
+}
+
+#[test]
 fn self_hosted_monomorphic_perform_elaborates_like_bootstrap() {
     // Keep the first executable effect-body parity case intentionally narrow:
     // a monomorphic operation has no continuation lowering requirement, but
