@@ -9210,6 +9210,26 @@ elaborate_block(
             ),
             @elaborate_block
         ),
+        // The parser preserves a contextual block for call-shape recovery,
+        // but it has the same resolved statements and lexical scope as an
+        // ordinary block by elaboration time.
+        super::bodies::BodyExpressionView::ContextBlock(children) => try(
+            elaborate_block_statements(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                expression,
+                children,
+                expected,
+                0,
+                &mut lets
+            ),
+            @elaborate_block
+        ),
         _ => unreachable()
     };
     let final_type = final_value.type_id;
@@ -11654,6 +11674,17 @@ elaborate_expression(
                 )
             },
         super::bodies::BodyExpressionView::Block(_) => elaborate_block(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            expression,
+            expected
+        ),
+        super::bodies::BodyExpressionView::ContextBlock(_) => elaborate_block(
             original,
             headers,
             declarations,
