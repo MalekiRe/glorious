@@ -1750,6 +1750,10 @@ scalar_width(type_id: u32) -> Option<usize> {
         11 => Option::Some(16),
         12 => Option::Some(8),
         13 => Option::Some(8),
+        // `char` is encoded as its Unicode scalar value, matching the
+        // four-byte representation used by the VM artifact's predefined
+        // character type.
+        16 => Option::Some(4),
         _ => None
     }
 }

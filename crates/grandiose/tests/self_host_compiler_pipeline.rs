@@ -325,3 +325,47 @@ fn self_hosted_compiler_pipeline_result_prelude_does_not_mask_unknown_names() {
         .join()
         .unwrap();
 }
+
+// Character syntax is already elaborated as an integer-style scalar constant.
+// Keep the end-to-end VM compiler gate focused on the lowering boundary: the
+// predefined `char` artifact type requires a four-byte payload rather than an
+// unsupported scalar error.
+#[test]
+#[ignore = "baseline-blocked: run through the full self-host compiler RAM gate"]
+fn self_hosted_compiler_pipeline_character_literal_reaches_emission() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let artifact = compile_bundle_to_bytecode_with_options(
+                &self_host_compiler_pipeline_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&artifact, "classify_compile_error");
+            let verified = verify(artifact).unwrap();
+            let source = "character() -> char { '🦀' } main() { () }";
+            assert!(
+                grandiose::compile_source_to_bytecode("compiler-character.glorious", source)
+                    .is_ok(),
+                "bootstrap oracle must accept the character literal"
+            );
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(Vec::<std::ffi::OsString>::new()),
+            )
+            .unwrap();
+            let Value::U64(phase) = vm
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap()
+            else {
+                panic!("classify_compile_error did not return u8");
+            };
+            assert_eq!(phase, 0, "character literal must reach emission");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
