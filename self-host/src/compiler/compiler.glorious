@@ -1483,6 +1483,91 @@ prepare_session(
     })
 }
 
+// The initial seed has no substitutions.  In particular, a trait interface
+// method can have no callable-local generic parameters while its signature
+// still contains TraitSelf.  Do not turn those abstract interfaces into
+// lowering work: instances are only safe to lower once their entire exposed
+// signature is represented by concrete artifact types.
+type_is_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    semantic: elaboration::TypeId
+) -> Bool {
+    let index = Id::to_usize(semantic);
+    let tag = elaboration::interface_type_tag_at(interfaces, index);
+    if(tag == 8 or { tag == 13 }) {
+        // TypeParameter includes declaration, impl, and TraitSelf owners;
+        // effects have no artifact type either.
+        false
+    } else { if(tag == 4 or { tag == 10 }) {
+        let start = elaboration::interface_type_a_at(interfaces, index);
+        let count = if(tag == 4) {
+            elaboration::interface_type_b_at(interfaces, index)
+        } else { elaboration::interface_type_c_at(interfaces, index) };
+        type_elements_are_recursively_concrete(
+            interfaces, start, count, 0
+        )
+    } else { if(tag == 9 or { tag == 6 } or { tag == 7 }) {
+        type_is_recursively_concrete(
+            interfaces,
+            Id::from_u32(elaboration::interface_type_a_at(interfaces, index))
+        )
+    } else { if(tag == 5) {
+        elaboration::interface_nominal_generic_count(
+            interfaces,
+            usize_from_u32(elaboration::interface_type_a_at(interfaces, index))
+        ) == 0
+    } else {
+        // Unit, Never, scalar, Text, and Bytes have no type children.
+        true
+    } } } }
+}
+
+type_elements_are_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    start: u32,
+    count: u32,
+    offset: usize
+) -> Bool {
+    if(offset < usize_from_u32(count)) {
+        let child = elaboration::interface_type_element_at(
+            interfaces,
+            usize_from_u32(start) + offset
+        );
+        type_is_recursively_concrete(interfaces, child) and {
+            type_elements_are_recursively_concrete(
+                interfaces, start, count, offset + 1
+            )
+        }
+    } else { true }
+}
+
+callable_signature_is_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    callable: InterfaceCallableId,
+    parameter: usize
+) -> Bool {
+    let parameter_count = elaboration::interface_callable_parameter_count(
+        interfaces, callable
+    );
+    if(parameter < usize_from_u32(parameter_count)) {
+        type_is_recursively_concrete(
+            interfaces,
+            elaboration::interface_callable_parameter_at(
+                interfaces, callable, parameter
+            )
+        ) and {
+            callable_signature_is_recursively_concrete(
+                interfaces, callable, parameter + 1
+            )
+        }
+    } else {
+        type_is_recursively_concrete(
+            interfaces,
+            elaboration::interface_callable_result(interfaces, callable)
+        )
+    }
+}
+
 seed_concrete_callables<'a>(
     session: &mut CompilerSession,
     index: usize
@@ -1498,7 +1583,11 @@ seed_concrete_callables<'a>(
         if(elaboration::interface_callable_generic_count(
             &session.interfaces,
             callable
-        ) == 0) {
+        ) == 0 and {
+            callable_signature_is_recursively_concrete(
+                &session.interfaces, callable, 0
+            )
+        }) {
             let substitutions = Vec::new();
             elaboration::intern_callable_instance(
                 &mut session.interfaces,
