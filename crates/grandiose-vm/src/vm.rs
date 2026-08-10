@@ -1108,22 +1108,28 @@ impl Vm {
                     args,
                 } => {
                     let (dst, function) = (*dst, *function);
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let callee = make_verified_frame_from_arguments(
+                        a,
+                        function,
+                        frame,
+                        args,
+                        Value::Unit,
+                        dst,
+                    )?;
                     frame.pc += 1;
-                    stack.push(make_verified_frame(a, function, values, Value::Unit, dst)?);
+                    stack.push(callee);
                 }
                 Instruction::TailCall { function, args } => {
                     let function = *function;
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, Value::Unit, return_dst)?;
+                    let mut replacement = make_verified_frame_from_arguments(
+                        a,
+                        function,
+                        frame,
+                        args,
+                        Value::Unit,
+                        return_dst,
+                    )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -2043,6 +2049,45 @@ fn make_verified_frame(
     Ok(frame_from_verified_values(
         f, function, args, receiver, return_dst,
     ))
+}
+
+/// Construct a verified callee frame while relocating arguments straight from
+/// its caller. Direct calls are abundant in the self-host compiler and do not
+/// need the temporary `Vec<Value>` otherwise used by the more general call
+/// forms that also need to construct or transform their argument list.
+fn make_verified_frame_from_arguments(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    args: &[u32],
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if args.len() != f.params.len() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: args.len(),
+        });
+    }
+    let mut registers = vec![None; f.register_types.len()];
+    registers[0] = Some(receiver);
+    for (index, argument) in args.iter().copied().enumerate() {
+        registers[index + 1] = Some(take(caller, argument)?);
+    }
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
 }
 
 fn frame_from_verified_values(
