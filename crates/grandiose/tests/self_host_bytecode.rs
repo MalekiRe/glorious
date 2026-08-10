@@ -1630,6 +1630,10 @@ fn self_hosted_effect_elaboration_diagnostic_returns_without_abort() {
             let output = directory.path().join("unexpected-output.grbc");
             fs::write(
                 &input,
+                // A terminal operation may not declare a resumption quantity.
+                // Header elaboration reports this as local diagnostic code 64
+                // during InterfaceCollection (G5064). Before the exhaustive
+                // mapping this same ElaborationError reached `unreachable()`.
                 "effect Stop { [1,1] stop() -> ! } main() { () }",
             )
             .unwrap();
