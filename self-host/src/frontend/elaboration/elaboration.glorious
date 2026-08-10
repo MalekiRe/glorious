@@ -47,7 +47,8 @@ enum TypeKind {
     Effect(ShellId),
     Nominal(InterfaceNominalId),
     SharedReference(TypeId),
-    UniqueReference(TypeId)
+    UniqueReference(TypeId),
+    Callable(CallableSignatureId)
 }
 
 impl Use<[0, *]> for TypeKind {}
@@ -67,6 +68,11 @@ pub type InterfaceCallableId = Id<InterfaceCallableTag>;
 
 pub struct CallableInstanceTag {}
 pub type CallableInstanceId = Id<CallableInstanceTag>;
+
+// A callable type is an interned semantic signature. It deliberately does not
+// describe a runtime closure layout: closure sites own those details below.
+pub struct CallableSignatureTag {}
+pub type CallableSignatureId = Id<CallableSignatureTag>;
 
 type InterfaceFieldRange = super::syntax::IdRange<InterfaceFieldTag>;
 
@@ -282,6 +288,15 @@ struct CallableInstance {
 
 impl Use<[0, *]> for CallableInstance {}
 
+pub struct CallableSignature {
+    parameters: TypeElementRange,
+    result: TypeId,
+    effects: TypeElementRange,
+    effect_tail: Option<u32>
+}
+
+impl Use<[0, *]> for CallableSignature {}
+
 struct SignatureScope {
     owner: ShellId,
     start: u32,
@@ -328,6 +343,9 @@ pub struct TypedInterfaces {
     instance_parameters: Vec<TypeId>,
     instance_substitutions: Vec<Option<TypeId>>,
     callable_effects: Vec<TypeId>,
+    callable_signatures: Arena<CallableSignatureTag, CallableSignature>,
+    callable_signature_parameters: Vec<TypeId>,
+    callable_signature_effects: Vec<TypeId>,
     effects: Arena<InterfaceEffectTag, InterfaceEffect>,
     effect_operations:
         Arena<InterfaceEffectOperationTag, InterfaceEffectOperation>,
@@ -365,6 +383,35 @@ pub type CoreLocalId = Id<CoreLocalTag>;
 pub struct LabelDestinationTag {}
 pub type LabelDestinationId = Id<LabelDestinationTag>;
 
+pub struct ClosureSiteTag {}
+pub type ClosureSiteId = Id<ClosureSiteTag>;
+
+struct ClosureCaptureRangeTag {}
+type ClosureCaptureRange = super::syntax::IdRange<ClosureCaptureRangeTag>;
+
+// Capture modes are semantic ownership decisions.  Keeping them at Core
+// avoids rediscovering capture order or ownership while constructing MIR.
+pub enum CoreCaptureMode { Borrow, Copy, Move }
+
+impl Use<[0, *]> for CoreCaptureMode {}
+
+pub struct CoreClosureCapture {
+    order: u32,
+    value: CoreValueId,
+    mode: CoreCaptureMode
+}
+
+impl Use<[0, *]> for CoreClosureCapture {}
+
+pub struct ClosureSiteDescriptor {
+    owner: ShellId,
+    source_order: u32,
+    signature: CallableSignatureId,
+    captures: ClosureCaptureRange
+}
+
+impl Use<[0, *]> for ClosureSiteDescriptor {}
+
 pub struct IntegerConstantTag {}
 pub type IntegerConstantId = Id<IntegerConstantTag>;
 
@@ -380,7 +427,8 @@ enum CoreValueKind {
     Bytes(Bytes),
     Local(CoreLocalId, Bool),
     Projection(CoreValueId, u32),
-    Embedded(CoreComputationId)
+    Embedded(CoreComputationId),
+    Closure(ClosureSiteId)
 }
 
 impl Use<[0, *]> for CoreValueKind {}
@@ -416,6 +464,9 @@ enum CoreComputationKind {
     Pure(CoreValueId),
     Let(CoreLocalId, CoreComputationId, CoreComputationId),
     Call(ShellId, CallableInstanceId, OperandRange),
+    // The signature is retained explicitly so a later backend can validate
+    // the callee type without relying on a transient elaboration context.
+    CallIndirect(CoreValueId, CallableSignatureId, OperandRange),
     Primitive(u32, OperandRange),
     Construct(ConstructionFlavor, ConstructionFieldRange),
     VariantDispatch(CoreValueId, MatchArmRange),
@@ -517,6 +568,8 @@ pub struct TypedBody {
     integer_arms: Vec<CoreIntegerArm>,
     label_destinations: Vec<CoreLabelDestination>,
     handler_clauses: Vec<CoreHandlerClause>,
+    closure_sites: Arena<ClosureSiteTag, ClosureSiteDescriptor>,
+    closure_captures: Vec<CoreClosureCapture>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
@@ -586,7 +639,8 @@ pub enum ElaborationError {
     IntegerEncodingOverflow(usize, u32),
     InvalidLocalReference(usize, u32, u32),
     EmbeddedValueSerializationUnsupported(usize),
-    VariantDispatchSerializationUnsupported(usize)
+    VariantDispatchSerializationUnsupported(usize),
+    InvalidClosureCaptureOrder(u32)
 }
 
 // Backend-facing views keep the finalized Core representation semantic.
@@ -605,7 +659,8 @@ pub enum InterfaceTypeView<'a> {
     Effect(u32),
     Nominal(u32),
     SharedReference(u32),
-    UniqueReference(u32)
+    UniqueReference(u32),
+    Callable(CallableSignatureId)
 }
 
 impl<'a> Use<[0, *]> for InterfaceTypeView<'a> {}
@@ -652,6 +707,29 @@ F: Use<[0, 0]> {
             walk_type(interfaces, Id::from_u32(child), stop, visitor),
         InterfaceTypeView::UniqueReference(child) =>
             walk_type(interfaces, Id::from_u32(child), stop, visitor),
+        InterfaceTypeView::Callable(signature) => {
+            let callable = interface_callable_signature_at(interfaces, signature);
+            __g1_walk_type_elements(
+                interfaces,
+                interface_callable_signature_parameters(interfaces, callable),
+                0,
+                stop,
+                visitor
+            );
+            walk_type(
+                interfaces,
+                interface_callable_signature_result(callable),
+                stop,
+                visitor
+            );
+            __g1_walk_type_elements(
+                interfaces,
+                interface_callable_signature_effects(interfaces, callable),
+                0,
+                stop,
+                visitor
+            )
+        },
         _ => ()
     }
 }
@@ -741,6 +819,32 @@ F: Use<[0, 0]> {
         InterfaceTypeView::UniqueReference(child) => fold_type(
             interfaces, Id::from_u32(child), accumulator, stop, visitor
         ),
+        InterfaceTypeView::Callable(signature) => {
+            let callable = interface_callable_signature_at(interfaces, signature);
+            let after_parameters = __g1_fold_type_elements(
+                interfaces,
+                interface_callable_signature_parameters(interfaces, callable),
+                0,
+                accumulator,
+                stop,
+                visitor
+            );
+            let after_result = fold_type(
+                interfaces,
+                interface_callable_signature_result(callable),
+                after_parameters,
+                stop,
+                visitor
+            );
+            __g1_fold_type_elements(
+                interfaces,
+                interface_callable_signature_effects(interfaces, callable),
+                0,
+                after_result,
+                stop,
+                visitor
+            )
+        },
         _ => accumulator
     }
 }
@@ -785,7 +889,8 @@ pub enum CoreValueView {
     Bytes(TypeId, Bytes),
     Local(TypeId, CoreLocalId, Bool, Bool),
     Projection(TypeId, CoreValueId, u32),
-    Embedded(TypeId, CoreComputationId)
+    Embedded(TypeId, CoreComputationId),
+    Closure(TypeId, ClosureSiteId)
 }
 
 impl Use<[0, *]> for CoreValueView {}
@@ -794,6 +899,12 @@ pub enum CoreComputationView<'a> {
     Pure(TypeId, CoreValueId),
     Let(TypeId, CoreLocalId, CoreComputationId, CoreComputationId),
     Call(TypeId, ShellId, CallableInstanceId, Slice<'a, CoreValueId>),
+    CallIndirect(
+        TypeId,
+        CoreValueId,
+        CallableSignatureId,
+        Slice<'a, CoreValueId>
+    ),
     Primitive(TypeId, u32, Slice<'a, CoreValueId>),
     Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>),
     VariantDispatch(TypeId, CoreValueId, Slice<'a, CoreMatchArm>),
@@ -830,12 +941,14 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
             CoreValueView::Bytes(ty, _) => ty,
             CoreValueView::Local(ty, _, _, _) => ty,
             CoreValueView::Projection(ty, _, _) => ty,
-            CoreValueView::Embedded(ty, _) => ty
+            CoreValueView::Embedded(ty, _) => ty,
+            CoreValueView::Closure(ty, _) => ty
         },
         CoreNodeView::Computation(found) => handle found {
             CoreComputationView::Pure(ty, _) => ty,
             CoreComputationView::Let(ty, _, _, _) => ty,
             CoreComputationView::Call(ty, _, _, _) => ty,
+            CoreComputationView::CallIndirect(ty, _, _, _) => ty,
             CoreComputationView::Primitive(ty, _, _) => ty,
             CoreComputationView::Construct(ty, _, _) => ty,
             CoreComputationView::VariantDispatch(ty, _, _) => ty,
@@ -870,12 +983,16 @@ core_node_child_count(
         CoreNodeView::Value(view) => handle view {
             CoreValueView::Projection(_, _, _) => 1,
             CoreValueView::Embedded(_, _) => 1,
+            CoreValueView::Closure(_, site) =>
+                usize_from_u32(closure_site_at(body, site).captures.count),
             _ => 0
         },
         CoreNodeView::Computation(view) => handle view {
             CoreComputationView::Pure(_, _) => 1,
             CoreComputationView::Let(_, _, _, _) => 2,
             CoreComputationView::Call(_, _, _, operands) => Slice::len(operands),
+            CoreComputationView::CallIndirect(_, _, _, operands) =>
+                Slice::len(operands) + 1,
             CoreComputationView::Primitive(_, _, operands) =>
                 Slice::len(operands),
             CoreComputationView::Construct(_, _, fields) => Slice::len(fields),
@@ -903,6 +1020,15 @@ core_node_child_at(
                 CoreNodeId::Value(source),
             CoreValueView::Embedded(_, computation) =>
                 CoreNodeId::Computation(computation),
+            CoreValueView::Closure(_, site) => {
+                let captures = closure_site_at(body, site).captures;
+                CoreNodeId::Value(core_closure_capture_value(
+                    Vec::index(
+                        &body.closure_captures,
+                        usize_from_u32(captures.start) + index
+                    )
+                ))
+            },
             _ => unreachable()
         },
         CoreNodeView::Computation(view) => handle view {
@@ -918,6 +1044,15 @@ core_node_child_at(
                     Result::Ok(found) => *found
                 };
                 CoreNodeId::Value(value)
+            },
+            CoreComputationView::CallIndirect(_, callee, _, operands) => {
+                if(index == 0) { CoreNodeId::Value(callee) } else {
+                    let operand = handle Slice::get(operands, index - 1) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(found) => *found
+                    };
+                    CoreNodeId::Value(operand)
+                }
             },
             CoreComputationView::Primitive(_, _, operands) => {
                 let value = handle Slice::get(operands, index) {
@@ -1108,6 +1243,14 @@ core_handler_clause_set_body(
     ()
 }
 
+core_closure_capture_set_value(
+    value: &mut CoreClosureCapture,
+    replacement: CoreValueId
+) {
+    (*value).value = replacement;
+    ()
+}
+
 
 typed_body_set_root(value: &mut TypedBody, replacement: CoreComputationId) {
     (*value).root = replacement;
@@ -1131,6 +1274,17 @@ core_node_child_set(
                 CoreValueKind::Embedded(_) => CoreValueKind::Embedded(
                     core_rewrite_computation(replacement)
                 ),
+                CoreValueKind::Closure(site) => {
+                    let capture_start = closure_site_at(&*body, site).captures.start;
+                    core_closure_capture_set_value(
+                        Vec::index_mut(
+                            &mut body.closure_captures,
+                            usize_from_u32(capture_start) + index
+                        ),
+                        core_rewrite_value(replacement)
+                    );
+                    CoreValueKind::Closure(site)
+                },
                 other => { replacement; index; other }
             };
             core_value_set_kind(
@@ -1165,6 +1319,23 @@ core_node_child_set(
                         usize_from_u32(operands.start) + index
                     ) = core_rewrite_value(replacement);
                     CoreComputationKind::Call(target, instance, operands)
+                },
+                CoreComputationKind::CallIndirect(
+                    callee, signature, operands
+                ) => {
+                    if(index == 0) {
+                        CoreComputationKind::CallIndirect(
+                            core_rewrite_value(replacement), signature, operands
+                        )
+                    } else {
+                        *Vec::index_mut(
+                            &mut body.operands,
+                            usize_from_u32(operands.start) + index - 1
+                        ) = core_rewrite_value(replacement);
+                        CoreComputationKind::CallIndirect(
+                            callee, signature, operands
+                        )
+                    }
                 },
                 CoreComputationKind::Primitive(primitive, operands) => {
                     *Vec::index_mut(
@@ -1434,6 +1605,8 @@ struct CoreBuilder {
     match_bindings: Vec<CoreMatchBinding>,
     integer_arms: Vec<CoreIntegerArm>,
     label_destinations: Vec<CoreLabelDestination>,
+    closure_sites: Arena<ClosureSiteTag, ClosureSiteDescriptor>,
+    closure_captures: Vec<CoreClosureCapture>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
@@ -1451,6 +1624,8 @@ new_core_builder(
         match_bindings: Vec::new(),
         integer_arms: Vec::new(),
         label_destinations: Vec::new(),
+        closure_sites: Arena::new(),
+        closure_captures: Vec::new(),
         integer_constants: Arena::new()
     }
 }
@@ -2507,7 +2682,9 @@ pub interface_type_at<'a>(
         TypeKind::SharedReference(id) =>
             InterfaceTypeView::SharedReference(Id::to_u32(id)),
         TypeKind::UniqueReference(id) =>
-            InterfaceTypeView::UniqueReference(Id::to_u32(id))
+            InterfaceTypeView::UniqueReference(Id::to_u32(id)),
+        TypeKind::Callable(signature) =>
+            InterfaceTypeView::Callable(signature)
     }
 }
 
@@ -2525,7 +2702,8 @@ pub interface_type_tag_at(value: &TypedInterfaces, index: usize) -> u8 {
         TypeKind::Effect(_) => 13,
         TypeKind::Nominal(_) => 5,
         TypeKind::SharedReference(_) => 6,
-        TypeKind::UniqueReference(_) => 7
+        TypeKind::UniqueReference(_) => 7,
+        TypeKind::Callable(_) => 14
     }
 }
 
@@ -2545,6 +2723,7 @@ pub interface_type_a_at(value: &TypedInterfaces, index: usize) -> u32 {
         TypeKind::Nominal(id) => Id::to_u32(id),
         TypeKind::SharedReference(id) => Id::to_u32(id),
         TypeKind::UniqueReference(id) => Id::to_u32(id),
+        TypeKind::Callable(signature) => Id::to_u32(signature),
         _ => 0
     }
 }
@@ -2584,6 +2763,182 @@ pub interface_type_element_at(
     index: usize
 ) -> TypeId {
     *Vec::index(&value.type_elements, index)
+}
+
+callable_signature_at<'a>(
+    value: &'a TypedInterfaces,
+    id: CallableSignatureId
+) -> &'a CallableSignature {
+    Arena::index(&value.callable_signatures, id)
+}
+
+pub interface_callable_signature_at<'a>(
+    value: &'a TypedInterfaces,
+    id: CallableSignatureId
+) -> &'a CallableSignature { callable_signature_at(value, id) }
+
+pub interface_callable_signature_parameters<'a>(
+    value: &'a TypedInterfaces,
+    signature: &'a CallableSignature
+) -> Slice<'a, TypeId> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.callable_signature_parameters),
+        usize_from_u32(signature.parameters.start),
+        usize_from_u32(signature.parameters.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub interface_callable_signature_result(
+    value: &CallableSignature
+) -> TypeId { value.result }
+
+pub interface_callable_signature_effects<'a>(
+    value: &'a TypedInterfaces,
+    signature: &'a CallableSignature
+) -> Slice<'a, TypeId> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.callable_signature_effects),
+        usize_from_u32(signature.effects.start),
+        usize_from_u32(signature.effects.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub interface_callable_signature_effect_tail(
+    value: &CallableSignature
+) -> Option<u32> { value.effect_tail }
+
+type_id_vectors_equal(
+    left: &Vec<TypeId>,
+    left_start: u32,
+    right: &Vec<TypeId>,
+    right_start: u32,
+    count: usize,
+    index: usize
+) -> Bool {
+    if(index < count) {
+        *Vec::index(left, usize_from_u32(left_start) + index) ==
+            *Vec::index(right, usize_from_u32(right_start) + index)
+            and { type_id_vectors_equal(
+                left, left_start, right, right_start, count, index + 1
+            ) }
+    } else { true }
+}
+
+callable_signature_matches(
+    value: &TypedInterfaces,
+    candidate: &CallableSignature,
+    parameters: &Vec<TypeId>,
+    result: TypeId,
+    effects: &Vec<TypeId>,
+    effect_tail: Option<u32>
+) -> Bool {
+    candidate.result == result
+        and { candidate.effect_tail == effect_tail }
+        and { candidate.parameters.count == u32_from_usize(Vec::len(parameters)) }
+        and { candidate.effects.count == u32_from_usize(Vec::len(effects)) }
+        and { type_id_vectors_equal(
+            &value.callable_signature_parameters,
+            candidate.parameters.start,
+            parameters,
+            0,
+            Vec::len(parameters),
+            0
+        ) }
+        and { type_id_vectors_equal(
+            &value.callable_signature_effects,
+            candidate.effects.start,
+            effects,
+            0,
+            Vec::len(effects),
+            0
+        ) }
+}
+
+find_callable_signature(
+    value: &TypedInterfaces,
+    parameters: &Vec<TypeId>,
+    result: TypeId,
+    effects: &Vec<TypeId>,
+    effect_tail: Option<u32>,
+    index: usize
+) -> Option<CallableSignatureId> {
+    if(index < Arena::len(&value.callable_signatures)) {
+        let id = handle Id::from_usize(index) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        if(callable_signature_matches(
+            value, callable_signature_at(value, id), parameters, result,
+            effects, effect_tail
+        )) { Option::Some(id) } else { find_callable_signature(
+            value, parameters, result, effects, effect_tail, index + 1
+        ) }
+    } else { None }
+}
+
+pub intern_callable_signature(
+    value: &mut TypedInterfaces,
+    parameters: &Vec<TypeId>,
+    result: TypeId,
+    effects: &Vec<TypeId>,
+    effect_tail: Option<u32>
+) -> CallableSignatureId {
+    handle find_callable_signature(
+        &*value, parameters, result, effects, effect_tail, 0
+    ) {
+        Option::Some(found) => found,
+        None => {
+            let parameter_start = u32_from_usize(
+                Vec::len(&value.callable_signature_parameters)
+            );
+            let effect_start = u32_from_usize(
+                Vec::len(&value.callable_signature_effects)
+            );
+            append_callable_signature_types(
+                &mut value.callable_signature_parameters, parameters, 0
+            );
+            append_callable_signature_types(
+                &mut value.callable_signature_effects, effects, 0
+            );
+            handle Arena::alloc(&mut value.callable_signatures,
+                CallableSignature {
+                    parameters: super::syntax::id_range(
+                        usize_from_u32(parameter_start),
+                        usize_from_u32(parameter_start) + Vec::len(parameters)
+                    ),
+                    result: result,
+                    effects: super::syntax::id_range(
+                        usize_from_u32(effect_start),
+                        usize_from_u32(effect_start) + Vec::len(effects)
+                    ),
+                    effect_tail: effect_tail
+                }
+            ) { Result::Err(_) => unreachable(), Result::Ok(found) => found }
+        }
+    }
+}
+
+append_callable_signature_types(
+    output: &mut Vec<TypeId>, values: &Vec<TypeId>, index: usize
+) {
+    if(index < Vec::len(values)) {
+        Vec::push(&mut *output, *Vec::index(values, index));
+        append_callable_signature_types(&mut *output, values, index + 1)
+    } else { () }
+}
+
+pub intern_callable_type(
+    value: &mut TypedInterfaces,
+    signature: CallableSignatureId
+) -> TypeId {
+    type_id_from_u32(intern_record_type(
+        value, TypeKind::Callable(signature), false
+    ))
 }
 
 checked_u32_from_usize(value: usize) -> u32 {
@@ -2857,7 +3212,8 @@ pub typed_body_value_at(
                 field
             ),
         CoreValueKind::Embedded(computation) =>
-            CoreValueView::Embedded(ty, computation)
+            CoreValueView::Embedded(ty, computation),
+        CoreValueKind::Closure(site) => CoreValueView::Closure(ty, site)
     }
 }
 
@@ -2954,6 +3310,63 @@ pub core_handler_clause_body(
     value: &CoreHandlerClause
 ) -> CoreComputationId { value.body }
 
+pub closure_site_at<'a>(
+    value: &'a TypedBody,
+    id: ClosureSiteId
+) -> &'a ClosureSiteDescriptor {
+    Arena::index(&value.closure_sites, id)
+}
+
+pub typed_body_closure_site_count(value: &TypedBody) -> usize {
+    Arena::len(&value.closure_sites)
+}
+
+pub typed_body_closure_site_at(
+    value: &TypedBody,
+    index: usize
+) -> ClosureSiteId {
+    handle Id::from_usize(index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub closure_site_owner(value: &ClosureSiteDescriptor) -> ShellId { value.owner }
+
+pub closure_site_source_order(value: &ClosureSiteDescriptor) -> u32 {
+    value.source_order
+}
+
+pub closure_site_signature(
+    value: &ClosureSiteDescriptor
+) -> CallableSignatureId { value.signature }
+
+pub closure_site_captures<'a>(
+    body: &'a TypedBody,
+    value: &ClosureSiteDescriptor
+) -> Slice<'a, CoreClosureCapture> {
+    handle Slice::subslice(
+        Vec::as_slice(&body.closure_captures),
+        usize_from_u32(value.captures.start),
+        usize_from_u32(value.captures.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub core_closure_capture_order(value: &CoreClosureCapture) -> u32 {
+    value.order
+}
+
+pub core_closure_capture_value(value: &CoreClosureCapture) -> CoreValueId {
+    value.value
+}
+
+pub core_closure_capture_mode(value: &CoreClosureCapture) -> CoreCaptureMode {
+    value.mode
+}
+
 pub core_match_arm_variant(value: &CoreMatchArm) -> u32 {
     value.variant
 }
@@ -3038,6 +3451,13 @@ pub typed_body_computation_at<'a>(
                 ty,
                 shell,
                 instance,
+                typed_body_operands(value, range)
+            ),
+        CoreComputationKind::CallIndirect(callee, signature, range) =>
+            CoreComputationView::CallIndirect(
+                ty,
+                callee,
+                signature,
                 typed_body_operands(value, range)
             ),
         CoreComputationKind::Primitive(primitive, range) =>
@@ -3993,6 +4413,10 @@ type_kinds_equal(left: TypeKind, right: TypeKind) -> Bool {
         },
         TypeKind::UniqueReference(left_id) => handle right {
             TypeKind::UniqueReference(right_id) => left_id == right_id,
+            _ => false
+        },
+        TypeKind::Callable(left_signature) => handle right {
+            TypeKind::Callable(right_signature) => left_signature == right_signature,
             _ => false
         }
     }
@@ -7068,7 +7492,11 @@ type_copyable(
             token
         ),
         TypeKind::SharedReference(_) => Result::Ok(true),
-        TypeKind::UniqueReference(_) => Result::Ok(false)
+        TypeKind::UniqueReference(_) => Result::Ok(false),
+        // A closure may capture an owned value even where its interface
+        // signature has only copyable parameters.  Copyability is therefore a
+        // closure-site fact, never a callable-type fact.
+        TypeKind::Callable(_) => Result::Ok(false)
     }
 }
 
@@ -7304,6 +7732,9 @@ pub collect_interfaces(
         instance_parameters: Vec::new(),
         instance_substitutions: Vec::new(),
         callable_effects: Vec::new(),
+        callable_signatures: Arena::new(),
+        callable_signature_parameters: Vec::new(),
+        callable_signature_effects: Vec::new(),
         effects: Arena::new(),
         effect_operations: Arena::new(),
         effect_payloads: Vec::new(),
@@ -7483,6 +7914,88 @@ active_label_destination(
         name,
         Vec::len(&value.active_labels)
     )
+}
+
+closure_captures_are_ordered(
+    captures: &Vec<CoreClosureCapture>,
+    index: usize
+) -> Bool {
+    if(index + 1 < Vec::len(captures)) {
+        (Vec::index(captures, index)).order <
+            (Vec::index(captures, index + 1)).order
+            and { closure_captures_are_ordered(captures, index + 1) }
+    } else { true }
+}
+
+// This is the sole builder entry point for closure values. Capture order is
+// supplied by the elaborator's lexical binding order and validated here so a
+// deterministic closure descriptor cannot be accidentally reconstructed from
+// hash/arena iteration by a future frontend feature.
+push_closure_value(
+    value: &mut CoreBuilder,
+    ty: TypeId,
+    owner: ShellId,
+    source_order: u32,
+    signature: CallableSignatureId,
+    captures: &Vec<CoreClosureCapture>
+) -> Result<CoreValueId, ElaborationError> {
+    if(not(closure_captures_are_ordered(captures, 0))) {
+        Result::Err(ElaborationError::InvalidClosureCaptureOrder(source_order))
+    } else {
+        let start = u32_from_usize(Vec::len(&value.closure_captures));
+        append_core_closure_captures(&mut value.closure_captures, captures, 0);
+        let site = handle Arena::alloc(&mut value.closure_sites,
+            ClosureSiteDescriptor {
+                owner: owner,
+                source_order: source_order,
+                signature: signature,
+                captures: super::syntax::id_range(
+                    usize_from_u32(start),
+                    usize_from_u32(start) + Vec::len(captures)
+                )
+            }
+        ) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        Result::Ok(push_value(value, ty, CoreValueKind::Closure(site)))
+    }
+}
+
+append_core_closure_captures(
+    output: &mut Vec<CoreClosureCapture>,
+    captures: &Vec<CoreClosureCapture>,
+    index: usize
+) {
+    if(index < Vec::len(captures)) {
+        Vec::push(&mut *output, *Vec::index(captures, index));
+        append_core_closure_captures(&mut *output, captures, index + 1)
+    } else { () }
+}
+
+push_indirect_call(
+    value: &mut CoreBuilder,
+    result: TypeId,
+    callee: CoreValueId,
+    signature: CallableSignatureId,
+    operands: &Vec<CoreValueId>
+) -> CoreComputationId {
+    let start = u32_from_usize(Vec::len(&value.operands));
+    append_core_operand_ids(&mut value.operands, operands, 0);
+    push_computation(value, result, CoreComputationKind::CallIndirect(
+        callee,
+        signature,
+        super::syntax::id_range(
+            usize_from_u32(start),
+            usize_from_u32(start) + Vec::len(operands)
+        )
+    ))
+}
+
+append_core_operand_ids(
+    output: &mut Vec<CoreValueId>, values: &Vec<CoreValueId>, index: usize
+) {
+    if(index < Vec::len(values)) {
+        Vec::push(&mut *output, *Vec::index(values, index));
+        append_core_operand_ids(&mut *output, values, index + 1)
+    } else { () }
 }
 
 pure(
@@ -12261,6 +12774,8 @@ pub elaborate_function_instance_body(
                 match_bindings,
                 integer_arms,
                 label_destinations,
+                closure_sites,
+                closure_captures,
                 integer_constants
             } = core;
             let output = TypedBody {
@@ -12278,6 +12793,8 @@ pub elaborate_function_instance_body(
                 integer_arms: integer_arms,
                 label_destinations: label_destinations,
                 handler_clauses: Vec::new(),
+                closure_sites: closure_sites,
+                closure_captures: closure_captures,
                 integer_constants: integer_constants
             };
             Result::Ok(__g1_identity_rewrite_core(

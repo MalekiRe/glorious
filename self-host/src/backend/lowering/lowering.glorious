@@ -719,7 +719,10 @@ pub enum LoweringError {
     InvalidMirFunction(MirFunctionId),
     // Typed Core can retain effect control before MIR learns its one-shot
     // cleanup semantics. Reject it here rather than emitting ordinary calls.
-    EffectControlNotLowered(CoreComputationId)
+    EffectControlNotLowered(CoreComputationId),
+    // Callable Core is intentionally modeled before the MIR callable ABI is
+    // available. Keep this rejection explicit; it is not a fallback lowering.
+    CallableNotLowered(CoreValueId)
 }
 
 invalid_mir_register_result(
@@ -1927,6 +1930,22 @@ analyze_value(
                 output,
                 allow_transfer
             ),
+        CoreValueView::Closure(_, site) => {
+            let descriptor = super::super::frontend::elaboration::
+                closure_site_at(body, site);
+            Slice::for_each(
+                super::super::frontend::elaboration::closure_site_captures(
+                    body, descriptor
+                ),
+                { capture => analyze_value(
+                    body,
+                    super::super::frontend::elaboration::
+                        core_closure_capture_value(capture),
+                    output,
+                    allow_transfer
+                ) }
+            )
+        },
         _ => ()
     }
 }
@@ -2094,6 +2113,16 @@ analyze_computation(
                 output,
                 allow_transfer
             ),
+        CoreComputationView::CallIndirect(_, callee, _, operands) => {
+            analyze_values_reverse(
+                body,
+                operands,
+                Slice::len(operands),
+                output,
+                allow_transfer
+            );
+            analyze_value(body, callee, output, allow_transfer)
+        },
         CoreComputationView::Primitive(_, _, operands) =>
             analyze_values_reverse(
                 body,
@@ -2653,7 +2682,9 @@ lower_value<'a>(
             }
         },
         CoreValueView::Embedded(_, computation) =>
-            lower_computation(interfaces, body, value, computation)
+            lower_computation(interfaces, body, value, computation),
+        CoreValueView::Closure(_, _) =>
+            Result::Err(LoweringError::CallableNotLowered(id))
     }
 }
 
@@ -3684,6 +3715,8 @@ lower_computation<'a>(
                     Result::Ok(target)
             } else { Result::Err(LoweringError::UnknownCallable(shell)) }
         },
+        CoreComputationView::CallIndirect(_, callee, _, _) =>
+            Result::Err(LoweringError::CallableNotLowered(callee)),
         CoreComputationView::Primitive(_, primitive, operands) => {
             let arguments = Vec::new();
             try(lower_arguments(

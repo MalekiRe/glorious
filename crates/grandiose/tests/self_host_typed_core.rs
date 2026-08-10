@@ -2156,6 +2156,42 @@ fn self_host_effect_core_foundation_retains_control_and_rejects_lowering() {
 }
 
 #[test]
+fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
+    // This is a Core-model gate: closure layout and instruction selection
+    // belong to the future backend integration, but Typed Core must preserve
+    // all semantic input deterministically before that work starts.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "Callable(CallableSignatureId)",
+        "pub struct CallableSignature",
+        "pub struct ClosureSiteDescriptor",
+        "pub struct CoreClosureCapture",
+        "pub enum CoreCaptureMode { Borrow, Copy, Move }",
+        "Closure(ClosureSiteId)",
+        "CallIndirect(CoreValueId, CallableSignatureId, OperandRange)",
+        "closure_captures_are_ordered",
+        "push_closure_value",
+        "push_indirect_call",
+        "CoreValueView::Closure",
+        "CoreComputationView::CallIndirect",
+        "interface_callable_signature_effect_tail",
+    ] {
+        assert!(core.contains(required), "missing callable Typed Core foundation: {required}");
+    }
+
+    let lowering = fs::read_to_string(
+        root.join("self-host/src/backend/lowering/lowering.glorious"),
+    )
+    .unwrap();
+    assert!(lowering.contains("CallableNotLowered(CoreValueId)"));
+    assert!(lowering.contains("CoreComputationView::CallIndirect"));
+}
+
+#[test]
 fn self_hosted_monomorphic_perform_elaborates_like_bootstrap() {
     // Keep the first executable effect-body parity case intentionally narrow:
     // a monomorphic operation has no continuation lowering requirement, but

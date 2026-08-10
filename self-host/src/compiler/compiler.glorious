@@ -1555,9 +1555,10 @@ type_is_recursively_concrete(
 ) -> Bool {
     let index = Id::to_usize(semantic);
     let tag = elaboration::interface_type_tag_at(interfaces, index);
-    if(tag == 8 or { tag == 13 }) {
+    if(tag == 8 or { tag == 13 } or { tag == 14 }) {
         // TypeParameter includes declaration, impl, and TraitSelf owners;
-        // effects have no artifact type either.
+        // effects and callable descriptors have no artifact type until the
+        // backend lowers a closure environment and callable ABI.
         false
     } else { if(tag == 4 or { tag == 10 }) {
         let start = if(tag == 4) {
