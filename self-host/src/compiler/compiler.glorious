@@ -1714,7 +1714,7 @@ lower_effect_operations(
     if(ordinal < elaboration::interface_effect_operation_count(
         &session.interfaces, protocol
     )) {
-        let operation = *handle elaboration::interface_effect_operation_id(
+        let operation = handle elaboration::interface_effect_operation_id(
             &session.interfaces, protocol, ordinal
         ) { None => unreachable(), Option::Some(found) => found };
         let payloads = Vec::new();
@@ -1722,7 +1722,7 @@ lower_effect_operations(
             &session.interfaces, operation
         );
         for_range(Range::new(0, usize_from_u32(count)), { index => {
-            let semantic = *handle elaboration::interface_effect_operation_payload_at(
+            let semantic = handle elaboration::interface_effect_operation_payload_at(
                 &session.interfaces, operation, checked_u32(index)
             ) { None => unreachable(), Option::Some(found) => found };
             let artifact = try(lower_concrete_type(
@@ -1758,7 +1758,7 @@ lower_effect_protocols(
     output: &mut Arena<lowering::MirProtocolTag, lowering::MirProtocol>
 ) -> Result<(), CompileError> {
     if(index < elaboration::interface_effect_count(&session.interfaces)) {
-        let protocol = *handle elaboration::interface_effect_id_at(&session.interfaces, index) {
+        let protocol = handle elaboration::interface_effect_id_at(&session.interfaces, index) {
             None => unreachable(), Option::Some(found) => found
         };
         // Generic effect instances are not materialized in this initial

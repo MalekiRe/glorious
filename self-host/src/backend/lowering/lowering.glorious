@@ -4262,7 +4262,7 @@ callable_effect_protocols(
 ) {
     if(ordinal < super::super::frontend::elaboration::
         interface_callable_effect_count(interfaces, callable)) {
-        let ty = *handle super::super::frontend::elaboration::
+        let ty = handle super::super::frontend::elaboration::
             interface_callable_effect_at(interfaces, callable, ordinal) {
             None => unreachable(), Option::Some(found) => found
         };
