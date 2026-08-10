@@ -2273,6 +2273,41 @@ fn self_host_is_refinement_core_retains_decision_shape_and_scoped_bindings() {
 }
 
 #[test]
+fn self_host_is_elaboration_builds_structural_patterns_before_bool_conversion() {
+    // This deliberately remains a source/Core contract: the branch CFG is a
+    // separate MIR feature.  It prevents the elaborator from regressing to
+    // the old subject-only path while that lowering is still pending.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "elaborate_is(",
+        "BodyExpressionView::Is(subject, pattern) => elaborate_is(",
+        "elaborate_refinement_pattern(",
+        "find_refinement_variant(",
+        "CorePatternKind::Variant(",
+        "CorePatternKind::Tuple(",
+        "CorePatternPathSegment::Variant(",
+        "CorePatternPathSegment::Field(",
+        "push_refinement_binding(&mut value.core, local, ty, range)",
+        "CoreComputationKind::Refinement(subject_value, core_pattern",
+        "wrap_raw_bool(",
+    ] {
+        assert!(core.contains(required), "missing is elaboration layer: {required}");
+    }
+    let elaboration = core
+        .split("elaborate_is(")
+        .nth(1)
+        .expect("is elaborator exists");
+    assert!(
+        elaboration.contains("let start = super::syntax::range_mark(&value.core.refinement_bindings)"),
+        "success-edge bindings must be ranged before the recursive pattern walk"
+    );
+}
+
+#[test]
 fn self_hosted_monomorphic_perform_elaborates_like_bootstrap() {
     // Keep the first executable effect-body parity case intentionally narrow:
     // a monomorphic operation has no continuation lowering requirement, but
