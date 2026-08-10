@@ -145,6 +145,49 @@ function_name<'a>(
     }
 }
 
+callable_name<'a>(
+    session: &CompilerSession,
+    callable: InterfaceCallableId
+) -> Result<String, CompileError> {
+    handle lexer::lexeme(
+        headers::parsed_source(&session.headers),
+        Id::from_u32(elaboration::interface_callable_name_raw(
+            &session.interfaces, callable
+        ))
+    ) {
+        Result::Err(_) => Result::Err(CompileError::DeclarationName(
+            elaboration::interface_callable_shell(&session.interfaces, callable)
+        )),
+        Result::Ok(found) => {
+            let shell = elaboration::interface_callable_shell(
+                &session.interfaces, callable
+            );
+            handle scanner::shell_at(&session.declarations, shell) {
+                Result::Ok(declaration) => if(
+                    scanner::shell_kind(declaration)
+                        is scanner::DeclarationKind::Function
+                ) { Result::Ok(*found) } else {
+                    let output = Formatter::new();
+                    // Trait and impl members share their enclosing shell.
+                    // Give lowered methods a deterministic private identity,
+                    // so a member named `main` cannot become the entry point.
+                    Formatter::literal(&mut output, &"$method$");
+                    Formatter::append_u64(
+                        &mut output, wrapping_convert_to_u64(Id::to_u32(shell))
+                    );
+                    Formatter::literal(&mut output, &"$");
+                    Formatter::literal(&mut output, found);
+                    handle Formatter::finish(output) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(name) => Result::Ok(name)
+                    }
+                },
+                Result::Err(_) => Result::Err(CompileError::DeclarationName(shell))
+            }
+        }
+    }
+}
+
 enum RuntimeLeaf {
     Primitive(u32),
     Host(u32),
@@ -371,18 +414,36 @@ prepare_body<'a>(
         &session.interfaces,
         callable
     );
-    let name = try(
-        function_name(session, shell),
-        @prepare_body
+    let name = try(callable_name(session, callable), @prepare_body);
+    let header_index = elaboration::interface_callable_header_index(
+        &session.interfaces, callable
     );
     let syntax = try(
         Result::map_err(
-            bodies::parse_function_body(
-                &session.original,
-                &session.headers,
-                &session.declarations,
-                shell
-            ),
+            handle scanner::shell_at(&session.declarations, shell) {
+                Result::Err(_) => bodies::parse_function_body(
+                    &session.original,
+                    &session.headers,
+                    &session.declarations,
+                    shell
+                ),
+                Result::Ok(declaration) => if(
+                    scanner::shell_kind(declaration)
+                        is scanner::DeclarationKind::Impl
+                ) {
+                    bodies::parse_impl_method_body(
+                        &session.original,
+                        &session.headers,
+                        &session.declarations,
+                        header_index
+                    )
+                } else { bodies::parse_function_body(
+                    &session.original,
+                    &session.headers,
+                    &session.declarations,
+                    shell
+                ) }
+            },
             { found => CompileError::BodyParse(shell, found) }
         ),
         @prepare_body
@@ -500,7 +561,7 @@ lower_callable<'a>(
     try(lower_concrete_type(
         session, map, types, type_names, result
     ), @lower_callable);
-    let name = try(function_name(&*session, shell), @lower_callable);
+    let name = try(callable_name(&*session, callable), @lower_callable);
     handle runtime_leaf_identity(shell, &name) {
         Option::Some(RuntimeLeaf::Primitive(primitive)) => Result::map_err(
             lowering::lower_primitive_function(
@@ -1483,6 +1544,109 @@ prepare_session(
     })
 }
 
+// The initial seed has no substitutions.  In particular, a trait interface
+// method can have no callable-local generic parameters while its signature
+// still contains TraitSelf.  Do not turn those abstract interfaces into
+// lowering work: instances are only safe to lower once their entire exposed
+// signature is represented by concrete artifact types.
+type_is_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    semantic: elaboration::TypeId
+) -> Bool {
+    let index = Id::to_usize(semantic);
+    let tag = elaboration::interface_type_tag_at(interfaces, index);
+    if(tag == 8 or { tag == 13 }) {
+        // TypeParameter includes declaration, impl, and TraitSelf owners;
+        // effects have no artifact type either.
+        false
+    } else { if(tag == 4 or { tag == 10 }) {
+        let start = if(tag == 4) {
+            elaboration::interface_type_a_at(interfaces, index)
+        } else {
+            elaboration::interface_type_b_at(interfaces, index)
+        };
+        let count = if(tag == 4) {
+            elaboration::interface_type_b_at(interfaces, index)
+        } else { elaboration::interface_type_c_at(interfaces, index) };
+        type_elements_are_recursively_concrete(
+            interfaces, start, count, 0
+        )
+    } else { if(tag == 9 or { tag == 6 } or { tag == 7 }) {
+        type_is_recursively_concrete(
+            interfaces,
+            Id::from_u32(elaboration::interface_type_a_at(interfaces, index))
+        )
+    } else { if(tag == 5) {
+        elaboration::interface_nominal_generic_count(
+            interfaces,
+            usize_from_u32(elaboration::interface_type_a_at(interfaces, index))
+        ) == 0
+    } else {
+        // Unit, Never, scalar, Text, and Bytes have no type children.
+        true
+    } } } }
+}
+
+type_elements_are_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    start: u32,
+    count: u32,
+    offset: usize
+) -> Bool {
+    if(offset < usize_from_u32(count)) {
+        let child = elaboration::interface_type_element_at(
+            interfaces,
+            usize_from_u32(start) + offset
+        );
+        type_is_recursively_concrete(interfaces, child) and {
+            type_elements_are_recursively_concrete(
+                interfaces, start, count, offset + 1
+            )
+        }
+    } else { true }
+}
+
+callable_signature_is_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    callable: InterfaceCallableId,
+    parameter: usize
+) -> Bool {
+    let parameter_count = elaboration::interface_callable_parameter_count(
+        interfaces, callable
+    );
+    if(parameter < usize_from_u32(parameter_count)) {
+        type_is_recursively_concrete(
+            interfaces,
+            elaboration::interface_callable_parameter_at(
+                interfaces, callable, parameter
+            )
+        ) and {
+            callable_signature_is_recursively_concrete(
+                interfaces, callable, parameter + 1
+            )
+        }
+    } else {
+        type_is_recursively_concrete(
+            interfaces,
+            elaboration::interface_callable_result(interfaces, callable)
+        )
+    }
+}
+
+callable_is_trait_requirement(
+    session: &CompilerSession,
+    callable: InterfaceCallableId
+) -> Bool {
+    let shell = elaboration::interface_callable_shell(
+        &session.interfaces, callable
+    );
+    handle scanner::shell_at(&session.declarations, shell) {
+        Result::Err(_) => true,
+        Result::Ok(declaration) => scanner::shell_kind(declaration)
+            is scanner::DeclarationKind::Trait
+    }
+}
+
 seed_concrete_callables<'a>(
     session: &mut CompilerSession,
     index: usize
@@ -1498,7 +1662,17 @@ seed_concrete_callables<'a>(
         if(elaboration::interface_callable_generic_count(
             &session.interfaces,
             callable
-        ) == 0) {
+        ) == 0 and {
+            // A receiverless trait requirement can look concrete too, but it
+            // has no body or selected implementation to lower.  Keep its
+            // interface for future dispatch; only implementation members may
+            // enter the initial direct-call seed.
+            not callable_is_trait_requirement(&*session, callable)
+        } and {
+            callable_signature_is_recursively_concrete(
+                &session.interfaces, callable, 0
+            )
+        }) {
             let substitutions = Vec::new();
             elaboration::intern_callable_instance(
                 &mut session.interfaces,

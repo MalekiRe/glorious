@@ -257,6 +257,10 @@ impl Use<[0, *]> for InterfaceVariant {}
 
 struct InterfaceCallable {
     shell: ShellId,
+    // Nominal methods share the enclosing trait/impl shell.  Retain their
+    // header identity and spelling for body selection and artifact naming.
+    header_index: usize,
+    name: u32,
     result: TypeId,
     parameters: CallableParameterRange,
     generics: SignatureScope,
@@ -2624,6 +2628,20 @@ pub interface_callable_shell(
     id: InterfaceCallableId
 ) -> ShellId {
     interface_callable_at(value, id).shell
+}
+
+pub interface_callable_header_index(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> usize {
+    interface_callable_at(value, id).header_index
+}
+
+pub interface_callable_name_raw(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> u32 {
+    interface_callable_at(value, id).name
 }
 
 pub interface_callable_parameter_at(
@@ -6372,6 +6390,8 @@ collect_callable(
         output,
         InterfaceCallable {
             shell: shell,
+            header_index: index,
+            name: super::headers::callable_name_raw(callable),
             result: result,
             parameters: super::syntax::id_range(
                 usize_from_u32(start),
