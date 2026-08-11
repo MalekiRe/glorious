@@ -58328,15 +58328,20 @@ mod mir_edge_emission_tests {
         });
 
         assert!(layout_and_peephole(&mut artifact));
-        assert_eq!(artifact.functions[0].code_len, 2);
+        // Jump threading retains both back-edges: after the first rewrite
+        // each arm of the switch reaches the loop header directly.  Neither
+        // branch is fallthrough, so fixed-point compaction correctly keeps
+        // all three control instructions.
+        assert_eq!(artifact.functions[0].code_len, 3);
         assert_eq!(
             artifact.code,
             vec![
                 Instruction::Switch {
                     discr: 0,
-                    cases: vec![(0, 1)],
+                    cases: vec![(0, 2)],
                     otherwise: 1,
                 },
+                Instruction::Jump { target: 0 },
                 Instruction::Jump { target: 0 },
             ]
         );
@@ -58679,7 +58684,7 @@ mod mir_edge_emission_tests {
     }
 
     #[test]
-    fn peephole_keeps_second_stage_snapshot_transfer_unfolded() {
+    fn peephole_folds_reference_free_second_stage_snapshot_transfer() {
         let mut artifact = Artifact {
             code: vec![
                 Instruction::Move { dst: 2, src: 1 },
@@ -58706,10 +58711,16 @@ mod mir_edge_emission_tests {
         assert_eq!(
             artifact.code,
             [
-                Instruction::Move { dst: 3, src: 1 },
-                Instruction::Move { dst: 4, src: 3 },
+                Instruction::Move { dst: 4, src: 1 },
                 Instruction::Return { src: Some(4) },
             ]
+        );
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(0, vec![Value::I64(42)])
+                .unwrap(),
+            Value::I64(42)
         );
     }
 
@@ -58779,16 +58790,21 @@ mod mir_edge_emission_tests {
             label_slot_count: 0,
         });
         assert!(layout_and_peephole(&mut targeted));
-        assert!(matches!(
-            targeted.code[0],
-            Instruction::Const { dst: 1, .. }
-        ));
-        assert!(matches!(
-            targeted.code[1],
-            Instruction::Move { dst: 2, src: 1 }
-        ));
+        assert_eq!(
+            targeted.code,
+            [
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(2) },
+            ]
+        );
         let targeted = grandiose_vm::verify::with_generated_cleanup_plans(targeted).unwrap();
-        verify(targeted).unwrap();
+        assert_eq!(
+            Vm::new(verify(targeted).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(42)
+        );
     }
 
     #[test]
@@ -58826,7 +58842,6 @@ mod mir_edge_emission_tests {
                     dst: 1,
                     constant: 0,
                 },
-                Instruction::Jump { target: 2 },
                 Instruction::Return { src: Some(1) },
             ]
         );
@@ -58895,14 +58910,10 @@ mod mir_edge_emission_tests {
         });
 
         assert!(layout_and_peephole(&mut artifact));
-        assert_eq!(artifact.functions[0].code_len, 2);
+        assert_eq!(artifact.functions[0].code_len, 1);
         assert_eq!(
             artifact.code,
             [
-                Instruction::Const {
-                    dst: 1,
-                    constant: 0,
-                },
                 Instruction::Return { src: None },
             ]
         );
