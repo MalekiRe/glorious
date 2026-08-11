@@ -2536,7 +2536,11 @@ fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
             let entry = phases.artifact.entry_function.expect("Stage1 entry");
             let bytes = phases.artifact.encode();
             let vm_stage1 = load_verified(&bytes).expect("Stage1 must verify");
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default())
+            let llvm_options = LlvmOptions {
+                native_allocation_limit: 536_870_912,
+                ..LlvmOptions::default()
+            };
+            let module = grandiose::emit_llvm_ir(&phases, &llvm_options)
                 .expect("Stage1 LLVM emission must succeed");
             let directory = tempfile::tempdir().unwrap();
             let input = directory.path().join("canonical.glorious");
