@@ -2227,6 +2227,36 @@ fn self_hosted_generic_alias_enum_construction_reaches_backend_in_release_vm() {
 }
 
 #[test]
+#[ignore = "expensive release regression gate: compile and verify the complete production self-host bundle"]
+fn full_self_host_bundle_compiles_to_a_verified_artifact_in_release() {
+    // Keep this deliberately before executing stage one: this is the smallest
+    // gate for lowering regressions in the production self-host compiler.  In
+    // particular, all-terminal nested dispatches must not leave untyped dead
+    // registers behind in the encoded artifact.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &production_self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
+            let bytes = phases.artifact.encode();
+            let decoded = Artifact::decode(&bytes)
+                .expect("the complete self-host artifact must decode");
+            assert_eq!(decoded.encode(), bytes, "the self-host artifact must be canonical");
+            load_verified(&bytes).unwrap_or_else(|errors| {
+                panic!("the complete self-host artifact must load and verify: {errors:#?}")
+            });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "expensive release gate: bootstrap and run two complete self-compilation stages"]
 fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
     std::thread::Builder::new()
