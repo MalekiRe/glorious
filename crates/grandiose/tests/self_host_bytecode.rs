@@ -2786,6 +2786,110 @@ fn canonical_self_host_vm_succeeds_while_bootstrap_llvm_native_reports_g9003() {
 }
 
 #[test]
+#[ignore = "expensive release regression: verify zero-initialized native enums let canonical Stage1 emit Stage2"]
+fn canonical_self_host_native_emits_stage2_after_enum_zero_initialization() {
+    // `Construct` used to seed enum aggregates with LLVM `poison`. Values of
+    // every variant are moved and copied as complete aggregates, so an
+    // inactive payload could escape into native code even though the VM always
+    // initializes it. This native-only gate reaches the G9003 site without
+    // first spending the VM's self-host execution time. Its output must still
+    // decode and verify; merely avoiding the diagnostic is not sufficient.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source_bundle = production_self_host_bundle();
+            let source_program = modules::parse_bundle(&source_bundle)
+                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
+            let source_resolution = modules::resolve_program(&source_bundle, source_program)
+                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
+            let monolithic_source =
+                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
+                    .expect("the self-host module graph must have a canonical one-file form");
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &source_bundle,
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O3,
+                },
+            )
+            .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
+            let stage1_bytes = phases.artifact.encode();
+            decode_and_verify_full_self_host_artifact(&stage1_bytes);
+
+            let mut trace = RetainedSelfHostArtifact::write(&stage1_bytes);
+            trace.keep = true;
+            let input = trace.directory.join("canonical-self-host.glorious");
+            let native_output = trace.directory.join("native-stage2.grbc");
+            fs::write(&input, monolithic_source.as_bytes()).unwrap();
+
+            let module = grandiose::emit_llvm_ir(
+                &phases,
+                &LlvmOptions {
+                    native_allocation_limit: 512 * 1024 * 1024,
+                    ..LlvmOptions::default()
+                },
+            )
+            .expect("zero-initialized Stage1 LLVM emission must succeed");
+            let llvm = trace.directory.join("bootstrap-self-host-enum-zero.ll");
+            let executable = trace.directory.join("bootstrap-self-host-enum-zero");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O3")
+                .arg("--ld-path=wild")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "zero-initialized bootstrap LLVM executable failed to link:\n{}\nretained {}",
+                String::from_utf8_lossy(&clang.stderr),
+                trace.directory.display(),
+            );
+
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            let native_log = format!(
+                "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+                native.status,
+                String::from_utf8_lossy(&native.stdout),
+                String::from_utf8_lossy(&native.stderr),
+            );
+            fs::write(trace.directory.join("native-enum-zero.log"), &native_log).unwrap();
+            assert!(
+                native.status.success(),
+                "the zero-initialized bootstrap native compiler failed; retained {}\n{native_log}",
+                trace.directory.display(),
+            );
+            assert!(
+                !native_log.contains("[G9003]"),
+                "zero-initialized enum aggregates did not remove the native G9003 diagnostic; retained {}\n{native_log}",
+                trace.directory.display(),
+            );
+            let stage2 = fs::read(&native_output).unwrap_or_else(|error| {
+                panic!(
+                    "the zero-initialized native compiler did not emit {}: {error}; retained {}",
+                    native_output.display(),
+                    trace.directory.display(),
+                )
+            });
+            decode_and_verify_full_self_host_artifact(&stage2);
+            eprintln!(
+                "retained zero-initialized native Stage1 output: {}",
+                trace.directory.display()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "expensive release differential: test whether suppressing terminal handler fusion removes native G9003"]
 fn canonical_self_host_native_still_reports_g9003_without_terminal_handler_fusion() {
     std::thread::Builder::new()
