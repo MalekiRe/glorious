@@ -55067,16 +55067,20 @@ fn prune_unused_constants(artifact: &mut Artifact) -> bool {
             _ => {}
         }
     }
-    if used.iter().all(|used| *used) {
-        return false;
-    }
-
     let old = std::mem::take(&mut artifact.constants);
     let mut remap = vec![0_u32; old.len()];
+    let mut changed = false;
     for (old_id, constant) in old.into_iter().enumerate() {
         if used[old_id] {
-            remap[old_id] = artifact.constants.len() as u32;
-            artifact.constants.push(constant);
+            if let Some(existing) = artifact.constants.iter().position(|known| known == &constant) {
+                remap[old_id] = existing as u32;
+                changed = true;
+            } else {
+                remap[old_id] = artifact.constants.len() as u32;
+                artifact.constants.push(constant);
+            }
+        } else {
+            changed = true;
         }
     }
     for instruction in &mut artifact.code {
@@ -55090,7 +55094,7 @@ fn prune_unused_constants(artifact: &mut Artifact) -> bool {
             _ => {}
         }
     }
-    true
+    changed
 }
 
 /// Put MIR blocks in their final emission order without changing their stable
@@ -58539,6 +58543,34 @@ mod mir_edge_emission_tests {
             Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
             Value::I64(7)
         );
+    }
+
+    #[test]
+    fn prune_unused_constants_coalesces_duplicate_live_const_ids() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(7), Constant::I64(7)];
+        artifact.code = vec![
+            Instruction::Const { dst: 1, constant: 1 },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "duplicate_constants".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        });
+
+        assert!(prune_unused_constants(&mut artifact));
+        assert_eq!(artifact.constants, vec![Constant::I64(7)]);
+        assert_eq!(artifact.code[0], Instruction::Const { dst: 1, constant: 0 });
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(), Value::I64(7));
     }
 
     #[test]
