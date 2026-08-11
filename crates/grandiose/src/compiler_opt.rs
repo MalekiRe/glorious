@@ -7460,6 +7460,21 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
     for caller in &mut program.functions {
         let mut caller_changed = false;
         for block_index in 0..caller.blocks.len() {
+            if let Terminator::TailCall { function, args } =
+                caller.blocks[block_index].terminator.clone()
+            {
+                if matches!(
+                    forwarding.get(&function),
+                    Some(DirectCallSpecialization::Forward(0))
+                ) && args.len() == 1
+                {
+                    caller.blocks[block_index].terminator = Terminator::Return {
+                        value: Some(args[0]),
+                    };
+                    caller_changed = true;
+                }
+                continue;
+            }
             let Terminator::Call {
                 result,
                 function,
@@ -18502,6 +18517,36 @@ mod tests {
                 target: 1,
                 args: vec![move_operand(6), move_operand(4)],
             })
+        );
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
+    fn specializes_single_argument_forwarding_tail_call() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let caller = &mut candidate.functions[0];
+        caller.blocks.truncate(1);
+        caller.blocks[0].terminator = Terminator::TailCall {
+            function: 1,
+            args: vec![move_operand(1)],
+        };
+        let callee = &mut candidate.functions[1];
+        callee.params = vec![I64];
+        callee.register_types = vec![UNIT, I64];
+        callee.blocks[0].statements.clear();
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+
+        assert_eq!(
+            specialize_forwarding_direct_calls(&mut candidate, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        assert_eq!(
+            candidate.functions[0].blocks[0].terminator,
+            Terminator::Return {
+                value: Some(move_operand(1)),
+            }
         );
         validate_program(&candidate, &types, MirPhase::Raw).unwrap();
     }
