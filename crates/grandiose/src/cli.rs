@@ -21,7 +21,7 @@ use grandiose::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
 
 const MAX_NATIVE_ALLOCATION_LIMIT: u64 = 1024 * 1024 * 1024;
 const SESSION_PROTOCOL: u32 = 1;
@@ -157,6 +157,10 @@ struct CompileCommand {
     stop_phase: Option<StopPhase>,
     output: Option<PathBuf>,
     emit: Option<EmitKind>,
+    /// Explicit opt-in to process-local independently compiled LLVM function
+    /// objects. The persistent server owns the cache; a one-shot invocation
+    /// is rejected before it could accidentally use the monolithic route.
+    native_incremental: bool,
     native_allocation_limit: Option<u64>,
     json_diagnostics: bool,
 }
@@ -280,6 +284,7 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         stop_phase: None,
         output: None,
         emit: None,
+        native_incremental: false,
         native_allocation_limit: None,
         json_diagnostics: false,
     };
@@ -356,6 +361,13 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     if command.emit.replace(kind).is_some() {
                         return Err("`--emit` may be specified only once".to_string());
                     }
+                    continue;
+                }
+                "--native-incremental" => {
+                    if command.native_incremental {
+                        return Err("`--native-incremental` may be specified only once".to_string());
+                    }
+                    command.native_incremental = true;
                     continue;
                 }
                 "--native-allocation-limit" => {
@@ -440,6 +452,12 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
     }
     if command.native_allocation_limit.is_some() && command.emit != Some(EmitKind::Executable) {
         return Err("`--native-allocation-limit` is supported only with `--emit executable`".to_string());
+    }
+    if command.native_incremental && command.emit != Some(EmitKind::Executable) {
+        return Err("`--native-incremental` requires `--emit executable`".to_string());
+    }
+    if command.native_incremental && command.optimization_level != OptimizationLevel::O3 {
+        return Err("`--native-incremental` requires `-O3`".to_string());
     }
     Ok(Command::Compile(command))
 }
@@ -700,6 +718,13 @@ fn declared_external_module_paths(file: &Path, source: &str) -> Vec<PathBuf> {
 }
 
 fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
+    if command.native_incremental {
+        let _ = writeln!(
+            stderr,
+            "grc: error: `--native-incremental` requires a persistent `grc --serve` request"
+        );
+        return 1;
+    }
     let segments = match load_segments(&command) {
         Ok(segments) => segments,
         Err(error) => {
@@ -2028,6 +2053,78 @@ mod tests {
             panic!("expected a compile command")
         };
         assert_eq!(command.native_allocation_limit, Some(134217728));
+    }
+
+    #[test]
+    fn parses_partitioned_native_selector_only_for_o3_executables() {
+        let Command::Compile(command) = parse(
+            [
+                "-O3",
+                "--emit",
+                "executable",
+                "--native-incremental",
+                "input.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .unwrap() else {
+            panic!("expected a compile command")
+        };
+        assert!(command.native_incremental);
+        assert_eq!(command.optimization_level, OptimizationLevel::O3);
+        assert_eq!(command.emit, Some(EmitKind::Executable));
+
+        for arguments in [
+            vec!["--native-incremental", "input.glorious"],
+            vec![
+                "-O2",
+                "--emit",
+                "executable",
+                "--native-incremental",
+                "input.glorious",
+            ],
+            vec!["-O3", "--native-incremental", "input.glorious"],
+            vec![
+                "-O3",
+                "--emit",
+                "llvm-object",
+                "--native-incremental",
+                "input.glorious",
+            ],
+        ] {
+            assert!(
+                parse(arguments.into_iter().map(OsString::from).collect()).is_err(),
+                "invalid native-incremental invocation was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn partitioned_native_selector_rejects_one_shot_compilation() {
+        let Command::Compile(command) = parse(
+            [
+                "-O3",
+                "--emit",
+                "executable",
+                "--native-incremental",
+                "input.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .unwrap() else {
+            panic!("expected a compile command")
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(compile(command, &mut stdout, &mut stderr), 1);
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("requires a persistent `grc --serve` request"));
     }
 
     #[test]
