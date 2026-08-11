@@ -55387,7 +55387,7 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
         contains
     }
 
-    fn local(
+    fn local_once(
         code: &[Instruction],
         register_types: &[TypeId],
         types: &[Type],
@@ -55750,6 +55750,40 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 state_renames,
             }),
         )
+    }
+
+    // Each local rewrite strictly removes at least one instruction. A first
+    // fold can expose a newly adjacent dead Const/Return pair, so iterate a
+    // small bounded number of times and compose the ordinal/rename evidence
+    // back to the original MIR-visible PCs.
+    fn local(
+        code: &[Instruction],
+        register_types: &[TypeId],
+        types: &[Type],
+    ) -> (Vec<Instruction>, Option<PeepholePcMap>) {
+        const MAX_PEEPHOLE_ROUNDS: usize = 4;
+        let mut rewritten = code.to_vec();
+        let mut composed: Option<PeepholePcMap> = None;
+        for _ in 0..MAX_PEEPHOLE_ROUNDS {
+            let (next, map) = local_once(&rewritten, register_types, types);
+            let Some(map) = map else { break };
+            composed = Some(match composed {
+                None => map,
+                Some(previous) => {
+                    let mut ordinals = Vec::with_capacity(previous.ordinals.len());
+                    let mut state_renames = Vec::with_capacity(previous.state_renames.len());
+                    for (old, middle) in previous.ordinals.iter().enumerate() {
+                        ordinals.push(map.ordinals[*middle as usize]);
+                        let mut renames = previous.state_renames[old].clone();
+                        renames.extend(map.state_renames[*middle as usize].iter().copied());
+                        state_renames.push(renames);
+                    }
+                    PeepholePcMap { ordinals, state_renames }
+                }
+            });
+            rewritten = next;
+        }
+        (rewritten, composed)
     }
 
     let old_code = std::mem::take(&mut artifact.code);
@@ -58168,6 +58202,35 @@ mod mir_edge_emission_tests {
         });
         assert!(!layout_and_peephole(&mut single));
         assert_eq!(single.code, [Instruction::Nop]);
+    }
+
+    #[test]
+    fn peephole_fixed_point_removes_constant_exposed_by_transfer_fold() {
+        let mut artifact = Artifact {
+            constants: vec![Constant::I64(7)],
+            code: vec![
+                Instruction::Const { dst: 2, constant: 0 },
+                Instruction::Move { dst: 3, src: 2 },
+                Instruction::Return { src: Some(1) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "fixed_point".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, vec![Instruction::Return { src: Some(1) }]);
+        assert_eq!(artifact.functions[0].code_len, 1);
     }
 
     #[test]
