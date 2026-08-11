@@ -58660,6 +58660,86 @@ mod mir_edge_emission_tests {
     }
 
     #[test]
+    fn peephole_prunes_undefined_tail_after_terminal_perform_but_keeps_resumptive_perform() {
+        // A terminal operation has no bytecode fallthrough. MIR still emits
+        // the following synthetic edge before layout can prove the source
+        // block dead, so it can mention registers whose definitions were
+        // retired with that block. Treating `Perform { dst: None }` as a
+        // normal instruction leaves an undecodable artifact. In contrast a
+        // resumptive operation produces `dst: Some(_)` and must retain its
+        // continuation edge.
+        let mut terminal = Artifact {
+            code: vec![
+                Instruction::Perform {
+                    dst: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads: vec![],
+                },
+                Instruction::Drop { register: 3 },
+                Instruction::Move { dst: 2, src: 1 },
+            ],
+            ..Artifact::default()
+        };
+        terminal.functions.push(BytecodeFunction {
+            name: "terminal_perform_dead_edge".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut terminal));
+        assert!(matches!(
+            terminal.code.as_slice(),
+            [Instruction::Perform { dst: None, .. }]
+        ));
+        assert!(compact_artifact_registers_after_peephole(&mut terminal));
+        assert_eq!(terminal.functions[0].register_types, [UNIT]);
+
+        let mut resumptive = Artifact {
+            code: vec![
+                Instruction::Perform {
+                    dst: Some(1),
+                    protocol: 0,
+                    operation: 0,
+                    payloads: vec![],
+                },
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        resumptive.functions.push(BytecodeFunction {
+            name: "resumptive_perform_live_edge".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(!layout_and_peephole(&mut resumptive));
+        assert!(matches!(
+            resumptive.code.as_slice(),
+            [
+                Instruction::Perform { dst: Some(1), .. },
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ]
+        ));
+    }
+
+    #[test]
     fn peephole_keeps_label_leave_destination_reachable() {
         // A LabelPush has two successors: the body falls through, while a
         // Leave transfers to its target.  The target must not be mistaken for
