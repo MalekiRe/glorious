@@ -210,6 +210,31 @@ fn nominal_const_defaults_can_reference_earlier_const_arguments() {
 }
 
 #[test]
+fn alias_expansion_materializes_dependent_nominal_const_defaults() {
+    let source = r#"
+        struct Window<const Start: u32, const End: u32 = Start + 1> { marker: i64 }
+        type StartWindow<const Start: u32> = Window<Start>;
+        make() -> StartWindow<3> { Window { marker: 4 } }
+        read(value: Window<3, 4>) -> i64 { value.marker }
+        answer() -> i64 { read(make()) }
+        main() -> () { () }
+    "#;
+    let artifact = compile_source_to_bytecode("const-alias-dependent-default.glorious", source)
+        .unwrap();
+    let verified = verify(artifact).unwrap();
+    let answer = verified
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verified).run(answer, vec![]).unwrap(),
+        Value::I64(4)
+    );
+}
+
+#[test]
 fn symbolic_const_expressions_fold_after_specialization() {
     let source = r#"
         struct Tag<const N: u32> { marker: i64 }
