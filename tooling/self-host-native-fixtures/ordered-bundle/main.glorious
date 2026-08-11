@@ -1,0 +1,3 @@
+// The primary file can refer to declarations supplied by a later ordered
+// source: the self-host compiler gathers headers across the merged stream.
+main() -> { answer() }

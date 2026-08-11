@@ -98,6 +98,20 @@ fn self_host_compiler_pipeline_bundle() -> SourceBundle {
                 }
             }
 
+            // The public native CLI gives compiler::compile_sources an ordered
+            // list of decoded source files. Keep this callable in the
+            // bootstrap-compiled self-host source bundle so the ABI is type-
+            // checked independently of native executable construction.
+            classify_ordered_sources(first: String, second: String) -> u8 {
+                let sources = Vec::new();
+                Vec::push(&mut sources, first);
+                Vec::push(&mut sources, second);
+                handle compiler::compile_sources(&sources) {
+                    Result::Ok(_) => 0,
+                    Result::Err(_) => 1
+                }
+            }
+
             main() { run_compiler_host(diagnostics::application) }
         "#,
     ]
@@ -110,6 +124,19 @@ fn self_host_compiler_pipeline_bundle() -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
+}
+
+#[test]
+fn ordered_source_bundle_api_is_wired_into_the_self_host_entrypoint() {
+    let root = repository_root().join("self-host/src");
+    let compiler = fs::read_to_string(root.join("compiler/compiler.glorious")).unwrap();
+    let diagnostics = fs::read_to_string(root.join("diagnostics/diagnostics.glorious")).unwrap();
+
+    assert!(compiler.contains("pub compile_sources(sources: &Vec<String>)"));
+    assert!(compiler.contains("append_ordered_sources(sources, 0"));
+    assert!(diagnostics.contains("<input.glorious>..."));
+    assert!(diagnostics.contains("read_ordered_sources(&arguments, 1"));
+    assert!(diagnostics.contains("compiler::compile_sources(&sources)"));
 }
 
 fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {

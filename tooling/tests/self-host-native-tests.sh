@@ -19,8 +19,9 @@ cat > "$scratch/fake-native" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 output=$1
-input=$2
-if grep -qx accept "$input"; then
+shift
+input=$1
+if (($#)) && grep -qx accept "$@"; then
     printf artifact > "$output"
     exit 0
 fi
@@ -51,9 +52,17 @@ fi
 rg -q 'expected accept, native compiler exited 17' "$scratch/wrong.out"
 rg -q 'synthetic rejection' "$scratch/wrong.out"
 
+printf 'accept\n' > "$scratch/corpus/extra.glorious"
+printf 'bundle-accept\taccept\ttarget/%s/corpus/a.glorious\ttarget/%s/corpus/extra.glorious\n' \
+    "$(basename "$scratch")" "$(basename "$scratch")" > "$scratch/bundle.tsv"
+bundle_output=$(G1_SELF_HOST_NATIVE_RUNNER="$scratch/fake-runner" "$repo_root/tooling/self-host-native-tests.sh" run --manifest "$scratch/bundle.tsv" 2>&1)
+[[ $bundle_output == *$'PASS\tbundle-accept\taccept\t'*'extra.glorious'* ]] || { echo "$bundle_output" >&2; exit 1; }
+[[ $bundle_output == *'passed=1 failed=0'* ]] || { echo "$bundle_output" >&2; exit 1; }
+
 # The checked-in corpus is deliberately larger than the original four module
 # fixtures and must retain both successful and failing single-source cases.
 default_list=$("$repo_root/tooling/self-host-native-tests.sh" list)
-[[ $(wc -l <<< "$default_list") -eq 19 ]] || { echo "unexpected native corpus size" >&2; exit 1; }
+[[ $(wc -l <<< "$default_list") -eq 20 ]] || { echo "unexpected native corpus size" >&2; exit 1; }
 [[ $default_list == *$'arithmetic-calls\taccept\t'* ]] || { echo "missing arithmetic accept" >&2; exit 1; }
 [[ $default_list == *$'invalid-return-type\treject\t'* ]] || { echo "missing type rejection" >&2; exit 1; }
+[[ $default_list == *$'ordered-bundle\taccept\t'*$'ordered-bundle/library.glorious'* ]] || { echo "missing ordered source bundle" >&2; exit 1; }

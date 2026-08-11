@@ -22,9 +22,12 @@ accepted=0
 rejected=0
 failed=0
 for entry in "${cases[@]}"; do
-    IFS=$'\t' read -r id expectation source <<< "$entry"
+    IFS=$'\t' read -r -a fields <<< "$entry"
+    id="${fields[0]}"
+    expectation="${fields[1]}"
+    source_paths=("${fields[@]:2}")
     set +e
-    "$compiler" -O3 --check "$repo_root/$source" >"$repo_root/target/self-host-native-bootstrap-$id.log" 2>&1
+    "$compiler" -O3 --check "${source_paths[@]/#/$repo_root/}" >"$repo_root/target/self-host-native-bootstrap-$id.log" 2>&1
     status=$?
     set -e
     rm -f -- "$repo_root/target/self-host-native-bootstrap-$id.log"
@@ -38,7 +41,7 @@ for entry in "${cases[@]}"; do
         continue
     fi
     printf 'bootstrap corpus mismatch: %s expected %s, bootstrap -O3 --check exited %d (%s)\n' \
-        "$id" "$expectation" "$status" "$source" >&2
+        "$id" "$expectation" "$status" "$(IFS=,; printf '%s' "${source_paths[*]}")" >&2
     ((failed += 1))
 done
 

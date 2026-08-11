@@ -159,20 +159,41 @@ pub compile_source(original: &String) -> Result<Bytes, CompilerDiagnostic> {
     )
 }
 
+read_ordered_sources(
+    arguments: &Vec<String>,
+    index: usize,
+    sources: &mut Vec<String>,
+    invalid_utf8: &mut Bool
+) / FileRead {
+    if(index < Vec::len(arguments)) {
+        let path = *Vec::index(arguments, index);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => { *invalid_utf8 = true; () },
+            Result::Ok(source) => { Vec::push(sources, source); () }
+        };
+        read_ordered_sources(arguments, index + 1, sources, invalid_utf8)
+    } else { () }
+}
+
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     if(Vec::len(&arguments) < 2) {
         write_diagnostic(
-            "usage: grandiose-self-host-compiler <output.grbc> <input.glorious>"
+            "usage: grandiose-self-host-compiler <output.grbc> <input.glorious>..."
         )
     } else {
         let output_path = *Vec::index(&arguments, 0);
-        let input_path = *Vec::index(&arguments, 1);
-        let bytes = read_file(input_path);
-        handle String::from_utf8(bytes) {
-            Result::Err(_) =>
-                write_diagnostic("self-host compiler: input is not UTF-8"),
-            Result::Ok(source) => handle compile_source(&source) {
+        let sources = Vec::new();
+        let invalid_utf8 = false;
+        read_ordered_sources(&arguments, 1, &mut sources, &mut invalid_utf8);
+        if(invalid_utf8) {
+            write_diagnostic("self-host compiler: input is not UTF-8")
+        } else {
+            handle Result::map_err(
+                compiler::compile_sources(&sources),
+                { found => compile_error_diagnostic(&found) }
+            ) {
                 Result::Err(diagnostic) =>
                     write_diagnostic(render_diagnostic(&diagnostic)),
                 Result::Ok(artifact_bytes) =>

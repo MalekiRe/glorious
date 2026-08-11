@@ -12,13 +12,14 @@ usage:
   tooling/self-host-native-tests.sh run  [--manifest FILE] [--case ID]... [--keep-artifacts]
 
 The manifest is a tab-separated file with one case per line:
-  case-id<TAB>accept|reject<TAB>repository-relative-source-path
+  case-id<TAB>accept|reject<TAB>repository-relative-primary-source-path<TAB>[additional-source-path...]
 
 `run` first builds the O3, Wild-linked native self-host compiler through
-tooling/self-host-native.sh, then invokes that one executable for every
-selected source.  `accept` requires a nonempty bytecode artifact; `reject`
-requires a non-zero native compiler status.  Results are ordered by case id.
-No VM execution or lower-optimization compiler fallback is used.
+tooling/self-host-native.sh, then invokes that one executable with every
+ordered source path for each selected case. `accept` requires a nonempty
+bytecode artifact; `reject` requires a non-zero native compiler status.
+Results are ordered by case id. No VM execution or lower-optimization compiler
+fallback is used.
 USAGE
     exit 2
 }
@@ -71,16 +72,22 @@ case_selected() {
 # manifest from looking like a partially successful corpus invocation.
 declare -A seen=()
 declare -a cases=()
-while IFS=$'\t' read -r id expectation source extra; do
-    [[ -z "$id" || "$id" == \#* ]] && continue
-    [[ -z "${extra:-}" ]] || { echo "self-host-native-tests: malformed manifest line for $id" >&2; exit 2; }
+while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    IFS=$'\t' read -r -a fields <<< "$line"
+    ((${#fields[@]} >= 3)) || { echo "self-host-native-tests: malformed manifest line: $line" >&2; exit 2; }
+    id="${fields[0]}"
+    expectation="${fields[1]}"
+    source_paths=("${fields[@]:2}")
     [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "self-host-native-tests: invalid case id: $id" >&2; exit 2; }
     [[ "$expectation" == accept || "$expectation" == reject ]] || { echo "self-host-native-tests: $id must expect accept or reject" >&2; exit 2; }
-    [[ "$source" != /* && "$source" != *".."* ]] || { echo "self-host-native-tests: $id has unsafe source path: $source" >&2; exit 2; }
-    [[ -f "$repo_root/$source" ]] || { echo "self-host-native-tests: $id source does not exist: $source" >&2; exit 2; }
+    for source in "${source_paths[@]}"; do
+        [[ -n "$source" && "$source" != /* && "$source" != *".."* ]] || { echo "self-host-native-tests: $id has unsafe source path: $source" >&2; exit 2; }
+        [[ -f "$repo_root/$source" ]] || { echo "self-host-native-tests: $id source does not exist: $source" >&2; exit 2; }
+    done
     [[ -z "${seen[$id]:-}" ]] || { echo "self-host-native-tests: duplicate case id: $id" >&2; exit 2; }
     seen[$id]=1
-    case_selected "$id" && cases+=("$id"$'\t'"$expectation"$'\t'"$source")
+    case_selected "$id" && cases+=("$id"$'\t'"$expectation"$'\t'"$(IFS=$'\t'; printf '%s' "${source_paths[*]}")")
 done < "$manifest"
 
 for requested in "${requested_cases[@]}"; do
@@ -109,16 +116,20 @@ printf 'self-host-native-tests: native=%s cases=%d artifacts=%s\n' "$native_bina
 passed=0
 failed=0
 for entry in "${cases[@]}"; do
-    IFS=$'\t' read -r id expectation source <<< "$entry"
+    IFS=$'\t' read -r -a fields <<< "$entry"
+    id="${fields[0]}"
+    expectation="${fields[1]}"
+    source_paths=("${fields[@]:2}")
+    source_label="$(IFS=,; printf '%s' "${source_paths[*]}")"
     output="$run_dir/$id.grbc"
     log="$run_dir/$id.log"
     set +e
-    "$native_binary" "$output" "$repo_root/$source" >"$log" 2>&1
+    "$native_binary" "$output" "${source_paths[@]/#/$repo_root/}" >"$log" 2>&1
     status=$?
     set -e
     if [[ "$expectation" == accept ]]; then
         if [[ $status -eq 0 && -s "$output" ]]; then
-            printf 'PASS\t%s\taccept\t%s\n' "$id" "$source"
+            printf 'PASS\t%s\taccept\t%s\n' "$id" "$source_label"
             ((passed += 1))
             continue
         fi
@@ -126,13 +137,13 @@ for entry in "${cases[@]}"; do
         [[ -s "$output" ]] || reason+=" and emitted no artifact"
     else
         if [[ $status -ne 0 ]]; then
-            printf 'PASS\t%s\treject\t%s\n' "$id" "$source"
+            printf 'PASS\t%s\treject\t%s\n' "$id" "$source_label"
             ((passed += 1))
             continue
         fi
         reason="expected reject, native compiler accepted the source"
     fi
-    printf 'FAIL\t%s\t%s\t%s\n' "$id" "$reason" "$source" >&2
+    printf 'FAIL\t%s\t%s\t%s\n' "$id" "$reason" "$source_label" >&2
     printf '%s\n' "--- native diagnostic: $id ($log) ---" >&2
     sed -n '1,160p' "$log" >&2
     ((failed += 1))

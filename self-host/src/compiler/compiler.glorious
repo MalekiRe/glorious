@@ -1911,6 +1911,40 @@ pub compile_source(original: &String) -> Result<Bytes, CompileError> {
     compile_session(session)
 }
 
+// The native driver accepts an ordered list of source paths. The compiler
+// itself deliberately keeps one source stream: headers and bodies resolve over
+// the complete declaration set, and a newline at each file boundary prevents
+// adjacent final/initial tokens from becoming one token. This is not a
+// filesystem module resolver; external `mod name;` path discovery remains a
+// distinct frontend capability. Keeping that distinction explicit avoids the
+// duplicate-standard-library problem of bootstrap monolithic-source output.
+append_ordered_sources(
+    sources: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) {
+    if(index < Vec::len(sources)) {
+        if(index != 0) { ByteBuf::push(output, 10) } else { () };
+        ByteBuf::append_bytes(
+            output,
+            &String::as_bytes(Vec::index(sources, index))
+        );
+        append_ordered_sources(sources, index + 1, output)
+    } else { () }
+}
+
+pub compile_sources(sources: &Vec<String>) -> Result<Bytes, CompileError> {
+    let merged = ByteBuf::new();
+    append_ordered_sources(sources, 0, &mut merged);
+    let original = handle String::from_utf8(ByteBuf::finish(merged)) {
+        // The inputs are already valid Strings, so concatenation cannot make
+        // invalid UTF-8. Keep the Result boundary explicit for this ABI.
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    };
+    compile_source(&original)
+}
+
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     if(Vec::len(&arguments) < 2) {
