@@ -820,6 +820,9 @@ impl Vm {
             .flatten();
         let trace_errors = self.diagnostics_configured
             && std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        let mut cached_function = None;
+        let mut cached_descriptor = None;
+        let mut cached_instructions = None;
         loop {
             if let Some(profile) = &mut memory_profile {
                 profile.observe(&stack, &self.slots, a);
@@ -836,15 +839,18 @@ impl Vm {
             if let Some(profile) = &mut hot_functions {
                 profile.observe(frame.function);
             }
-            let verified_fun = self
-                .artifact
-                .function(frame.function)
-                .ok_or(RuntimeError::InvalidFunction(frame.function))?;
-            let fun = verified_fun.descriptor();
-            let verified_pc = verified_fun
-                .checked_pc(frame.pc)
+            if cached_function != Some(frame.function) {
+                let verified = self.artifact.function(frame.function)
+                    .ok_or(RuntimeError::InvalidFunction(frame.function))?;
+                cached_function = Some(frame.function);
+                cached_descriptor = Some(verified.descriptor());
+                cached_instructions = Some(verified.instructions());
+            }
+            let fun = cached_descriptor.expect("cached verified function descriptor");
+            let ins = cached_instructions
+                .expect("cached verified function instructions")
+                .get(frame.pc as usize)
                 .ok_or(RuntimeError::TypeConfusion)?;
-            let ins = verified_fun.instruction(verified_pc);
             if let Some(profile) = &mut opcode_profile {
                 profile.observe(ins);
             }

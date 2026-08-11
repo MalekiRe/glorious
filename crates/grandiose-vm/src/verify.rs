@@ -150,14 +150,17 @@ impl<'a> VerifiedFunction<'a> {
             pc.function, self.function,
             "verified PC used with wrong function"
         );
-        self.decoded
-            .get_or_init(|| {
-                self.code.materialize_range(
-                    self.code_range.start as usize..self.code_range.end as usize,
-                )
-            })
+        self.instructions()
             .get(pc.offset as usize)
             .expect("verified PC has a decoded instruction")
+    }
+
+    pub(crate) fn instructions(&self) -> &'a [Instruction] {
+        self.decoded.get_or_init(|| {
+            self.code.materialize_range(
+                self.code_range.start as usize..self.code_range.end as usize,
+            )
+        })
     }
 
     pub(crate) fn cleanup_registers(&self, pc: VerifiedPc) -> &'a [u32] {
