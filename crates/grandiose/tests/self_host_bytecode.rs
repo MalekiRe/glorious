@@ -2656,6 +2656,135 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
 }
 
 #[test]
+#[ignore = "expensive release diagnostic gate: retain the canonical VM/native G9003 divergence"]
+fn canonical_self_host_vm_succeeds_while_bootstrap_llvm_native_reports_g9003() {
+    // This deliberately records the currently known native-only failure rather
+    // than hiding it behind the small frontend fixture. The same O3 bootstrap
+    // artifact must compile the canonical, one-file self-host source in the VM
+    // before the LLVM executable is allowed to report its G9003 diagnostic.
+    //
+    // When the native path is fixed, replace this with a VM/native byte-for-byte
+    // parity assertion rather than weakening the VM half or patching a leaf
+    // runtime mapping.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source_bundle = production_self_host_bundle();
+            let source_program = modules::parse_bundle(&source_bundle)
+                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
+            let source_resolution = modules::resolve_program(&source_bundle, source_program)
+                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
+            let monolithic_source =
+                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
+                    .expect("the self-host module graph must have a canonical one-file form");
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &source_bundle,
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O3,
+                },
+            )
+            .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
+            let stage1_bytes = phases.artifact.encode();
+            decode_and_verify_full_self_host_artifact(&stage1_bytes);
+            let stage1_entry = phases
+                .artifact
+                .entry_function
+                .expect("the bootstrap compiler must have an entry function");
+            let stage1 = load_verified(&stage1_bytes)
+                .expect("the Rust-bootstrap compiler artifact must verify");
+
+            // This is a deliberately retained regression baseline, not a
+            // transient scratch directory. G1_SELF_HOST_ARTIFACT_TRACE_DIR
+            // redirects it for CI or local investigation.
+            let mut trace = RetainedSelfHostArtifact::write(&stage1_bytes);
+            trace.keep = true;
+            let input = trace.directory.join("canonical-self-host.glorious");
+            let vm_output = trace.directory.join("vm-stage2.grbc");
+            let native_output = trace.directory.join("native-stage2.grbc");
+            fs::write(&input, monolithic_source.as_bytes()).unwrap();
+
+            let vm = Vm::with_host(
+                stage1,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    vm_output.clone().into_os_string(),
+                    input.clone().into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(stage1_entry, vec![]).unwrap(), Value::Unit);
+            let vm_bytes = fs::read(&vm_output).unwrap_or_else(|error| {
+                panic!(
+                    "the VM self-host compiler did not emit {}: {error}",
+                    vm_output.display()
+                )
+            });
+            decode_and_verify_full_self_host_artifact(&vm_bytes);
+
+            let llvm_options = LlvmOptions {
+                native_allocation_limit: 512 * 1024 * 1024,
+                ..LlvmOptions::default()
+            };
+            let module = grandiose::emit_llvm_ir(&phases, &llvm_options).unwrap();
+            let llvm = trace.directory.join("bootstrap-self-host.ll");
+            let executable = trace.directory.join("bootstrap-self-host");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O3")
+                .arg("--ld-path=wild")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "bootstrap LLVM executable failed to link:\n{}\nretained {}",
+                String::from_utf8_lossy(&clang.stderr),
+                trace.directory.display(),
+            );
+
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            let native_log = format!(
+                "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+                native.status,
+                String::from_utf8_lossy(&native.stdout),
+                String::from_utf8_lossy(&native.stderr),
+            );
+            fs::write(trace.directory.join("native-g9003.log"), &native_log).unwrap();
+            assert!(
+                native.status.success(),
+                "the bootstrap LLVM executable must preserve the compiler's diagnostic exit-0 contract; retained {}\\n{native_log}",
+                trace.directory.display(),
+            );
+            assert!(
+                native_log.contains("[G9003]"),
+                "expected the known bootstrap LLVM native G9003 diagnostic; retained {}\n{native_log}",
+                trace.directory.display(),
+            );
+            assert!(
+                !native_output.exists(),
+                "G9003 must not emit a stage-two artifact; retained {}",
+                trace.directory.display(),
+            );
+            eprintln!(
+                "retained canonical VM/native G9003 baseline: {}",
+                trace.directory.display()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "diagnostic release gate: replay a captured stage-one compiler in the VM"]
 fn self_hosted_stage_one_replay_emits_stage_two_in_release_vm() {
     std::thread::Builder::new()
