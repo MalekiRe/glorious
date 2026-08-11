@@ -796,10 +796,12 @@ fn emit_function(
                     &frame_name,
                 )?;
                 output.push_str(&format!(
-                    "  ; closed-host-handler-frame r{dst}: def={} routes={} clauses={} active-field=0 one-shot-fields=1..{}\n",
+                    "  ; closed-host-handler-frame r{dst}: def={} routes={} clauses={} active-field={} continuation-slots={} one-shot-fields=1..{}\n",
                     plan.frame.handler_def,
                     plan.frame.continuations.len(),
                     plan.clause_functions.len(),
+                    plan.continuation_abi.active_field,
+                    plan.continuation_abi.slots.len(),
                     field_count - 1,
                 ));
                 for dispatch in shared_perform_dispatches
@@ -1208,6 +1210,7 @@ struct ClosedHostHandlerFrame {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ClosedHostHandlerPlan {
     frame: ClosedHostHandlerFrame,
+    continuation_abi: ClosedFrameContinuationAbiPlan,
     clause_functions: Vec<u32>,
 }
 
@@ -1251,6 +1254,27 @@ enum ClosedFrameResultTransfer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ClosedFrameResumeTransfer {
     handler_def: u32,
+    one_shot_field: u32,
+    resumption_type: TypeId,
+    value_type: TypeId,
+    destination_type: TypeId,
+}
+
+/// The static native layout contract for all resumptions owned by one closed
+/// handler frame. It deliberately names no continuation pointer or callback:
+/// the current artifact ABI has no dynamic resumption representation. That
+/// absence is why this planner is not permission to invoke a frozen host call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedFrameContinuationAbiPlan {
+    handler_def: u32,
+    active_field: u32,
+    slots: Vec<ClosedFrameContinuationSlot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClosedFrameContinuationSlot {
+    protocol: u32,
+    operation: u32,
     one_shot_field: u32,
     resumption_type: TypeId,
     value_type: TypeId,
@@ -1556,6 +1580,42 @@ fn closed_frame_resume_transfer(
             value_type,
             destination_type,
         })
+}
+
+impl ClosedFrameContinuationAbiPlan {
+    fn build(artifact: &Artifact, frame: &ClosedHostHandlerFrame) -> Option<Self> {
+        let destination_type = frame_result_type(artifact, frame.handler_def)?;
+        let mut slots = Vec::with_capacity(frame.continuations.len());
+        for continuation in &frame.continuations {
+            let route = closed_frame_perform_route(frame, continuation.protocol, continuation.operation)?;
+            let transfer = closed_frame_resume_transfer(
+                artifact,
+                &route,
+                route.resumption_type,
+                route.operation_result,
+                destination_type,
+            )?;
+            slots.push(ClosedFrameContinuationSlot {
+                protocol: route.protocol,
+                operation: route.operation,
+                one_shot_field: transfer.one_shot_field,
+                resumption_type: transfer.resumption_type,
+                value_type: transfer.value_type,
+                destination_type: transfer.destination_type,
+            });
+        }
+        slots.sort_by_key(|slot| (slot.protocol, slot.operation));
+        (slots.iter().all(|slot| slot.one_shot_field > 0)
+            && slots.windows(2).all(|slots| slots[0].one_shot_field != slots[1].one_shot_field))
+            .then_some(Self { handler_def: frame.handler_def, active_field: 0, slots })
+    }
+
+    fn slot(&self, protocol: u32, operation: u32) -> Option<ClosedFrameContinuationSlot> {
+        self.slots
+            .iter()
+            .copied()
+            .find(|slot| slot.protocol == protocol && slot.operation == operation)
+    }
 }
 
 /// Emit the one-shot state transition for an already validated closed-frame
@@ -1903,6 +1963,7 @@ impl ClosedHostHandlerPlan {
         captures: &[u32],
     ) -> Option<Self> {
         let frame = ClosedHostHandlerFrame::build(artifact, handler_def)?;
+        let continuation_abi = ClosedFrameContinuationAbiPlan::build(artifact, &frame)?;
         let definition = artifact.handler_defs.get(handler_def as usize)?;
         if !captures.is_empty() || functions.len() != definition.clauses.len() {
             return None;
@@ -1927,6 +1988,7 @@ impl ClosedHostHandlerPlan {
         }
         Some(Self {
             frame,
+            continuation_abi,
             clause_functions: functions.to_vec(),
         })
     }
@@ -3268,7 +3330,7 @@ mod tests {
         assert!(ir.contains("%closed_handler_frame_0 = alloca [5 x i1]"), "{ir}");
         assert!(ir.contains("store i1 false, ptr %closed_handler_frame_0_field_0"), "{ir}");
         assert!(ir.contains("store ptr %closed_handler_frame_0, ptr %slot1"), "{ir}");
-        assert!(ir.contains("closed-host-handler-frame r1: def=0 routes=4 clauses=4 active-field=0 one-shot-fields=1..4"), "{ir}");
+        assert!(ir.contains("closed-host-handler-frame r1: def=0 routes=4 clauses=4 active-field=0 continuation-slots=4 one-shot-fields=1..4"), "{ir}");
         assert_eq!(plans[&1].frame.native_resumption_field(0, 0), Some(1));
         assert_eq!(plans[&1].frame.native_resumption_field(3, 0), Some(4));
         let route = plans[&1].perform_route(3, 0).expect("exact frozen process-args route");
@@ -3293,6 +3355,18 @@ mod tests {
         assert_eq!(resume.one_shot_field, 4);
         assert_eq!(resume.value_type, 19);
         assert_eq!(resume.destination_type, UNIT);
+        let continuation_abi = &plans[&1].continuation_abi;
+        assert_eq!(continuation_abi.handler_def, 0);
+        assert_eq!(continuation_abi.active_field, 0);
+        assert_eq!(continuation_abi.slots.len(), 4);
+        assert_eq!(continuation_abi.slot(3, 0), Some(ClosedFrameContinuationSlot {
+            protocol: 3,
+            operation: 0,
+            one_shot_field: 4,
+            resumption_type: route.resumption_type,
+            value_type: 19,
+            destination_type: UNIT,
+        }));
         assert!(closed_frame_resume_transfer(&artifact, &route, 20, 19, UNIT).is_none());
         assert!(closed_frame_resume_transfer(&artifact, &route, route.resumption_type, UNIT, UNIT).is_none());
         assert!(closed_frame_resume_transfer(&artifact, &route, route.resumption_type, 19, BYTES).is_none());
