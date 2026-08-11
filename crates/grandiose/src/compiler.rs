@@ -17624,11 +17624,14 @@ fn instantiate_ground_nominals(
                 constructor,
                 arguments,
                 lifetime_arguments,
-                ..
+                const_arguments,
             } => {
                 let name = constructor.simple_name()?;
                 generic_heads.contains(name).then_some(())?;
-                let const_arguments = program.type_const_arguments(syntax.span);
+                // Default lowering appends omitted nominal const arguments to
+                // this application.  The span-indexed Program compatibility
+                // table contains only parser-supplied arguments, so using it
+                // here would construct a shortened runtime nominal identity.
                 let const_by_position = const_arguments
                     .iter()
                     .map(|argument| (argument.position, &argument.value))
