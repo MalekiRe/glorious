@@ -86,6 +86,7 @@ fn slice_value(
     };
     let array = ArenaObject::new(ArrayValue {
         element_type: grandiose_vm::I64,
+        packed_bytes: None,
         slots: [10, 20, 30, 40]
             .into_iter()
             .map(|value| Some(Value::I64(value)))

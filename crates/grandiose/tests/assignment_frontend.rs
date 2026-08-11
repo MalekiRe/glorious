@@ -13,6 +13,7 @@ use grandiose_vm::{
 fn external_i64(value: i64) -> ArenaObject<ArrayValue> {
     ArenaObject::new(ArrayValue {
         element_type: I64,
+        packed_bytes: None,
         slots: vec![Some(Value::I64(value))],
         logical_capacity: 1,
     })
