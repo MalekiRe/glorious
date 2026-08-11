@@ -51,9 +51,11 @@ grc -O3 --emit executable \
 This route compiles a shared runtime/entry object plus one object for each
 source-function LLVM fragment. A function object is reused across compiler
 processes only when its complete emitted IR and exact native toolchain/runtime
-ABI match. A body-only edit therefore recompiles that function while retaining
-unchanged sibling objects. Missing, malformed, or digest-mismatched cache
-entries are discarded and rebuilt.
+ABI match. Each unit retains the runtime/global declarations it needs and only
+the source-function declarations referenced by its own body, so an unrelated
+sibling ABI edit does not invalidate that unit. A body-only edit therefore
+recompiles that function while retaining unchanged sibling objects. Missing,
+malformed, or digest-mismatched cache entries are discarded and rebuilt.
 
 The cache directory is an input/output artifact owned by one worktree; copy a
 seed into a new worktree rather than sharing a mutable directory between

@@ -11,11 +11,15 @@ use grandiose::{
 };
 
 fn phases(source: &str) -> grandiose::CompiledPhases {
+    phases_at(source, OptimizationLevel::O2)
+}
+
+fn phases_at(source: &str, optimization_level: OptimizationLevel) -> grandiose::CompiledPhases {
     compile_source_to_phases_with_options(
         "llvm-incremental-manifest.glorious",
         source,
         grandiose::CompileOptions {
-            optimization_level: OptimizationLevel::O2,
+            optimization_level,
         },
     )
     .unwrap()
@@ -134,22 +138,24 @@ fn target_option_change_invalidates_every_fragment() {
 
 #[test]
 fn global_literal_table_change_invalidates_retained_native_fragments() {
-    let before = phases(
+    let before = phases_at(
         r#"
             literal_anchor() -> String { "z" }
             literal_edit() -> String { "zz" }
             main() -> () { let left = literal_anchor(); let right = literal_edit(); () }
         "#,
+        OptimizationLevel::O0,
     );
     // `edited` changes only its own source body, but adding a lexically
     // earlier literal changes the module-global byte-literal index used by
     // `stable`. A function-object cache must not retain that stale address.
-    let after = phases(
+    let after = phases_at(
         r#"
             literal_anchor() -> String { "z" }
             literal_edit() -> String { "a" }
             main() -> () { let left = literal_anchor(); let right = literal_edit(); () }
         "#,
+        OptimizationLevel::O0,
     );
     let options = LlvmOptions::default();
     let before_manifest = llvm_incremental_manifest(&before, &options);
@@ -198,6 +204,55 @@ fn native_partition_keys_bind_target_and_shared_entry_abi() {
     assert!(!entry_changed.shared.ir.contains("define i32 @main()"));
     assert_ne!(base.shared_fingerprint, entry_changed.shared_fingerprint);
     assert_ne!(function_keys(&base), function_keys(&entry_changed));
+}
+
+#[test]
+fn native_function_units_exclude_unreferenced_sibling_abi_declarations() {
+    let before = phases_at(
+        r#"
+            incremental_unit_changed() -> String { "changed" }
+            incremental_unit_stable() -> String { "stable" }
+            main() -> () {
+                __g1_diagnostic_write(incremental_unit_changed());
+                __g1_diagnostic_write(incremental_unit_stable());
+                ()
+            }
+        "#,
+        OptimizationLevel::O0,
+    );
+    let after = phases_at(
+        r#"
+            incremental_unit_changed(unused: ()) -> String { "changed" }
+            incremental_unit_stable() -> String { "stable" }
+            main() -> () {
+                __g1_diagnostic_write(incremental_unit_changed(()));
+                __g1_diagnostic_write(incremental_unit_stable());
+                ()
+            }
+        "#,
+        OptimizationLevel::O0,
+    );
+    let options = LlvmOptions::default();
+    let before_units = emit_llvm_native_object_units(&before, &options).unwrap();
+    let after_units = emit_llvm_native_object_units(&after, &options).unwrap();
+    let before_declarations = declarations(&before);
+    let after_declarations = declarations(&after);
+    let stable_before = before_units
+        .functions
+        .iter()
+        .find(|unit| unit.declaration == before_declarations["incremental_unit_stable"])
+        .unwrap();
+    let stable_after = after_units
+        .functions
+        .iter()
+        .find(|unit| unit.declaration == after_declarations["incremental_unit_stable"])
+        .unwrap();
+
+    assert_eq!(
+        stable_before.module.ir, stable_after.module.ir,
+        "an unrelated sibling ABI must not alter a reusable function unit"
+    );
+    assert_ne!(before_units.shared_fingerprint, after_units.shared_fingerprint);
 }
 
 #[test]

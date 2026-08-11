@@ -1014,8 +1014,7 @@ fn compile_loaded(
                 });
                 for (index, function) in units.functions.iter().enumerate() {
                     let abi = format!(
-                        "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;shared={};decl={};fragment={}",
-                        units.shared_fingerprint,
+                        "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;decl={};fragment={}",
                         function.declaration,
                         function.fragment_fingerprint
                     );
@@ -1097,8 +1096,7 @@ fn compile_loaded(
                 }
                 for (index, function) in units.functions.iter().enumerate() {
                     let abi = format!(
-                        "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=function;shared-fingerprint={};declaration={};fragment={}",
-                        units.shared_fingerprint,
+                        "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=function;declaration={};fragment={}",
                         function.declaration,
                         function.fragment_fingerprint
                     );

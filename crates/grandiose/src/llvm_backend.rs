@@ -513,6 +513,10 @@ pub fn emit_llvm_native_object_units(
     // Source fragments have already been replaced with declarations above.
     shared_ir = llvm_externalize_internal_definitions(&shared_ir);
     let function_prelude = llvm_declarations_only(&shared_ir);
+    let source_declarations = source_fragments
+        .iter()
+        .map(|(declaration, _, text)| (*declaration, llvm_fragment_declarations(text)))
+        .collect::<BTreeMap<_, _>>();
     let functions = source_fragments
         .into_iter()
         .map(|(declaration, fragment_fingerprint, text)| {
@@ -521,7 +525,12 @@ pub fn emit_llvm_native_object_units(
             // declaration in the module. Remove this unit's prototypes
             // entirely: recursive and forward references are valid inside a
             // definition, just as they are in the original monolithic IR.
-            let prelude = function_prelude.replacen(&declaration_text, "", 1);
+            let prelude = llvm_fragment_source_dependency_prelude(
+                function_prelude.replacen(&declaration_text, "", 1),
+                &text,
+                declaration,
+                &source_declarations,
+            );
             LlvmNativeFunctionUnit {
                 declaration,
                 fragment_fingerprint,
@@ -543,6 +552,34 @@ pub fn emit_llvm_native_object_units(
         },
         functions,
     })
+}
+
+/// Drop source-function declarations that this independently emitted body does
+/// not reference. Runtime/global declarations remain in every unit. This
+/// keeps a sibling ABI edit from changing an unrelated unit's complete IR,
+/// while the exact emitted IR remains the final cache-key authority.
+fn llvm_fragment_source_dependency_prelude(
+    mut prelude: String,
+    body: &str,
+    self_declaration: u32,
+    source_declarations: &BTreeMap<u32, String>,
+) -> String {
+    for (declaration, prototype) in source_declarations {
+        if *declaration == self_declaration {
+            continue;
+        }
+        let Some(symbol_start) = prototype.find('@') else {
+            continue;
+        };
+        let Some(symbol_end) = prototype[symbol_start..].find('(') else {
+            continue;
+        };
+        let symbol = &prototype[symbol_start..symbol_start + symbol_end];
+        if !body.contains(symbol) {
+            prelude = prelude.replacen(prototype, "", 1);
+        }
+    }
+    prelude
 }
 
 /// Convert each definition in a function fragment to an external declaration.
