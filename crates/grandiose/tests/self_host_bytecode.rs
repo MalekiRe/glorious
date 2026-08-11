@@ -2146,6 +2146,17 @@ fn self_hosted_compiler_executes_protected_labels_and_nested_leave_in_release_vm
                 bool_dispatch_returns(value: Bool) -> i64 {
                     match(value) { true => 55, false => 66 }
                 }
+                // Keep one normal arm alongside an outer transfer.  The
+                // lowering must allocate a join result for the normal arm,
+                // while retaining the direct Leave for the terminal one.
+                bool_dispatch_mixed(value: Bool) -> i64 {
+                    @outer: i64 {
+                        match(value) {
+                            true => @outer(101),
+                            false => 102
+                        }
+                    }
+                }
                 // Construct Bool values in source: the production prelude
                 // represents Bool as a nominal Result alias, not a VM scalar.
                 bool_dispatch_to_outer_true() -> i64 {
@@ -2157,8 +2168,22 @@ fn self_hosted_compiler_executes_protected_labels_and_nested_leave_in_release_vm
                 bool_dispatch_returns_false() -> i64 {
                     bool_dispatch_returns(false)
                 }
+                bool_dispatch_mixed_true() -> i64 {
+                    bool_dispatch_mixed(true)
+                }
+                bool_dispatch_mixed_false() -> i64 {
+                    bool_dispatch_mixed(false)
+                }
                 integer_dispatch_returns(value: u64) -> i64 {
                     match(value) { 0 => 77, _ => 88 }
+                }
+                integer_dispatch_mixed(value: u64) -> i64 {
+                    @outer: i64 {
+                        match(value) {
+                            0 => @outer(103),
+                            _ => 104
+                        }
+                    }
                 }
                 main() { () }
             "#;
@@ -2285,6 +2310,51 @@ fn self_hosted_compiler_executes_protected_labels_and_nested_leave_in_release_vm
                     )
                     .unwrap(),
                 Value::I64(77)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_returns"),
+                        vec![Value::U64(9)]
+                    )
+                    .unwrap(),
+                Value::I64(88)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_mixed_true"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(101)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_mixed_false"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(102)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_mixed"),
+                        vec![Value::U64(0)]
+                    )
+                    .unwrap(),
+                Value::I64(103)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_mixed"),
+                        vec![Value::U64(9)]
+                    )
+                    .unwrap(),
+                Value::I64(104)
             );
         })
         .unwrap()
