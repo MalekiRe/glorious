@@ -41348,10 +41348,23 @@ impl<'a> CoreLowerer<'a> {
                                 .chain(origin.parent)
                         })
                         .collect::<BTreeSet<_>>();
+                    // `suspended` is a cached view of the active whole and
+                    // projected loans.  A branch can refresh that view while
+                    // another branch merely carries the same pre-existing
+                    // loan through unchanged.  Join the cache
+                    // conservatively in that case; the authoritative loan
+                    // maps below still have to agree exactly.
+                    let same_loan_shape = |local: &core::LocalId| {
+                        positive_loans.get(local) == self.loans.get(local)
+                            && positive_projected_loans.get(local)
+                                == self.projected_loans.get(local)
+                    };
                     let suspended_shape_matches = positive_suspended
                         .symmetric_difference(&self.suspended)
                         .filter(|local| baseline_ids.contains(local))
-                        .all(|local| result_loan_roots.contains(local));
+                        .all(|local| {
+                            result_loan_roots.contains(local) || same_loan_shape(local)
+                        });
                     let unique_result_loan_roots = joined_result_references
                         .values()
                         .filter(|origin| origin.unique)
@@ -41365,7 +41378,9 @@ impl<'a> CoreLowerer<'a> {
                     let unique_suspended_shape_matches = positive_uniquely_suspended
                         .symmetric_difference(&self.uniquely_suspended)
                         .filter(|local| baseline_ids.contains(local))
-                        .all(|local| unique_result_loan_roots.contains(local));
+                        .all(|local| {
+                            unique_result_loan_roots.contains(local) || same_loan_shape(local)
+                        });
                     let ownership_shape_matches = !result_reference_conflict
                         && suspended_shape_matches
                         && unique_suspended_shape_matches
