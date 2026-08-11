@@ -45,6 +45,7 @@ seed_dir=${G1_NATIVE_SELFHOST_SEED_DIR:-}
 cache_marker="$cache_dir/.private-cache"
 manifest="$cache_dir/manifest"
 executable="$cache_dir/grandiose-self-host"
+objects="$cache_dir/objects"
 
 if [[ ! -f $input ]]; then
     printf 'native self-host: input does not exist: %s\n' "$input" >&2
@@ -65,6 +66,7 @@ if [[ ! -e $cache_marker ]]; then
     fi
     : > "$cache_marker"
 fi
+mkdir -p "$objects"
 
 if [[ -n ${G1_GRC_BIN:-} ]]; then
     grc=$G1_GRC_BIN
@@ -127,7 +129,8 @@ if [[ $rebuild -eq 1 || ! -x $executable || ! -f $manifest || $(<"$manifest") !=
     rm -f -- "$temporary"
     printf 'native self-host: compiling release LLVM executable with Wild...\n' >&2
     set +e
-    "$grc" -O3 --emit executable -o "$temporary" "$self_host_main" "${self_host_modules[@]}"
+    "$grc" -O3 --emit executable --native-incremental-cache "$objects" \
+        -o "$temporary" "$self_host_main" "${self_host_modules[@]}"
     status=$?
     set -e
     if [[ $status -ne 0 ]]; then
