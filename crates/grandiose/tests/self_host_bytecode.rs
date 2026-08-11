@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -1200,12 +1201,14 @@ fn command_log(output: &std::process::Output) -> String {
     )
 }
 
-/// Build an executable through the production release CLI.  Keeping this
-/// route here (rather than calling `emit_llvm_ir` and a C compiler directly)
-/// makes test iteration exercise the same partition manifest, durable native
-/// object cache, and Wild link path used by developers.
-fn compile_release_grc_native_cli(input: &Path, executable: &Path, trace: &Path) {
+/// Build an executable through the production release CLI from the bundle's
+/// user segments.  The embedded standard library is omitted because `grc`
+/// supplies that trusted distribution itself; the canonical monolith remains
+/// only the runtime input to the resulting self-host executable.
+fn compile_release_grc_native_cli(bundle: &SourceBundle, executable: &Path, trace: &Path) {
+    let sources = trace.join("native-inputs");
     let cache = private_native_cli_cache_directory();
+    fs::create_dir_all(&sources).unwrap();
     fs::create_dir_all(&cache).unwrap_or_else(|error| {
         panic!(
             "failed to create private native CLI cache {}: {error}",
@@ -1218,6 +1221,31 @@ fn compile_release_grc_native_cli(input: &Path, executable: &Path, trace: &Path)
         "release grc is required for native CLI tests; run \\
          `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
     );
+    let user_segments = &bundle.segments()[1..];
+    assert!(
+        !user_segments.is_empty(),
+        "native CLI bundle must contain a primary user source segment"
+    );
+    let source_root = Path::new(user_segments[0].name())
+        .parent()
+        .expect("native CLI primary source must have a parent path");
+    let mut inputs = Vec::<OsString>::with_capacity(user_segments.len());
+    for segment in user_segments {
+        let relative = Path::new(segment.name())
+            .strip_prefix(source_root)
+            .unwrap_or_else(|_| {
+                panic!(
+                    "native CLI user segment {} escapes primary source root {}",
+                    segment.name(),
+                    source_root.display()
+                )
+            });
+        let path = sources.join(relative);
+        fs::create_dir_all(path.parent().expect("serialized source must have a parent"))
+            .unwrap();
+        fs::write(&path, segment.source()).unwrap();
+        inputs.push(path.into_os_string());
+    }
     let compile = Command::new(&grc)
         .current_dir(repository_root())
         .args(["-O3", "--emit", "executable"])
@@ -1225,7 +1253,7 @@ fn compile_release_grc_native_cli(input: &Path, executable: &Path, trace: &Path)
         .arg(&cache)
         .arg("-o")
         .arg(executable)
-        .arg(input)
+        .args(&inputs)
         .output()
         .expect("release grc must start for native CLI iteration");
     let compile_log = command_log(&compile);
@@ -2049,7 +2077,11 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             let native_output = trace.join("native.grbc");
             fs::write(&native_input, FIXTURE).unwrap();
             drop(phases);
-            compile_release_grc_native_cli(&native_input, &executable, &trace);
+            compile_release_grc_native_cli(
+                &self_host_bundle(),
+                &executable,
+                &trace,
+            );
             run_native_cli_self_host(&executable, &native_input, &native_output, &trace);
             let native_bytes = fs::read(&native_output).unwrap();
             assert_eq!(native_bytes, vm_bytes, "VM and native CLI hosts must agree");
@@ -2801,7 +2833,7 @@ fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
                 &input,
                 &vm_output,
             );
-            compile_release_grc_native_cli(&input, &executable, &trace);
+            compile_release_grc_native_cli(&bundle, &executable, &trace);
             run_native_cli_self_host(&executable, &input, &native_output, &trace);
             assert_eq!(
                 fs::read(&native_output).unwrap(),
@@ -2839,7 +2871,7 @@ fn canonical_self_host_native_cli_uses_private_incremental_cache_in_release() {
             let stage2 = trace.join("native-stage2.grbc");
             let cache = private_native_cli_cache_directory();
             fs::write(&input, monolithic_source.as_bytes()).unwrap();
-            compile_release_grc_native_cli(&input, &executable, &trace);
+            compile_release_grc_native_cli(&source_bundle, &executable, &trace);
             run_native_cli_self_host(&executable, &input, &stage2, &trace);
             let bytes = fs::read(&stage2).unwrap_or_else(|error| {
                 panic!(
@@ -2978,7 +3010,7 @@ fn canonical_self_host_native_emits_stage2_after_enum_zero_initialization() {
             let native_output = trace.join("native-stage2.grbc");
             let executable = trace.join("bootstrap-self-host-enum-zero");
             fs::write(&input, monolithic_source.as_bytes()).unwrap();
-            compile_release_grc_native_cli(&input, &executable, &trace);
+            compile_release_grc_native_cli(&source_bundle, &executable, &trace);
             run_native_cli_self_host(&executable, &input, &native_output, &trace);
             let stage2 = fs::read(&native_output).unwrap_or_else(|error| {
                 panic!(
