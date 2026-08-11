@@ -10068,6 +10068,48 @@ struct InlinePolicyState {
     depths: BTreeMap<u32, u8>,
 }
 
+/// The first O3 inlining round is deliberately more aggressive than O2. The
+/// repeated O3 round exists to consume opportunities exposed by its preceding
+/// control simplification, not to multiply that expansion again. Keep the
+/// second round's admission limits at the O2 envelope while retaining O3's
+/// candidate-cost threshold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InlineAdmissionCaps {
+    ForOptimizationLevel,
+    O2Style,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InlineAdmissionLimits {
+    growth_factor: u64,
+    growth_slack: u64,
+    depth_cap: u8,
+    source_clone_cap: u32,
+}
+
+fn inline_admission_limits(
+    level: OptimizationLevel,
+    admission_caps: InlineAdmissionCaps,
+) -> InlineAdmissionLimits {
+    let use_o3_admission_caps =
+        level == OptimizationLevel::O3 && admission_caps == InlineAdmissionCaps::ForOptimizationLevel;
+    if use_o3_admission_caps {
+        InlineAdmissionLimits {
+            growth_factor: 4,
+            growth_slack: 1_024,
+            depth_cap: 16,
+            source_clone_cap: 16,
+        }
+    } else {
+        InlineAdmissionLimits {
+            growth_factor: 2,
+            growth_slack: 256,
+            depth_cap: 8,
+            source_clone_cap: 8,
+        }
+    }
+}
+
 impl Default for InlinePolicyState {
     fn default() -> Self {
         Self {
@@ -10706,6 +10748,42 @@ fn inline_by_cost_with_policy(
     budget: u64,
     policy: &mut InlinePolicyState,
 ) -> (PassOutcome, u64) {
+    inline_by_cost_with_admission_caps(
+        program,
+        types,
+        level,
+        budget,
+        policy,
+        InlineAdmissionCaps::ForOptimizationLevel,
+    )
+}
+
+fn inline_by_cost_with_o2_admission_caps(
+    program: &mut Program,
+    types: &[Type],
+    level: OptimizationLevel,
+    budget: u64,
+    policy: &mut InlinePolicyState,
+) -> (PassOutcome, u64) {
+    debug_assert_eq!(level, OptimizationLevel::O3);
+    inline_by_cost_with_admission_caps(
+        program,
+        types,
+        level,
+        budget,
+        policy,
+        InlineAdmissionCaps::O2Style,
+    )
+}
+
+fn inline_by_cost_with_admission_caps(
+    program: &mut Program,
+    types: &[Type],
+    level: OptimizationLevel,
+    budget: u64,
+    policy: &mut InlinePolicyState,
+    admission_caps: InlineAdmissionCaps,
+) -> (PassOutcome, u64) {
     let scan_work = operation_count(program);
     if scan_work > budget {
         return (PassOutcome::BudgetExhausted, scan_work);
@@ -10717,22 +10795,7 @@ fn inline_by_cost_with_policy(
         OptimizationLevel::O2 => 60,
         OptimizationLevel::O3 => 120,
     };
-    let growth_factor = if level == OptimizationLevel::O3 { 4 } else { 2 };
-    let growth_slack = if level == OptimizationLevel::O3 {
-        1_024
-    } else {
-        256
-    };
-    let depth_cap = if level == OptimizationLevel::O3 {
-        16
-    } else {
-        8
-    };
-    let source_clone_cap = if level == OptimizationLevel::O3 {
-        16
-    } else {
-        8
-    };
+    let admission_limits = inline_admission_limits(level, admission_caps);
     let originals = program
         .functions
         .iter()
@@ -10805,7 +10868,7 @@ fn inline_by_cost_with_policy(
         let mut changed_this_round = false;
         for candidate in candidates {
             let Some(next_depth) =
-                inline_candidate_depth(&scratch_policy.depths, candidate.target, depth_cap)
+                inline_candidate_depth(&scratch_policy.depths, candidate.target, admission_limits.depth_cap)
             else {
                 continue;
             };
@@ -10814,7 +10877,7 @@ fn inline_by_cost_with_policy(
                 .get(&candidate.target)
                 .copied()
                 .unwrap_or(0)
-                >= source_clone_cap
+                >= admission_limits.source_clone_cap
                 || scratch_policy.cloned_bodies_remaining == 0
             {
                 continue;
@@ -10913,7 +10976,7 @@ fn inline_by_cost_with_policy(
             caller.features = infer_feature_bits(caller);
 
             let original = originals[&candidate.caller];
-            let cap = growth_factor * original + growth_slack;
+            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
             if inline_weight(caller) > cap {
                 scratch.functions[caller_index] = old_caller;
                 continue;
@@ -10998,7 +11061,7 @@ fn inline_by_cost_with_policy(
         let mut changed_this_round = false;
         for candidate in candidates {
             let Some(next_depth) =
-                inline_candidate_depth(&scratch_policy.depths, candidate.target, depth_cap)
+                inline_candidate_depth(&scratch_policy.depths, candidate.target, admission_limits.depth_cap)
             else {
                 continue;
             };
@@ -11007,7 +11070,7 @@ fn inline_by_cost_with_policy(
                 .get(&candidate.target)
                 .copied()
                 .unwrap_or(0)
-                >= source_clone_cap
+                >= admission_limits.source_clone_cap
                 || scratch_policy.cloned_bodies_remaining == 0
             {
                 continue;
@@ -11184,7 +11247,7 @@ fn inline_by_cost_with_policy(
             caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
 
             let original = originals[&candidate.caller];
-            let cap = growth_factor * original + growth_slack;
+            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
             if inline_weight(caller) > cap {
                 scratch.functions[caller_index] = old_caller;
                 continue;
@@ -11396,6 +11459,41 @@ fn run_transactional_whole_program_pass(
     *global_remaining = global_remaining.saturating_sub(work_units.min(*global_remaining));
     PassReport {
         pass,
+        outcome,
+        work_units,
+    }
+}
+
+/// Run the repeated O3 inline round with its intentionally narrower admission
+/// envelope. This is separate from the normal dispatcher so every other
+/// InlineByCost invocation retains the optimization level's native policy.
+fn run_transactional_o3_followup_inline_pass(
+    program: &mut Program,
+    tables: WholeProgramPassTables<'_>,
+    global_remaining: &mut u64,
+    inline_policy: &mut InlinePolicyState,
+) -> PassReport {
+    let (outcome, work_units) = inline_by_cost_with_o2_admission_caps(
+        program,
+        tables.types,
+        OptimizationLevel::O3,
+        *global_remaining,
+        inline_policy,
+    );
+    if outcome == PassOutcome::Changed {
+        let contract = pass_contract(PassId::InlineByCost);
+        debug_assert_eq!(contract.scope, InvalidationScope::ChangedBodies);
+        debug_assert!(
+            program
+                .functions
+                .iter()
+                .any(|function| function.invalid_analyses & contract.invalidates != 0),
+            "O3 follow-up InlineByCost changed MIR without publishing body invalidation"
+        );
+    }
+    *global_remaining = global_remaining.saturating_sub(work_units.min(*global_remaining));
+    PassReport {
+        pass: PassId::InlineByCost,
         outcome,
         work_units,
     }
@@ -13643,11 +13741,9 @@ pub(crate) fn optimize_program_with_control_tables(
                 push_checked(&mut passes, report, program, types)?;
             }
             if global_remaining != 0 {
-                let report = run_transactional_whole_program_pass(
+                let report = run_transactional_o3_followup_inline_pass(
                     program,
-                    PassId::InlineByCost,
                     whole_program_tables,
-                    level,
                     &mut global_remaining,
                     &mut inline_policy,
                 );
@@ -19273,6 +19369,60 @@ mod tests {
             assert_eq!(depths[&0], cap);
             assert_eq!(inline_candidate_depth(&depths, 0, cap), None);
         }
+    }
+
+    #[test]
+    fn o3_followup_inline_round_uses_o2_admission_caps_without_lowering_o3_costs() {
+        assert_eq!(
+            inline_admission_limits(
+                OptimizationLevel::O3,
+                InlineAdmissionCaps::ForOptimizationLevel,
+            ),
+            InlineAdmissionLimits {
+                growth_factor: 4,
+                growth_slack: 1_024,
+                depth_cap: 16,
+                source_clone_cap: 16,
+            }
+        );
+        assert_eq!(
+            inline_admission_limits(OptimizationLevel::O3, InlineAdmissionCaps::O2Style),
+            inline_admission_limits(
+                OptimizationLevel::O2,
+                InlineAdmissionCaps::ForOptimizationLevel,
+            )
+        );
+
+        let types = Type::predefined();
+        let mut first_round = inline_many_callers(20);
+        let mut first_policy = InlinePolicyState::default();
+        assert_eq!(
+            inline_by_cost_with_policy(
+                &mut first_round,
+                &types,
+                OptimizationLevel::O3,
+                u64::MAX,
+                &mut first_policy,
+            )
+            .0,
+            PassOutcome::Changed
+        );
+        assert_eq!(inlined_callers(&first_round).len(), 16);
+
+        let mut followup_round = inline_many_callers(20);
+        let mut followup_policy = InlinePolicyState::default();
+        assert_eq!(
+            inline_by_cost_with_o2_admission_caps(
+                &mut followup_round,
+                &types,
+                OptimizationLevel::O3,
+                u64::MAX,
+                &mut followup_policy,
+            )
+            .0,
+            PassOutcome::Changed
+        );
+        assert_eq!(inlined_callers(&followup_round).len(), 8);
     }
 
     #[test]
