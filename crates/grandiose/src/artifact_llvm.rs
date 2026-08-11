@@ -406,6 +406,13 @@ fn emit_function(
                             "construct field type",
                         ));
                     }
+                    // Unit has no LLVM value representation. A payload made
+                    // exclusively of unit fields is nevertheless observable
+                    // only through its enum tag, so the compact tag-only enum
+                    // ABI intentionally omits those zero-sized fields.
+                    if variant.is_some() && field_ty == UNIT {
+                        continue;
+                    }
                     let field_value = emit_load(
                         output,
                         &register_types,
@@ -438,14 +445,24 @@ fn emit_function(
                     .register_types
                     .get(*src as usize)
                     .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
-                let field_types = aggregate_fields(artifact, function_id, source_ty)?;
-                let field_ty = *field_types
-                    .get(*field as usize)
-                    .ok_or_else(|| unsupported(function_id, instruction_id, "aggregate field"))?;
                 let destination_ty = *function
                     .register_types
                     .get(*dst as usize)
                     .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+                // Once a preceding tag check has selected a unit-only enum
+                // variant, projecting its unit payload has no runtime bits to
+                // extract. The verifier still owns the path-sensitive variant
+                // proof; this ABI slice merely preserves the resulting Unit.
+                if destination_ty == UNIT
+                    && enum_has_unit_field(artifact, source_ty, *field)
+                {
+                    emit_fallthrough(output, function, function_id, instruction_id)?;
+                    continue;
+                }
+                let field_types = aggregate_fields(artifact, function_id, source_ty)?;
+                let field_ty = *field_types
+                    .get(*field as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "aggregate field"))?;
                 if destination_ty != field_ty {
                     return Err(unsupported(
                         function_id,
@@ -758,10 +775,10 @@ fn llvm_type(artifact: &Artifact, function: u32, ty: TypeId) -> Result<String, A
             function,
             &fields.iter().map(|field| field.ty).collect::<Vec<_>>(),
         ),
-        Some(Type::Enum { variants, .. }) if variants.iter().all(|variant| variant.fields.is_empty()) => {
-            // A fieldless enum is represented solely by its deterministic G1
-            // variant index. Payload-carrying variants stay fail-closed until
-            // their full tagged-union ABI is specified.
+        Some(Type::Enum { variants, .. }) if enum_has_only_unit_payloads(variants) => {
+            // A fieldless (or unit-only) enum is represented solely by its
+            // deterministic G1 variant index. Payloads with a runtime value
+            // stay fail-closed until their full tagged-union ABI is specified.
             Ok("{ i32 }".into())
         }
         _ => Err(ArtifactLlvmError::UnsupportedType { function, ty }),
@@ -817,10 +834,28 @@ fn enum_variant_fields_for_type(
     ty: TypeId,
 ) -> Result<Vec<Vec<TypeId>>, ArtifactLlvmError> {
     match artifact.types.get(ty as usize).map(Type::representation) {
-        Some(Type::Enum { variants, .. }) if variants.iter().all(|variant| variant.fields.is_empty()) => {
-            Ok(variants.iter().map(|_| Vec::new()).collect())
+        Some(Type::Enum { variants, .. }) if enum_has_only_unit_payloads(variants) => {
+            Ok(variants
+                .iter()
+                .map(|variant| variant.fields.iter().map(|field| field.ty).collect())
+                .collect())
         }
         _ => Err(ArtifactLlvmError::UnsupportedType { function, ty }),
+    }
+}
+
+fn enum_has_only_unit_payloads(variants: &[grandiose_vm::bytecode::EnumVariant]) -> bool {
+    variants
+        .iter()
+        .all(|variant| variant.fields.iter().all(|field| field.ty == UNIT))
+}
+
+fn enum_has_unit_field(artifact: &Artifact, ty: TypeId, field: u32) -> bool {
+    match artifact.types.get(ty as usize).map(Type::representation) {
+        Some(Type::Enum { variants, .. }) if enum_has_only_unit_payloads(variants) => variants
+            .iter()
+            .all(|variant| variant.fields.get(field as usize).is_some_and(|value| value.ty == UNIT)),
+        _ => false,
     }
 }
 
@@ -1354,6 +1389,101 @@ mod tests {
     }
 
     #[test]
+    fn verified_unit_payload_enum_uses_the_tag_only_abi_without_vm_execution() {
+        let result = 19;
+        let mut artifact = Artifact {
+            entry_function: Some(0),
+            constants: vec![Constant::Unit, Constant::U32(0), Constant::U32(1)],
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    flags: 0,
+                    params: vec![],
+                    return_type: UNIT,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, result, U32, UNIT],
+                    code_start: 0,
+                    code_len: 13,
+                    label_slot_count: 0,
+                },
+                Function {
+                    name: "result_unit".into(),
+                    flags: 0,
+                    params: vec![],
+                    return_type: result,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, UNIT, result],
+                    code_start: 13,
+                    code_len: 3,
+                    label_slot_count: 0,
+                },
+            ],
+            code: vec![
+                Instruction::Call { dst: Some(1), function: 1, args: vec![] },
+                Instruction::EnumTag { dst: 2, src: 1 },
+                Instruction::Switch {
+                    discr: 2,
+                    cases: vec![(1, 3), (2, 8)],
+                    otherwise: 3,
+                },
+                Instruction::Drop { register: 2 },
+                Instruction::ProjectMove { dst: 3, src: 1, field: 0 },
+                Instruction::Deconstruct { src: 1 },
+                Instruction::Drop { register: 3 },
+                Instruction::Return { src: None },
+                Instruction::Drop { register: 2 },
+                Instruction::ProjectMove { dst: 3, src: 1, field: 0 },
+                Instruction::Deconstruct { src: 1 },
+                Instruction::Drop { register: 3 },
+                Instruction::Return { src: None },
+                Instruction::Const { dst: 1, constant: 0 },
+                Instruction::Construct {
+                    dst: 2,
+                    ty: result,
+                    variant: Some(1),
+                    fields: vec![1],
+                },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(artifact.types.len(), result as usize);
+        artifact.types.push(Type::Enum {
+            name: "ResultUnit".into(),
+            variants: vec![
+                EnumVariant {
+                    name: "Ok".into(),
+                    fields: vec![Field { name: "value".into(), ty: UNIT }],
+                },
+                EnumVariant {
+                    name: "Err".into(),
+                    fields: vec![Field { name: "error".into(), ty: UNIT }],
+                },
+            ],
+            copy: true,
+        });
+        let artifact = with_generated_cleanup_plans(artifact).unwrap();
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        assert!(ir.contains("define { i32 } @grbc_fn_1()"));
+        assert!(ir.contains("insertvalue { i32 } undef, i32 1, 0"));
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("unit-payload-enum.ll");
+        let object = directory.path().join("unit-payload-enum.o");
+        fs::write(&source, ir).unwrap();
+        let status = Command::new("clang")
+            .args(["-x", "ir", "-c"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(object.is_file());
+    }
+
+    #[test]
     fn verified_artifact_uses_the_same_runtime_fault_abi_as_source_llvm() {
         let artifact = with_generated_cleanup_plans(Artifact {
             entry_function: Some(0),
@@ -1495,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_carrying_enums_remain_fail_closed_until_a_tagged_union_abi_exists() {
+    fn runtime_payload_enums_remain_fail_closed_until_a_tagged_union_abi_exists() {
         let mut artifact = Artifact::default();
         artifact.types.push(Type::Enum {
             name: "Payload".into(),
