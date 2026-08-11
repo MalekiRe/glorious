@@ -2556,6 +2556,104 @@ mod tests {
         assert!(closed_host_handler_plans(&artifact, 4, &entry).is_err());
     }
 
+    #[test]
+    fn prevalidated_shared_host_handler_stops_at_handle_before_perform_or_resume() {
+        // This is deliberately an `emit_function` regression rather than an
+        // encoded-artifact test.  `Handle`'s body is a runtime callable, for
+        // which the scalar AOT type gate intentionally has no representation
+        // yet.  Calling the single-function emitter lets the test prove the
+        // next diagnostic *after* the existing shared-handler plan and its
+        // admitted handler slot have both succeeded; it does not weaken the
+        // verifier or native type admission merely to reach `Handle`.
+        let mut artifact = frozen_handler_artifact_for_continuation_abi();
+        for clause in &mut artifact.handler_defs[0].clauses {
+            clause.callable_signature.outward_protocols.clear();
+        }
+        let shared_unit = artifact.types.len() as u32;
+        artifact.types.push(Type::RefShared { referent: UNIT });
+        let handler = artifact.types.len() as u32;
+        artifact.types.push(Type::Handler {
+            handler_def: 0,
+            capture_type: UNIT,
+            identity_name: "closed-host".into(),
+        });
+        // The clause functions are the future continuation targets.  Their
+        // `Resume` must remain unreachable from native lowering until Handle
+        // dispatch exists.
+        let clauses = (0..4)
+            .map(|index| Function {
+                name: format!("clause-{index}"),
+                flags: 0,
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: Some(0),
+                register_types: vec![shared_unit, UNIT],
+                code_start: 3,
+                code_len: 1,
+                label_slot_count: 0,
+            })
+            .collect::<Vec<_>>();
+        // The body is likewise deliberately left for the Handle ABI.  Its
+        // frozen host Perform is not permission for a process-global call.
+        let body = Function {
+            name: "body".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![0],
+            receiver_mode: Some(0),
+            register_types: vec![shared_unit, UNIT],
+            code_start: 2,
+            code_len: 1,
+            label_slot_count: 0,
+        };
+        let entry = Function {
+            name: "plan-entry".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            // r1 is the only non-scalar register and is accepted solely by
+            // the already-validated closed-handler-plan exception.
+            register_types: vec![UNIT, handler],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        };
+        artifact.functions = clauses
+            .into_iter()
+            .chain(std::iter::once(body))
+            .chain(std::iter::once(entry.clone()))
+            .collect();
+        artifact.code = vec![
+            Instruction::MakeHandlerShared {
+                dst: 1,
+                handler_def: 0,
+                functions: vec![0, 1, 2, 3],
+                captures: vec![],
+            },
+            // r0 is intentionally inert here: Handle rejects before reading
+            // its callable operand, and a scalar stand-in avoids granting a
+            // callable native representation in this regression fixture.
+            Instruction::Handle { dst: 0, handler: 1, body: 0, args: vec![] },
+            Instruction::Perform { dst: Some(1), protocol: 0, operation: 0, payloads: vec![] },
+            Instruction::Resume { dst: 1, resumption: 0, receiver_mode: 0, value: 1 },
+        ];
+
+        let mut ir = String::new();
+        assert_eq!(
+            emit_function(&mut ir, &artifact, 5, &entry),
+            Err(ArtifactLlvmError::UnsupportedInstruction {
+                function: 5,
+                instruction: 1,
+                opcode: "Handle",
+            })
+        );
+        assert!(ir.contains("closed-host-handler-plan r1"), "{ir}");
+    }
+
     fn frozen_handler_artifact_for_continuation_abi() -> Artifact {
         let array_text = 19;
         let mut artifact = Artifact {
