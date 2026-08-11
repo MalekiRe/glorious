@@ -1289,6 +1289,15 @@ fn assert_compiled_artifact(bytes: &[u8]) {
 }
 
 #[test]
+// Release-only profiling harness for substantial generated bootstrap bytecode.
+//
+// Run without the self-host stage replay, for example:
+// `G1_VM_OPCODE_PROFILE=1 tooling/ram-gate.sh cargo test --release -p grandiose
+// --test self_host_bytecode self_host_callable_backend_direct_mir_emits_vm_callable_wire_format
+// -- --exact --nocapture`
+// The VM prints `g1-vm-opcode-profile` with exact executed instruction and
+// opcode-category counts. Combine it with `G1_VM_HOT_FUNCTION_SAMPLE_STEPS`
+// when selecting the next interpreter optimization target.
 fn self_host_callable_backend_direct_mir_emits_vm_callable_wire_format() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)

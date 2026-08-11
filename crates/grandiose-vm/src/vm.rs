@@ -238,6 +238,7 @@ fn diagnostics_configured_with(mut present: impl FnMut(&str) -> bool) -> bool {
         "G1_VM_MEMORY_PROFILE_MIB",
         "G1_VM_PROGRESS_STEPS",
         "G1_VM_HOT_FUNCTION_SAMPLE_STEPS",
+        "G1_VM_OPCODE_PROFILE",
     ]
     .into_iter()
     .any(&mut present)
@@ -263,6 +264,104 @@ struct VmHotFunctions {
     report_countdown: u64,
     steps: u64,
     samples: Vec<u64>,
+}
+
+/// Exact opcode-category accounting for a single VM run.  This is intentionally
+/// opt-in because incrementing a category counter on every dispatch perturbs
+/// throughput; it is for choosing VM optimization work, not measuring a final
+/// benchmark number.  `G1_VM_OPCODE_PROFILE=1` prints one stable summary when
+/// the run ends, including runs that terminate with a runtime error.
+struct VmOpcodeProfile {
+    started: Instant,
+    categories: [u64; 9],
+}
+
+impl VmOpcodeProfile {
+    fn from_env() -> Option<Self> {
+        std::env::var_os("G1_VM_OPCODE_PROFILE").map(|_| Self {
+            started: Instant::now(),
+            categories: [0; 9],
+        })
+    }
+
+    fn observe(&mut self, instruction: &Instruction) {
+        let category = match instruction {
+            Instruction::Nop
+            | Instruction::Jump { .. }
+            | Instruction::Switch { .. }
+            | Instruction::Return { .. }
+            | Instruction::Abort { .. }
+            | Instruction::Unreachable => 0,
+            Instruction::Const { .. } | Instruction::Move { .. } | Instruction::Copy { .. } => 1,
+            Instruction::Primitive { .. } => 2,
+            Instruction::Call { .. }
+            | Instruction::TailCall { .. }
+            | Instruction::CallSelf { .. }
+            | Instruction::TailCallSelf { .. }
+            | Instruction::CallKnownReceiver { .. }
+            | Instruction::TailCallKnownReceiver { .. }
+            | Instruction::CallIndirect { .. }
+            | Instruction::TailCallIndirect { .. }
+            | Instruction::HostCall { .. } => 3,
+            Instruction::Construct { .. }
+            | Instruction::ProjectMove { .. }
+            | Instruction::ProjectCopy { .. }
+            | Instruction::EnumTag { .. }
+            | Instruction::Deconstruct { .. }
+            | Instruction::MakeCallable { .. }
+            | Instruction::MakeBindingPack { .. } => 4,
+            Instruction::BorrowShared { .. }
+            | Instruction::BorrowUnique { .. }
+            | Instruction::ReborrowShared { .. }
+            | Instruction::ReborrowUnique { .. }
+            | Instruction::DerefCopy { .. }
+            | Instruction::DerefReborrowShared { .. }
+            | Instruction::DerefReborrowUnique { .. }
+            | Instruction::DerefMove { .. }
+            | Instruction::DerefStore { .. }
+            | Instruction::EndBorrow { .. }
+            | Instruction::ProjectBorrowShared { .. }
+            | Instruction::ProjectBorrowUnique { .. } => 5,
+            Instruction::Drop { .. } => 6,
+            Instruction::MakeHandler { .. }
+            | Instruction::MakeHandlerShared { .. }
+            | Instruction::Handle { .. }
+            | Instruction::Perform { .. }
+            | Instruction::Resume { .. }
+            | Instruction::TailResume { .. }
+            | Instruction::Cancel { .. } => 7,
+            Instruction::LabelPush { .. } | Instruction::LabelPop { .. } | Instruction::Leave { .. } => 8,
+        };
+        self.categories[category] = self.categories[category].saturating_add(1);
+    }
+}
+
+impl Drop for VmOpcodeProfile {
+    fn drop(&mut self) {
+        const NAMES: [&str; 9] = [
+            "control",
+            "register",
+            "primitive",
+            "call",
+            "aggregate",
+            "reference",
+            "cleanup",
+            "effect",
+            "label",
+        ];
+        let total = self.categories.iter().sum::<u64>();
+        let categories = NAMES
+            .into_iter()
+            .zip(self.categories)
+            .filter(|(_, count)| *count != 0)
+            .map(|(name, count)| format!("{name}={count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "g1-vm-opcode-profile instructions={total} elapsed={:.3}s categories=[{categories}]",
+            self.started.elapsed().as_secs_f64(),
+        );
+    }
 }
 
 impl VmHotFunctions {
@@ -707,6 +806,10 @@ impl Vm {
             .diagnostics_configured
             .then(|| VmHotFunctions::from_env(a.functions.len()))
             .flatten();
+        let mut opcode_profile = self
+            .diagnostics_configured
+            .then(VmOpcodeProfile::from_env)
+            .flatten();
         let breakpoint = self
             .diagnostics_configured
             .then(VmBreakpoint::from_env)
@@ -742,6 +845,9 @@ impl Vm {
                 .checked_pc(frame.pc)
                 .ok_or(RuntimeError::TypeConfusion)?;
             let ins = verified_fun.instruction(verified_pc);
+            if let Some(profile) = &mut opcode_profile {
+                profile.observe(ins);
+            }
             if let Some(trace) = &mut progress_trace {
                 trace.observe(frame.function, &fun.name, frame.pc, stack_depth);
             }
@@ -5863,10 +5969,35 @@ mod tests {
             "G1_VM_MEMORY_PROFILE_MIB",
             "G1_VM_PROGRESS_STEPS",
             "G1_VM_HOT_FUNCTION_SAMPLE_STEPS",
+            "G1_VM_OPCODE_PROFILE",
         ] {
             assert!(diagnostics_configured_with(|name| name == control));
         }
         assert!(!diagnostics_configured_with(|_| false));
+    }
+
+    #[test]
+    fn opcode_profile_groups_dispatch_categories() {
+        let mut profile = VmOpcodeProfile {
+            started: Instant::now(),
+            categories: [0; 9],
+        };
+        profile.observe(&Instruction::Const {
+            dst: 1,
+            constant: 0,
+        });
+        profile.observe(&Instruction::Primitive {
+            dst: 2,
+            op: Primitive::IntCheckedAdd,
+            args: vec![1, 1],
+        });
+        profile.observe(&Instruction::Call {
+            dst: None,
+            function: 0,
+            args: vec![],
+        });
+        profile.observe(&Instruction::Return { src: None });
+        assert_eq!(profile.categories, [1, 1, 1, 1, 0, 0, 0, 0, 0]);
     }
 
     #[test]
