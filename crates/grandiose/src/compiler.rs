@@ -56810,7 +56810,22 @@ fn cross_validate_cleanup_maps(
                                     },
                                 )
                         };
-                    let matches = actual == expected.as_slice()
+                    // An `Unreachable` instruction cannot run a cleanup:
+                    // its cleanup-table entry is observationally dead. A
+                    // peephole can relocate the unreachable terminator and
+                    // the first ordinal after it onto one PC; serialization
+                    // deliberately keeps the later predecessor state for
+                    // that collision. Do not require that dead entry to
+                    // match a distinct MIR ownership state.
+                    let relocated_unreachable = peephole_relocated
+                        && matches!(
+                            artifact
+                                .code
+                                .get(artifact.functions[fid].code_start as usize + pc as usize),
+                            Some(Instruction::Unreachable)
+                        );
+                    let matches = relocated_unreachable
+                        || actual == expected.as_slice()
                         || (expected.iter().all(|register| {
                             actual.contains(register)
                                 || folded_unrestricted(register)
