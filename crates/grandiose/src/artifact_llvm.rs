@@ -1130,6 +1130,9 @@ struct ClosedHostCallable {
 struct ClosedHostHandlerContinuationAbi {
     owner_function: u32,
     handle_instruction: u32,
+    handler_register: u32,
+    body_register: u32,
+    clause_registers: Vec<u32>,
     frame: ClosedHostHandlerFrame,
     body: ClosedHostCallable,
     clauses: Vec<ClosedHostCallable>,
@@ -1151,7 +1154,8 @@ fn closed_host_handler_continuation_abis(
         let Some(end) = start.checked_add(owner.code_len as usize) else { continue };
         let Some(code) = artifact.code.get(start..end) else { continue };
         let mut callables = BTreeMap::<u32, ClosedHostCallable>::new();
-        let mut handlers = BTreeMap::<u32, (ClosedHostHandlerFrame, Vec<ClosedHostCallable>)>::new();
+        let mut handlers =
+            BTreeMap::<u32, (ClosedHostHandlerFrame, Vec<ClosedHostCallable>, Vec<u32>)>::new();
         for (offset, instruction) in code.iter().enumerate() {
             match instruction {
                 Instruction::MakeCallable { dst, callable_type, function, captures }
@@ -1170,6 +1174,7 @@ fn closed_host_handler_continuation_abis(
                         handlers.remove(dst);
                         continue;
                     };
+                    let clause_registers = clauses.clone();
                     let clauses = clauses
                         .iter()
                         .map(|register| callables.get(register).cloned())
@@ -1181,7 +1186,7 @@ fn closed_host_handler_continuation_abis(
                     if closed_host_handler_clauses_match(artifact, &frame, &clauses)
                         && handler_register_matches(artifact, owner, *dst, *handler_def, &clauses)
                     {
-                        handlers.insert(*dst, (frame, clauses));
+                        handlers.insert(*dst, (frame, clauses, clause_registers));
                     } else {
                         handlers.remove(dst);
                     }
@@ -1193,12 +1198,16 @@ fn closed_host_handler_continuation_abis(
                     handlers.remove(dst);
                 }
                 Instruction::Handle { dst, handler, body, args } => {
-                    let Some((frame, clauses)) = handlers.get(handler).cloned() else { continue };
+                    let Some((frame, clauses, clause_registers)) = handlers.get(handler).cloned() else { continue };
+                    let body_register = *body;
                     let Some(body) = callables.get(body).cloned() else { continue };
                     if closed_host_handle_matches(artifact, owner, *dst, args, &frame, &body) {
                         found.push(ClosedHostHandlerContinuationAbi {
                             owner_function: owner_function as u32,
                             handle_instruction: offset as u32,
+                            handler_register: *handler,
+                            body_register,
+                            clause_registers,
                             frame,
                             body,
                             clauses,
@@ -1243,29 +1252,16 @@ fn closed_handle_opaque_registers(
     if sites.is_empty() {
         return BTreeSet::new();
     }
-    let abis = closed_host_handler_continuation_abis(artifact);
-    let mut callable_functions = BTreeSet::new();
-    let mut handler_defs = BTreeSet::new();
-    for abi in abis.iter().filter(|abi| {
+    closed_host_handler_continuation_abis(artifact)
+        .into_iter()
+        .filter(|abi| {
         abi.owner_function == owner_function
             && sites.get(&abi.handle_instruction) == Some(&abi.body.function)
-    }) {
-        callable_functions.insert(abi.body.function);
-        callable_functions.extend(abi.clauses.iter().map(|clause| clause.function));
-        handler_defs.insert(abi.frame.handler_def);
-    }
-    let Some(owner) = artifact.functions.get(owner_function as usize) else { return BTreeSet::new() };
-    let start = owner.code_start as usize;
-    let Some(code) = artifact.code.get(start..start.saturating_add(owner.code_len as usize)) else {
-        return BTreeSet::new();
-    };
-    code.iter()
-        .filter_map(|instruction| match instruction {
-            Instruction::MakeCallable { dst, function, captures, .. }
-                if captures.is_empty() && callable_functions.contains(function) => Some(*dst),
-            Instruction::MakeHandler { dst, handler_def, .. }
-                if handler_defs.contains(handler_def) => Some(*dst),
-            _ => None,
+        })
+        .flat_map(|abi| {
+            std::iter::once(abi.handler_register)
+                .chain(std::iter::once(abi.body_register))
+                .chain(abi.clause_registers)
         })
         .collect()
 }
@@ -2493,6 +2489,47 @@ mod tests {
             payloads: vec![],
         };
         assert!(closed_handle_body_functions(&effectful).is_empty());
+    }
+
+    #[test]
+    fn closed_handle_opaque_type_admission_is_exact_and_never_admits_resumptions() {
+        let artifact = frozen_handler_artifact_for_continuation_abi();
+        let owner = &artifact.functions[0];
+        let body_callable = owner.register_types[1];
+        let resumption = artifact.handler_defs[0].clauses[0].resumption_type.unwrap();
+        let opaque = closed_handle_opaque_registers(
+            &artifact,
+            0,
+            &closed_handle_sites(&artifact, 0),
+        );
+        assert_eq!(opaque, BTreeSet::from([1, 2, 3, 4, 5, 6]));
+
+        // Reusing the same callable definition in a distinct register is not
+        // a lexical proof token.  It must still fail the ordinary type gate.
+        let mut unrelated_callable = artifact.clone();
+        unrelated_callable.functions[0].register_types.push(body_callable);
+        let owner = unrelated_callable.functions[0].clone();
+        assert_eq!(
+            emit_function(&mut String::new(), &unrelated_callable, 0, &owner, false),
+            Err(ArtifactLlvmError::UnsupportedType {
+                function: 0,
+                ty: body_callable,
+            })
+        );
+
+        // A resumption is a live continuation capability, not an inert
+        // handler/callable proof token.  Even a frozen one-shot definition is
+        // not admitted until Resume itself has a precise native ABI.
+        let mut resumption_register = artifact;
+        resumption_register.functions[0].register_types.push(resumption);
+        let owner = resumption_register.functions[0].clone();
+        assert_eq!(
+            emit_function(&mut String::new(), &resumption_register, 0, &owner, false),
+            Err(ArtifactLlvmError::UnsupportedType {
+                function: 0,
+                ty: resumption,
+            })
+        );
     }
 
     #[test]
