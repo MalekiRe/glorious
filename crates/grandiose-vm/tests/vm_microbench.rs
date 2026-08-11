@@ -455,6 +455,84 @@ fn shared_closure_call_program() -> Artifact {
     }
 }
 
+/// Shared closures in compiler walks often carry a node/index argument. This
+/// isolates receiver-preserving indirect calls that relocate one scalar into
+/// the closure frame on every invocation.
+fn shared_closure_one_argument_program() -> Artifact {
+    let mut types = Type::predefined();
+    let shared_unit = types.len() as u32;
+    types.push(Type::RefShared { referent: UNIT });
+    let callable = types.len() as u32;
+    types.push(Type::Callable {
+        signature: Signature {
+            params: vec![I64],
+            result: I64,
+            outward_protocols: vec![],
+        },
+        capture_type: UNIT,
+        receiver_mode: 0,
+        identity_name: "shared one-argument microbench closure".into(),
+        copy: true,
+        zero_use_allowed: true,
+    });
+    let mut code = vec![Instruction::MakeCallable {
+        dst: 1,
+        callable_type: callable,
+        function: 1,
+        captures: vec![],
+    }];
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Const {
+                dst: 2,
+                constant: 0,
+            },
+            Instruction::CallIndirect {
+                dst: Some(3),
+                callable: 1,
+                receiver_mode: 0,
+                args: vec![2],
+            },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 3 });
+        }
+    }
+    code.push(Instruction::Drop { register: 1 });
+    code.push(Instruction::Return { src: Some(3) });
+    let body_start = code.len() as u32;
+    code.push(Instruction::Return { src: Some(1) });
+    Artifact {
+        required_features: 1 | (1 << 1),
+        types,
+        constants: vec![Constant::I64(7)],
+        functions: vec![
+            function(
+                "main",
+                vec![],
+                I64,
+                vec![UNIT, callable, I64, I64],
+                0,
+                body_start,
+            ),
+            Function {
+                name: "one_argument_closure_body".into(),
+                flags: 0,
+                params: vec![I64],
+                return_type: I64,
+                outward_protocols: vec![],
+                receiver_mode: Some(0),
+                register_types: vec![shared_unit, I64],
+                code_start: body_start,
+                code_len: 1,
+                label_slot_count: 0,
+            },
+        ],
+        code,
+        ..Artifact::default()
+    }
+}
+
 /// Parser and symbol-table paths commonly compare a copied immutable spelling
 /// against itself.  This keeps the source text large enough for content
 /// comparison to be visible while retaining the VM's normal Copy semantics.
@@ -604,6 +682,11 @@ fn vm_execution_microbenchmarks() {
         "shared_closure_call",
         shared_closure_call_program(),
         Value::I64(1),
+    );
+    measure(
+        "shared_closure_one_argument",
+        shared_closure_one_argument_program(),
+        Value::I64(7),
     );
     measure(
         "shared_text_equality",

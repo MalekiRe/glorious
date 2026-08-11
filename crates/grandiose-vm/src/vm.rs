@@ -1599,10 +1599,17 @@ impl Vm {
                     let (dst, callable, receiver_mode) = (*dst, *callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
-                    let mut callee = if args.is_empty() {
-                        make_verified_zero_argument_receiver_frame(a, function, receiver, dst)?
-                    } else {
-                        make_verified_frame_from_arguments(a, function, frame, args, receiver, dst)?
+                    let mut callee = match args.as_slice() {
+                        [] => make_verified_zero_argument_receiver_frame(a, function, receiver, dst)?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a, function, frame, argument, receiver, dst,
+                        )?,
+                        &[first, second] => make_verified_two_argument_frame(
+                            a, function, frame, first, second, receiver, dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
+                            a, function, frame, args, receiver, dst,
+                        )?,
                     };
                     frame.pc += 1;
                     if let Some(guard) = guard {
@@ -1619,14 +1626,19 @@ impl Vm {
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
                     let return_dst = frame.return_dst;
-                    let mut replacement = if args.is_empty() {
-                        make_verified_zero_argument_receiver_frame(
+                    let mut replacement = match args.as_slice() {
+                        [] => make_verified_zero_argument_receiver_frame(
                             a, function, receiver, return_dst,
-                        )?
-                    } else {
-                        make_verified_frame_from_arguments(
+                        )?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a, function, frame, argument, receiver, return_dst,
+                        )?,
+                        &[first, second] => make_verified_two_argument_frame(
+                            a, function, frame, first, second, receiver, return_dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
                             a, function, frame, args, receiver, return_dst,
-                        )?
+                        )?,
                     };
                     if let Some(guard) = guard {
                         replacement.guards.push(guard);
