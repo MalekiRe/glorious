@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod ast;
+pub mod artifact_llvm;
 pub(crate) mod ast_visit;
 mod builtins;
 mod compiler;
