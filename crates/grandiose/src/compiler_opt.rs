@@ -11313,13 +11313,21 @@ fn run_transactional_pass(
 ) -> PassReport {
     // Direct custom-hook identity is distinct from structural destruction,
     // but cleanup simplification must still see those hooks recursively when
-    // deciding whether an otherwise scalar-only container is observable.
-    let direct_custom_drop_types = program
-        .functions
-        .iter()
-        .flat_map(|function| &function.flow.locals)
-        .filter_map(|fact| (fact.drop_glue == DropGlueKind::Custom).then_some(fact.ty))
-        .collect::<BTreeSet<_>>();
+    // deciding whether an otherwise scalar-only container is observable. Most
+    // local passes do not consume this set, so avoid repeatedly walking every
+    // function's ownership facts during a whole-program optimization run.
+    let direct_custom_drop_types = matches!(
+        pass,
+        PassId::SimplifyCleanup | PassId::FormTailCallsAndHoist
+    )
+    .then(|| {
+        program
+            .functions
+            .iter()
+            .flat_map(|function| &function.flow.locals)
+            .filter_map(|fact| (fact.drop_glue == DropGlueKind::Custom).then_some(fact.ty))
+            .collect::<BTreeSet<_>>()
+    });
     let mut outcome = PassOutcome::Unchanged;
     let mut total_work = 0_u64;
     // Tail formation is the final stack-safety opportunity after proof
@@ -11340,13 +11348,27 @@ fn run_transactional_pass(
             PassId::SparseSimplify => sparse_simplify(function, types, limit),
             PassId::ScalarizeLocals => scalarize_locals(function, types, limit),
             PassId::SimplifyCleanup => {
-                simplify_cleanup(function, types, &direct_custom_drop_types, limit)
+                simplify_cleanup(
+                    function,
+                    types,
+                    direct_custom_drop_types
+                        .as_ref()
+                        .expect("cleanup simplification prepared custom-drop types"),
+                    limit,
+                )
             }
             PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
             PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
             PassId::EraseLoanProofsAndScalarizedReferences => erase_loan_proofs(function, limit),
             PassId::FormTailCallsAndHoist => {
-                form_tail_calls_and_hoist(function, types, &direct_custom_drop_types, limit)
+                form_tail_calls_and_hoist(
+                    function,
+                    types,
+                    direct_custom_drop_types
+                        .as_ref()
+                        .expect("tail formation prepared custom-drop types"),
+                    limit,
+                )
             }
             _ => (PassOutcome::SkippedUnavailable, 0),
         };
