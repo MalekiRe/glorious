@@ -45,6 +45,11 @@ PATH="$scratch/bin:$PATH" "$repo_root/tooling/publish-native-selfhost-baseline.s
 [[ "$(<"$scratch/published")" == "$baseline" ]]
 [[ ! -w "$baseline/grandiose-self-host-native" ]]
 [[ ! -w "$baseline/build.fingerprint" ]]
+# The objects are part of the immutable baseline too.  The publisher used to
+# protect just the top-level `objects/` directory while leaving its payloads
+# writable, which made an accidental shared-cache mutation possible.
+[[ ! -w "$baseline/objects/fixture.o" ]]
+[[ ! -w "$baseline/objects/fixture.manifest" ]]
 # The baseline contract includes both members of every durable object entry;
 # a seed must never receive an object without the manifest that validates it.
 grep -Fq $'file\tobjects/fixture.o\t' "$baseline/manifest.tsv"

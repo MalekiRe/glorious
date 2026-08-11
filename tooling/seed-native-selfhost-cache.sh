@@ -93,6 +93,11 @@ for entry in "${entries[@]}"; do
   [[ "$actual" == "$expected" ]] || { echo "seed-native-selfhost-cache: baseline checksum mismatch: $path" >&2; exit 1; }
   mkdir -p "$stage/$(dirname "$path")"
   cp -- "$source" "$stage/$path"
+  # A published baseline is intentionally read-only.  This staging copy is
+  # the receiving worktree's independent mutable cache, so restore the
+  # owner's write bit before publication; otherwise a seed from an immutable
+  # baseline could not replace stale objects on a later rebuild.
+  chmod u+w "$stage/$path"
   copied=$(sha256sum "$stage/$path" | awk '{print $1}')
   [[ "$copied" == "$expected" ]] || { echo "seed-native-selfhost-cache: copied checksum mismatch: $path" >&2; exit 1; }
 done

@@ -90,10 +90,12 @@ revision=$(git -C "$worktree" rev-parse HEAD)
     printf 'file\t%s\t%s\n' "$file" "$(sha256sum "$stage/$file" | awk '{print $1}')"
   done
 } > "$stage/manifest.tsv"
-# Consumers only require ordinary file reads.  Removing write bits makes an
-# accidental shared-cache mutation visible instead of silently corrupting
-# later worktree seeds.
-chmod a-w "$stage"/*
+# Consumers only require ordinary file reads.  Remove write bits recursively:
+# the durable object payloads live below `objects/`, and protecting only that
+# directory would still leave its individual files mutable through an already
+# open or accidentally restored writable directory.  A published baseline is
+# a read-only seed, never the mutable cache used by a worktree.
+chmod -R a-w "$stage"
 mv -- "$stage" "$output"
 trap - EXIT
 printf '%s\n' "$output"
