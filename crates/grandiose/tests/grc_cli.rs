@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
@@ -16,6 +17,15 @@ fn grc() -> Command {
     Command::new(env!("CARGO_BIN_EXE_grc"))
 }
 
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned()
+}
+
 struct Session {
     child: Child,
     input: ChildStdin,
@@ -24,7 +34,15 @@ struct Session {
 
 impl Session {
     fn start() -> Self {
-        let mut child = grc()
+        Self::start_command(grc())
+    }
+
+    fn start_release(program: &Path) -> Self {
+        Self::start_command(Command::new(program))
+    }
+
+    fn start_command(mut command: Command) -> Self {
+        let mut child = command
             .arg("--serve")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -206,6 +224,143 @@ fn release_warm_llvm_serve_iteration_records_cache_evidence() {
     assert_eq!(
         interface_changed["cache_stats"]["llvm_fragments_reused"], 0,
         "the current runtime-ABI guard conservatively invalidates every fragment after a leaf ABI edit: {interface_changed}"
+    );
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn copied_production_self_host_inputs(directory: &Path) -> Vec<PathBuf> {
+    let repository = repository_root();
+    let original_root = repository.join("self-host/src");
+    let copied_root = directory.join("self-host-src");
+    copy_tree(&original_root, &copied_root);
+    let listed = Command::new(repository.join("tooling/self-host-production-source.sh"))
+        .arg("inputs")
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "production input enumeration failed: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    String::from_utf8(listed.stdout)
+        .unwrap()
+        .lines()
+        .map(PathBuf::from)
+        .map(|original| {
+            copied_root.join(original.strip_prefix(&original_root).unwrap_or_else(|_| {
+                panic!(
+                    "production input {} escapes {}",
+                    original.display(),
+                    original_root.display()
+                )
+            }))
+        })
+        .collect()
+}
+
+fn durable_object_manifests(cache: &Path) -> BTreeSet<std::ffi::OsString> {
+    fs::read_dir(cache)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            (entry.path().extension().is_some_and(|extension| extension == "manifest"))
+                .then(|| entry.file_name())
+        })
+        .collect()
+}
+
+/// Expensive full-self-host release check. It intentionally exercises the
+/// persistent frontend/type/MIR driver and a private durable object cache at
+/// the same time; cache-work evidence is asserted, never wall-clock time.
+#[test]
+#[ignore = "release-only copied self-host serve warm-edit harness"]
+fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
+    let directory = tempdir().unwrap();
+    let cache = directory.path().join("native-cache");
+    fs::create_dir_all(&cache).unwrap();
+    let inputs = copied_production_self_host_inputs(directory.path());
+    assert!(!inputs.is_empty(), "production closure needs main source");
+    let compiler = directory.path().join("self-host-src/compiler/compiler.glorious");
+    let release_grc = repository_root().join("target/release/grc");
+    assert!(
+        release_grc.is_file(),
+        "release grc is required; run `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
+    );
+    let arguments = |output: &Path| {
+        let mut arguments = vec![
+            "-O3".to_owned(),
+            "--emit".to_owned(),
+            "executable".to_owned(),
+            "--native-incremental".to_owned(),
+            "--native-incremental-cache".to_owned(),
+            cache.display().to_string(),
+            "--native-allocation-limit".to_owned(),
+            "536870912".to_owned(),
+            "-o".to_owned(),
+            output.display().to_string(),
+        ];
+        arguments.extend(inputs.iter().map(|path| path.display().to_string()));
+        serde_json::Value::Array(arguments.into_iter().map(serde_json::Value::String).collect())
+    };
+    let request = |session: &mut Session, id, arguments: serde_json::Value| {
+        session.request(serde_json::json!({
+            "protocol": 1,
+            "id": id,
+            "method": "compile",
+            "arguments": arguments,
+        }))
+    };
+    let mut session = Session::start_release(&release_grc);
+    let cold = request(&mut session, 1, arguments(&directory.path().join("cold-native")));
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["strategy"], "partitioned-function-objects");
+    assert!(directory.path().join("cold-native").is_file());
+    let before = durable_object_manifests(&cache);
+    assert!(!before.is_empty(), "cold build wrote no durable object manifests");
+
+    let before_edit = fs::read_to_string(&compiler).unwrap();
+    let original = "usize_from_u32(value: u32) -> usize {\n    wrapping_convert_to_usize(value)\n}";
+    let replacement = "usize_from_u32(value: u32) -> usize {\n    if(value == 0) { 0 } else { wrapping_convert_to_usize(value) }\n}";
+    assert_eq!(
+        before_edit.matches(original).count(),
+        1,
+        "the copied self-host body edit must target exactly one function"
+    );
+    write(&compiler, &before_edit.replacen(original, replacement, 1));
+
+    let edited = request(
+        &mut session,
+        2,
+        arguments(&directory.path().join("edited-native")),
+    );
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert!(directory.path().join("edited-native").is_file());
+    assert!(
+        edited["cache_stats"]["bodies_reused"].as_u64().unwrap_or_default() > 0,
+        "a one-body edit must reuse self-host body work: {edited}"
+    );
+    let after = durable_object_manifests(&cache);
+    let newly_written = after.difference(&before).collect::<Vec<_>>();
+    assert!(
+        !newly_written.is_empty(),
+        "body edit produced no durable native object evidence"
+    );
+    assert!(
+        newly_written.iter().any(|manifest| fs::read_to_string(cache.join(manifest))
+            .is_ok_and(|contents| contents.contains("role=function;"))),
+        "body edit must publish at least one function-object manifest: {newly_written:?}"
     );
 }
 
