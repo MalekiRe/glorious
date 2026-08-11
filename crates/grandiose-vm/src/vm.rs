@@ -688,6 +688,13 @@ impl Vm {
             .map_err(|error| RuntimeError::HostLink(error.clone()))?;
         let a = self.artifact.image();
         let mut stack = vec![make_frame(a, function, args, Value::Unit, None)?];
+        // A direct zero-argument call is common in lowered compiler code. Its
+        // callee frame has no incoming values to preserve, so return its
+        // register storage to this run-local cache when it becomes empty.
+        // Keeping the cache local makes separate and re-entrant `Vm::run`
+        // calls independent while avoiding allocator traffic for sequential
+        // leaf calls.
+        let mut recycled_zero_argument_registers = None;
         let mut memory_profile = self
             .diagnostics_configured
             .then(VmMemoryProfile::from_env)
@@ -1110,7 +1117,12 @@ impl Vm {
                 } => {
                     let (dst, function) = (*dst, *function);
                     let callee = match args.as_slice() {
-                        [] => make_verified_zero_argument_frame(a, function, dst)?,
+                        [] => make_verified_zero_argument_frame(
+                            a,
+                            function,
+                            dst,
+                            Some(&mut recycled_zero_argument_registers),
+                        )?,
                         &[argument] => make_verified_one_argument_frame(
                             a, function, frame, argument, Value::Unit, dst,
                         )?,
@@ -1128,7 +1140,12 @@ impl Vm {
                     let function = *function;
                     let return_dst = frame.return_dst;
                     let mut replacement = match args.as_slice() {
-                        [] => make_verified_zero_argument_frame(a, function, return_dst)?,
+                        [] => make_verified_zero_argument_frame(
+                            a,
+                            function,
+                            return_dst,
+                            None,
+                        )?,
                         &[argument] => make_verified_one_argument_frame(
                             a,
                             function,
@@ -1730,6 +1747,17 @@ impl Vm {
                         None => Value::Unit,
                     };
                     let dst = frame.return_dst;
+                    // Only a direct zero-argument call has the unit receiver
+                    // and no parameter registers. Once every local has been
+                    // consumed, its register allocation can be used by the
+                    // next such call in this execution.
+                    let recycle_zero_argument_registers = fun.params.is_empty()
+                        && frame.delimiter.is_none()
+                        && frame.guards.is_empty()
+                        && frame.deferred_frames.is_empty()
+                        && frame.labels.is_empty()
+                        && matches!(frame.registers.first(), Some(Some(Value::Unit)))
+                        && frame.registers[1..].iter().all(Option::is_none);
                     if let Some(handler) = frame.delimiter.take() {
                         self.destroy_runtime_typed(handler)?;
                     }
@@ -1739,7 +1767,10 @@ impl Vm {
                     for deferred in frame.deferred_frames.drain(..).rev() {
                         self.destroy_frame(deferred)?;
                     }
-                    stack.pop();
+                    let completed = stack.pop().expect("return executes with a current frame");
+                    if recycle_zero_argument_registers {
+                        recycled_zero_argument_registers = Some(completed.registers);
+                    }
                     match stack.last_mut() {
                         Some(caller) => {
                             if let Some(dst) = dst {
@@ -2017,6 +2048,7 @@ fn make_verified_zero_argument_frame(
     a: &ExecutionImage,
     function: u32,
     return_dst: Option<u32>,
+    recycled_registers: Option<&mut Option<Vec<Option<Value>>>>,
 ) -> Result<Frame, RuntimeError> {
     let f = a
         .functions
@@ -2031,7 +2063,14 @@ fn make_verified_zero_argument_frame(
     // The general relocation helper begins with an all-empty register file and
     // overwrites r0.  Build the known unit receiver first instead, mirroring
     // the already optimized entry-frame path.
-    let mut registers = Vec::with_capacity(f.register_types.len());
+    let mut registers = recycled_registers
+        .and_then(|registers| registers.take())
+        .filter(|registers| registers.len() == f.register_types.len())
+        .unwrap_or_else(|| Vec::with_capacity(f.register_types.len()));
+    // A cached vector came from a fully returned frame, but clear it here
+    // rather than relying on that fact: this keeps the constructor's frame
+    // invariant explicit and makes the cache robust to future return paths.
+    registers.clear();
     registers.push(Some(Value::Unit));
     registers.resize_with(f.register_types.len(), || None);
     Ok(Frame {
