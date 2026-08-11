@@ -676,12 +676,20 @@ fn references_lower_to_native_pointers() {
 fn enum_tags_and_payloads_lower_to_native_llvm_values() {
     let module = grandiose::compile_source_to_llvm_ir(
         "llvm-enum.glorious",
-        "enum Choice { Yes(i64), No } select(choice: Choice) -> i64 { if(choice is Choice::Yes(value)) { value } else { 0 } } main() -> () { select(Choice::Yes(9)); () }",
+        "enum Choice { Yes(i64), No } select(choice: Choice) -> i64 { if(choice is Choice::Yes(value)) { value } else { 0 } } main() -> () { select(Choice::Yes(9)); select(Choice::No); () }",
     )
     .unwrap();
     assert!(module.ir.contains("= type { i32, [1 x i128] }"));
     assert!(module.ir.contains("insertvalue %g1.type."));
     assert!(module.ir.contains("extractvalue %g1.type."));
+    assert!(
+        module.ir.contains("zeroinitializer, i32 1, 0"),
+        "a unit variant must zero its inactive payload slot before an aggregate copy"
+    );
+    assert!(
+        !module.ir.contains("poison, i32"),
+        "enum values must initialize inactive slots before aggregate copies"
+    );
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("enum.ll");

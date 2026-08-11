@@ -6055,9 +6055,14 @@ impl<'a> Emitter<'a> {
                         fields.len()
                     ))]);
                 }
+                // Enum values are copied and stored as complete aggregates.
+                // Starting from `poison` would leave inactive variant slots
+                // poison, allowing ordinary aggregate copies to become UB in
+                // native code.  The VM representation initializes those
+                // slots, so use the same deterministic zero baseline here.
                 let tagged = self.temp();
                 self.line(&format!(
-                    "  %{tagged} = insertvalue {aggregate_ty} poison, i32 {variant}, 0"
+                    "  %{tagged} = insertvalue {aggregate_ty} zeroinitializer, i32 {variant}, 0"
                 ));
                 let mut aggregate = format!("%{tagged}");
                 for (index, field) in fields.iter().enumerate() {
