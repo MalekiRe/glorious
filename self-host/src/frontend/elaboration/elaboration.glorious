@@ -9969,14 +9969,28 @@ elaborate_call_arguments(
             generic_owner,
             substitutions
         )) {
-            expected_callable_from_fn_constraint(
+            // A partially-grounded nominal application still carries useful
+            // contextual information.  For example, `else` receives
+            // `Result<Option<u8>, E>` before its error parameter is known;
+            // forwarding that shape lets the nested `if` infer its result
+            // argument and, in turn, gives `Option::Some` its `u8` payload.
+            // Bare unbound parameters remain deliberately uncontextualized:
+            // passing one through would make literal inference unsound.
+            let callable_expected = expected_callable_from_fn_constraint(
                 interfaces,
                 callable,
                 instantiated,
                 generic_owner,
                 substitutions,
                 0
-            )
+            );
+            handle callable_expected {
+                Option::Some(found) => Option::Some(found),
+                None => handle type_kind_at(&*interfaces, instantiated) {
+                    TypeKind::Application(_, _) => Option::Some(instantiated),
+                    _ => None
+                }
+            }
         } else { Option::Some(instantiated) };
         let argument = try(elaborate_expression(
             original,
