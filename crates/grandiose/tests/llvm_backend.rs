@@ -5301,6 +5301,76 @@ fn llvm_and_vm_backends_execute_the_same_vec_program() {
 }
 
 #[test]
+fn llvm_o3_vecdeque_wraparound_matches_the_vm() {
+    // VecDeque is implemented in the bootstrap surface in terms of a movable
+    // Vec plus a logical head.  Unlike plain Vec coverage, this exercises the
+    // native backend's aggregate moves, modulo arithmetic, and Option result
+    // routing after the ring wraps around.
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-vecdeque-wraparound.glorious",
+        r#"
+            effect I64OptionCase { inspect(value: Result<i64, ()>) -> !; }
+
+            i64_or_zero(value: Option<i64>) -> i64 {
+                handle perform I64OptionCase::inspect(move value) {
+                    I64OptionCase::inspect(Result::Ok(item)) => move item,
+                    I64OptionCase::inspect(Result::Err(_)) => 0
+                }
+            }
+
+            selected() -> i64 {
+                let values = VecDeque::new();
+                VecDeque::push_back(&mut values, 1);
+                VecDeque::push_back(&mut values, 2);
+                VecDeque::push_back(&mut values, 3);
+                i64_or_zero(VecDeque::pop_front(&mut values));
+                i64_or_zero(VecDeque::pop_front(&mut values));
+                VecDeque::push_back(&mut values, 4);
+                VecDeque::push_back(&mut values, 5);
+                VecDeque::push_front(&mut values, 9);
+                let a = i64_or_zero(VecDeque::pop_front(&mut values));
+                let b = i64_or_zero(VecDeque::pop_front(&mut values));
+                let c = i64_or_zero(VecDeque::pop_front(&mut values));
+                let d = i64_or_zero(VecDeque::pop_front(&mut values));
+                a * 1000 + b * 100 + c * 10 + d
+            }
+
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(9_345)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        9_345,
+        "llvm-o3-vecdeque-wraparound",
+    );
+}
+
+#[test]
 fn llvm_o3_bytebuf_reader_roundtrip_and_truncation_match_the_vm() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-o3-bytebuf-reader.glorious",
