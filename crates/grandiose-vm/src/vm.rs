@@ -900,57 +900,21 @@ impl Vm {
                 | Instruction::ProjectBorrowUnique { dst, src, field } => {
                     let (dst, src, field) = (*dst, *src, *field);
                     let unique = matches!(ins, Instruction::ProjectBorrowUnique { .. });
-                    let value = get(frame, src)?;
-                    let aggregate = aggregate_place(&value, unique)?;
-                    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
-                    if aggregate
-                        .borrow()
-                        .fields
-                        .get(field)
-                        .ok_or(RuntimeError::TypeConfusion)?
-                        .is_none()
-                    {
-                        return Err(RuntimeError::TypeConfusion);
-                    }
-                    let referent_type = match a
-                        .checked_type(fun.register_types[dst as usize])
-                        .ok_or(RuntimeError::TypeConfusion)?
-                        .representation()
-                    {
-                        Type::RefShared { referent } if !unique => *referent,
-                        Type::RefUnique { referent } if unique => *referent,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    // A callable environment may store a reference handle as
-                    // a field. Borrowing that field with a destination whose
-                    // referent is the stored handle's referent is a per-call
-                    // reborrow of the captured target, not a borrow of the
-                    // handle slot itself. The verifier admits this flattened
-                    // form only for shared reborrows, or for a unique reborrow
-                    // through an originally unique captured handle.
-                    let flattened = {
-                        let aggregate = aggregate.borrow();
-                        match aggregate.fields.get(field).and_then(Option::as_ref) {
-                            Some(Value::Reference {
-                                referent_type: captured_referent,
-                                unique: captured_unique,
-                                target,
-                            }) if *captured_referent == referent_type
-                                && (!unique || *captured_unique) =>
-                            {
-                                Some(target.clone())
-                            }
-                            _ => None,
-                        }
-                    };
+                    let (referent_type, target) = borrow_project_register(
+                        a,
+                        frame,
+                        src,
+                        field,
+                        unique,
+                        fun.register_types[dst as usize],
+                    )?;
                     put(
                         frame,
                         dst,
                         Value::Reference {
                             referent_type,
                             unique,
-                            target: flattened
-                                .unwrap_or(ReferenceTarget::AggregateField { aggregate, field }),
+                            target,
                         },
                     )?;
                     frame.pc += 1;
@@ -2564,6 +2528,79 @@ fn move_reference_register(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
             move_reference_value(&value)
         }
         value => move_reference_value(value),
+    }
+}
+
+fn borrow_project_value(
+    a: &ExecutionImage,
+    value: &Value,
+    field: u32,
+    unique: bool,
+    destination_type: TypeId,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let aggregate = aggregate_place(value, unique)?;
+    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
+    if aggregate
+        .borrow()
+        .fields
+        .get(field)
+        .ok_or(RuntimeError::TypeConfusion)?
+        .is_none()
+    {
+        return Err(RuntimeError::TypeConfusion);
+    }
+    let referent_type = match a
+        .checked_type(destination_type)
+        .ok_or(RuntimeError::TypeConfusion)?
+        .representation()
+    {
+        Type::RefShared { referent } if !unique => *referent,
+        Type::RefUnique { referent } if unique => *referent,
+        _ => return Err(RuntimeError::TypeConfusion),
+    };
+    // A callable environment may store a reference handle as a field.
+    // Borrowing that field with a destination whose referent is the stored
+    // handle's referent is a per-call reborrow of the captured target, not a
+    // borrow of the handle slot itself.
+    let flattened = {
+        let aggregate = aggregate.borrow();
+        match aggregate.fields.get(field).and_then(Option::as_ref) {
+            Some(Value::Reference {
+                referent_type: captured_referent,
+                unique: captured_unique,
+                target,
+            }) if *captured_referent == referent_type && (!unique || *captured_unique) => {
+                Some(target.clone())
+            }
+            _ => None,
+        }
+    };
+    Ok((
+        referent_type,
+        flattened.unwrap_or(ReferenceTarget::AggregateField { aggregate, field }),
+    ))
+}
+
+/// PROJECT_BORROW only observes its source aggregate. Avoid materializing a
+/// cloned source Value before deriving the reference target.
+fn borrow_project_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    field: u32,
+    unique: bool,
+    destination_type: TypeId,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| {
+                borrow_project_value(a, value, field, unique, destination_type)
+            })
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => borrow_project_value(a, value, field, unique, destination_type),
     }
 }
 
