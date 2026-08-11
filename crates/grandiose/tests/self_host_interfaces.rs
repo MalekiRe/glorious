@@ -12,9 +12,12 @@ use grandiose::{
         TypeSyntax, TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel,
 };
 use grandiose_vm::{verify, SystemHost, Value, Vm};
+
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 const NESTED_GENERIC_NOMINAL_FIELDS: &str = r#"
     struct NestedSlot<T> { value: T }
@@ -613,8 +616,9 @@ fn self_hosted_interfaces_match_rust_in_vm_and_native_execution() {
             }
             fs::write(&expected_path, &expected).unwrap();
 
+            let bundle = self_host_bundle();
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &bundle,
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -665,45 +669,10 @@ fn self_hosted_interfaces_match_rust_in_vm_and_native_execution() {
                 "VM interfaces diverged"
             );
 
-            let asan = std::env::var_os("G1_SELF_HOST_INTERFACES_ASAN").is_some();
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let debug_directory = repository_root().join("target/self-host-interfaces-debug");
-            if asan {
-                fs::create_dir_all(&debug_directory).unwrap();
-                let functions = phases
-                    .mir
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, function)| format!("{index}\t{}\n", function.name))
-                    .collect::<String>();
-                fs::write(debug_directory.join("functions.txt"), functions).unwrap();
-            }
-            let llvm = if asan {
-                debug_directory.join("self-host-interfaces.ll")
-            } else {
-                directory.path().join("self-host-interfaces.ll")
-            };
-            let executable = if asan {
-                debug_directory.join("self-host-interfaces")
-            } else {
-                directory.path().join("self-host-interfaces")
-            };
-            fs::write(&llvm, module.ir).unwrap();
-            let mut clang_command = Command::new("clang");
-            clang_command
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0");
-            if asan {
-                clang_command.args(["-fsanitize=address", "-fno-omit-frame-pointer", "-g"]);
-            }
-            let clang = clang_command.arg("-o").arg(&executable).output().unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &bundle,
+                directory.path(),
+                "self-host-interfaces",
             );
 
             let native_all_path = directory.path().join("native-all.bin");
