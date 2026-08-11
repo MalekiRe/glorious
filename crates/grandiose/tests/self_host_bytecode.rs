@@ -1652,7 +1652,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 let phases = grandiose::compile_bundle_to_phases_with_options(
                     &bundle,
                     CompileOptions {
-                        optimization_level: OptimizationLevel::O2,
+                        optimization_level: OptimizationLevel::O3,
                     },
                 )
                 .unwrap_or_else(|errors| {
@@ -1683,7 +1683,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
                 CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
+                    optimization_level: OptimizationLevel::O3,
                 },
             )
             .unwrap();
@@ -1777,7 +1777,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 .arg(&llvm)
                 .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
                 .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O2")
+                .arg("-O3")
                 .arg("-o")
                 .arg(&executable)
                 .output()
@@ -2435,7 +2435,7 @@ fn full_self_host_bundle_compiles_to_a_verified_artifact_in_release() {
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &production_self_host_bundle(),
                 CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
+                    optimization_level: OptimizationLevel::O3,
                 },
             )
             .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
@@ -2465,7 +2465,7 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &source_bundle,
                 CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
+                    optimization_level: OptimizationLevel::O3,
                 },
             )
             .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
