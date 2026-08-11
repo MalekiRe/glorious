@@ -1082,28 +1082,22 @@ impl Vm {
                     if !matches!(fun.receiver_mode, Some(0 | 1)) {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let receiver = get(frame, 0)?;
                     let function = frame.function;
+                    let callee = make_verified_self_frame_from_arguments(
+                        a, function, frame, args, dst, false,
+                    )?;
                     frame.pc += 1;
-                    stack.push(make_verified_frame(a, function, values, receiver, dst)?);
+                    stack.push(callee);
                 }
                 Instruction::TailCallSelf { args } => {
                     if fun.receiver_mode.is_none() {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let receiver = take(frame, 0)?;
                     let function = frame.function;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement = make_verified_self_frame_from_arguments(
+                        a, function, frame, args, return_dst, true,
+                    )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -2005,6 +1999,49 @@ fn make_verified_frame_from_arguments(
     for (index, argument) in args.iter().copied().enumerate() {
         registers[index + 1] = Some(take(caller, argument)?);
     }
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Construct a recursive callee frame by relocating its arguments directly
+/// into the new register file. Self calls consume ordinary arguments before
+/// observing or moving their receiver; retain that order so their ownership
+/// behavior exactly matches the former temporary-Vec path.
+fn make_verified_self_frame_from_arguments(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    args: &[u32],
+    return_dst: Option<u32>,
+    move_receiver: bool,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if args.len() != f.params.len() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: args.len(),
+        });
+    }
+    let mut registers = vec![None; f.register_types.len()];
+    for (index, argument) in args.iter().copied().enumerate() {
+        registers[index + 1] = Some(take(caller, argument)?);
+    }
+    registers[0] = Some(if move_receiver {
+        take(caller, 0)?
+    } else {
+        get(caller, 0)?
+    });
     Ok(Frame {
         function,
         pc: 0,
