@@ -3725,6 +3725,7 @@ fn encode_cleanups(
     for (function_id, function) in functions.iter().enumerate() {
         let start = at as u32;
         let mut next = 0;
+        let mut previous_registers: Option<(&[u32], u32)> = None;
         while at < plans.len() && plans[at].function == function_id as u32 {
             let plan = &plans[at];
             if plan.first_instruction != next
@@ -3745,14 +3746,30 @@ fn encode_cleanups(
             {
                 return Err(DecodeError::InvalidTable("cleanup"));
             }
-            let (operand_start, operand_count) =
-                intern_operand_list(&plan.registers, operands, operand_lists);
+            // Cleanup plans commonly retire the newest owner, leaving a
+            // suffix of the preceding list. Operand ranges are immutable, so
+            // that suffix can reuse the previous plan's table entries without
+            // changing the decoded cleanup state at either PC range.
+            let (operand_start, operand_count) = previous_registers
+                .filter(|(registers, _)| {
+                    !plan.registers.is_empty() && registers.ends_with(&plan.registers)
+                })
+                .map_or_else(
+                    || intern_operand_list(&plan.registers, operands, operand_lists),
+                    |(registers, operand_start)| {
+                        (
+                            operand_start + (registers.len() - plan.registers.len()) as u32,
+                            plan.registers.len() as u32,
+                        )
+                    },
+                );
             put_u32(&mut w, plan.function);
             put_u32(&mut w, plan.first_instruction);
             put_u32(&mut w, plan.end_instruction);
             put_u32(&mut w, operand_start);
             put_u32(&mut w, operand_count);
             put_u32(&mut w, 0);
+            previous_registers = Some((&plan.registers, operand_start));
             next = plan.end_instruction;
             at += 1;
         }
@@ -6394,15 +6411,23 @@ mod tests {
             receiver_mode: None,
             register_types: vec![UNIT, I64, I64, I64],
             code_start: 0,
-            code_len: 1,
+            code_len: 2,
             label_slot_count: 0,
         };
-        let plans = vec![CleanupPlan {
-            function: 0,
-            first_instruction: 0,
-            end_instruction: 1,
-            registers: vec![1, 2],
-        }];
+        let plans = vec![
+            CleanupPlan {
+                function: 0,
+                first_instruction: 0,
+                end_instruction: 1,
+                registers: vec![1, 2],
+            },
+            CleanupPlan {
+                function: 0,
+                first_instruction: 1,
+                end_instruction: 2,
+                registers: vec![2],
+            },
+        ];
         let mut code = Vec::new();
         let mut operands = Vec::new();
         let mut operand_lists = BTreeMap::new();
@@ -6424,7 +6449,7 @@ mod tests {
         assert_eq!(operands, vec![1, 2]);
         assert_eq!(decode_instructions(&code, &operands, &[]).unwrap(), [instruction]);
         assert_eq!(
-            decode_cleanups(&cleanups, 1, &operands, &[function], &spans).unwrap(),
+            decode_cleanups(&cleanups, 2, &operands, &[function], &spans).unwrap(),
             plans
         );
     }
