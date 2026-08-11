@@ -54,9 +54,11 @@ pub use compiler_mir::{
 };
 pub use llvm_backend::{
     DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_INCREMENTAL_MANIFEST_SCHEMA, LlvmCalleeDependency, LlvmFunctionManifest,
-    LlvmFragmentCache, LlvmFunctionFragment, LlvmIncrementalManifest, LlvmModule, LlvmOptions,
+    LlvmFragmentCache, LlvmFunctionFragment, LlvmIncrementalManifest, LlvmModule,
+    LlvmNativeFunctionUnit, LlvmNativeObjectUnits, LlvmOptions,
     default_target_data_layout, default_target_triple, emit_llvm_ir,
-    emit_llvm_ir_with_fragment_cache, llvm_incremental_manifest,
+    emit_llvm_ir_with_fragment_cache, emit_llvm_native_object_units,
+    llvm_incremental_manifest,
 };
 
 pub fn compile_source_to_llvm_ir(

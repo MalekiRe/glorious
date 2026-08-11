@@ -1,7 +1,12 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs,
+    process::Command,
+};
 
 use grandiose::{
     compile_source_to_phases_with_options, emit_llvm_ir, emit_llvm_ir_with_fragment_cache,
+    emit_llvm_native_object_units,
     llvm_incremental_manifest, LlvmFragmentCache, LlvmOptions, OptimizationLevel,
 };
 
@@ -199,4 +204,65 @@ fn fragment_cache_reuses_body_unchanged_callers_and_invalidates_interface_users(
         1,
         "only main may survive a leaf ABI change"
     );
+}
+
+#[test]
+fn native_function_units_compile_separately_and_link_through_wild() {
+    let phases = phases(
+        r#"
+            leaf(value: i64) -> i64 { value + 1 }
+            caller(value: i64) -> i64 { leaf(value) }
+            main() -> () { caller(41); () }
+        "#,
+    );
+    let units = emit_llvm_native_object_units(&phases, &LlvmOptions::default()).unwrap();
+    assert_eq!(units.functions.len(), 3);
+    assert!(units.shared.ir.contains("define i32 @main()"));
+    for unit in &units.functions {
+        let own = format!("@g1_f{}", unit.declaration);
+        assert!(unit.module.ir.contains(&format!("define i64 {own}")) || unit.module.ir.contains(&format!("define void {own}")));
+        assert!(
+            !unit.module.ir.contains("define internal"),
+            "function unit must import shared runtime helpers rather than duplicate them"
+        );
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let shared_ir = directory.path().join("shared.ll");
+    let shared_object = directory.path().join("shared.o");
+    fs::write(&shared_ir, &units.shared.ir).unwrap();
+    let compile = |input: &std::path::Path, output: &std::path::Path| {
+        Command::new("clang")
+            .args(["-x", "ir", "-O3", "-c"])
+            .arg(input)
+            .arg("-o")
+            .arg(output)
+            .status()
+            .unwrap()
+    };
+    assert!(compile(&shared_ir, &shared_object).success());
+    let mut objects = vec![shared_object];
+    for unit in &units.functions {
+        let input = directory.path().join(format!("function-{}.ll", unit.declaration));
+        let output = directory.path().join(format!("function-{}.o", unit.declaration));
+        fs::write(&input, &unit.module.ir).unwrap();
+        assert!(compile(&input, &output).success(), "unit {}", unit.declaration);
+        objects.push(output);
+    }
+    let executable = directory.path().join("native-units");
+    assert!(
+        Command::new("clang")
+            .arg("--ld-path=wild")
+            .args(&objects)
+            .arg("-x")
+            .arg("c")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/native_host_runtime.c"))
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/native_runtime.c"))
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(Command::new(executable).status().unwrap().success());
 }

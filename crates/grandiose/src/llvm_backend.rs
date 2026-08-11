@@ -334,6 +334,28 @@ pub struct LlvmModule {
     pub target_triple: String,
 }
 
+/// LLVM translation units for the function-granular native path.
+///
+/// `shared` owns the generated runtime and entry wrapper. Each element of
+/// `functions` defines exactly one source-function fragment and declares the
+/// shared runtime plus every other source function. This deliberately keeps
+/// the existing monolithic module emitter untouched: callers select this
+/// representation only when they can compile the units separately and make a
+/// fresh Wild link from all of their objects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmNativeObjectUnits {
+    pub shared: LlvmModule,
+    pub functions: Vec<LlvmNativeFunctionUnit>,
+}
+
+/// One independently compilable source-function LLVM unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmNativeFunctionUnit {
+    pub declaration: u32,
+    pub fragment_fingerprint: u64,
+    pub module: LlvmModule,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmOptions {
     pub target_triple: String,
@@ -399,6 +421,138 @@ pub fn emit_llvm_ir_with_fragment_cache(
     cache: &mut LlvmFragmentCache,
 ) -> Result<LlvmModule, Vec<Diagnostic>> {
     Emitter::new(phases, options).emit_with_fragment_cache(cache)
+}
+
+/// Partition one emitted LLVM module into a shared runtime/entry unit and
+/// independently compilable source-function units.
+///
+/// The generated function IR is already a manifest-keyed unit.  This adapter
+/// gives it the declarations it previously obtained implicitly from the
+/// monolithic module, while moving runtime definitions to `shared`.  Native
+/// callers may compile each resulting unit at `-O3`, cache only function
+/// objects by `fragment_fingerprint`, and still invoke Wild for every final
+/// executable link.  The monolithic `emit_llvm_ir` route remains the baseline
+/// and retains cross-function LLVM optimization.
+pub fn emit_llvm_native_object_units(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+) -> Result<LlvmNativeObjectUnits, Vec<Diagnostic>> {
+    let mut fragments = LlvmFragmentCache::default();
+    let module = emit_llvm_ir_with_fragment_cache(phases, options, &mut fragments)?;
+    let manifest = llvm_incremental_manifest(phases, options);
+    let fingerprints = manifest
+        .functions
+        .iter()
+        .map(|function| (function.declaration, function.fragment_fingerprint))
+        .collect::<BTreeMap<_, _>>();
+    let source_fragments = fragments
+        .fragments
+        .iter()
+        .filter_map(|(declaration, fragment)| {
+            fingerprints
+                .get(declaration)
+                .copied()
+                .map(|fingerprint| (*declaration, fingerprint, fragment.emitted_text.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut shared_ir = module.ir.clone();
+    for (_, _, text) in &source_fragments {
+        // Fragment text came from this exact canonical module emission. A
+        // missing replacement would make a supposedly independent unit retain
+        // another function body, so fail closed rather than returning it.
+        let Some(offset) = shared_ir.find(text) else {
+            return Err(vec![backend_error(
+                "could not partition canonical LLVM function fragment",
+            )]);
+        };
+        shared_ir.replace_range(offset..offset + text.len(), &llvm_fragment_declarations(text));
+    }
+    // Runtime helpers were internal in the monolith. The shared unit now owns
+    // them, so the function units must resolve them through external symbols.
+    // Source fragments have already been replaced with declarations above.
+    shared_ir = llvm_externalize_internal_definitions(&shared_ir);
+    let function_prelude = llvm_declarations_only(&shared_ir);
+    let functions = source_fragments
+        .into_iter()
+        .map(|(declaration, fragment_fingerprint, text)| {
+            let declaration_text = llvm_fragment_declarations(&text);
+            // LLVM permits a later definition only when it replaces the exact
+            // declaration in the module. Remove this unit's prototypes
+            // entirely: recursive and forward references are valid inside a
+            // definition, just as they are in the original monolithic IR.
+            let prelude = function_prelude.replacen(&declaration_text, "", 1);
+            LlvmNativeFunctionUnit {
+                declaration,
+                fragment_fingerprint,
+                module: LlvmModule {
+                    ir: format!(
+                        "{prelude}\n{}",
+                        llvm_externalize_internal_definitions(&text)
+                    ),
+                    target_triple: module.target_triple.clone(),
+                },
+            }
+        })
+        .collect();
+    Ok(LlvmNativeObjectUnits {
+        shared: LlvmModule {
+            ir: shared_ir,
+            target_triple: module.target_triple,
+        },
+        functions,
+    })
+}
+
+/// Convert each definition in a function fragment to an external declaration.
+fn llvm_fragment_declarations(fragment: &str) -> String {
+    fragment
+        .lines()
+        .filter(|line| line.starts_with("define "))
+        .map(llvm_definition_declaration)
+        .collect()
+}
+
+fn llvm_definition_declaration(line: &str) -> String {
+    let header = line
+        .strip_prefix("define ")
+        .and_then(|header| header.strip_suffix('{'))
+        .map(str::trim_end)
+        .expect("LLVM function definition header");
+    let header = header
+        .strip_prefix("internal ")
+        .or_else(|| header.strip_prefix("private "))
+        .unwrap_or(header);
+    format!("declare {header}\n")
+}
+
+/// Make helper definitions in the shared unit link-visible to function units.
+fn llvm_externalize_internal_definitions(ir: &str) -> String {
+    ir.replace("define internal ", "define ")
+}
+
+/// Retain target/type/global declarations but replace every function body by
+/// a declaration. Generated LLVM always terminates a function body with a
+/// standalone `}`, and the emitter never emits top-level definitions inside a
+/// function, making this intentionally small parser fail closed by structure.
+fn llvm_declarations_only(ir: &str) -> String {
+    let mut output = String::new();
+    let mut definition = false;
+    for line in ir.lines() {
+        if !definition && line.starts_with("define ") {
+            output.push_str(&llvm_definition_declaration(line));
+            definition = true;
+        } else if definition {
+            if line == "}" {
+                definition = false;
+                output.push('\n');
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    assert!(!definition, "unterminated LLVM function definition");
+    output
 }
 
 struct Emitter<'a> {
