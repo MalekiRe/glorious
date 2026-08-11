@@ -1028,6 +1028,28 @@ impl Vm {
                     // every dispatch. Variable-arity array and byte helpers
                     // retain the exact old left-to-right collection path.
                     let v = match args.as_slice() {
+                        // The self-hosted compiler spends much of its time in
+                        // checked machine-word arithmetic.  Verification has
+                        // already fixed both operand and result
+                        // representations, so keep this common case out of
+                        // the generic integer dispatcher (which must support
+                        // every width, signedness, conversion, and operation).
+                        [first, second]
+                            if op == Primitive::IntCheckedAdd
+                                && first_arg_type == Some(I64)
+                                && result_type == I64 =>
+                        {
+                            let (Value::I64(first), Value::I64(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            Value::I64(
+                                first
+                                    .checked_add(second)
+                                    .ok_or(RuntimeError::ArithmeticOverflow)?,
+                            )
+                        }
                         [] => primitive_typed_first_type(a, result_type, op, first_arg_type, &[])?,
                         [first] => {
                             let first = take(frame, *first)?;
