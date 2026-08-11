@@ -1145,6 +1145,70 @@ fn checked_division_reports_the_exact_vm_runtime_error_natively() {
 }
 
 #[test]
+fn checked_shift_reports_the_exact_vm_runtime_error_natively() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-shift-fault.glorious",
+        "selected(value: i64, count: u32) -> i64 { shift_left(value, count) }\nmain() -> () { selected(1, 1); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![Value::I64(1), Value::U64(64)])
+            .unwrap_err()
+            .to_string(),
+        "invalid integer shift count"
+    );
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("shift-fault.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("shift-fault");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(int64_t, uint32_t);\nint main(void) {{ (void)g1_f{selected}(1, 64); return 0; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = clang_with_native_runtime()
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success());
+    assert_eq!(
+        execution.stderr,
+        b"grandiose: invalid integer shift count\n"
+    );
+}
+
+#[test]
 fn cli_native_abort_preserves_its_message() {
     let directory = tempfile::tempdir().unwrap();
     let executable = compile_cli_executable(
