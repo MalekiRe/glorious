@@ -133,8 +133,13 @@ lower-optimization fallback in this path.
 
 Create stage provenance with
 `tooling/write-native-stage-provenance.sh`. For the canonical bootstrap-native
-stage, `tooling/self-host-native.sh provenance SOURCE stage1.tsv` builds (or
-reuses) the per-worktree O3/Wild runner and publishes its stage-1 manifest.
+stage, first materialize the production closure with
+`tooling/self-host-native.sh canonical-source SOURCE`; then
+`tooling/self-host-native.sh provenance SOURCE stage1.tsv` builds (or reuses)
+the per-worktree O3/Wild runner and publishes its stage-1 manifest. The latter
+re-materializes and byte-compares the source before attesting it, so a stage-1
+manifest cannot bind the native host to an arbitrary file that happens to have
+been passed as `SOURCE`.
 For stage 2, the native-stage producer supplies its executable and emitted
 `stage2.grbc` to `write-native-stage-provenance.sh --stage 2`; the helper
 atomically records both hashes and refuses to overwrite retained evidence.
