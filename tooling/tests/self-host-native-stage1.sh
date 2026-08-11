@@ -42,11 +42,19 @@ case "$1" in
       printf 'source-sha256\t%s\n' "$(sha256sum "$source" | awk '{print $1}')"
     } > "$output"
     ;;
-  build) printf '%s\n' "$NATIVE_STAGE1_TEST_NATIVE" ;;
+  build)
+    if [[ "${NATIVE_STAGE1_TEST_ADVANCE_HEAD:-0}" == 1 ]]; then
+      git -C "$NATIVE_STAGE1_TEST_REPO" commit --allow-empty -qm 'advance live head during native build'
+    fi
+    printf '%s\n' "$NATIVE_STAGE1_TEST_NATIVE"
+    ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$scratch/repo/tooling/self-host-native.sh"
+git -C "$scratch/repo" add tooling/self-host-native.sh
+git -C "$scratch/repo" commit -qm 'native tool fixture'
+initial_head=$(git -C "$scratch/repo" rev-parse HEAD)
 cat > "$scratch/bin/readelf" <<'EOF'
 #!/usr/bin/env bash
 printf 'Wild linker marker\n'
@@ -64,6 +72,19 @@ rg -q $'^repository-head\t[0-9a-f]{40}$' "$scratch/run/metadata.tsv"
 for log in canonical-source provenance build stage1; do [[ -f "$scratch/run/$log.log" ]]; done
 [[ -f "$scratch/run/verify-stage2.log" ]]
 [[ "$(cat "$scratch/verify.log")" == "native-preflight $scratch/run/stage2.grbc" ]]
+
+# A native build can outlive ordinary integration commits. The retained run
+# must continue from its clean preflight snapshot, rather than rejecting the
+# now-advanced live checkout or mixing its later files into stage 1.
+NATIVE_STAGE1_TEST_NATIVE="$scratch/native" NATIVE_STAGE1_TEST_STAGE2="$scratch/snapshot-run/stage2.grbc" \
+  NATIVE_STAGE1_TEST_VERIFY_LOG="$scratch/snapshot-verify.log" NATIVE_STAGE1_TEST_REPO="$scratch/repo" \
+  NATIVE_STAGE1_TEST_ADVANCE_HEAD=1 PATH="$scratch/bin:$PATH" \
+  "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/snapshot-run" > "$scratch/snapshot.out"
+rg -q '^STAGE1_EMITTED' "$scratch/snapshot.out"
+rg -q "^snapshot-head[[:space:]]$initial_head$" "$scratch/snapshot-run/metadata.tsv"
+[[ "$(git -C "$scratch/repo" rev-parse HEAD)" != "$initial_head" ]]
+[[ -x "$scratch/snapshot-run/stage1-native" ]]
+[[ "$(cat "$scratch/snapshot-verify.log")" == "native-preflight $scratch/snapshot-run/stage2.grbc" ]]
 
 if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" NATIVE_STAGE1_TEST_STAGE2="$scratch/invalid-run/stage2.grbc" \
   NATIVE_STAGE1_TEST_VERIFY_LOG="$scratch/invalid-verify.log" NATIVE_STAGE1_TEST_VERIFY_FAIL=1 PATH="$scratch/bin:$PATH" \
