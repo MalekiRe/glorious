@@ -9,6 +9,7 @@ use std::{
 
 use grandiose::{
     CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options,
+    artifact_llvm::emit_artifact_llvm_ir,
     compiler_session::CompilationDriver,
     diagnostic::{Diagnostic, Severity},
     emit_llvm_ir,
@@ -160,6 +161,10 @@ struct CompileCommand {
 
 enum Command {
     Compile(CompileCommand),
+    ArtifactLlvmIr {
+        artifact: PathBuf,
+        output: PathBuf,
+    },
     InspectTokens {
         input: PathBuf,
         indices: Vec<usize>,
@@ -186,6 +191,39 @@ fn parse_optimization(argument: &str) -> Option<OptimizationLevel> {
 
 fn parse(args: Vec<OsString>) -> Result<Command, String> {
     let mut args = args.into_iter().peekable();
+    if args
+        .peek()
+        .is_some_and(|argument| argument == "--artifact-llvm-ir")
+    {
+        args.next();
+        let artifact = args
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| "`--artifact-llvm-ir` requires a `.grbc` artifact".to_string())?;
+        if artifact
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("grbc")
+        {
+            return Err(format!(
+                "artifact `{}` must use the `.grbc` extension",
+                artifact.display()
+            ));
+        }
+        if args.next().as_deref() != Some(std::ffi::OsStr::new("-o")) {
+            return Err("`--artifact-llvm-ir` requires `-o <output.ll>`".to_string());
+        }
+        let output = args
+            .next()
+            .map(PathBuf::from)
+            .ok_or_else(|| "`-o` requires an output path".to_string())?;
+        if args.next().is_some() {
+            return Err(
+                "`--artifact-llvm-ir` accepts only an artifact and `-o <output.ll>`".to_string(),
+            );
+        }
+        return Ok(Command::ArtifactLlvmIr { artifact, output });
+    }
     if args
         .peek()
         .is_some_and(|argument| argument == "--inspect-bundle-token")
@@ -1564,6 +1602,9 @@ pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
             let mut stdout = io::stdout().lock();
             compile(command, &mut stdout, &mut stderr)
         }
+        Ok(Command::ArtifactLlvmIr { artifact, output }) => {
+            emit_verified_artifact_llvm_ir_file(&artifact, &output, &mut stderr)
+        }
         Ok(Command::InspectTokens { input, indices }) => {
             let mut stdout = io::stdout().lock();
             inspect_tokens(&input, &indices, &mut stdout, &mut stderr)
@@ -1605,6 +1646,47 @@ pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
             2
         }
     }
+}
+
+/// The standalone GRBC AOT front door. This is purposefully not folded into
+/// source compilation: an artifact must be decoded and VM-verified before the
+/// limited native ABI is consulted, and unsupported instructions return an
+/// error instead of reaching a VM execution path.
+fn emit_verified_artifact_llvm_ir_file(
+    artifact: &Path,
+    output: &Path,
+    stderr: &mut dyn Write,
+) -> u8 {
+    let bytes = match std::fs::read(artifact) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "grc: error: could not read artifact {}: {error}",
+                artifact.display()
+            );
+            return 1;
+        }
+    };
+    let ir = match emit_artifact_llvm_ir(&bytes) {
+        Ok(ir) => ir,
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "grc: error: verified artifact-to-LLVM lowering failed: {error}"
+            );
+            return 1;
+        }
+    };
+    if let Err(error) = std::fs::write(output, ir) {
+        let _ = writeln!(
+            stderr,
+            "grc: error: could not write {}: {error}",
+            output.display()
+        );
+        return 1;
+    }
+    0
 }
 
 fn inspect_tokens(
@@ -1837,6 +1919,45 @@ mod tests {
             panic!("expected a compile command")
         };
         assert_eq!(command.optimization_level, OptimizationLevel::O2);
+    }
+
+    #[test]
+    fn parses_verified_artifact_llvm_boundary_without_source_inputs() {
+        let command = parse(
+            ["--artifact-llvm-ir", "stage2.grbc", "-o", "stage2.ll"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap();
+        assert!(matches!(
+            command,
+            Command::ArtifactLlvmIr { artifact, output }
+                if artifact == PathBuf::from("stage2.grbc")
+                    && output == PathBuf::from("stage2.ll")
+        ));
+    }
+
+    #[test]
+    fn artifact_llvm_boundary_requires_a_grbc_and_output() {
+        let Err(error) = parse(
+            ["--artifact-llvm-ir", "stage2.glorious", "-o", "stage2.ll"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        ) else {
+            panic!("non-GRBC artifact input was accepted")
+        };
+        assert!(error.contains(".grbc"));
+        let Err(error) = parse(
+            ["--artifact-llvm-ir", "stage2.grbc"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        ) else {
+            panic!("artifact input without an output path was accepted")
+        };
+        assert!(error.contains("-o"));
     }
 
     #[test]

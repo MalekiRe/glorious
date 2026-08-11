@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Write an immutable provenance manifest for an O3/Wild native compiler stage.
 #
-# This does not compile a .grbc artifact into native code.  Until that backend
-# exists, a stage-two native host must be supplied by the stage-native producer;
-# this helper binds its exact executable bytes to the exact .grbc it represents.
+# This helper does not itself compile a .grbc artifact. `grbc-native.sh` owns
+# that verified, fail-closed lowering boundary; this helper binds the exact
+# executable it produced to the exact .grbc it represents.
 set -euo pipefail
 
 usage() {
