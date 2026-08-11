@@ -27,7 +27,7 @@ use grandiose::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-incremental-cache DIR  durable private partitioned objects (-O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-incremental-cache DIR  durable private partitioned objects (-O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n\nnative incremental environment:\n  G1_NATIVE_OBJECT_WORKERS requests 1..=4 concurrent durable native object workers; the compiler clamps it to available parallelism (default: the same safe bound).\n";
 
 const MAX_NATIVE_ALLOCATION_LIMIT: u64 = 1024 * 1024 * 1024;
 const SESSION_PROTOCOL: u32 = 1;
@@ -40,7 +40,8 @@ const NATIVE_RUNTIME: &[u8] = include_bytes!("native_runtime.c");
 /// The durable cache route invokes independent Clang processes. Keep its
 /// concurrency deliberately conservative so an editor request cannot starve
 /// the machine while still avoiding one-process-at-a-time compilation.
-const DURABLE_NATIVE_OBJECT_WORKERS: usize = 4;
+const MAX_DURABLE_NATIVE_OBJECT_WORKERS: usize = 4;
+const DURABLE_NATIVE_OBJECT_WORKERS_ENV: &str = "G1_NATIVE_OBJECT_WORKERS";
 const DISK_CACHE_LOCK_WAIT: Duration = Duration::from_secs(30);
 static DISK_CACHE_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1025,14 +1026,22 @@ fn compile_loaded(
                         abi,
                     });
                 }
-                let objects =
-                    match materialize_disk_partitioned_native_objects(&output, cache_dir, jobs) {
-                        Ok(objects) => objects,
-                        Err(error) => {
-                            let _ = writeln!(stderr, "grc: error: {error}");
-                            return 1;
-                        }
-                    };
+                let workers = match durable_native_object_workers() {
+                    Ok(workers) => workers,
+                    Err(error) => {
+                        let _ = writeln!(stderr, "grc: error: {error}");
+                        return 1;
+                    }
+                };
+                let objects = match materialize_disk_partitioned_native_objects(
+                    &output, cache_dir, workers, jobs,
+                ) {
+                    Ok(objects) => objects,
+                    Err(error) => {
+                        let _ = writeln!(stderr, "grc: error: {error}");
+                        return 1;
+                    }
+                };
                 let host = native_host.as_ref().expect("executable native host");
                 if let Err(error) = link_partitioned_native_executable(&output, host, &objects) {
                     let _ = writeln!(stderr, "grc: error: {error}");
@@ -1428,22 +1437,56 @@ struct DiskNativeObjectJob {
     abi: String,
 }
 
+fn bounded_durable_native_object_workers(
+    requested: Option<&str>,
+    available_parallelism: usize,
+) -> Result<usize, String> {
+    let requested = match requested {
+        Some(value) => value.parse::<usize>().map_err(|_| {
+            format!(
+                "{DURABLE_NATIVE_OBJECT_WORKERS_ENV} must be an integer from 1 through {MAX_DURABLE_NATIVE_OBJECT_WORKERS}"
+            )
+        })?,
+        None => MAX_DURABLE_NATIVE_OBJECT_WORKERS,
+    };
+    if !(1..=MAX_DURABLE_NATIVE_OBJECT_WORKERS).contains(&requested) {
+        return Err(format!(
+            "{DURABLE_NATIVE_OBJECT_WORKERS_ENV} must be an integer from 1 through {MAX_DURABLE_NATIVE_OBJECT_WORKERS}"
+        ));
+    }
+    Ok(requested.min(available_parallelism.max(1)))
+}
+
+fn durable_native_object_workers() -> Result<usize, String> {
+    let available = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let requested = match std::env::var(DURABLE_NATIVE_OBJECT_WORKERS_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!(
+                "{DURABLE_NATIVE_OBJECT_WORKERS_ENV} must be valid Unicode and an integer from 1 through {MAX_DURABLE_NATIVE_OBJECT_WORKERS}"
+            ));
+        }
+    };
+    bounded_durable_native_object_workers(requested.as_deref(), available)
+}
+
 /// Compile independent durable-cache misses in small deterministic waves.
 /// Results are returned in ordinal order regardless of completion order, and
 /// an error is selected by ordinal rather than scheduler timing.
 fn materialize_disk_partitioned_native_objects(
     output: &Path,
     cache_dir: &Path,
+    workers: usize,
     jobs: Vec<DiskNativeObjectJob>,
 ) -> Result<Vec<TemporaryNativeObject>, String> {
     let count = jobs.len();
     let mut results = (0..count).map(|_| None).collect::<Vec<_>>();
     let mut pending = jobs.into_iter();
     loop {
-        let wave = pending
-            .by_ref()
-            .take(DURABLE_NATIVE_OBJECT_WORKERS)
-            .collect::<Vec<_>>();
+        let wave = pending.by_ref().take(workers).collect::<Vec<_>>();
         if wave.is_empty() {
             break;
         }
@@ -2525,6 +2568,17 @@ fn inspect_bundle_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_native_worker_request_is_bounded_by_available_parallelism() {
+        assert_eq!(bounded_durable_native_object_workers(None, 64), Ok(4));
+        assert_eq!(bounded_durable_native_object_workers(Some("3"), 64), Ok(3));
+        assert_eq!(bounded_durable_native_object_workers(Some("4"), 2), Ok(2));
+        assert_eq!(bounded_durable_native_object_workers(Some("1"), 0), Ok(1));
+        assert!(bounded_durable_native_object_workers(Some("0"), 4).is_err());
+        assert!(bounded_durable_native_object_workers(Some("5"), 4).is_err());
+        assert!(bounded_durable_native_object_workers(Some("many"), 4).is_err());
+    }
 
     #[test]
     fn durable_cache_same_key_publication_is_locked_and_rechecked() {

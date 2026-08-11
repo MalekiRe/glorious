@@ -31,6 +31,10 @@ that native compiler. `provenance` builds (or reuses) the canonical native
 stage-1 compiler and writes an immutable O3/Wild provenance manifest for it.
 `canonical-source` materializes the exact monolithic source closure used by
 that compiler; `provenance` refuses a source file that differs from it.
+
+Set G1_NATIVE_OBJECT_WORKERS=1..4 to request a durable native-object worker
+budget for this private route. grc clamps it to available parallelism; omitted
+uses the same conservative bound.
 USAGE
     exit 2
 }
