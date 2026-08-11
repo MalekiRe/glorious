@@ -46,6 +46,7 @@ readonly route_binary="$route_cache/grandiose-self-host-native"
 readonly route_fingerprint="$route_cache/build.fingerprint"
 readonly route_objects="$route_cache/objects"
 readonly route_grc="$route_root/target/release/grc"
+readonly route_grc_seed="$route_root/target/release/grc.stage1-seed.tsv"
 
 inside_worktree() {
     case "$1" in "$route_root"/*) return 0 ;; *) return 1 ;; esac
@@ -141,16 +142,30 @@ verify_canonical_source() {
 build_native() {
     initialize
     command -v wild >/dev/null || { echo "self-host-native: Wild linker is required" >&2; exit 1; }
+    local current_head seeded_head seeded_hash
+    current_head=$(git -C "$route_root" rev-parse HEAD)
+    seeded_head=$(awk -F '\t' '$1 == "commit" { print $2 }' "$route_grc_seed" 2>/dev/null || true)
+    seeded_hash=$(awk -F '\t' '$1 == "grc-sha256" { print $2 }' "$route_grc_seed" 2>/dev/null || true)
     # This tool can be invoked from a parent stage runner whose working
     # directory is a different checkout.  Cargo selects its target directory
     # from the working directory, so run it explicitly from this route's
     # immutable worktree.  In particular, a detached stage-one snapshot must
     # never accidentally build its bootstrap compiler into the live checkout
     # and then look for it below the snapshot.
-    (
-        cd -- "$route_root"
-        "$route_root/tooling/ram-gate.sh" cargo build --release -p grandiose --bin grc
-    )
+    if [[ ! -x "$route_grc" || "$seeded_head" != "$current_head" ]] || \
+        [[ "$seeded_hash" != "$(sha256sum "$route_grc" 2>/dev/null | awk '{print $1}')" ]]; then
+        (
+            cd -- "$route_root"
+            "$route_root/tooling/ram-gate.sh" cargo build --release -p grandiose --bin grc
+        )
+        if git -C "$route_root" diff --quiet --ignore-submodules -- && \
+            git -C "$route_root" diff --cached --quiet --ignore-submodules --; then
+            printf 'schema\t1\ncommit\t%s\ngrc-sha256\t%s\n' \
+                "$current_head" "$(sha256sum "$route_grc" | awk '{print $1}')" > "$route_grc_seed"
+        else
+            rm -f -- "$route_grc_seed"
+        fi
+    fi
     local fingerprint
     fingerprint="$(native_fingerprint)"
     if [[ -x "$route_binary" && -f "$route_fingerprint" ]] && \

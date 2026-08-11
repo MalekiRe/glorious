@@ -26,6 +26,8 @@ readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly repo_root="$(cd -- "$script_dir/.." && pwd -P)"
 readonly native_tool="$repo_root/tooling/self-host-native.sh"
 readonly grvm="$repo_root/target/release/grvm"
+readonly release_grc="$repo_root/target/release/grc"
+readonly release_grc_seed="$repo_root/target/release/grc.stage1-seed.tsv"
 
 command=${1:-}
 [[ "$command" == run ]] || usage
@@ -105,6 +107,20 @@ snapshot_head() {
         return 1
     }
     printf '%s\n' "$head"
+}
+
+seed_snapshot_release_grc() {
+    local commit checksum copied destination
+    [[ -x "$release_grc" && -f "$release_grc_seed" ]] || return 0
+    commit=$(awk -F '\t' '$1 == "commit" { if (++found == 1) print $2 } END { exit(found == 1 ? 0 : 1) }' "$release_grc_seed") || return 0
+    checksum=$(awk -F '\t' '$1 == "grc-sha256" { if (++found == 1) print $2 } END { exit(found == 1 ? 0 : 1) }' "$release_grc_seed") || return 0
+    [[ "$commit" == "$run_head" && "$checksum" == "$(sha256sum "$release_grc" | awk '{print $1}')" ]] || return 0
+    destination="$snapshot_dir/target/release"
+    mkdir -p "$destination"
+    cp -- "$release_grc" "$destination/grc"
+    cp -- "$release_grc_seed" "$destination/grc.stage1-seed.tsv"
+    copied=$(sha256sum "$destination/grc" | awk '{print $1}')
+    [[ "$copied" == "$checksum" ]] || { rm -f -- "$destination/grc" "$destination/grc.stage1-seed.tsv"; return 1; }
 }
 
 manifest_value() {
@@ -265,6 +281,7 @@ cleanup_snapshot() {
 trap cleanup_snapshot EXIT
 run_logged snapshot git -C "$repo_root" worktree add --detach "$snapshot_dir" "$run_head"
 [[ "$(snapshot_head)" == "$run_head" ]] || record_failure snapshot 1
+seed_snapshot_release_grc || record_failure snapshot-seed 1
 seed_snapshot_native_cache || record_failure retry-seed 1
 readonly snapshot_native_tool="$snapshot_dir/tooling/self-host-native.sh"
 [[ -x "$snapshot_native_tool" ]] || record_failure snapshot 1
