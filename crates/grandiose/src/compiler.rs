@@ -55605,10 +55605,16 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 *instruction = Instruction::Jump { target: *otherwise };
             }
         }
-        // Threading can leave an intermediate jump with no remaining incoming
-        // edge. Conservatively trace only known terminal/control forms; every
-        // other opcode is treated as fallthrough. That may retain extra code,
-        // but it can never delete a reachable instruction.
+        // Threading can leave a suffix after a terminal instruction with no
+        // remaining incoming edge.  It is important to retire the entire
+        // suffix, not just a dead Jump: edge lowering appends transfers after
+        // the MIR blocks, and an unreachable transfer can mention an SSA
+        // source whose definition was itself removed with an unreachable MIR
+        // block.  Even though that bytecode can never execute, GRBC decoding
+        // infers every register type structurally and must not see the stale
+        // use.  The traversal includes every bytecode control target
+        // (including LabelPush), so replacing an unreached instruction with a
+        // Nop cannot change a reachable path.
         let mut reachable = vec![false; folded.len()];
         let mut pending = vec![0_usize];
         while let Some(pc) = pending.pop() {
@@ -55621,13 +55627,20 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                     pending.push(*otherwise as usize);
                     pending.extend(cases.iter().map(|(_, target)| *target as usize));
                 }
+                // A Leave dynamically transfers to this destination after
+                // popping the active label.  LabelPush also falls through to
+                // its body, so both ordinary successors are live.
+                Instruction::LabelPush { target, .. } => {
+                    pending.push(*target as usize);
+                    pending.push(pc + 1);
+                }
                 Instruction::Return { .. } | Instruction::Abort { .. }
                 | Instruction::Unreachable => {}
                 _ => pending.push(pc + 1),
             }
         }
         for (pc, instruction) in folded.iter_mut().enumerate() {
-            if !reachable[pc] && matches!(instruction, Instruction::Jump { .. }) {
+            if !reachable[pc] {
                 *instruction = Instruction::Nop;
             }
         }
@@ -58556,6 +58569,88 @@ mod mir_edge_emission_tests {
     }
 
     #[test]
+    fn peephole_removes_unreachable_edge_transfer_with_undefined_source() {
+        // MIR edge lowering can leave a transfer tail after its sole
+        // predecessor was proven terminal. The tail is unreachable, but the
+        // serialized format still infers types for its source registers; do
+        // not retain a use of a source that no emitted block defines.
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Return { src: None },
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Move { dst: 3, src: 2 },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_edge_transfer".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, [Instruction::Return { src: None }]);
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT]);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let decoded = Artifact::decode(&artifact.encode()).unwrap();
+        verify(decoded).unwrap();
+    }
+
+    #[test]
+    fn peephole_keeps_label_leave_destination_reachable() {
+        // A LabelPush has two successors: the body falls through, while a
+        // Leave transfers to its target.  The target must not be mistaken for
+        // a dead suffix merely because the ordinary body returns first.
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::LabelPush {
+                    slot: 0,
+                    result_register: 1,
+                    target: 3,
+                },
+                Instruction::Return { src: None },
+                Instruction::Nop,
+                Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "label_destination".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, UNIT],
+            code_start: 0,
+            code_len: 4,
+            label_slot_count: 1,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::LabelPush {
+                    slot: 0,
+                    result_register: 1,
+                    target: 2,
+                },
+                Instruction::Return { src: None },
+                Instruction::Return { src: None },
+            ]
+        );
+    }
+
+    #[test]
     fn peephole_removes_switch_cases_that_match_otherwise() {
         let mut artifact = Artifact {
             constants: vec![
@@ -59255,7 +59350,9 @@ mod mir_edge_emission_tests {
             label_slot_count: 0,
         });
 
-        assert!(!layout_and_peephole(&mut artifact));
+        // The protected edge bundle itself must remain intact. The terminal
+        // gap after its Jump is now correctly retired as unreachable.
+        assert!(layout_and_peephole(&mut artifact));
         assert_eq!(
             &artifact.code[2..6],
             &[
