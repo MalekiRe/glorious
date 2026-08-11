@@ -664,6 +664,22 @@ mod tests {
             "a cache miss must return the current phases' IR, never stale text"
         );
 
+        // The allocation ceiling is embedded in native runtime helpers.  It
+        // is target ABI, not merely a driver preference, so it must also miss
+        // the persistent IR/fragment cache.
+        let mut different_allocation_limit = target.clone();
+        different_allocation_limit.native_allocation_limit *= 2;
+        driver
+            .emit_llvm_ir(
+                &second,
+                options,
+                &second_phases,
+                &different_allocation_limit,
+            )
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        assert_eq!(driver.stats().reused_llvm_fragments, 0);
+
         let mut different_target = target.clone();
         different_target.emit_entry_wrapper = false;
         driver

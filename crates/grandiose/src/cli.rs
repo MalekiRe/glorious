@@ -1058,13 +1058,14 @@ fn native_object_toolchain_abi(
         )));
     }
     Ok(format!(
-        "schema=1;clang-version={};clang-target={};input=-x-ir-stdin;compile-only=true;opt={};llvm-target={};llvm-layout={:?};entry-wrapper={}",
+        "schema=1;clang-version={};clang-target={};input=-x-ir-stdin;compile-only=true;opt={};llvm-target={};llvm-layout={:?};entry-wrapper={};native-allocation-limit={}",
         String::from_utf8_lossy(&version.stdout),
         String::from_utf8_lossy(&target.stdout),
         clang_optimization_flag(optimization_level),
         llvm_options.target_triple,
         llvm_options.target_data_layout,
         llvm_options.emit_entry_wrapper,
+        llvm_options.native_allocation_limit,
     ))
 }
 

@@ -39,7 +39,7 @@ pub const DEFAULT_NATIVE_ALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Bump this whenever LLVM fragment generation changes independently of MIR.
 /// Cached fragments with another schema are never reusable.
-pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 1;
+pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 2;
 
 /// The ABI-facing identity of a direct callee used by one emitted fragment.
 /// A callee body change alone deliberately does not invalidate its callers.
@@ -72,6 +72,9 @@ pub struct LlvmIncrementalManifest {
     pub target_triple: String,
     pub target_data_layout: Option<String>,
     pub emit_entry_wrapper: bool,
+    /// Embedded per-allocation runtime ceiling.  This changes runtime helper
+    /// IR, so fragment reuse across limits would produce an incoherent module.
+    pub native_allocation_limit: u64,
     /// Changes to the global type/runtime ABI invalidate every fragment.
     pub runtime_abi_fingerprint: u64,
     pub functions: Vec<LlvmFunctionManifest>,
@@ -121,6 +124,7 @@ impl LlvmIncrementalManifest {
             || self.target_triple != previous.target_triple
             || self.target_data_layout != previous.target_data_layout
             || self.emit_entry_wrapper != previous.emit_entry_wrapper
+            || self.native_allocation_limit != previous.native_allocation_limit
             || self.runtime_abi_fingerprint != previous.runtime_abi_fingerprint
         {
             return self
@@ -228,10 +232,11 @@ pub fn llvm_incremental_manifest(
             let interface_fingerprint = interfaces[&function.declaration];
             let body_fingerprint = function_body_fingerprint(function);
             let fragment_fingerprint = fingerprint_text(format!(
-                "schema={LLVM_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};runtime={runtime_abi_fingerprint};interface={interface_fingerprint};body={body_fingerprint};callees={callees:?}",
+                "schema={LLVM_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={runtime_abi_fingerprint};interface={interface_fingerprint};body={body_fingerprint};callees={callees:?}",
                 options.target_triple,
                 options.target_data_layout,
                 options.emit_entry_wrapper,
+                options.native_allocation_limit,
             ));
             LlvmFunctionManifest {
                 declaration: function.declaration,
@@ -247,6 +252,7 @@ pub fn llvm_incremental_manifest(
         target_triple: options.target_triple.clone(),
         target_data_layout: options.target_data_layout.clone(),
         emit_entry_wrapper: options.emit_entry_wrapper,
+        native_allocation_limit: options.native_allocation_limit,
         runtime_abi_fingerprint,
         functions,
     }
