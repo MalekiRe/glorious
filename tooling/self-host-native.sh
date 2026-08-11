@@ -71,35 +71,17 @@ initialize() {
     } > "$route_manifest"
 }
 
-module_paths() {
-    local root="$route_root/self-host/src"
-    printf '%s\n' \
-        "$root/frontend/frontend.glorious" \
-        "$root/frontend/lexer/lexer.glorious" \
-        "$root/frontend/lossless/lossless.glorious" \
-        "$root/frontend/scanner/scanner.glorious" \
-        "$root/frontend/headers/headers.glorious" \
-        "$root/frontend/bodies/bodies.glorious" \
-        "$root/frontend/resolution/resolution.glorious" \
-        "$root/frontend/elaboration/elaboration.glorious" \
-        "$root/backend/backend.glorious" \
-        "$root/backend/artifact/artifact.glorious" \
-        "$root/backend/lowering/lowering.glorious" \
-        "$root/backend/emission/emission.glorious" \
-        "$root/compiler/compiler.glorious" \
-        "$root/diagnostics/diagnostics.glorious" \
-        "$root/diagnostics/model/model.glorious" \
-        "$root/diagnostics/source_errors/source_errors.glorious" \
-        "$root/diagnostics/backend_errors/backend_errors.glorious"
+production_inputs() {
+    "$route_root/tooling/self-host-production-source.sh" inputs
 }
 
 native_fingerprint() {
     {
         sha256sum "$route_grc"
         sha256sum "$route_root/tooling/self-host-native.sh"
-        sha256sum "$route_root/self-host/src/main.glorious"
-        module_paths | xargs -r sha256sum
-        printf '%s\n' 'optimization=O3;linker=wild-only;cache-schema=1'
+        sha256sum "$route_root/tooling/self-host-production-source.sh"
+        production_inputs | xargs -r sha256sum
+        printf '%s\n' 'optimization=O3;linker=wild-only;cache-schema=2'
     } | sha256sum | awk '{print $1}'
 }
 
@@ -142,9 +124,8 @@ build_native() {
         printf '%s\n' "$route_binary"
         return
     fi
-    mapfile -t modules < <(module_paths)
-    "$route_grc" -O3 --emit executable -o "$route_binary" \
-        "$route_root/self-host/src/main.glorious" "${modules[@]}"
+    mapfile -t inputs < <(production_inputs)
+    "$route_grc" -O3 --emit executable -o "$route_binary" "${inputs[@]}"
     [[ -x "$route_binary" ]] || { echo "self-host-native: native compiler was not emitted" >&2; exit 1; }
     printf '%s\n' "$fingerprint" > "$route_fingerprint"
     printf '%s\n' "$route_binary"
