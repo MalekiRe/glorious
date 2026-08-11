@@ -945,6 +945,11 @@ struct SessionResponse<'a> {
     transaction: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_fingerprint: Option<&'a str>,
+    /// Present only for LLVM emission requests. It exposes IR-cache behavior
+    /// at the persistent-session boundary without pretending that the native
+    /// linker/object output itself is cached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llvm_ir_cache: Option<&'a str>,
 }
 
 struct SessionSnapshot {
@@ -1189,6 +1194,7 @@ fn session_protocol_error(
                 .last_good
                 .as_ref()
                 .map(|snapshot| snapshot.source_fingerprint.as_str()),
+            llvm_ir_cache: None,
         },
     )
 }
@@ -1259,6 +1265,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                     .last_good
                     .as_ref()
                     .map(|snapshot| snapshot.source_fingerprint.as_str()),
+                llvm_ir_cache: None,
             };
             return if write_session_response(output, &response).is_ok() {
                 0
@@ -1330,6 +1337,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                         .last_good
                         .as_ref()
                         .map(|last| last.source_fingerprint.as_str()),
+                    llvm_ir_cache: None,
                 };
                 if write_session_response(output, &response).is_err() {
                     return 1;
@@ -1337,6 +1345,10 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 continue;
             }
         };
+        let llvm_emission = matches!(
+            command.emit,
+            Some(EmitKind::LlvmIr | EmitKind::LlvmObject | EmitKind::Executable)
+        );
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = compile_loaded(
@@ -1372,6 +1384,13 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
         } else {
             Some(current_source_fingerprint.as_str())
         };
+        let llvm_ir_cache = (status == 0 && llvm_emission).then(|| {
+            if state.compiler.stats().reused_llvm_ir != 0 {
+                "hit"
+            } else {
+                "miss"
+            }
+        });
         let response = SessionResponse {
             protocol: SESSION_PROTOCOL,
             id: Some(request.id),
@@ -1381,6 +1400,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             generation: state.generation,
             transaction,
             source_fingerprint,
+            llvm_ir_cache,
         };
         if write_session_response(output, &response).is_err() {
             return 1;

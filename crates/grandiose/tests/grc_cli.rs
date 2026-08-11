@@ -69,6 +69,66 @@ impl Drop for Session {
 }
 
 #[test]
+fn persistent_serve_reuses_llvm_ir_and_invalidates_after_a_body_edit() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("cache.glorious");
+    let output = directory.path().join("cache.ll");
+    write(
+        &input,
+        "value() -> i64 { 1 } main() -> { let marker = value(); () }",
+    );
+    let arguments = || {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-ir",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+
+    let first = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(first["status"], 0, "{first}");
+    assert_eq!(first["llvm_ir_cache"], "miss", "{first}");
+    let first_ir = fs::read(&output).unwrap();
+
+    let second = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(second["status"], 0, "{second}");
+    assert_eq!(second["llvm_ir_cache"], "hit", "{second}");
+    assert_eq!(fs::read(&output).unwrap(), first_ir);
+
+    write(
+        &input,
+        "value() -> i64 { 2 } main() -> { let marker = value(); () }",
+    );
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 3,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(edited["llvm_ir_cache"], "miss", "{edited}");
+    assert_ne!(
+        fs::read(&output).unwrap(),
+        first_ir,
+        "an edited body reused stale LLVM IR"
+    );
+}
+
+#[test]
 fn multiple_inputs_compile_in_argument_order_at_every_optimization_level() {
     let directory = tempdir().unwrap();
     let primary = directory.path().join("main.glorious");
