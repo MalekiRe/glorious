@@ -1068,17 +1068,43 @@ impl Vm {
                     let first_arg_type = args
                         .first()
                         .map(|register| fun.register_types[*register as usize]);
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let v = primitive_typed_first_type(
-                        a,
-                        fun.register_types[dst as usize],
-                        op,
-                        first_arg_type,
-                        &values,
-                    )?;
+                    let result_type = fun.register_types[dst as usize];
+                    // Nearly every compiler primitive is unary or binary.
+                    // Keep those operands in registers/stack slots instead
+                    // of building an iterator state machine and heap Vec on
+                    // every dispatch. Variable-arity array and byte helpers
+                    // retain the exact old left-to-right collection path.
+                    let v = match args.as_slice() {
+                        [] => primitive_typed_first_type(a, result_type, op, first_arg_type, &[])?,
+                        [first] => {
+                            let first = take(frame, *first)?;
+                            primitive_typed_first_type(
+                                a,
+                                result_type,
+                                op,
+                                first_arg_type,
+                                &[first],
+                            )?
+                        }
+                        [first, second] => {
+                            let first = take(frame, *first)?;
+                            let second = take(frame, *second)?;
+                            primitive_typed_first_type(
+                                a,
+                                result_type,
+                                op,
+                                first_arg_type,
+                                &[first, second],
+                            )?
+                        }
+                        _ => {
+                            let values = args
+                                .iter()
+                                .map(|register| take(frame, *register))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            primitive_typed_first_type(a, result_type, op, first_arg_type, &values)?
+                        }
+                    };
                     put(frame, dst, v)?;
                     frame.pc += 1;
                 }
