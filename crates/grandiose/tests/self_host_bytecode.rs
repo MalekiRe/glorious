@@ -2887,6 +2887,107 @@ fn canonical_self_host_native_still_reports_g9003_without_terminal_handler_fusio
 }
 
 #[test]
+#[ignore = "expensive release differential: test whether suppressing direct resumptive-handler fusion removes native G9003"]
+fn canonical_self_host_native_still_reports_g9003_without_direct_resumptive_handler_fusion() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source_bundle = production_self_host_bundle();
+            let source_program = modules::parse_bundle(&source_bundle)
+                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
+            let source_resolution = modules::resolve_program(&source_bundle, source_program)
+                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
+            let monolithic_source =
+                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
+                    .expect("the self-host module graph must have a canonical one-file form");
+
+            let phases = compile_bundle_to_phases_with_test_optimizer_suppression(
+                &source_bundle,
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O3,
+                },
+                TestOptimizerSuppression::DirectResumptiveHandlerFusion,
+            )
+            .unwrap_or_else(|errors| {
+                panic!("suppressed bundle-context Stage1 did not compile: {errors:#?}")
+            });
+            let stage1_bytes = phases.artifact.encode();
+            decode_and_verify_full_self_host_artifact(&stage1_bytes);
+
+            let mut trace = RetainedSelfHostArtifact::write(&stage1_bytes);
+            trace.keep = true;
+            let input = trace.directory.join("canonical-self-host.glorious");
+            let native_output = trace.directory.join("native-stage2.grbc");
+            fs::write(&input, monolithic_source.as_bytes()).unwrap();
+
+            let llvm_options = LlvmOptions {
+                native_allocation_limit: 512 * 1024 * 1024,
+                ..LlvmOptions::default()
+            };
+            let module = grandiose::emit_llvm_ir(&phases, &llvm_options)
+                .expect("suppressed Stage1 LLVM emission must succeed");
+            let llvm = trace.directory.join("bootstrap-self-host-resumptive-suppressed.ll");
+            let executable = trace.directory.join("bootstrap-self-host-resumptive-suppressed");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O3")
+                .arg("--ld-path=wild")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "suppressed bootstrap LLVM executable failed to link:\n{}\nretained {}",
+                String::from_utf8_lossy(&clang.stderr),
+                trace.directory.display(),
+            );
+
+            let native = Command::new(&executable)
+                .arg(&native_output)
+                .arg(&input)
+                .output()
+                .unwrap();
+            let native_log = format!(
+                "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+                native.status,
+                String::from_utf8_lossy(&native.stdout),
+                String::from_utf8_lossy(&native.stderr),
+            );
+            fs::write(
+                trace.directory.join("native-direct-resumptive-handler-fusion-suppressed.log"),
+                &native_log,
+            )
+            .unwrap();
+            assert!(
+                native.status.success(),
+                "the suppressed bootstrap LLVM executable must preserve the compiler's diagnostic exit-0 contract; retained {}\n{native_log}",
+                trace.directory.display(),
+            );
+            assert!(
+                native_log.contains("[G9003]"),
+                "direct-resumptive-handler-fusion suppression removed the known native G9003 diagnostic; retained {}\n{native_log}",
+                trace.directory.display(),
+            );
+            assert!(
+                !native_output.exists(),
+                "G9003 must not emit a stage-two artifact; retained {}",
+                trace.directory.display(),
+            );
+            eprintln!(
+                "retained direct-resumptive-handler-fusion-suppressed native G9003 differential: {}",
+                trace.directory.display()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 #[ignore = "diagnostic release gate: replay a captured stage-one compiler in the VM"]
 fn self_hosted_stage_one_replay_emits_stage_two_in_release_vm() {
     std::thread::Builder::new()
