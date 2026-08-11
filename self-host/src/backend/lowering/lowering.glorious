@@ -2346,7 +2346,7 @@ analyze_computation(
         // runs before that rejection, so it must still be a total traversal:
         // otherwise a valid source program aborts instead of receiving the
         // promised `EffectControlNotLowered` diagnostic.
-        CoreComputationView::Perform(_, _, operands) =>
+        CoreComputationView::Perform(_, _, _, operands) =>
             analyze_values_reverse(
                 body,
                 operands,
@@ -4243,7 +4243,7 @@ lower_computation<'a>(
                 }
             } else { Result::Err(LoweringError::LabelControlNotLowered(id)) }
         },
-        CoreComputationView::Perform(_, operation, operands) => {
+        CoreComputationView::Perform(_, instance, operation, operands) => {
             let payloads = Vec::new();
             try(lower_arguments(
                 interfaces, body, value, operands, &mut payloads
@@ -4251,7 +4251,7 @@ lower_computation<'a>(
             if(super::super::frontend::elaboration::
                 interface_effect_operation_is_terminal(interfaces, operation)) {
                 let owner = super::super::frontend::elaboration::
-                    interface_effect_operation_owner(interfaces, operation);
+                    interface_effect_instance_effect(interfaces, instance);
                 emit_terminal_perform(
                     value,
                     Id::from_u32(Id::to_u32(owner)),

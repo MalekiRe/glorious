@@ -1290,7 +1290,7 @@ computation_uses_local(
             } else {
                 match_arms_use_local(body, arms, 0, local)
             },
-        CoreComputationView::Perform(_, _, operands) =>
+        CoreComputationView::Perform(_, _, _, operands) =>
             values_use_local(body, operands, 0, local),
         CoreComputationView::Resume(_, resumption, result) =>
             value_uses_local(body, resumption, local)
@@ -1774,7 +1774,7 @@ write_computation_expression(
         // Effect-control bytecode lowering is intentionally still gated, but
         // the Typed Core probe must be able to observe a successfully
         // elaborated perform without treating it as an ordinary call.
-        CoreComputationView::Perform(ty, operation, operands) => {
+        CoreComputationView::Perform(ty, _, operation, operands) => {
             ByteBuf::push(output, 11);
             write_type_id(output, Id::to_u32(ty));
             ByteBuf::write_u32_le(output, Id::to_u32(operation));
@@ -1919,7 +1919,7 @@ write_block_expression(
         CoreComputationView::Primitive(found, _, _) => found,
         CoreComputationView::Construct(found, _, _) => found,
         CoreComputationView::VariantDispatch(found, _, _) => found,
-        CoreComputationView::Perform(found, _, _) => found,
+        CoreComputationView::Perform(found, _, _, _) => found,
         CoreComputationView::Resume(found, _, _) => found,
         CoreComputationView::Handle(found, _, _) => found
     };

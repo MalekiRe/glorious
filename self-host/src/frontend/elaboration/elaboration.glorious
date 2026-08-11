@@ -17,6 +17,14 @@ pub type InterfaceEffectId = Id<InterfaceEffectTag>;
 pub struct InterfaceEffectOperationTag {}
 pub type InterfaceEffectOperationId = Id<InterfaceEffectOperationTag>;
 
+// An effect declaration is a template.  A runtime/control identity is the
+// declaration together with its fully-ground type arguments.  Keep this in a
+// dedicated arena (rather than smuggling applications through TypeId) so a
+// later backend can assign protocols deterministically and handlers can test
+// exact instances rather than merely same-spelled operations.
+pub struct EffectInstanceTag {}
+pub type EffectInstanceId = Id<EffectInstanceTag>;
+
 enum TypeParameterOwner {
     Declaration(ShellId),
     EffectOperation(InterfaceEffectOperationId),
@@ -214,6 +222,13 @@ struct InterfaceEffectOperation {
 
 impl Use<[0, *]> for InterfaceEffectOperation {}
 
+struct EffectInstance {
+    protocol: InterfaceEffectId,
+    arguments: TypeElementRange
+}
+
+impl Use<[0, *]> for EffectInstance {}
+
 enum InterfaceNominalKind {
     Struct(InterfaceFieldRange),
     Enum(InterfaceVariantRange)
@@ -350,6 +365,8 @@ pub struct TypedInterfaces {
     effect_operations:
         Arena<InterfaceEffectOperationTag, InterfaceEffectOperation>,
     effect_payloads: Vec<TypeId>,
+    effect_instances: Arena<EffectInstanceTag, EffectInstance>,
+    effect_instance_arguments: Vec<TypeId>,
     constraint_goals: Vec<ConstraintGoal>,
     constraint_arguments: Vec<ConstraintArgument>,
     constraint_bindings: Vec<ConstraintBinding>,
@@ -499,7 +516,7 @@ enum CoreComputationKind {
     // Operation identity is an interface identity, never a spelling or a
     // callable shell. This keeps a future lowering from accidentally treating
     // `perform` as an ordinary call.
-    Perform(InterfaceEffectOperationId, OperandRange),
+    Perform(EffectInstanceId, InterfaceEffectOperationId, OperandRange),
     // A resume consumes the resumption value exactly once. Quantity checking
     // and MIR cleanup remain deliberately unimplemented in this foundation.
     Resume(CoreValueId, CoreValueId),
@@ -612,6 +629,7 @@ impl Use<[0, *]> for CoreRefinementBinding {}
 // `payloads` are the operation parameters in declaration order; `resumption`
 // is absent only for terminal operations.
 pub struct CoreHandlerClause {
+    instance: EffectInstanceId,
     operation: InterfaceEffectOperationId,
     payloads: Vec<CoreLocalId>,
     resumption: Option<CoreLocalId>,
@@ -990,7 +1008,7 @@ pub enum CoreComputationView<'a> {
     ),
     VariantDispatch(TypeId, CoreValueId, Slice<'a, CoreMatchArm>),
     IntegerDispatch(TypeId, CoreValueId, Slice<'a, CoreIntegerArm>),
-    Perform(TypeId, InterfaceEffectOperationId, Slice<'a, CoreValueId>),
+    Perform(TypeId, EffectInstanceId, InterfaceEffectOperationId, Slice<'a, CoreValueId>),
     Resume(TypeId, CoreValueId, CoreValueId),
     LabelDestination(TypeId, LabelDestinationId, CoreComputationId),
     Leave(TypeId, LabelDestinationId, CoreValueId),
@@ -1035,7 +1053,7 @@ pub core_node_view_type<'a>(value: CoreNodeView<'a>) -> TypeId {
             CoreComputationView::Refinement(ty, _, _, _) => ty,
             CoreComputationView::VariantDispatch(ty, _, _) => ty,
             CoreComputationView::IntegerDispatch(ty, _, _) => ty,
-            CoreComputationView::Perform(ty, _, _) => ty,
+            CoreComputationView::Perform(ty, _, _, _) => ty,
             CoreComputationView::Resume(ty, _, _) => ty,
             CoreComputationView::LabelDestination(ty, _, _) => ty,
             CoreComputationView::Leave(ty, _, _) => ty,
@@ -1083,7 +1101,7 @@ core_node_child_count(
                 Slice::len(arms) + 1,
             CoreComputationView::IntegerDispatch(_, _, arms) =>
                 Slice::len(arms) + 1,
-            CoreComputationView::Perform(_, _, operands) => Slice::len(operands),
+            CoreComputationView::Perform(_, _, _, operands) => Slice::len(operands),
             CoreComputationView::Resume(_, _, _) => 2,
             CoreComputationView::LabelDestination(_, _, _) => 1,
             CoreComputationView::Leave(_, _, _) => 1,
@@ -1171,7 +1189,7 @@ core_node_child_at(
                     CoreNodeId::Computation(core_integer_arm_body(arm))
                 }
             },
-            CoreComputationView::Perform(_, _, operands) => {
+            CoreComputationView::Perform(_, _, _, operands) => {
                 let value = handle Slice::get(operands, index) {
                     Result::Err(_) => unreachable(),
                     Result::Ok(found) => *found
@@ -1451,12 +1469,12 @@ core_node_child_set(
                     CoreComputationKind::Refinement(
                         core_rewrite_value(replacement), pattern, bindings
                     ),
-                CoreComputationKind::Perform(operation, operands) => {
+                CoreComputationKind::Perform(instance, operation, operands) => {
                     *Vec::index_mut(
                         &mut body.operands,
                         usize_from_u32(operands.start) + index
                     ) = core_rewrite_value(replacement);
-                    CoreComputationKind::Perform(operation, operands)
+                    CoreComputationKind::Perform(instance, operation, operands)
                 },
                 CoreComputationKind::Resume(resumption, result) => if(index == 0) {
                     CoreComputationKind::Resume(core_rewrite_value(replacement), result)
@@ -1928,6 +1946,106 @@ pub interface_effect_generic_count(
     id: InterfaceEffectId
 ) -> u32 {
     interface_effect_at(value, id).generics.count
+}
+
+effect_instance_arguments_equal(
+    interfaces: &TypedInterfaces,
+    range: TypeElementRange,
+    arguments: &Vec<TypeId>,
+    ordinal: u32
+) -> Bool {
+    if(ordinal < range.count) {
+        if(*Vec::index(
+            &interfaces.effect_instance_arguments,
+            usize_from_u32(range.start + ordinal)
+        ) == *Vec::index(arguments, usize_from_u32(ordinal))) {
+            effect_instance_arguments_equal(interfaces, range, arguments, ordinal + 1)
+        } else { false }
+    } else { true }
+}
+
+find_effect_instance(
+    interfaces: &TypedInterfaces,
+    protocol: InterfaceEffectId,
+    arguments: &Vec<TypeId>,
+    index: usize
+) -> Option<EffectInstanceId> {
+    if(index < Arena::len(&interfaces.effect_instances)) {
+        let id = Id::from_u32(u32_from_usize(index));
+        let instance = Arena::index(&interfaces.effect_instances, id);
+        // Copy both fields out before recursing through the owning arena.
+        // This keeps the arena borrow lexical for the self-host checker.
+        let stored_protocol = instance.protocol;
+        let stored_arguments = instance.arguments;
+        if(stored_protocol == protocol and {
+            stored_arguments.count == u32_from_usize(Vec::len(arguments))
+            and { effect_instance_arguments_equal(
+                interfaces, stored_arguments, arguments, 0
+            ) }
+        }) { Option::Some(id) } else {
+            find_effect_instance(interfaces, protocol, arguments, index + 1)
+        }
+    } else { None }
+}
+
+// Intern only grounded source applications.  This identity is shared by
+// performs and handler clauses, so equal source instances necessarily select
+// the same future runtime protocol while unequal instantiations cannot match.
+intern_effect_instance(
+    interfaces: &mut TypedInterfaces,
+    protocol: InterfaceEffectId,
+    arguments: &Vec<TypeId>
+) -> EffectInstanceId {
+    handle find_effect_instance(&*interfaces, protocol, arguments, 0) {
+        Option::Some(found) => found,
+        None => {
+            let start = Vec::len(&interfaces.effect_instance_arguments);
+            append_effect_instance_arguments(
+                &mut interfaces.effect_instance_arguments, arguments, 0
+            );
+            let end = Vec::len(&interfaces.effect_instance_arguments);
+            handle Arena::alloc(&mut interfaces.effect_instances, EffectInstance {
+                protocol: protocol,
+                arguments: super::syntax::id_range(start, end)
+            }) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }
+        }
+    }
+}
+
+append_effect_instance_arguments(
+    output: &mut Vec<TypeId>, source: &Vec<TypeId>, index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, index));
+        append_effect_instance_arguments(output, source, index + 1)
+    } else { () }
+}
+
+pub interface_effect_instance_effect(
+    interfaces: &TypedInterfaces,
+    instance: EffectInstanceId
+) -> InterfaceEffectId { Arena::index(&interfaces.effect_instances, instance).protocol }
+
+pub interface_effect_instance_argument_count(
+    interfaces: &TypedInterfaces,
+    instance: EffectInstanceId
+) -> u32 { Arena::index(&interfaces.effect_instances, instance).arguments.count }
+
+pub interface_effect_instance_argument_at(
+    interfaces: &TypedInterfaces,
+    instance: EffectInstanceId,
+    ordinal: u32
+) -> Option<TypeId> {
+    let range = Arena::index(&interfaces.effect_instances, instance).arguments;
+    if(ordinal < range.count) {
+        Option::Some(*Vec::index(
+            &interfaces.effect_instance_arguments,
+            usize_from_u32(range.start + ordinal)
+        ))
+    } else { None }
 }
 
 pub interface_effect_constraint_start(
@@ -3676,8 +3794,8 @@ pub typed_body_computation_at<'a>(
                 subject,
                 typed_body_integer_arms(value, range)
             ),
-        CoreComputationKind::Perform(operation, range) =>
-            CoreComputationView::Perform(ty, operation, typed_body_operands(value, range)),
+        CoreComputationKind::Perform(instance, operation, range) =>
+            CoreComputationView::Perform(ty, instance, operation, typed_body_operands(value, range)),
         CoreComputationKind::Resume(resumption, result) =>
             CoreComputationView::Resume(ty, resumption, result),
         CoreComputationKind::LabelDestination(label, body) =>
@@ -7930,6 +8048,8 @@ pub collect_interfaces(
         effects: Arena::new(),
         effect_operations: Arena::new(),
         effect_payloads: Vec::new(),
+        effect_instances: Arena::new(),
+        effect_instance_arguments: Vec::new(),
         constraint_goals: Vec::new(),
         constraint_arguments: Vec::new(),
         constraint_bindings: Vec::new(),
@@ -9534,6 +9654,47 @@ elaborate_call_arguments(
     } else { Result::Ok(()) }
 }
 
+// Resolve the source `Effect<Args...>` component of a control path into the
+// shared instance arena.  Resolution has already proved the declaration and
+// operation names; this phase owns the semantic type arguments and refuses an
+// arity mismatch rather than guessing an identity.
+resolve_ground_effect_instance(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    protocol: InterfaceEffectId,
+    syntax: super::bodies::BodyTypeId,
+    token: usize
+) -> Result<EffectInstanceId, ElaborationError> {
+    let expected = interface_effect_generic_count(&*interfaces, protocol);
+    handle super::bodies::body_type_view(body, syntax) {
+        super::bodies::BodyTypeView::Path(_, _) => if(expected == 0) {
+            Result::Ok(intern_effect_instance(interfaces, protocol, &Vec::new()))
+        } else { Result::Err(ElaborationError::InvalidSignatureType(token)) },
+        super::bodies::BodyTypeView::Application(_, arguments) => {
+            if(u32_from_usize(Slice::len(arguments)) == expected) {
+                let raw = Vec::new();
+                try(resolve_label_body_type_arguments(
+                    headers, declarations, interfaces, body, arguments, &mut raw, 0
+                ), @resolve_ground_effect_instance);
+                let typed = Vec::new();
+                append_type_ids_from_words(&mut typed, &raw, 0);
+                Result::Ok(intern_effect_instance(interfaces, protocol, &typed))
+            } else { Result::Err(ElaborationError::InvalidSignatureType(token)) }
+        }
+    }
+}
+
+append_type_ids_from_words(
+    output: &mut Vec<TypeId>, source: &Vec<u32>, index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, type_id_from_u32(*Vec::index(source, index)));
+        append_type_ids_from_words(output, source, index + 1)
+    } else { () }
+}
+
 // `perform` has no callable callee child: its children are exactly its
 // payload expressions.  Keep this separate from ordinary-call inference so
 // the Core operation identity remains an effect operation, rather than an
@@ -9635,8 +9796,15 @@ elaborate_perform(
         )),
         Option::Some(found) => found
     };
-    if(interface_effect_generic_count(&*interfaces, interface_effect) != 0
-        or { interface_effect_operation_generic_count(&*interfaces, operation) != 0 }) {
+    let path = handle super::bodies::expression_view(body, expression) {
+        super::bodies::BodyExpressionView::Perform(found, _) => found,
+        _ => @elaborate_perform(Result::Err(ElaborationError::UnsupportedExpression(token)))
+    };
+    let instance = try(resolve_ground_effect_instance(
+        headers, declarations, interfaces, body, interface_effect,
+        super::bodies::effect_operation_effect_type(&path), token
+    ), @elaborate_perform);
+    if(interface_effect_operation_generic_count(&*interfaces, operation) != 0) {
         @elaborate_perform(Result::Err(ElaborationError::UnsupportedExpression(token)))
     } else { () };
     let found_count = super::bodies::expression_child_count_at(body, expression);
@@ -9670,7 +9838,7 @@ elaborate_perform(
     let perform_computation = push_computation(
         &mut value.core,
         result,
-        CoreComputationKind::Perform(operation, operand_range(operand_start, operand_end))
+        CoreComputationKind::Perform(instance, operation, operand_range(operand_start, operand_end))
     );
     Result::Ok(Elaborated {
         type_id: result,
@@ -11657,7 +11825,7 @@ elaborate_terminal_u32_arms(
     map: &ResolutionMap,
     value: &mut BodyContext,
     expression: u32,
-    identity: super::resolution::EffectOperationIdentity,
+    operation: GroundEffectOperation,
     ordinal: usize,
     expected: Option<TypeId>,
     inferred: Option<TypeId>,
@@ -11680,12 +11848,40 @@ elaborate_terminal_u32_arms(
         ) {
             super::resolution::ResolvedHandleTarget::EffectOperation(found) =>
                 super::resolution::effect_operation_effect(&found) ==
-                    super::resolution::effect_operation_effect(&identity)
+                    super::resolution::effect_operation_effect(&operation.identity)
                 and { super::resolution::effect_operation_ordinal(&found) ==
-                    super::resolution::effect_operation_ordinal(&identity) },
+                    super::resolution::effect_operation_ordinal(&operation.identity) },
             _ => false
         };
         if(same_operation) { () } else {
+            @elaborate_terminal_u32_arms(Result::Err(
+                ElaborationError::UnsupportedExpression(token)
+            ))
+        };
+        // Obtain the immutable arena lookup before entering the mutable
+        // instance-resolution call.  Keeping both expressions as arguments to
+        // that call makes the self-host ownership checker conservatively hold
+        // the immutable `interfaces` borrow across the mutable borrow.
+        let arm_effect = interface_effect_for_shell(
+            &*interfaces,
+            super::resolution::effect_operation_effect(&operation.identity)
+        );
+        let arm_instance = handle super::bodies::handle_arm_effect_type(source_arm) {
+            None => @elaborate_terminal_u32_arms(Result::Err(
+                ElaborationError::InvalidSignatureType(token)
+            )),
+            Option::Some(syntax) => {
+                let protocol = arm_effect else { @elaborate_terminal_u32_arms(Result::Err(
+                    ElaborationError::MissingEffectType(
+                        super::resolution::effect_operation_effect(&operation.identity)
+                    )
+                )) };
+                try(resolve_ground_effect_instance(
+                    headers, declarations, interfaces, body, protocol, syntax, token
+                ), @elaborate_terminal_u32_arms)
+            }
+        };
+        if(arm_instance == operation.instance) { () } else {
             @elaborate_terminal_u32_arms(Result::Err(
                 ElaborationError::UnsupportedExpression(token)
             ))
@@ -11756,7 +11952,7 @@ elaborate_terminal_u32_arms(
             map,
             value,
             expression,
-            identity,
+            operation,
             ordinal + 1,
             expected,
             join_branch_type(inferred, arm_type),
@@ -11775,12 +11971,19 @@ elaborate_terminal_u32_arms(
     }
 }
 
+struct GroundEffectOperation {
+    instance: EffectInstanceId,
+    identity: super::resolution::EffectOperationIdentity
+}
+
 terminal_u32_operation(
-    interfaces: &TypedInterfaces,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
     map: &ResolutionMap,
     subject: u32
-) -> Option<super::resolution::EffectOperationIdentity> {
+) -> Option<GroundEffectOperation> {
     handle super::bodies::expression_view(body, subject) {
         super::bodies::BodyExpressionView::Perform(_, _) => handle
             resolved_target_at(map, subject) {
@@ -11797,10 +12000,9 @@ terminal_u32_operation(
                     ) {
                         None => None,
                         Option::Some(operation) => if(
-                            interface_effect_generic_count(interfaces, effect_id) == 0
-                            and { interface_effect_operation_generic_count(
+                            interface_effect_operation_generic_count(
                                 interfaces, operation
-                            ) == 0 }
+                            ) == 0
                             and { interface_effect_operation_is_terminal(
                                 interfaces, operation
                             ) }
@@ -11816,7 +12018,20 @@ terminal_u32_operation(
                             and { super::bodies::expression_child_count_at(
                                 body, subject
                             ) == 1 }) {
-                                Option::Some(identity)
+                                handle super::bodies::expression_view(body, subject) {
+                                    super::bodies::BodyExpressionView::Perform(path, _) => handle
+                                        resolve_ground_effect_instance(
+                                            headers, declarations, interfaces, body, effect_id,
+                                            super::bodies::effect_operation_effect_type(&path),
+                                            super::bodies::effect_operation_effect_token(&path)
+                                        ) {
+                                            Result::Err(_) => None,
+                                            Result::Ok(instance) => Option::Some(
+                                                GroundEffectOperation { instance: instance, identity: identity }
+                                            )
+                                        },
+                                    _ => None
+                                }
                             } else { None }
                     }
                 }
@@ -11952,7 +12167,7 @@ elaborate_handle(
             )))
         }
     };
-    handle terminal_u32_operation(&*interfaces, body, map, immediate) {
+    handle terminal_u32_operation(headers, declarations, interfaces, body, map, immediate) {
         None => (),
         Option::Some(identity) => {
             let payload = try(elaborate_expression(
