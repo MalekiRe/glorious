@@ -389,3 +389,67 @@ fn native_function_units_compile_separately_and_link_through_wild() {
     );
     assert!(Command::new(executable).status().unwrap().success());
 }
+
+#[test]
+fn native_function_units_retain_effect_guard_runtime_declarations() {
+    let phases = phases_at(
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            selected() -> i64 {
+                let captured = 1;
+                let answer = { => perform Ask::ask() + captured };
+                handle { answer() } {
+                    Ask::ask() with k => resume(k, 41)
+                }
+            }
+            main() -> () {
+                selected();
+                ()
+            }
+        "#,
+        OptimizationLevel::O0,
+    );
+    let units = emit_llvm_native_object_units(&phases, &LlvmOptions::default()).unwrap();
+    let guard_symbols = units
+        .shared
+        .ir
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("declare void ")
+                .and_then(|symbol| symbol.split_once('('))
+                .map(|(symbol, _)| symbol)
+                .filter(|symbol| symbol.starts_with("@g1_effect_guard_drop_f"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !guard_symbols.is_empty(),
+        "effect fixture must exercise emitted guard-drop helpers"
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    for unit in &units.functions {
+        for symbol in &guard_symbols {
+            assert!(
+                unit.module.ir.contains(&format!("declare void {symbol}("))
+                    || unit.module.ir.contains(&format!("define void {symbol}(")),
+                "function unit {} lost shared effect helper {symbol}",
+                unit.declaration,
+            );
+        }
+        let input = directory.path().join(format!("effect-{}.ll", unit.declaration));
+        let output = directory.path().join(format!("effect-{}.o", unit.declaration));
+        fs::write(&input, &unit.module.ir).unwrap();
+        assert!(
+            Command::new("clang")
+                .args(["-x", "ir", "-O3", "-c"])
+                .arg(&input)
+                .arg("-o")
+                .arg(&output)
+                .status()
+                .unwrap()
+                .success(),
+            "effect function unit {} must compile independently",
+            unit.declaration,
+        );
+    }
+}
