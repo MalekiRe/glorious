@@ -55477,6 +55477,26 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
         }
 
         let mut folded = code.to_vec();
+        // Thread chains of unconditional jumps before ordinary ordinal
+        // compaction. A Jump has no register effect, so reaching its final
+        // target is equivalent; doing this before PC-map construction keeps
+        // cleanup serialization and every retained branch target in one map.
+        for pc in 0..folded.len() {
+            let Instruction::Jump { target } = folded[pc] else {
+                continue;
+            };
+            let mut target = target as usize;
+            let mut seen = BTreeSet::new();
+            while target < folded.len() && seen.insert(target) {
+                let Instruction::Jump { target: next } = folded[target] else {
+                    break;
+                };
+                target = next as usize;
+            }
+            if target < folded.len() {
+                folded[pc] = Instruction::Jump { target: target as u32 };
+            }
+        }
         // A self-copy cannot change either the register value or its ownership
         // state. These show up after generic forwarding has been specialized
         // to an already-selected destination; removing them also lets the
@@ -58202,6 +58222,36 @@ mod mir_edge_emission_tests {
         });
         assert!(!layout_and_peephole(&mut single));
         assert_eq!(single.code, [Instruction::Nop]);
+    }
+
+    #[test]
+    fn peephole_threads_jump_chains_into_removable_fallthroughs() {
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Jump { target: 2 },
+                Instruction::Return { src: None },
+                Instruction::Jump { target: 1 },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "jump_chain".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, vec![
+            Instruction::Return { src: None },
+            Instruction::Jump { target: 0 },
+        ]);
     }
 
     #[test]
