@@ -806,16 +806,8 @@ impl Vm {
                 }
                 Instruction::DerefStore { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let target = match get(frame, dst)? {
-                        Value::Reference {
-                            unique: true,
-                            target,
-                            ..
-                        } => target,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
                     let value = take(frame, src)?;
-                    store_reference_target(&target, value)?;
+                    store_reference_register(frame, dst, value)?;
                     frame.pc += 1;
                 }
                 Instruction::Construct {
@@ -2528,6 +2520,40 @@ fn move_reference_register(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
             move_reference_value(&value)
         }
         value => move_reference_value(value),
+    }
+}
+
+fn store_reference_value(value: &Value, replacement: Value) -> Result<(), RuntimeError> {
+    let Value::Reference {
+        unique: true,
+        target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    store_reference_target(target, replacement)
+}
+
+/// Store through a unique reference without cloning an ordinary destination
+/// register. Place-backed references still detach their read before storing:
+/// the referent can live in the same slot store. Verified bytecode gives the
+/// reference register and moved referent distinct types, so taking the source
+/// before borrowing this destination preserves their valid execution order.
+fn store_reference_register(
+    f: &Frame,
+    r: u32,
+    replacement: Value,
+) -> Result<(), RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => {
+            let value = slot.get().map_err(|_| RuntimeError::EmptyRegister(r))?;
+            store_reference_value(&value, replacement)
+        }
+        value => store_reference_value(value, replacement),
     }
 }
 
