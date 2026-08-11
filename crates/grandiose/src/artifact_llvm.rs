@@ -1591,6 +1591,42 @@ fn emit_closed_frame_consume_one_shot(
     Ok(())
 }
 
+/// The exact entry point a future static Resume lowering must use.
+///
+/// The frame layout currently stores only scope/one-shot bits; it does not
+/// contain a captured native return address, register snapshot, or ownership
+/// restoration plan.  Therefore even a perfectly typed frozen Resume must
+/// fail *before* consuming its one-shot field.  Clearing the bit before this
+/// diagnostic would mutate observable handler state without transferring
+/// control, which is less safe than rejecting it.
+fn emit_closed_frame_resume_or_reject(
+    output: &mut String,
+    artifact: &Artifact,
+    route: &ClosedFramePerformRoute,
+    resumption_type: TypeId,
+    value_type: TypeId,
+    destination_type: TypeId,
+    function_id: u32,
+    instruction_id: u32,
+) -> Result<(), ArtifactLlvmError> {
+    let emitted_before = output.len();
+    let Some(_transfer) = closed_frame_resume_transfer(
+        artifact,
+        route,
+        resumption_type,
+        value_type,
+        destination_type,
+    ) else {
+        return Err(unsupported(function_id, instruction_id, "closed frame resume ABI"));
+    };
+    debug_assert_eq!(output.len(), emitted_before, "no one-shot state may be consumed before continuation state exists");
+    Err(unsupported(
+        function_id,
+        instruction_id,
+        "closed frame continuation state",
+    ))
+}
+
 fn closed_handle_sites(artifact: &Artifact, owner_function: u32) -> BTreeMap<u32, u32> {
     closed_host_handler_continuation_abis(artifact)
         .into_iter()
@@ -3279,6 +3315,29 @@ mod tests {
         assert!(matches!(
             emit_closed_frame_consume_one_shot(&mut String::new(), "%frame", 5, invalid_consume, 4, 17),
             Err(ArtifactLlvmError::UnsupportedInstruction { opcode: "closed frame resumption field", .. })
+        ));
+        let mut resume_ir = String::from("  ; preceding lexical scope state\n");
+        assert!(matches!(
+            emit_closed_frame_resume_or_reject(
+                &mut resume_ir,
+                &artifact,
+                &route,
+                route.resumption_type,
+                19,
+                UNIT,
+                4,
+                17,
+            ),
+            Err(ArtifactLlvmError::UnsupportedInstruction {
+                function: 4,
+                instruction: 17,
+                opcode: "closed frame continuation state",
+            })
+        ));
+        assert_eq!(resume_ir, "  ; preceding lexical scope state\n", "a rejected resume must not consume its one-shot field");
+        assert!(matches!(
+            emit_closed_frame_resume_or_reject(&mut String::new(), &artifact, &route, 20, 19, UNIT, 4, 17),
+            Err(ArtifactLlvmError::UnsupportedInstruction { opcode: "closed frame resume ABI", .. })
         ));
         assert!(plans[&1].perform_route(3, 1).is_none());
         assert!(plans[&1].perform_route(9, 0).is_none());
