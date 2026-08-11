@@ -648,6 +648,55 @@ fn emit_function(
                 }
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
+            Instruction::TailCall {
+                function: callee,
+                args,
+            } => {
+                let callee_function = artifact
+                    .functions
+                    .get(*callee as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "invalid callee"))?;
+                if callee_function.receiver_mode.is_some()
+                    || !callee_function.outward_protocols.is_empty()
+                {
+                    return Err(unsupported(
+                        function_id,
+                        instruction_id,
+                        "receiver/effect tail call",
+                    ));
+                }
+                if args.len() != callee_function.params.len() {
+                    return Err(unsupported(function_id, instruction_id, "tail call arity"));
+                }
+                let callee_result = llvm_type(artifact, function_id, callee_function.return_type)?;
+                if callee_result != result {
+                    return Err(unsupported(function_id, instruction_id, "tail call result"));
+                }
+                let mut arguments = Vec::with_capacity(args.len());
+                for (index, register) in args.iter().enumerate() {
+                    let ty = llvm_type(artifact, function_id, callee_function.params[index])?;
+                    let value = emit_load(
+                        output,
+                        &register_types,
+                        function_id,
+                        instruction_id,
+                        *register,
+                        &mut temporary,
+                    )?;
+                    arguments.push(format!("{ty} {value}"));
+                }
+                let arguments = arguments.join(", ");
+                if result == "void" {
+                    output.push_str(&format!("  tail call void @grbc_fn_{callee}({arguments})\n"));
+                    output.push_str("  ret void\n");
+                } else {
+                    let name = format!("%v{temporary}");
+                    output.push_str(&format!(
+                        "  {name} = tail call {result} @grbc_fn_{callee}({arguments})\n"
+                    ));
+                    output.push_str(&format!("  ret {result} {name}\n"));
+                }
+            }
             Instruction::HostCall { dst, import, args } => {
                 emit_host_call(
                     output,
@@ -1151,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_unsupported_instruction_fails_closed() {
+    fn verified_direct_tail_call_emits_llvm_without_vm_execution() {
         let mut artifact = scalar_program();
         artifact.code[5] = Instruction::TailCall {
             function: 1,
@@ -1159,14 +1208,21 @@ mod tests {
         };
         // Rebuild verifier cleanups after mutating the hand-built artifact.
         let artifact = with_generated_cleanup_plans(artifact).unwrap();
-        let error = emit_artifact_llvm_ir(&artifact.encode()).unwrap_err();
-        assert!(matches!(
-            error,
-            ArtifactLlvmError::UnsupportedInstruction {
-                opcode: "TailCall",
-                ..
-            }
-        ));
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        assert!(ir.contains("tail call void @grbc_fn_1()"));
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("tail.ll");
+        let object = directory.path().join("tail.o");
+        fs::write(&source, ir).unwrap();
+        let status = Command::new("clang")
+            .args(["-x", "ir", "-c"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(object.is_file());
     }
 
     #[test]
