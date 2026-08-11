@@ -55497,6 +55497,32 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 folded[pc] = Instruction::Jump { target: target as u32 };
             }
         }
+        // Threading can leave an intermediate jump with no remaining incoming
+        // edge. Conservatively trace only known terminal/control forms; every
+        // other opcode is treated as fallthrough. That may retain extra code,
+        // but it can never delete a reachable instruction.
+        let mut reachable = vec![false; folded.len()];
+        let mut pending = vec![0_usize];
+        while let Some(pc) = pending.pop() {
+            if pc >= folded.len() || std::mem::replace(&mut reachable[pc], true) {
+                continue;
+            }
+            match &folded[pc] {
+                Instruction::Jump { target } => pending.push(*target as usize),
+                Instruction::Switch { cases, otherwise, .. } => {
+                    pending.push(*otherwise as usize);
+                    pending.extend(cases.iter().map(|(_, target)| *target as usize));
+                }
+                Instruction::Return { .. } | Instruction::Abort { .. }
+                | Instruction::Unreachable => {}
+                _ => pending.push(pc + 1),
+            }
+        }
+        for (pc, instruction) in folded.iter_mut().enumerate() {
+            if !reachable[pc] && matches!(instruction, Instruction::Jump { .. }) {
+                *instruction = Instruction::Nop;
+            }
+        }
         // A self-copy cannot change either the register value or its ownership
         // state. These show up after generic forwarding has been specialized
         // to an already-selected destination; removing them also lets the
@@ -58248,10 +58274,7 @@ mod mir_edge_emission_tests {
         });
 
         assert!(layout_and_peephole(&mut artifact));
-        assert_eq!(artifact.code, vec![
-            Instruction::Return { src: None },
-            Instruction::Jump { target: 0 },
-        ]);
+        assert_eq!(artifact.code, vec![Instruction::Return { src: None }]);
     }
 
     #[test]
