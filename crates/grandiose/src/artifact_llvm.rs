@@ -1216,6 +1216,18 @@ enum ClosedFrameResultTransfer {
     Identity { ty: TypeId },
 }
 
+/// Static contract for consuming one exact frozen-frame resumption field.
+/// It is intentionally not an executable continuation: the caller still must
+/// establish active scope, consume the field once, and lower control transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClosedFrameResumeTransfer {
+    handler_def: u32,
+    one_shot_field: u32,
+    resumption_type: TypeId,
+    value_type: TypeId,
+    destination_type: TypeId,
+}
+
 /// A direct callable producer that is safe to name in the closed-handler ABI.
 /// This is intentionally a lexical identity, rather than an attempt to infer
 /// a callable through copies, joins, or a global target set.
@@ -1485,6 +1497,36 @@ fn closed_frame_result_transfer(
             ty: route.operation_result,
         },
     )
+}
+
+fn closed_frame_resume_transfer(
+    artifact: &Artifact,
+    route: &ClosedFramePerformRoute,
+    resumption_type: TypeId,
+    value_type: TypeId,
+    destination_type: TypeId,
+) -> Option<ClosedFrameResumeTransfer> {
+    // The import result can only feed the operation result through a proven
+    // transfer ABI.  Today that means strict identity; a future wrapper must
+    // be modeled explicitly before Resume can see it.
+    closed_frame_result_transfer(route)?;
+    if route.one_shot_field == 0 || resumption_type != route.resumption_type {
+        return None;
+    }
+    let Type::Resumption { input_type, output_type, lower_uses, upper_uses, .. } =
+        artifact.types.get(resumption_type as usize)?.representation() else { return None };
+    (*input_type == route.operation_result
+        && *input_type == value_type
+        && *output_type == destination_type
+        && *lower_uses == 1
+        && *upper_uses == Some(1))
+        .then_some(ClosedFrameResumeTransfer {
+            handler_def: route.handler_def,
+            one_shot_field: route.one_shot_field,
+            resumption_type,
+            value_type,
+            destination_type,
+        })
 }
 
 fn closed_handle_sites(artifact: &Artifact, owner_function: u32) -> BTreeMap<u32, u32> {
@@ -2983,6 +3025,15 @@ mod tests {
         let mut mismatched_operation_result = route.clone();
         mismatched_operation_result.operation_result = BYTES;
         assert!(closed_frame_result_transfer(&mismatched_operation_result).is_none());
+        let resume = closed_frame_resume_transfer(&artifact, &route, route.resumption_type, 19, UNIT)
+            .expect("mapped one-shot resume transfer");
+        assert_eq!(resume.handler_def, 0);
+        assert_eq!(resume.one_shot_field, 4);
+        assert_eq!(resume.value_type, 19);
+        assert_eq!(resume.destination_type, UNIT);
+        assert!(closed_frame_resume_transfer(&artifact, &route, 20, 19, UNIT).is_none());
+        assert!(closed_frame_resume_transfer(&artifact, &route, route.resumption_type, UNIT, UNIT).is_none());
+        assert!(closed_frame_resume_transfer(&artifact, &route, route.resumption_type, 19, BYTES).is_none());
         assert!(plans[&1].perform_route(3, 1).is_none());
         assert!(plans[&1].perform_route(9, 0).is_none());
 
