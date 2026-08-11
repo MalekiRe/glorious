@@ -55069,7 +55069,15 @@ fn prune_unused_constants(artifact: &mut Artifact) -> bool {
     let mut changed = false;
     for (old_id, constant) in old.into_iter().enumerate() {
         if used[old_id] {
-            if let Some(existing) = artifact.constants.iter().position(|known| known == &constant) {
+            if let Some(existing) = artifact
+                .constants
+                .iter()
+                // Rust float equality aliases +0/-0 and considers every NaN
+                // unequal. Artifact constants use their frozen encoding as
+                // identity, so pruning must use the same bit-stable key as
+                // lowering and canonicalization.
+                .position(|known| constant_key(known) == constant_key(&constant))
+            {
                 remap[old_id] = existing as u32;
                 changed = true;
             } else {
@@ -58891,6 +58899,38 @@ mod mir_edge_emission_tests {
         assert_eq!(artifact.code[0], Instruction::Const { dst: 1, constant: 0 });
         let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
         assert_eq!(Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(), Value::I64(7));
+    }
+
+    #[test]
+    fn prune_unused_constants_keeps_signed_zero_constants_distinct() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::F32(0.0), Constant::F32(-0.0)];
+        artifact.code = vec![
+            Instruction::Const { dst: 1, constant: 0 },
+            Instruction::Const { dst: 2, constant: 1 },
+            Instruction::Return { src: Some(2) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "signed_zero".into(),
+            flags: 0,
+            params: vec![],
+            return_type: grandiose_vm::F32,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, grandiose_vm::F32, grandiose_vm::F32],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(!prune_unused_constants(&mut artifact));
+        assert_eq!(artifact.constants.len(), 2);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let Value::F32(result) = Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap()
+        else {
+            panic!("signed-zero function returned a non-f32 value")
+        };
+        assert_eq!(result.to_bits(), (-0.0_f32).to_bits());
     }
 
     #[test]
