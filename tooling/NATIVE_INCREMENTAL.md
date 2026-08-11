@@ -37,6 +37,29 @@ command: process-local object reuse cannot survive that command's process
 boundary. It requires `-O3` and `--emit executable`; no other optimization
 level or emit kind may silently select a different native route.
 
+## Durable cache for independent invocations
+
+For ordinary one-shot recompiles, select the same function partitioning with
+a private, worktree-local cache directory:
+
+```sh
+grc -O3 --emit executable \
+  --native-incremental-cache .cache/native-objects \
+  -o /tmp/grc-next /work/compiler.glorious
+```
+
+This route compiles a shared runtime/entry object plus one object for each
+source-function LLVM fragment. A function object is reused across compiler
+processes only when its complete emitted IR and exact native toolchain/runtime
+ABI match. A body-only edit therefore recompiles that function while retaining
+unchanged sibling objects. Missing, malformed, or digest-mismatched cache
+entries are discarded and rebuilt.
+
+The cache directory is an input/output artifact owned by one worktree; copy a
+seed into a new worktree rather than sharing a mutable directory between
+worktrees. Cached executables are intentionally never used: every successful
+invocation links the current objects through Wild.
+
 The native-stage integration must expose this response shape on a successful
 request (additional fields are permitted):
 
