@@ -3478,6 +3478,73 @@ fn llvm_multishot_replays_effectful_terminal_takeover_twice() {
 }
 
 #[test]
+fn llvm_o3_multishot_terminal_takeover_matches_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-multishot-terminal-takeover.glorious",
+        r#"
+            effect Choice {
+                [2,2] choose() -> i64
+                stop() -> !
+            }
+            effect Ask { [1,1] ask() -> i64 }
+            selected() -> i64 {
+                handle {
+                    handle {
+                        perform Choice::choose();
+                        perform Choice::stop()
+                    } {
+                        Choice::choose() with continuation => {
+                            let first = resume(continuation, 0);
+                            let second = resume(move continuation, 0);
+                            first + second
+                        },
+                        Choice::stop() => perform Ask::ask()
+                    }
+                } {
+                    Ask::ask() with continuation =>
+                        resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(84)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("resumption.clone"));
+    run_native_i64(
+        module,
+        selected,
+        84,
+        "o3-multishot-terminal-takeover",
+    );
+}
+
+#[test]
 fn llvm_and_vm_backends_execute_the_same_one_shot_resumption() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-one-shot-resumption.glorious",
