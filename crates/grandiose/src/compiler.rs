@@ -46378,6 +46378,35 @@ fn mir_successors(terminator: &mir::Terminator) -> Vec<u32> {
     successors
 }
 
+/// Blocks are intentionally retained through MIR layout so diagnostics and
+/// ownership evidence keep their original identities.  Bytecode-only switch
+/// edge transfer blocks are different: they have no MIR identity, and are
+/// appended after every real block.  Materializing one for a dead source
+/// would make an otherwise unreachable edge's stale SSA arguments visible to
+/// the GRBC decoder as uses with no value-flow definition.
+fn reachable_mir_blocks(function: &mir::Function) -> BTreeSet<u32> {
+    let blocks = function
+        .blocks
+        .iter()
+        .map(|block| (block.id, &block.terminator))
+        .collect::<BTreeMap<_, _>>();
+    let mut reached = BTreeSet::new();
+    let mut work = vec![function.entry];
+    while let Some(block) = work.pop() {
+        if !reached.insert(block) {
+            continue;
+        }
+        let Some(terminator) = blocks.get(&block) else {
+            continue;
+        };
+        let mut successors = mir_successors(terminator);
+        // Stable traversal makes synthetic-transfer layout deterministic.
+        successors.sort_unstable_by(|left, right| right.cmp(left));
+        work.extend(successors);
+    }
+    reached
+}
+
 impl MirFlow {
     fn value(self) -> Option<u32> {
         match self {
@@ -56443,6 +56472,7 @@ fn serialize_mir_cleanup_plans(
         let lists = &cleanup_lists[fid];
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
             .map_err(|error| error.to_string())?;
+        let reachable = reachable_mir_blocks(function);
         let mut offsets = BTreeMap::new();
         let mut old_len = 0_u32;
         for block in &function.blocks {
@@ -56451,6 +56481,9 @@ fn serialize_mir_cleanup_plans(
         }
         let synthetic_start = old_len;
         for block in &function.blocks {
+            if !reachable.contains(&block.id) {
+                continue;
+            }
             if let mir::Terminator::Switch {
                 cases, otherwise, ..
             } = &block.terminator
@@ -56543,6 +56576,9 @@ fn serialize_mir_cleanup_plans(
         let mut synthetic_pc = synthetic_start;
         let mut synthetic = Vec::<(&mir::Edge, usize)>::new();
         for block in &function.blocks {
+            if !reachable.contains(&block.id) {
+                continue;
+            }
             let offset = offsets[&block.id];
             if let Some(points) = lists.get(&block.id) {
                 for (index, state) in points.iter().enumerate() {
@@ -56905,6 +56941,7 @@ fn emit_mir_function(
     constants: &mut Vec<Constant>,
 ) -> Vec<TypeId> {
     let mir_function = function;
+    let reachable = reachable_mir_blocks(mir_function);
 
     fn target_params<'a>(
         function: &'a mir::Function,
@@ -57015,6 +57052,9 @@ fn emit_mir_function(
     let mut switch_offsets = BTreeMap::new();
     let mut synthetic_edges = Vec::new();
     for block in &function.blocks {
+        if !reachable.contains(&block.id) {
+            continue;
+        }
         let mir::Terminator::Switch {
             cases, otherwise, ..
         } = &block.terminator
@@ -58339,6 +58379,84 @@ mod mir_edge_emission_tests {
         );
         assert!(matches!(emitted.code[2], Instruction::Return { .. }));
         assert!(matches!(emitted.code[3], Instruction::Return { .. }));
+    }
+
+    #[test]
+    fn unreachable_switch_edges_do_not_emit_orphan_value_transfers() {
+        // MIR layout retains unreachable blocks for diagnostics.  The stale
+        // edge source is deliberately never defined: emitting the synthetic
+        // switch transfer would append `Move { dst: 3, src: 2 }` after the
+        // entry Return, which the GRBC decoder correctly rejects as an
+        // uninferred register use.
+        let dead_switch = function(
+            0,
+            "dead-switch-transfer",
+            UNIT,
+            vec![UNIT, U32, I64, I64],
+            vec![
+                block(0, vec![], vec![], mir::Terminator::Return { value: None }),
+                block(
+                    1,
+                    vec![],
+                    vec![statement(mir::InstructionKind::Const {
+                        dst: 1,
+                        value: Constant::U32(0),
+                    })],
+                    mir::Terminator::Switch {
+                        discr: operand(1, mir::UseMode::Copy),
+                        cases: vec![(
+                            Constant::U32(0),
+                            mir::Edge {
+                                target: 2,
+                                args: vec![operand(2, mir::UseMode::Move)],
+                            },
+                        )],
+                        otherwise: mir::Edge {
+                            target: 3,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    2,
+                    vec![parameter(3, I64, mir::BlockParamRole::Ordinary)],
+                    vec![],
+                    mir::Terminator::Return { value: None },
+                ),
+                block(3, vec![], vec![], mir::Terminator::Return { value: None }),
+            ],
+        );
+        let mut emitted = Artifact::default();
+        let register_types = emit_mir_function(
+            &dead_switch,
+            &std::collections::BTreeMap::new(),
+            &mut emitted.code,
+            &mut emitted.constants,
+        );
+        emitted.functions.push(BytecodeFunction {
+            name: dead_switch.name.clone(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types,
+            code_start: 0,
+            code_len: emitted.code.len() as u32,
+            label_slot_count: 0,
+        });
+        assert!(
+            !emitted.code.iter().any(|instruction| matches!(
+                instruction,
+                Instruction::Move { dst: 3, src: 2 }
+            )),
+            "a dead switch must not append a synthetic edge transfer"
+        );
+        let program = mir::Program {
+            functions: vec![dead_switch],
+        };
+        emitted.cleanups = serialize_mir_cleanup_plans(&emitted, &program, &[]).unwrap();
+        verify(emitted).expect("dead synthetic edge must not leak into GRBC value flow");
     }
 
     #[test]
