@@ -2071,11 +2071,13 @@ fn frame_from_verified_values(
     receiver: Value,
     return_dst: Option<u32>,
 ) -> Frame {
-    let mut registers = vec![None; f.register_types.len()];
-    registers[0] = Some(receiver);
-    for (i, v) in args.into_iter().enumerate() {
-        registers[i + 1] = Some(v)
-    }
+    // The verified entry path already owns its receiver and arguments. Build
+    // those initialized slots first, then reserve `None` only for the local
+    // tail instead of zero-filling and immediately overwriting every input.
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    registers.extend(args.into_iter().map(Some));
+    registers.resize_with(f.register_types.len(), || None);
     Frame {
         function,
         pc: 0,
