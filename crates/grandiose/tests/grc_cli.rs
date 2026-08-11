@@ -465,6 +465,10 @@ fn disk_native_incremental_cache_reuses_sibling_object_across_processes() {
         first.is_file() && second.is_file(),
         "each invocation must link a fresh executable"
     );
+    assert!(
+        Command::new(&second).status().unwrap().success(),
+        "a durable native-link cache hit must preserve executable permissions"
+    );
     let victim = fs::read_dir(&cache)
         .unwrap()
         .filter_map(Result::ok)
@@ -489,6 +493,10 @@ fn disk_native_incremental_cache_reuses_sibling_object_across_processes() {
         "digest mismatch must rebuild the cached object"
     );
     assert!(recovered.is_file());
+    assert!(
+        Command::new(&recovered).status().unwrap().success(),
+        "a reused durable native executable must remain executable"
+    );
 }
 
 #[test]

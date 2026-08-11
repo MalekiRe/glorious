@@ -1902,7 +1902,7 @@ fn materialize_disk_linked_native_executable(
     std::fs::create_dir_all(key.executable.parent().expect("link cache parent"))
         .map_err(|error| format!("could not create native link cache: {error}"))?;
     let _lock = DiskCacheLock::acquire(key.lock.clone())?;
-    let bytes = if let Some(bytes) = key.read_valid(inputs, &link_abi) {
+    let _bytes = if let Some(bytes) = key.read_valid(inputs, &link_abi) {
         bytes
     } else {
         let temporary = disk_cache_temporary(
@@ -1948,9 +1948,18 @@ fn materialize_disk_linked_native_executable(
         }
         bytes
     };
-    std::fs::write(output, bytes).map_err(|error| {
+    std::fs::copy(&key.executable, output).map_err(|error| {
         format!(
             "could not materialize cached native executable {}: {error}",
+            output.display()
+        )
+    })?;
+    let permissions = std::fs::metadata(&key.executable)
+        .map_err(|error| format!("could not read cached native executable permissions: {error}"))?
+        .permissions();
+    std::fs::set_permissions(output, permissions).map_err(|error| {
+        format!(
+            "could not preserve cached native executable permissions {}: {error}",
             output.display()
         )
     })
