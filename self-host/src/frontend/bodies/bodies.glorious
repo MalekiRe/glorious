@@ -201,6 +201,11 @@ enum ExprKind {
     Perform(EffectOperationSyntax, ExprEdgeRange),
     Block(ExprEdgeRange),
     ContextBlock(ExprEdgeRange),
+    // Keep list syntax distinct from tuples even though both own ordered
+    // expression edges. The bootstrap frontend accepts lists structurally;
+    // semantic lowering remains responsible for its existing unsupported
+    // collection diagnostic.
+    List(ExprEdgeRange),
     Tuple(ExprEdgeRange),
     Construction(ExpressionNameRange, ExprEdgeRange),
     Projection(ExprId, ExpressionNameRange),
@@ -257,6 +262,7 @@ pub enum BodyExpressionView<'a> {
     Perform(EffectOperationSyntax, Slice<'a, ExprEdge>),
     Block(Slice<'a, ExprEdge>),
     ContextBlock(Slice<'a, ExprEdge>),
+    List(Slice<'a, ExprEdge>),
     Tuple(Slice<'a, ExprEdge>),
     Construction(ExpressionNameView, Slice<'a, ExprEdge>),
     Projection(ExprId, ExpressionNameView),
@@ -466,6 +472,13 @@ expression_child_set(
                 usize_from_u32(range.start + child)
             ), replacement);
             ExprKind::Block(range)
+        },
+        ExprKind::List(range) => {
+            expression_edge_set_value(Vec::index_mut(
+                &mut value.edges,
+                usize_from_u32(range.start + child)
+            ), replacement);
+            ExprKind::List(range)
         },
         ExprKind::Tuple(range) => {
             expression_edge_set_value(Vec::index_mut(
@@ -1765,6 +1778,8 @@ pub expression_view<'a>(
             BodyExpressionView::Block(expression_edges(value, children)),
         ExprKind::ContextBlock(children) =>
             BodyExpressionView::ContextBlock(expression_edges(value, children)),
+        ExprKind::List(children) =>
+            BodyExpressionView::List(expression_edges(value, children)),
         ExprKind::Tuple(children) =>
             BodyExpressionView::Tuple(expression_edges(value, children)),
         ExprKind::Construction(_, children) => BodyExpressionView::Construction(
@@ -2477,6 +2492,23 @@ push_tuple(
     push_node(
         value,
         ExprKind::Tuple(edges),
+        token_range(start, end)
+    )
+}
+
+push_list(
+    value: &mut BodyParser,
+    elements: &Vec<ExprId>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let edge_start = super::syntax::range_mark(&value.edges);
+    push_expression_edges(value, elements, 0);
+    let edge_end = Vec::len(&value.edges);
+    let edges = edge_range(edge_start, edge_end);
+    push_node(
+        value,
+        ExprKind::List(edges),
         token_range(start, end)
     )
 }
@@ -3290,6 +3322,39 @@ parse_tuple_tail(
         Result::Err(
             BodyError::ExpectedTupleDelimiter(value.tokens.position, start)
         )
+    }
+}
+
+parse_list_tail(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize,
+    elements: &mut Vec<ExprId>
+) -> Result<ExprId, BodyError> {
+    if(eat_token(value, source, TokenPattern::RBracket)) {
+        Result::Ok(push_list(value, &*elements, start, value.tokens.position))
+    } else {
+        let element = try(parse_expression(
+            original, source, declarations, nominal, value, owner, 0, depth
+        ), @parse_list_tail);
+        Vec::push(&mut *elements, element);
+        if(eat_token(value, source, TokenPattern::RBracket)) {
+            Result::Ok(push_list(value, &*elements, start, value.tokens.position))
+        } else if(eat_token(value, source, TokenPattern::Comma)) {
+            parse_list_tail(
+                original, source, declarations, nominal, value, owner, depth,
+                start, elements
+            )
+        } else {
+            Result::Err(BodyError::ExpectedTupleDelimiter(
+                value.tokens.position, start
+            ))
+        }
     }
 }
 
@@ -4564,6 +4629,14 @@ parse_atom(
                     start,
                     true,
                     &mut statements
+                )
+            },
+            TokenKind::LBracket => {
+                value.tokens.position = start + 1;
+                let elements = Vec::new();
+                parse_list_tail(
+                    original, source, declarations, nominal, value, owner,
+                    depth + 1, start, &mut elements
                 )
             },
             _ => Result::Err(BodyError::ExpectedExpression(start, start))

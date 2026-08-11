@@ -14286,6 +14286,14 @@ elaborate_expression(
             expression,
             expected
         ),
+        // Lists are retained by the frontend for source/AST parity. The
+        // bootstrap compiler has no collection literal lowering yet either,
+        // so preserve its explicit semantic rejection rather than silently
+        // treating a list as a tuple.
+        super::bodies::BodyExpressionView::List(_) =>
+            Result::Err(ElaborationError::UnsupportedExpression(
+                super::bodies::expression_token_start_at(body, expression)
+            )),
         super::bodies::BodyExpressionView::LabelDestination(label, annotation, child) =>
             elaborate_label_destination(
                 original,

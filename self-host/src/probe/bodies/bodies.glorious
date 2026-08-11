@@ -1008,6 +1008,13 @@ write_expression_kind(
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(statements)));
             write_block_statements(output, original, source, value, statements)
         },
+        BodyExpressionView::List(elements) => {
+            // This is an AST probe tag, not a bytecode collection encoding:
+            // bootstrap accepts list syntax before later semantic rejection.
+            ByteBuf::push(output, 23);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(elements)));
+            write_children(output, original, source, value, elements)
+        },
         BodyExpressionView::Tuple(elements) => {
             ByteBuf::push(output, 9);
             ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(elements)));

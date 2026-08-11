@@ -620,6 +620,13 @@ fn encode_expression(
             }
             encode_expression(output, program, source, body)?;
         }
+        ExprKind::List(elements) => {
+            output.push(23);
+            push_u32(output, elements.len().try_into().map_err(|_| ())?);
+            for element in elements.iter() {
+                encode_expression(output, program, source, element)?;
+            }
+        }
         ExprKind::Tuple(elements) => {
             output.push(9);
             push_u32(output, elements.len().try_into().map_err(|_| ())?);
@@ -1158,6 +1165,26 @@ fn self_host_body_numeric_source_payloads_match_bootstrap_ast() {
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_host_body_list_syntax_matches_bootstrap_ast_before_semantic_lowering() {
+    // Lists are a bootstrap parser feature even though the bootstrap semantic
+    // pipeline still rejects collection literals. This is intentionally an
+    // AST/probe gate: it makes the self-host frontend preserve the same list
+    // shape and trailing-comma behavior without claiming array MIR support.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "main() { [1, pair(2, 3), [4,],] }";
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+            assert_eq!(self_host_body_output(&[source]), expected);
         })
         .unwrap()
         .join()
