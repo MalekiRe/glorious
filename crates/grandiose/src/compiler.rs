@@ -55634,7 +55634,19 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                     pending.push(*target as usize);
                     pending.push(pc + 1);
                 }
-                Instruction::Return { .. } | Instruction::Abort { .. }
+                // These transfer directly to the caller/continuation (or
+                // abort) and therefore have no fallthrough bytecode edge.
+                // Treating them as ordinary instructions preserves stale
+                // cleanup tails, whose registers may have no reachable
+                // defining instruction after control-flow simplification.
+                Instruction::TailCall { .. }
+                | Instruction::TailCallSelf { .. }
+                | Instruction::TailCallKnownReceiver { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::Leave { .. }
+                | Instruction::Return { .. }
+                | Instruction::Abort { .. }
                 | Instruction::Unreachable => {}
                 _ => pending.push(pc + 1),
             }
@@ -58602,6 +58614,48 @@ mod mir_edge_emission_tests {
         let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
         let decoded = Artifact::decode(&artifact.encode()).unwrap();
         verify(decoded).unwrap();
+    }
+
+    #[test]
+    fn peephole_removes_unreachable_cleanup_after_tail_call() {
+        // Tail calls do not return to the next bytecode instruction.  A
+        // cleanup tail retained after one can mention an owner defined only
+        // on a now-dead source path, exactly like the production scalar_max
+        // lowering regression.
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::TailCall {
+                    function: 0,
+                    args: vec![],
+                },
+                Instruction::Drop { register: 2 },
+                Instruction::Return { src: Some(1) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_tail_cleanup".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, UNIT, UNIT],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [Instruction::TailCall {
+                function: 0,
+                args: vec![],
+            }]
+        );
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT]);
     }
 
     #[test]
