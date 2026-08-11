@@ -19,7 +19,7 @@ use supervisor::{
     MEMORY_REPORT_FD_ENV, SupervisorError, SupervisorLimits, WorkerTermination, run_worker,
 };
 
-const USAGE: &str = "usage:\n  grvm --capabilities\n  grvm verify FILE\n  grvm functions FILE [PATTERN]\n  grvm inspect FILE FUNCTION PC [RADIUS]\n  grvm verify-seeded FILE\n  grvm complete-seeded FILE OUTPUT\n  grvm inspect-seeded FILE FUNCTION PC [RADIUS]\n  grvm run [--seed-identity ID] [--time-limit 120s] [--memory-limit 4096MiB] [--allow CAPABILITY]... FILE [-- args...]";
+const USAGE: &str = "usage:\n  grvm --capabilities\n  grvm verify FILE\n  grvm native-preflight FILE\n  grvm functions FILE [PATTERN]\n  grvm inspect FILE FUNCTION PC [RADIUS]\n  grvm verify-seeded FILE\n  grvm complete-seeded FILE OUTPUT\n  grvm inspect-seeded FILE FUNCTION PC [RADIUS]\n  grvm run [--seed-identity ID] [--time-limit 120s] [--memory-limit 4096MiB] [--allow CAPABILITY]... FILE [-- args...]";
 const DEFAULT_WALL_TIME: Duration = Duration::from_secs(120);
 const DEFAULT_ADDRESS_SPACE_BYTES: u64 = 4096 * 1024 * 1024;
 
@@ -148,6 +148,9 @@ fn main() -> ExitCode {
 enum Cli {
     Capabilities,
     Verify(PathBuf),
+    /// Decode and verify an ordinary artifact for a future native lowering
+    /// backend. This never instantiates the bytecode VM.
+    NativePreflight(PathBuf),
     Functions {
         file: PathBuf,
         pattern: Option<String>,
@@ -200,6 +203,12 @@ fn parse(mut args: Vec<OsString>) -> Result<Cli, String> {
                 return Err("verify expects exactly one bytecode file".into());
             }
             Ok(Cli::Verify(PathBuf::from(args.remove(0))))
+        }
+        Some("native-preflight") => {
+            if args.len() != 1 {
+                return Err("native-preflight expects exactly one bytecode file".into());
+            }
+            Ok(Cli::NativePreflight(PathBuf::from(args.remove(0))))
         }
         Some("functions") => {
             if !(1..=2).contains(&args.len()) {
@@ -437,6 +446,7 @@ fn dispatch(command: Cli) -> u8 {
             0
         }
         Cli::Verify(file) => report(verify_file(&file)),
+        Cli::NativePreflight(file) => report(native_preflight_file(&file)),
         Cli::Functions { file, pattern } => report(list_functions(&file, pattern.as_deref())),
         Cli::Inspect {
             file,
@@ -512,6 +522,16 @@ fn supervise(
 }
 
 fn verify_file(path: &Path) -> Result<u8, AppError> {
+    load(path)?;
+    Ok(0)
+}
+
+/// Establish the only currently-valid entry boundary for artifact-to-native
+/// lowering. Keeping this separate from `run` matters: a successful preflight
+/// proves that decode and verification accepted the exact artifact bytes, but
+/// says nothing about execution and therefore cannot accidentally turn the VM
+/// into a purported native stage.
+fn native_preflight_file(path: &Path) -> Result<u8, AppError> {
     load(path)?;
     Ok(0)
 }
@@ -851,6 +871,33 @@ mod tests {
             parse(strings(&["verify", "program.grbc"])),
             Ok(Cli::Verify("program.grbc".into()))
         );
+    }
+
+    #[test]
+    fn parses_native_preflight_without_a_vm_run_route() {
+        assert_eq!(
+            parse(strings(&["native-preflight", "stage2.grbc"])),
+            Ok(Cli::NativePreflight("stage2.grbc".into()))
+        );
+        assert!(parse(strings(&["native-preflight"])).is_err());
+        assert!(parse(strings(&["native-preflight", "a.grbc", "extra"])).is_err());
+    }
+
+    #[test]
+    fn native_preflight_rejects_malformed_artifacts_at_decode_before_lowering() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("malformed.grbc");
+        fs::write(&artifact, b"not a grandiose artifact").unwrap();
+        let error = native_preflight_file(&artifact).unwrap_err();
+        assert!(matches!(error, AppError::Decode(DecodeError::Truncated)));
+    }
+
+    #[test]
+    fn native_preflight_accepts_a_verified_artifact_without_executing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("library.grbc");
+        fs::write(&artifact, grandiose_vm::Artifact::default().encode()).unwrap();
+        assert_eq!(native_preflight_file(&artifact).unwrap(), 0);
     }
 
     #[test]
