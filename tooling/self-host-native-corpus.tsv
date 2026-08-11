@@ -4,6 +4,21 @@
 # file at a time.  Multi-file Rust integration fixtures remain represented by
 # their focused self-host parity suites until the self-host CLI accepts bundles.
 contextual-pub-headers	accept	crates/grandiose/tests/fixtures/contextual_pub_headers.glorious
+arithmetic-calls	accept	tooling/self-host-native-fixtures/arithmetic-calls.glorious
+associated-call	accept	tooling/self-host-native-fixtures/associated-call.glorious
+byte-char-literals	accept	tooling/self-host-native-fixtures/byte-char-literals.glorious
+enum-match	accept	tooling/self-host-native-fixtures/enum-match.glorious
+reference-reborrow	accept	tooling/self-host-native-fixtures/reference-reborrow.glorious
+struct-deconstruction	accept	tooling/self-host-native-fixtures/struct-deconstruction.glorious
+invalid-arity	reject	tooling/self-host-native-fixtures/invalid-arity.glorious
+invalid-duplicate-field-pattern	reject	tooling/self-host-native-fixtures/invalid-duplicate-field-pattern.glorious
+invalid-malformed-callable-reference	reject	tooling/self-host-native-fixtures/invalid-malformed-callable-reference.glorious
+invalid-missing-binding-name	reject	tooling/self-host-native-fixtures/invalid-missing-binding-name.glorious
+invalid-return-type	reject	tooling/self-host-native-fixtures/invalid-return-type.glorious
+invalid-unclosed-block	reject	tooling/self-host-native-fixtures/invalid-unclosed-block.glorious
+invalid-unknown-field-pattern	reject	tooling/self-host-native-fixtures/invalid-unknown-field-pattern.glorious
+invalid-unknown-name	reject	tooling/self-host-native-fixtures/invalid-unknown-name.glorious
+invalid-unterminated-string	reject	tooling/self-host-native-fixtures/invalid-unterminated-string.glorious
 malformed-modules-and-uses	reject	crates/grandiose/tests/fixtures/malformed-modules-and-uses.glorious
 module-frontend-conformance	reject	crates/grandiose/tests/fixtures/module_frontend_conformance.glorious
 use-trees	reject	crates/grandiose/tests/fixtures/use_trees.glorious

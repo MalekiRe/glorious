@@ -1,0 +1,9 @@
+// Bootstrap corpus: mutable-reference calls and read-only reborrowing.
+increment(value: &mut i64) -> () { *value = *value + 1; () }
+observe(value: &i64) -> i64 { *value }
+answer() -> i64 {
+    let value = 41;
+    increment(&mut value);
+    observe(&value)
+}
+main() -> { answer(); () }

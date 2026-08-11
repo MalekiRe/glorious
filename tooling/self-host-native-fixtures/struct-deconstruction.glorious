@@ -1,0 +1,7 @@
+// Bootstrap corpus: nominal construction and exhaustive field deconstruction.
+struct Parcel { value: i64 }
+answer() -> i64 {
+    let Parcel { value } = Parcel { value: 42 };
+    value
+}
+main() -> { answer(); () }

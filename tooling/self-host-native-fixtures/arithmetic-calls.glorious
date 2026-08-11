@@ -1,0 +1,4 @@
+// Bootstrap corpus: scalar arithmetic and direct calls.
+twice(value: i64) -> i64 { value + value }
+answer() -> i64 { twice(21) }
+main() -> { answer(); () }

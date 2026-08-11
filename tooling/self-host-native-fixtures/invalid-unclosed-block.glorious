@@ -1,0 +1,2 @@
+// Bootstrap corpus rejection: function blocks must close.
+main() -> { ()

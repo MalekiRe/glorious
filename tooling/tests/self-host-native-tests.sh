@@ -50,3 +50,10 @@ if G1_SELF_HOST_NATIVE_RUNNER="$scratch/fake-runner" "$repo_root/tooling/self-ho
 fi
 rg -q 'expected accept, native compiler exited 17' "$scratch/wrong.out"
 rg -q 'synthetic rejection' "$scratch/wrong.out"
+
+# The checked-in corpus is deliberately larger than the original four module
+# fixtures and must retain both successful and failing single-source cases.
+default_list=$("$repo_root/tooling/self-host-native-tests.sh" list)
+[[ $(wc -l <<< "$default_list") -eq 19 ]] || { echo "unexpected native corpus size" >&2; exit 1; }
+[[ $default_list == *$'arithmetic-calls\taccept\t'* ]] || { echo "missing arithmetic accept" >&2; exit 1; }
+[[ $default_list == *$'invalid-return-type\treject\t'* ]] || { echo "missing type rejection" >&2; exit 1; }
