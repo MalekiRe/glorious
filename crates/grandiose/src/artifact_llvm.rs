@@ -1,10 +1,10 @@
-//! Fail-closed LLVM lowering for the first scalar `.grbc` AOT slice.
+//! Fail-closed LLVM lowering for the first scalar-and-value-aggregate `.grbc` AOT slice.
 //!
 //! This is intentionally an artifact boundary, not a second source compiler:
 //! callers hand it encoded bytecode, which is decoded and verified before a
 //! single LLVM instruction is emitted.  It does not construct a [`Vm`] or use
 //! any interpreter entry point.  The supported surface is deliberately small
-//! (direct scalar functions with ordinary control flow); every other valid G1 instruction
+//! (direct scalar/value-aggregate functions with ordinary control flow); every other valid G1 instruction
 //! remains an explicit lowering error until it has a native ABI.
 
 use std::{error::Error, fmt};
@@ -79,9 +79,8 @@ pub fn emit_verified_artifact_llvm_ir(
     let entry = artifact
         .entry_function
         .ok_or(ArtifactLlvmError::MissingEntry)?;
-    let mut output = String::from(
-        "; Grandiose verified .grbc scalar AOT\nsource_filename = \"grandiose.grbc\"\n\n",
-    );
+    let mut output =
+        String::from("; Grandiose verified .grbc AOT\nsource_filename = \"grandiose.grbc\"\n\n");
     for (function_id, function) in artifact.functions.iter().enumerate() {
         emit_function(&mut output, artifact, function_id as u32, function)?;
         output.push('\n');
@@ -151,7 +150,7 @@ fn emit_function(
         .map(|ty| llvm_type(artifact, function_id, ty))
         .collect::<Result<Vec<_>, _>>()?;
     for (register, llvm_ty) in register_types.iter().enumerate() {
-        if *llvm_ty != "void" {
+        if llvm_ty != "void" {
             output.push_str(&format!("  %slot{register} = alloca {llvm_ty}\n"));
         }
     }
@@ -174,7 +173,10 @@ fn emit_function(
         let instruction_id = offset as u32;
         output.push_str(&format!("bb{instruction_id}:\n"));
         match instruction {
-            Instruction::Nop | Instruction::Drop { .. } => {
+            // This subset admits only plain scalar/value aggregates, so their
+            // ownership bookkeeping has no native destructor or allocation to
+            // perform. The verifier has already validated the consuming use.
+            Instruction::Nop | Instruction::Drop { .. } | Instruction::Deconstruct { .. } => {
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
             Instruction::Const { dst, constant } => {
@@ -254,7 +256,7 @@ fn emit_function(
                 )?;
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
-            Instruction::Return { src } => match (result, src) {
+            Instruction::Return { src } => match (result.as_str(), src) {
                 ("void", _) => output.push_str("  ret void\n"),
                 (_, Some(src)) => {
                     let value = emit_load(
@@ -269,6 +271,120 @@ fn emit_function(
                 }
                 _ => return Err(unsupported(function_id, instruction_id, "return shape")),
             },
+            Instruction::Construct {
+                dst,
+                ty,
+                variant,
+                fields,
+            } => {
+                if variant.is_some() {
+                    return Err(unsupported(function_id, instruction_id, "enum construct"));
+                }
+                let destination_ty = *function
+                    .register_types
+                    .get(*dst as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+                if destination_ty != *ty {
+                    return Err(unsupported(
+                        function_id,
+                        instruction_id,
+                        "construct destination type",
+                    ));
+                }
+                let field_types = aggregate_fields(artifact, function_id, *ty)?;
+                if field_types.len() != fields.len() {
+                    return Err(unsupported(function_id, instruction_id, "construct arity"));
+                }
+                let aggregate_ty =
+                    register_type(&register_types, function_id, instruction_id, *dst)?;
+                let mut value = "undef".to_owned();
+                for (field, (register, field_ty)) in fields.iter().zip(field_types).enumerate() {
+                    let source_ty =
+                        *function
+                            .register_types
+                            .get(*register as usize)
+                            .ok_or_else(|| {
+                                unsupported(function_id, instruction_id, "invalid register")
+                            })?;
+                    if source_ty != field_ty {
+                        return Err(unsupported(
+                            function_id,
+                            instruction_id,
+                            "construct field type",
+                        ));
+                    }
+                    let field_value = emit_load(
+                        output,
+                        &register_types,
+                        function_id,
+                        instruction_id,
+                        *register,
+                        &mut temporary,
+                    )?;
+                    let name = format!("%v{temporary}");
+                    temporary += 1;
+                    output.push_str(&format!(
+                        "  {name} = insertvalue {aggregate_ty} {value}, {} {field_value}, {field}\n",
+                        llvm_type(artifact, function_id, field_ty)?,
+                    ));
+                    value = name;
+                }
+                emit_store(
+                    output,
+                    &register_types,
+                    function_id,
+                    instruction_id,
+                    *dst,
+                    &value,
+                )?;
+                emit_fallthrough(output, function, function_id, instruction_id)?;
+            }
+            Instruction::ProjectMove { dst, src, field }
+            | Instruction::ProjectCopy { dst, src, field } => {
+                let source_ty = *function
+                    .register_types
+                    .get(*src as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+                let field_types = aggregate_fields(artifact, function_id, source_ty)?;
+                let field_ty = *field_types
+                    .get(*field as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "aggregate field"))?;
+                let destination_ty = *function
+                    .register_types
+                    .get(*dst as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+                if destination_ty != field_ty {
+                    return Err(unsupported(
+                        function_id,
+                        instruction_id,
+                        "projection destination type",
+                    ));
+                }
+                let aggregate_ty =
+                    register_type(&register_types, function_id, instruction_id, *src)?;
+                let aggregate = emit_load(
+                    output,
+                    &register_types,
+                    function_id,
+                    instruction_id,
+                    *src,
+                    &mut temporary,
+                )?;
+                let name = format!("%v{temporary}");
+                temporary += 1;
+                output.push_str(&format!(
+                    "  {name} = extractvalue {aggregate_ty} {aggregate}, {field}\n"
+                ));
+                emit_store(
+                    output,
+                    &register_types,
+                    function_id,
+                    instruction_id,
+                    *dst,
+                    &name,
+                )?;
+                emit_fallthrough(output, function, function_id, instruction_id)?;
+            }
             Instruction::Jump { target } => {
                 check_target(function, function_id, instruction_id, *target)?;
                 output.push_str(&format!("  br label %bb{target}\n"));
@@ -352,7 +468,7 @@ fn emit_function(
                 }
                 let arguments = arguments.join(", ");
                 let callee_result = llvm_type(artifact, function_id, callee_function.return_type)?;
-                match (dst, callee_result) {
+                match (dst, callee_result.as_str()) {
                     (Some(_), "void") => {
                         return Err(unsupported(
                             function_id,
@@ -398,20 +514,20 @@ fn emit_function(
 }
 
 fn register_type<'a>(
-    register_types: &'a [&'static str],
+    register_types: &'a [String],
     function: u32,
     instruction: u32,
     register: u32,
 ) -> Result<&'a str, ArtifactLlvmError> {
     register_types
         .get(register as usize)
-        .copied()
+        .map(String::as_str)
         .ok_or_else(|| unsupported(function, instruction, "unavailable register"))
 }
 
 fn emit_load(
     output: &mut String,
-    register_types: &[&'static str],
+    register_types: &[String],
     function: u32,
     instruction: u32,
     register: u32,
@@ -429,7 +545,7 @@ fn emit_load(
 
 fn emit_store(
     output: &mut String,
-    register_types: &[&'static str],
+    register_types: &[String],
     function: u32,
     instruction: u32,
     register: u32,
@@ -475,20 +591,49 @@ fn unsupported(function: u32, instruction: u32, opcode: &'static str) -> Artifac
     }
 }
 
-fn llvm_type(
+fn llvm_type(artifact: &Artifact, function: u32, ty: TypeId) -> Result<String, ArtifactLlvmError> {
+    match artifact.types.get(ty as usize).map(Type::representation) {
+        Some(Type::Unit) => Ok("void".into()),
+        Some(Type::U8 | Type::I8) => Ok("i8".into()),
+        Some(Type::U16 | Type::I16) => Ok("i16".into()),
+        Some(Type::U32 | Type::I32 | Type::Char) => Ok("i32".into()),
+        Some(Type::U64 | Type::I64 | Type::Usize | Type::Isize) => Ok("i64".into()),
+        Some(Type::U128 | Type::I128) => Ok("i128".into()),
+        Some(Type::F32) => Ok("float".into()),
+        Some(Type::F64) => Ok("double".into()),
+        Some(Type::Tuple { fields, .. }) => llvm_aggregate_type(artifact, function, fields),
+        Some(Type::Struct { fields, .. }) => llvm_aggregate_type(
+            artifact,
+            function,
+            &fields.iter().map(|field| field.ty).collect::<Vec<_>>(),
+        ),
+        _ => Err(ArtifactLlvmError::UnsupportedType { function, ty }),
+    }
+}
+
+fn llvm_aggregate_type(
+    artifact: &Artifact,
+    function: u32,
+    fields: &[TypeId],
+) -> Result<String, ArtifactLlvmError> {
+    let fields = fields
+        .iter()
+        .map(|field| llvm_type(artifact, function, *field))
+        .collect::<Result<Vec<_>, _>>()?;
+    if fields.iter().any(|field| field == "void") {
+        return Err(ArtifactLlvmError::UnsupportedType { function, ty: UNIT });
+    }
+    Ok(format!("{{ {} }}", fields.join(", ")))
+}
+
+fn aggregate_fields(
     artifact: &Artifact,
     function: u32,
     ty: TypeId,
-) -> Result<&'static str, ArtifactLlvmError> {
+) -> Result<Vec<TypeId>, ArtifactLlvmError> {
     match artifact.types.get(ty as usize).map(Type::representation) {
-        Some(Type::Unit) => Ok("void"),
-        Some(Type::U8 | Type::I8) => Ok("i8"),
-        Some(Type::U16 | Type::I16) => Ok("i16"),
-        Some(Type::U32 | Type::I32 | Type::Char) => Ok("i32"),
-        Some(Type::U64 | Type::I64 | Type::Usize | Type::Isize) => Ok("i64"),
-        Some(Type::U128 | Type::I128) => Ok("i128"),
-        Some(Type::F32) => Ok("float"),
-        Some(Type::F64) => Ok("double"),
+        Some(Type::Tuple { fields, .. }) => Ok(fields.clone()),
+        Some(Type::Struct { fields, .. }) => Ok(fields.iter().map(|field| field.ty).collect()),
         _ => Err(ArtifactLlvmError::UnsupportedType { function, ty }),
     }
 }
@@ -555,9 +700,10 @@ fn instruction_name(instruction: &Instruction) -> &'static str {
 mod tests {
     use std::{fs, process::Command};
 
+    use grandiose_vm::bytecode::Field;
     use grandiose_vm::{
         verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction, Primitive,
-        I64, UNIT,
+        Type, I64, UNIT,
     };
 
     use super::*;
@@ -683,5 +829,127 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn verified_tuple_and_nominal_values_emit_parseable_llvm_without_vm_execution() {
+        let tuple = 19;
+        let record = 20;
+        let mut artifact = Artifact {
+            entry_function: Some(0),
+            constants: vec![Constant::Unit, Constant::I64(20), Constant::I64(22)],
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    flags: 0,
+                    params: vec![],
+                    return_type: UNIT,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, UNIT, I64],
+                    code_start: 0,
+                    code_len: 4,
+                    label_slot_count: 0,
+                },
+                Function {
+                    name: "aggregate".into(),
+                    flags: 0,
+                    params: vec![],
+                    return_type: I64,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, I64, I64, tuple, record, I64],
+                    code_start: 4,
+                    code_len: 8,
+                    label_slot_count: 0,
+                },
+            ],
+            code: vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Call {
+                    dst: Some(2),
+                    function: 1,
+                    args: vec![],
+                },
+                Instruction::Drop { register: 2 },
+                Instruction::Return { src: Some(1) },
+                Instruction::Const {
+                    dst: 1,
+                    constant: 1,
+                },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 2,
+                },
+                Instruction::Construct {
+                    dst: 3,
+                    ty: tuple,
+                    variant: None,
+                    fields: vec![1, 2],
+                },
+                Instruction::ProjectCopy {
+                    dst: 5,
+                    src: 3,
+                    field: 1,
+                },
+                Instruction::ProjectMove {
+                    dst: 1,
+                    src: 3,
+                    field: 0,
+                },
+                Instruction::Construct {
+                    dst: 4,
+                    ty: record,
+                    variant: None,
+                    fields: vec![1, 5],
+                },
+                Instruction::ProjectMove {
+                    dst: 5,
+                    src: 4,
+                    field: 0,
+                },
+                Instruction::Return { src: Some(5) },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(artifact.types.len(), tuple as usize);
+        artifact.types.push(Type::Tuple {
+            fields: vec![I64, I64],
+            copy: true,
+        });
+        artifact.types.push(Type::Struct {
+            name: "Pair".into(),
+            fields: vec![
+                Field {
+                    name: "left".into(),
+                    ty: I64,
+                },
+                Field {
+                    name: "right".into(),
+                    ty: I64,
+                },
+            ],
+            copy: true,
+        });
+        let artifact = with_generated_cleanup_plans(artifact).unwrap();
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        assert!(ir.contains("insertvalue { i64, i64 }"));
+        assert!(ir.contains("extractvalue { i64, i64 }"));
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("aggregate.ll");
+        let object = directory.path().join("aggregate.o");
+        fs::write(&source, ir).unwrap();
+        let status = Command::new("clang")
+            .args(["-x", "ir", "-c"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(object.is_file());
     }
 }
