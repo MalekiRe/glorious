@@ -49633,15 +49633,18 @@ impl MirLowerer {
         let baseline_owned = self.owned.clone();
         let baseline_borrowed = self.borrowed.clone();
         let baseline_borrow_parents = self.borrow_parents.clone();
-        let join = self.label();
-        let result = self.allocate(result_type);
+        // A syntactically value-typed arm can still be terminal (for example
+        // by leaving an enclosing label).  Do not create the join parameter
+        // until an arm actually reaches it: otherwise an all-terminal match
+        // leaves an untyped, unreachable block parameter in GRBC.
+        let mut join = None;
         let mut continuations = BTreeMap::new();
         self.lower_match_tree(
             &roots,
             arms,
             &baseline_locals,
             &baseline_owned,
-            join,
+            &mut join,
             span,
             fallback,
             result_type,
@@ -49651,19 +49654,23 @@ impl MirLowerer {
             0,
             &mut continuations,
         );
-        self.mark_with_params(
-            join,
-            vec![mir::BlockParam {
-                register: result,
-                ty: result_type,
-                role: mir::BlockParamRole::ProtectedExitValue,
-            }],
-        );
         self.locals = baseline_locals;
         self.owned.clear();
         self.borrowed.clear();
         self.borrow_parents.clear();
-        MirFlow::Value(Some(result))
+        if let Some((destination, result)) = join {
+            self.mark_with_params(
+                destination,
+                vec![mir::BlockParam {
+                    register: result,
+                    ty: result_type,
+                    role: mir::BlockParamRole::ProtectedExitValue,
+                }],
+            );
+            MirFlow::Value(Some(result))
+        } else {
+            MirFlow::Diverged
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -49673,7 +49680,7 @@ impl MirLowerer {
         arms: &[TypedMatchArm],
         baseline_locals: &BTreeMap<core::LocalId, u32>,
         baseline_owned: &[u32],
-        join: u32,
+        join: &mut Option<(u32, u32)>,
         span: Span,
         fallback: Option<&TypedMatchFallback>,
         match_result: TypeId,
@@ -49759,8 +49766,11 @@ impl MirLowerer {
                             self.transfer_owner(owner);
                         }
                     }
+                    let (destination, _) = *join.get_or_insert_with(|| {
+                        (self.label(), self.allocate(match_result))
+                    });
                     self.terminate(mir::Terminator::Goto(mir::Edge {
-                        target: join,
+                        target: destination,
                         args: vec![Self::operand(handler_result, mir::UseMode::Move)],
                     }));
                 }
@@ -49800,8 +49810,11 @@ impl MirLowerer {
                     self.transfer_owner(owner);
                 }
             }
+            let (destination, _) = *join.get_or_insert_with(|| {
+                (self.label(), self.allocate(match_result))
+            });
             self.terminate(mir::Terminator::Goto(mir::Edge {
-                target: join,
+                target: destination,
                 args: vec![Self::operand(value, mir::UseMode::Move)],
             }));
         }
