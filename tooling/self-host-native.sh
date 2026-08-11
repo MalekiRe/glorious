@@ -17,9 +17,10 @@ usage:
   tooling/self-host-native.sh canonical-source <output.glorious>
   tooling/self-host-native.sh provenance <canonical-source.glorious> <stage1.tsv>
 
-`init` creates this worktree's private cache and optionally copies a verified
-baseline cache directory into it. The baseline is never modified or read from a
-shared writable location. `build` emits an O3 Wild-linked native self-host
+`init` creates this worktree's private cache and copies an available verified
+baseline cache directory into it once (or uses the optional explicit baseline).
+The baseline is never modified; every build writes only to this worktree.
+`build` emits an O3 Wild-linked native self-host
 compiler; `run` executes it; `smoke` compiles a tiny source program through
 that native compiler. `provenance` builds (or reuses) the canonical native
 stage-1 compiler and writes an immutable O3/Wild provenance manifest for it.
@@ -55,10 +56,20 @@ initialize() {
     fi
     # The shared Git-common-dir baseline is read-only. Its checked files are
     # copied into this worktree's own target directory exactly once by the
-    # dedicated seeder; all later writes stay below this worktree root.
+    # dedicated seeder; all later writes stay below this worktree root.  An
+    # absent default baseline is normal for the first worktree to build.
     if [[ -n "$seed" ]]; then
         "$route_root/tooling/seed-native-selfhost-cache.sh" \
             --worktree "$route_root" --baseline "$seed"
+    else
+        local common default_seed
+        common="$(git -C "$route_root" rev-parse --git-common-dir)"
+        [[ "$common" = /* ]] || common="$route_root/$common"
+        default_seed="$common/grandiose-native-selfhost-baseline"
+        if [[ -d "$default_seed" ]]; then
+            "$route_root/tooling/seed-native-selfhost-cache.sh" \
+                --worktree "$route_root" --baseline "$default_seed"
+        fi
     fi
     mkdir -p "$route_cache"
     local head

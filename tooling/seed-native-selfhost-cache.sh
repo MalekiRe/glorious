@@ -67,6 +67,15 @@ done < "$manifest"
 }
 
 destination="$worktree/target/self-host-native-cache"
+if [[ -e "$destination" ]]; then
+  # A seeding retry must never merge with, or overwrite, a cache that may have
+  # been produced by this worktree.  The caller can remove a known partial
+  # cache explicitly; all successful seeds are published atomically below.
+  [[ -d "$destination" ]] && [[ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
+    echo "seed-native-selfhost-cache: refusing to overwrite private cache: $destination" >&2
+    exit 1
+  }
+fi
 mkdir -p "$destination"
 stage=$(mktemp -d "$worktree/target/.self-host-native-cache.XXXXXX")
 cleanup() { rm -rf "$stage"; }
