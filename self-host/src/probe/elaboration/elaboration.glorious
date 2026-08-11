@@ -20,38 +20,6 @@ use super::super::frontend::scanner::ShellId;
 u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
 usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
 
-// Focused Typed-Core probe for future effect-row fixed-point tests.  It keeps
-// demands, handler candidates, and callable edges independently observable so
-// tests cannot accidentally bless a terminal-only handler shortcut.
-pub core_effect_summary_shape(
-    body: &TypedBody
-) -> (u32, u32, u32, u32, u32) {
-    let summary = super::super::frontend::elaboration::core_effect_summary(body);
-    (
-        u32_from_usize(
-            super::super::frontend::elaboration::core_effect_summary_required_count(
-                &summary
-            )
-        ),
-        u32_from_usize(
-            super::super::frontend::elaboration::core_effect_summary_handler_candidate_count(
-                &summary
-            )
-        ),
-        u32_from_usize(
-            super::super::frontend::elaboration::core_effect_summary_direct_call_count(
-                &summary
-            )
-        ),
-        u32_from_usize(
-            super::super::frontend::elaboration::core_effect_summary_indirect_call_count(
-                &summary
-            )
-        ),
-        super::super::frontend::elaboration::core_effect_summary_resume_count(&summary)
-    )
-}
-
 // Read-only debugger entry point for mapping the self-host frontend's stable
 // semantic type indices without running body elaboration or backend lowering.
 // A zero tuple indicates that an earlier frontend phase failed or the index is

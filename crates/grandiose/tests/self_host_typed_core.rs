@@ -2156,48 +2156,6 @@ fn self_host_effect_core_foundation_retains_control_and_rejects_lowering() {
 }
 
 #[test]
-fn self_host_effect_row_summary_is_conservative_and_keeps_fixed_point_edges() {
-    // This is intentionally a Core-model gate.  It proves the first effect
-    // analysis pass is a monotone demand/edge summary: handler syntax alone
-    // cannot erase a `perform` before a future coverage pass proves every
-    // operation and pattern path is closed.
-    let root = repository_root();
-    let core = fs::read_to_string(
-        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
-    )
-    .unwrap();
-    for required in [
-        "pub struct CoreEffectSummary",
-        "required_instances: Vec<EffectInstanceId>",
-        "handler_candidates: Vec<EffectInstanceId>",
-        "direct_calls: Vec<CallableInstanceId>",
-        "indirect_calls: Vec<CallableSignatureId>",
-        "pub core_effect_summary(body: &TypedBody) -> CoreEffectSummary",
-        "CoreComputationView::Perform(_, instance, _, _)",
-        "CoreComputationView::Handle(_, _, clauses)",
-        "CoreComputationView::Call(_, _, instance, _)",
-        "CoreComputationView::CallIndirect(_, _, signature, _)",
-        "core_effect_summary_handler_candidates",
-        "handlers are candidates only, never proof",
-    ] {
-        assert!(core.contains(required), "missing effect-row summary foundation: {required}");
-    }
-    let probe = fs::read_to_string(root.join("self-host/src/probe/elaboration/elaboration.glorious"))
-        .unwrap();
-    for required in [
-        "pub core_effect_summary_shape(",
-        "core_effect_summary(body)",
-        "core_effect_summary_required_count",
-        "core_effect_summary_handler_candidate_count",
-        "core_effect_summary_direct_call_count",
-        "core_effect_summary_indirect_call_count",
-        "core_effect_summary_resume_count",
-    ] {
-        assert!(probe.contains(required), "missing effect-row summary probe: {required}");
-    }
-}
-
-#[test]
 fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
     // This is a Core-model gate: closure layout and instruction selection
     // belong to the future backend integration, but Typed Core must preserve

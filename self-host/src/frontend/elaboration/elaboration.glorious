@@ -640,19 +640,6 @@ pub struct CoreHandlerClause {
     body: CoreComputationId
 }
 
-// Conservative inter-body effect analysis input. `required_instances` is a
-// demand set in source/Core order; `handler_candidates` deliberately is not
-// subtracted from it. A generic handler must first prove complete operation
-// and pattern coverage. Call edges remain symbolic for the later fixed point,
-// so this pass never fabricates an effect instance for an open row tail.
-pub struct CoreEffectSummary {
-    required_instances: Vec<EffectInstanceId>,
-    handler_candidates: Vec<EffectInstanceId>,
-    direct_calls: Vec<CallableInstanceId>,
-    indirect_calls: Vec<CallableSignatureId>,
-    resume_count: u32
-}
-
 
 struct IntegerConstant { low0: u32, low1: u32, high0: u32, high1: u32 }
 
@@ -1298,105 +1285,6 @@ F: Use<[0, 0]> {
         stop,
         visitor
     )
-}
-
-core_effect_summary_children(
-    body: &TypedBody,
-    node: CoreNodeId,
-    child: usize,
-    summary: &mut CoreEffectSummary
-) {
-    if(child < core_node_child_count(body, node)) {
-        core_effect_summary_node(
-            body,
-            core_node_child_at(body, node, child),
-            summary
-        );
-        core_effect_summary_children(body, node, child + 1, summary)
-    } else { () }
-}
-
-core_effect_summary_node(
-    body: &TypedBody,
-    node: CoreNodeId,
-    summary: &mut CoreEffectSummary
-) {
-    handle core_node_view(body, node) {
-        CoreNodeView::Value(_) => (),
-        CoreNodeView::Computation(computation) => handle computation {
-            CoreComputationView::Call(_, _, instance, _) => Vec::push(
-                &mut (*summary).direct_calls, instance
-            ),
-            CoreComputationView::CallIndirect(_, _, signature, _) => Vec::push(
-                &mut (*summary).indirect_calls, signature
-            ),
-            CoreComputationView::Perform(_, instance, _, _) => Vec::push(
-                &mut (*summary).required_instances, instance
-            ),
-            CoreComputationView::Resume(_, _, _) =>
-                (*summary).resume_count = (*summary).resume_count + 1,
-            CoreComputationView::Handle(_, _, clauses) =>
-                core_effect_summary_handler_candidates(clauses, summary, 0),
-            _ => ()
-        }
-    };
-    core_effect_summary_children(body, node, 0, summary)
-}
-
-core_effect_summary_handler_candidates<'a>(
-    clauses: Slice<'a, CoreHandlerClause>,
-    summary: &mut CoreEffectSummary,
-    index: usize
-) {
-    if(index < Slice::len(clauses)) {
-        let clause = handle Slice::get(clauses, index) {
-            Result::Err(_) => unreachable(), Result::Ok(found) => found
-        };
-        Vec::push(
-            &mut (*summary).handler_candidates,
-            core_handler_clause_instance(clause)
-        );
-        core_effect_summary_handler_candidates(clauses, summary, index + 1)
-    } else { () }
-}
-
-// Summarize all effect-control demand and callable edges in deterministic Core
-// order. The summary is monotone: handlers are candidates only, never proof
-// that a performed protocol may be removed from an outward effect row.
-pub core_effect_summary(body: &TypedBody) -> CoreEffectSummary {
-    let summary = CoreEffectSummary {
-        required_instances: Vec::new(),
-        handler_candidates: Vec::new(),
-        direct_calls: Vec::new(),
-        indirect_calls: Vec::new(),
-        resume_count: 0
-    };
-    core_effect_summary_node(
-        body,
-        CoreNodeId::Computation(typed_body_root(body)),
-        &mut summary
-    );
-    summary
-}
-
-pub core_effect_summary_required_count(value: &CoreEffectSummary) -> usize {
-    Vec::len(&value.required_instances)
-}
-
-pub core_effect_summary_handler_candidate_count(
-    value: &CoreEffectSummary
-) -> usize { Vec::len(&value.handler_candidates) }
-
-pub core_effect_summary_direct_call_count(value: &CoreEffectSummary) -> usize {
-    Vec::len(&value.direct_calls)
-}
-
-pub core_effect_summary_indirect_call_count(value: &CoreEffectSummary) -> usize {
-    Vec::len(&value.indirect_calls)
-}
-
-pub core_effect_summary_resume_count(value: &CoreEffectSummary) -> u32 {
-    value.resume_count
 }
 
 pub enum CoreRewriteVisit {
