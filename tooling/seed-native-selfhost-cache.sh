@@ -42,6 +42,8 @@ manifest="$baseline/manifest.tsv"
 
 schema=''
 revision=''
+optimization=''
+fingerprint=''
 entries=()
 while IFS=$'\t' read -r kind first second extra; do
   [[ -z "$kind" || "$kind" == \#* ]] && continue
@@ -49,12 +51,18 @@ while IFS=$'\t' read -r kind first second extra; do
   case "$kind" in
     schema) [[ -z "$schema" ]] || { echo "seed-native-selfhost-cache: duplicate schema" >&2; exit 1; }; schema="$first" ;;
     revision) [[ -z "$revision" ]] || { echo "seed-native-selfhost-cache: duplicate revision" >&2; exit 1; }; revision="$first" ;;
+    optimization) [[ -z "$optimization" ]] || { echo "seed-native-selfhost-cache: duplicate optimization" >&2; exit 1; }; optimization="$first" ;;
+    cache-fingerprint) [[ -z "$fingerprint" ]] || { echo "seed-native-selfhost-cache: duplicate cache fingerprint" >&2; exit 1; }; fingerprint="$first" ;;
     file) [[ -n "$first" && -n "$second" ]] || { echo "seed-native-selfhost-cache: malformed file row" >&2; exit 1; }; entries+=("$first"$'\t'"$second") ;;
     *) echo "seed-native-selfhost-cache: unknown manifest row: $kind" >&2; exit 1 ;;
   esac
 done < "$manifest"
-[[ "$schema" == 1 && -n "$revision" && ${#entries[@]} -gt 0 ]] || {
-  echo "seed-native-selfhost-cache: manifest must provide schema 1, revision, and files" >&2
+[[ "$schema" == 1 && -n "$revision" && "$optimization" == O3 && -n "$fingerprint" && ${#entries[@]} -gt 0 ]] || {
+  echo "seed-native-selfhost-cache: manifest must provide schema 1, revision, optimization O3, cache fingerprint, and files" >&2
+  exit 1
+}
+[[ "$fingerprint" == *"optimization=O3"* ]] || {
+  echo "seed-native-selfhost-cache: cache fingerprint is incompatible with required optimization=O3" >&2
   exit 1
 }
 
@@ -90,4 +98,5 @@ done < "$manifest"
 tmp_manifest="$destination/.manifest.tsv.$$"
 cp -- "$manifest" "$tmp_manifest"
 mv -- "$tmp_manifest" "$destination/manifest.tsv"
-printf 'seeded revision=%s files=%s cache=%s\n' "$revision" "${#entries[@]}" "$destination"
+printf 'seeded revision=%s optimization=%s fingerprint=%s files=%s cache=%s\n' \
+  "$revision" "$optimization" "$fingerprint" "${#entries[@]}" "$destination"

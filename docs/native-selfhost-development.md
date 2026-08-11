@@ -22,6 +22,12 @@ Each native self-host baseline consists of:
   revision, LLVM cache schema, target/options, runtime ABI, Clang version, and
   Wild version.
 
+Native self-host executable development is **O3-only**. A baseline manifest
+must contain `optimization\tO3` and a `cache-fingerprint` field that includes
+`optimization=O3`. The seeding helper rejects O0, O1, O2, missing levels, and
+fingerprints that do not explicitly bind the artifact to O3. This prevents a
+fast-but-different development artifact from leaking into native test runs.
+
 The canonical baseline is read-only and lives at:
 
 ```text
@@ -90,6 +96,9 @@ Development and host-side self-host tests should invoke the native self-host
 runner and its private cache. Native executable emission requires `wild`; it
 must fail clearly if Wild is unavailable rather than silently choosing another
 linker.
+
+The native runner uses O3 only. Debug or lower-optimization executable output
+must not seed, satisfy, or overwrite this cache.
 
 The runner must not silently fall back to VM execution when its native artifact
 is absent or incompatible. It should reseed/rebuild the private cache or emit
