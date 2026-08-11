@@ -10376,28 +10376,93 @@ elaborate_call(
                         expected,
                         token
                     ), @elaborate_call);
-                    let operand_start =
-                        super::syntax::range_mark(&value.core.operands);
-                    append_core_values(
-                        &mut value.core.operands,
-                        &arguments,
-                        0
-                    );
-                    let operand_end = Vec::len(&value.core.operands);
-                    let operands = operand_range(operand_start, operand_end);
-                    let call = push_computation(
-                        &mut value.core,
-                        result,
-                        CoreComputationKind::Call(
-                            shell,
-                            instance,
-                            operands
-                        )
-                    );
-                    Result::Ok(Elaborated {
-                        type_id: result,
-                        form: ElaboratedForm::Computation(call)
-                    })
+                    handle super::bodies::expression_view(body, callee) {
+                        // An immediately invoked `$generic` still goes
+                        // through the callable ABI. Its ordinary call
+                        // inference has already fully instantiated the
+                        // target, so this needs no lambda scheduler.
+                        super::bodies::BodyExpressionView::FunctionValue(_) => {
+                            if(interface_callable_effect_count(
+                                &*interfaces, callable
+                            ) != 0) {
+                                @elaborate_call(Result::Err(
+                                    ElaborationError::FunctionUsedAsValue(token)
+                                ))
+                            } else { () };
+                            let callable_parameters = Vec::new();
+                            for_range(Range::new(
+                                0,
+                                usize_from_u32(parameters.count)
+                            ), { ordinal => Vec::push(
+                                &mut callable_parameters,
+                                instantiate_call_type(
+                                    interfaces,
+                                    interface_callable_parameter_at(
+                                        &*interfaces, callable, ordinal
+                                    ),
+                                    generic_owner,
+                                    &substitutions
+                                )
+                            ) });
+                            let effects = Vec::new();
+                            let signature = intern_callable_signature(
+                                interfaces,
+                                &callable_parameters,
+                                result,
+                                &effects,
+                                None
+                            );
+                            let callable_type = intern_callable_type(
+                                interfaces, signature
+                            );
+                            let captures = Vec::new();
+                            let closure = try(push_closure_value(
+                                &mut value.core,
+                                callable_type,
+                                super::bodies::body_shell(body),
+                                callee,
+                                signature,
+                                Option::Some(instance),
+                                &captures
+                            ), @elaborate_call);
+                            Result::Ok(Elaborated {
+                                type_id: result,
+                                form: ElaboratedForm::Computation(
+                                    push_indirect_call(
+                                        &mut value.core,
+                                        result,
+                                        closure,
+                                        signature,
+                                        &arguments
+                                    )
+                                )
+                            })
+                        },
+                        _ => {
+                            let operand_start =
+                                super::syntax::range_mark(&value.core.operands);
+                            append_core_values(
+                                &mut value.core.operands,
+                                &arguments,
+                                0
+                            );
+                            let operand_end = Vec::len(&value.core.operands);
+                            let operands = operand_range(operand_start, operand_end);
+                            let call = push_computation(
+                                &mut value.core,
+                                result,
+                                CoreComputationKind::Call(
+                                    shell,
+                                    instance,
+                                    operands
+                                )
+                            );
+                            Result::Ok(Elaborated {
+                                type_id: result,
+                                form: ElaboratedForm::Computation(call)
+                            })
+                        }
+                    }
                 } else { Result::Err(
                         ElaborationError::ArgumentCountMismatch(
                             token,
