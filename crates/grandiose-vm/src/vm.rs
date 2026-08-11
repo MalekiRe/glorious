@@ -202,6 +202,7 @@ pub struct Vm {
     imports: Result<Vec<ResolvedImport>, HostLinkError>,
     slots: SlotStore,
     last_location: Cell<Option<(u32, u32)>>,
+    diagnostics_configured: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,6 +222,26 @@ enum CapturePruning {
 }
 
 const DEFAULT_MEMORY_PROFILE_STEPS: u64 = 1_000_000;
+
+/// Diagnostic controls are process configuration captured when constructing a
+/// VM. This keeps the ordinary `run` path free of repeated environment probes
+/// while preserving every configured diagnostic's existing per-run state.
+fn diagnostics_configured() -> bool {
+    diagnostics_configured_with(|name| std::env::var_os(name).is_some())
+}
+
+fn diagnostics_configured_with(mut present: impl FnMut(&str) -> bool) -> bool {
+    [
+        "G1_VM_ERROR_TRACE",
+        "G1_VM_FUNCTION",
+        "G1_VM_BREAKPOINT",
+        "G1_VM_MEMORY_PROFILE_MIB",
+        "G1_VM_PROGRESS_STEPS",
+        "G1_VM_HOT_FUNCTION_SAMPLE_STEPS",
+    ]
+    .into_iter()
+    .any(&mut present)
+}
 
 struct VmProgressTrace {
     interval: u64,
@@ -586,6 +607,7 @@ impl Vm {
             imports,
             slots: SlotStore::default(),
             last_location: Cell::new(None),
+            diagnostics_configured: diagnostics_configured(),
         }
     }
     pub fn from_artifact(artifact: Artifact) -> Result<Self, VerifyError> {
@@ -622,13 +644,15 @@ impl Vm {
             imports: Ok(imports),
             slots: SlotStore::default(),
             last_location: Cell::new(None),
+            diagnostics_configured: diagnostics_configured(),
         })
     }
 
     pub fn run(&self, function: u32, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let scope = ReclamationScope::begin();
         scope.track_values(&args);
-        let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        let trace_errors = self.diagnostics_configured
+            && std::env::var_os("G1_VM_ERROR_TRACE").is_some();
         if trace_errors {
             self.last_location.set(None);
         }
@@ -664,12 +688,28 @@ impl Vm {
             .map_err(|error| RuntimeError::HostLink(error.clone()))?;
         let a = self.artifact.image();
         let mut stack = vec![make_frame(a, function, args, Value::Unit, None)?];
-        let mut memory_profile = VmMemoryProfile::from_env();
-        let mut progress_trace = VmProgressTrace::from_env();
-        let mut hot_functions = VmHotFunctions::from_env(a.functions.len());
-        let breakpoint = VmBreakpoint::from_env();
-        let traced_function = std::env::var("G1_VM_FUNCTION").ok();
-        let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        let mut memory_profile = self
+            .diagnostics_configured
+            .then(VmMemoryProfile::from_env)
+            .flatten();
+        let mut progress_trace = self
+            .diagnostics_configured
+            .then(VmProgressTrace::from_env)
+            .flatten();
+        let mut hot_functions = self
+            .diagnostics_configured
+            .then(|| VmHotFunctions::from_env(a.functions.len()))
+            .flatten();
+        let breakpoint = self
+            .diagnostics_configured
+            .then(VmBreakpoint::from_env)
+            .flatten();
+        let traced_function = self
+            .diagnostics_configured
+            .then(|| std::env::var("G1_VM_FUNCTION").ok())
+            .flatten();
+        let trace_errors = self.diagnostics_configured
+            && std::env::var_os("G1_VM_ERROR_TRACE").is_some();
         loop {
             if let Some(profile) = &mut memory_profile {
                 profile.observe(&stack, &self.slots, a);
@@ -5543,6 +5583,21 @@ mod tests {
     }
     fn prim(result: TypeId, op: Primitive, values: &[Value]) -> Result<Value, RuntimeError> {
         primitive(&image(Artifact::default()), result, op, values)
+    }
+
+    #[test]
+    fn vm_construction_recognizes_each_diagnostic_control() {
+        for control in [
+            "G1_VM_ERROR_TRACE",
+            "G1_VM_FUNCTION",
+            "G1_VM_BREAKPOINT",
+            "G1_VM_MEMORY_PROFILE_MIB",
+            "G1_VM_PROGRESS_STEPS",
+            "G1_VM_HOT_FUNCTION_SAMPLE_STEPS",
+        ] {
+            assert!(diagnostics_configured_with(|name| name == control));
+        }
+        assert!(!diagnostics_configured_with(|_| false));
     }
 
     #[test]
