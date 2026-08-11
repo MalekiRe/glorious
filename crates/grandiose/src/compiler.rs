@@ -55501,6 +55501,20 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 folded[pc] = Instruction::Jump { target: target as u32 };
             }
         }
+        // A switch case that reaches its `otherwise` successor cannot change
+        // execution: whether that literal matched or not, control reaches the
+        // same PC.  Drop those redundant comparisons first.  This is useful
+        // after sparse propagation has collapsed only some pattern arms, and
+        // it can expose the all-successors case folded below.
+        for instruction in &mut folded {
+            let Instruction::Switch {
+                cases, otherwise, ..
+            } = instruction
+            else {
+                continue;
+            };
+            cases.retain(|(_, target)| *target != *otherwise);
+        }
         // A switch whose every successor is the same target observes no
         // information that can affect execution.  Its discriminator is an
         // ordinary, non-consuming read, so replacing it with the equivalent
@@ -55767,6 +55781,19 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             *last = false;
         }
         if !removed.iter().any(|removed| *removed) {
+            // Rewriting a switch's case table does not change instruction
+            // ordinals, but it is still a real bytecode optimization. Keep
+            // the rewritten instruction and provide the identity ordinal map
+            // so the outer fixed-point loop records the change consistently.
+            if folded != code {
+                return (
+                    folded,
+                    Some(PeepholePcMap {
+                        ordinals: (0..code.len() as u32).collect(),
+                        state_renames,
+                    }),
+                );
+            }
             return (code.to_vec(), None);
         }
 
@@ -58303,6 +58330,73 @@ mod mir_edge_emission_tests {
         let vm = Vm::new(verify(artifact).unwrap());
         assert_eq!(vm.run(0, vec![Value::U64(0)]).unwrap(), Value::Unit);
         assert_eq!(vm.run(0, vec![Value::U64(99)]).unwrap(), Value::Unit);
+    }
+
+    #[test]
+    fn peephole_removes_switch_cases_that_match_otherwise() {
+        let mut artifact = Artifact {
+            constants: vec![
+                Constant::U32(0),
+                Constant::U32(1),
+                Constant::I64(42),
+                Constant::I64(9),
+            ],
+            code: vec![
+                Instruction::Switch {
+                    discr: 1,
+                    cases: vec![(0, 1), (1, 3)],
+                    otherwise: 3,
+                },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 2,
+                },
+                Instruction::Return { src: Some(2) },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 3,
+                },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "redundant_switch_case".into(),
+            flags: 0,
+            params: vec![U32],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, U32, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        let encoded_size = |artifact: &Artifact| {
+            let mut canonical = artifact.clone();
+            canonical.canonicalize_constants();
+            grandiose_vm::verify::with_generated_cleanup_plans(canonical)
+                .unwrap()
+                .encode()
+                .len()
+        };
+        let unoptimized_size = encoded_size(&artifact);
+        layout_and_peephole(&mut artifact);
+        assert_eq!(
+            artifact.code[0],
+            Instruction::Switch {
+                discr: 1,
+                cases: vec![(0, 1)],
+                otherwise: 3,
+            }
+        );
+        assert!(encoded_size(&artifact) < unoptimized_size);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let vm = Vm::new(verify(artifact).unwrap());
+        assert_eq!(vm.run(0, vec![Value::U64(0)]).unwrap(), Value::I64(42));
+        assert_eq!(vm.run(0, vec![Value::U64(1)]).unwrap(), Value::I64(9));
+        assert_eq!(vm.run(0, vec![Value::U64(2)]).unwrap(), Value::I64(9));
     }
 
     #[test]
