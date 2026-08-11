@@ -9,6 +9,7 @@ contextual-pub-headers	accept	crates/grandiose/tests/fixtures/contextual_pub_hea
 arithmetic-calls	accept	tooling/self-host-native-fixtures/arithmetic-calls.glorious
 associated-call	accept	tooling/self-host-native-fixtures/associated-call.glorious
 byte-char-literals	accept	tooling/self-host-native-fixtures/byte-char-literals.glorious
+float-literals-in-conditional	accept	tooling/self-host-native-fixtures/float-literals-in-conditional.glorious
 enum-match	accept	tooling/self-host-native-fixtures/enum-match.glorious
 reference-reborrow	accept	tooling/self-host-native-fixtures/reference-reborrow.glorious
 struct-deconstruction	accept	tooling/self-host-native-fixtures/struct-deconstruction.glorious

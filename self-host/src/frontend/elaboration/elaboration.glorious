@@ -13174,7 +13174,20 @@ elaborate_integer_negate(
         Option::Some(operand_expected)
     ), @elaborate_integer_negate);
     let type_id = elaborated.type_id;
-    if(integer_type(type_id) and {
+    if(type_id == type_id_from_u32(14) or { type_id == type_id_from_u32(15) }) {
+        let operand = embed_operand(&mut value.core, elaborated);
+        let operands = append_primitive_operand(&mut value.core, operand);
+        // `FloatNeg` is one runtime opcode; the operand type selects f32/f64.
+        let primitive = wrapping_convert_to_u32(44);
+        Result::Ok(Elaborated {
+            type_id: type_id,
+            form: ElaboratedForm::Computation(push_computation(
+                &mut value.core,
+                type_id,
+                CoreComputationKind::Primitive(primitive, operands)
+            ))
+        })
+    } else if(integer_type(type_id) and {
         scalar_is_signed(type_to_scalar_kind(Id::to_u32(type_id)))
     }) {
         let operand = embed_operand(&mut value.core, elaborated);
@@ -13194,6 +13207,143 @@ elaborate_integer_negate(
             Id::to_u32(type_id),
             10
         ))
+    }
+}
+
+// The self-hosted front end lowers a decimal literal with an all-zero
+// fractional part through the existing integer-to-float primitives. This is
+// a real typed Core computation, not a bootstrap-only spelling rewrite: it
+// supports f32/f64 literals in ordinary source wherever their expected type is
+// known. Decimal fractions and exponents stay explicitly rejected until their
+// correctly-rounded parser is represented in Typed Core.
+all_zero_float_fraction(original: &String, cursor: usize, end: usize) -> Bool {
+    if(cursor < end) {
+        handle Bytes::get(&String::as_bytes(original), cursor) {
+            Result::Err(_) => false,
+            Result::Ok(found) => if(found == 48 or { found == 95 }) {
+                all_zero_float_fraction(original, cursor + 1, end)
+            } else { false }
+        }
+    } else { true }
+}
+
+span_equals_float_bound(
+    original: &String,
+    start: usize,
+    end: usize,
+    expected: &String,
+    index: usize
+) -> Bool {
+    if(start + index < end) {
+        handle (Bytes::get(&String::as_bytes(original), start + index),
+                Bytes::get(&String::as_bytes(expected), index)) {
+            (Result::Ok(left), Result::Ok(right)) =>
+                left == right and {
+                    span_equals_float_bound(original, start, end, expected, index + 1)
+                },
+            _ => false
+        }
+    } else { index == Bytes::len(&String::as_bytes(expected)) }
+}
+
+integral_float_magnitude(
+    original: &String,
+    number: &super::lexer::NumberToken,
+    token: usize
+) -> Result<u128, ElaborationError> {
+    if(super::lexer::number_base_code(number) != 3 or {
+        Option::as_ref(super::lexer::number_exponent(number)) is Result::Ok(_)
+    }) {
+        Result::Err(ElaborationError::FloatLiteralUnsupported(token))
+    } else {
+        handle *super::lexer::number_fraction(number) {
+            Result::Err(_) => Result::Err(ElaborationError::FloatLiteralUnsupported(token)),
+            Result::Ok(fraction) => if(all_zero_float_fraction(
+                original,
+                super::lexer::span_start(&fraction),
+                super::lexer::span_end(&fraction)
+            )) {
+                let digits = super::lexer::number_digits(number);
+                handle parse_digits(
+                    String::as_bytes(original),
+                    super::lexer::span_start(&digits),
+                    super::lexer::span_end(&digits),
+                    10,
+                    wrapping_convert_to_u128(0)
+                ) {
+                    Result::Ok(found) => Result::Ok(found),
+                    // 2^128 cannot inhabit a u128 literal, but converting
+                    // u128::MAX to f64 rounds to exactly 2^128. This is the
+                    // canonical upper bound for checked f64-to-u128.
+                    Result::Err(_) => if(span_equals_float_bound(
+                        original,
+                        super::lexer::span_start(&digits),
+                        super::lexer::span_end(&digits),
+                        &"340282366920938463463374607431768211456",
+                        0
+                    )) {
+                        Result::Ok(bit_not(wrapping_convert_to_u128(0)))
+                    } else { Result::Err(ElaborationError::FloatLiteralUnsupported(token)) }
+                }
+            } else { Result::Err(ElaborationError::FloatLiteralUnsupported(token)) }
+        }
+    }
+}
+
+elaborate_float(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    body: &super::bodies::ParsedBody,
+    value: &mut BodyContext,
+    expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    handle expected {
+        None => Result::Err(ElaborationError::FloatLiteralUnsupported(token)),
+        Option::Some(type_id) => {
+            let primitive = if(type_id == type_id_from_u32(14) or {
+                type_id == type_id_from_u32(15)
+            }) {
+                // `IntegerToFloat` similarly dispatches by the result type.
+                wrapping_convert_to_u32(45)
+            } else { wrapping_convert_to_u32(0) };
+            if(primitive == 0) {
+                Result::Err(ElaborationError::TypeMismatch(
+                    token, Id::to_u32(type_id), 14
+                ))
+            } else {
+                handle super::lexer::token_kind_at(
+                    super::headers::parsed_source(headers), token
+                ) {
+                    TokenKind::Number(number) => {
+                        let magnitude = try(integral_float_magnitude(
+                            original, &number, token
+                        ), @elaborate_float);
+                        let constant = push_integer_constant(
+                            &mut value.core, magnitude
+                        );
+                        let integer = push_value(
+                            &mut value.core,
+                            type_id_from_u32(6),
+                            CoreValueKind::Integer(constant)
+                        );
+                        let operands = append_primitive_operand(
+                            &mut value.core, integer
+                        );
+                        Result::Ok(Elaborated {
+                            type_id: type_id,
+                            form: ElaboratedForm::Computation(push_computation(
+                                &mut value.core,
+                                type_id,
+                                CoreComputationKind::Primitive(primitive, operands)
+                            ))
+                        })
+                    },
+                    _ => Result::Err(ElaborationError::UnexpectedExpressionToken(token))
+                }
+            }
+        }
     }
 }
 
@@ -13237,7 +13387,9 @@ elaborate_expression(
             expression,
             expected
         ),
-        super::bodies::BodyExpressionView::Float(_) => unreachable(),
+        super::bodies::BodyExpressionView::Float(_) => elaborate_float(
+            original, headers, body, value, expression, expected
+        ),
         super::bodies::BodyExpressionView::Text(spelling, token) => {
             let text = handle super::lexer::lexeme(
                 super::headers::parsed_source(headers),

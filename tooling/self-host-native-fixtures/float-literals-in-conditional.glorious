@@ -1,0 +1,10 @@
+// Self-host regression: contextual f32 literals lower through Core primitives,
+// including a negated literal in an if branch.
+choose(flag: Bool) -> f32 {
+    if(flag) { 1.0 } else { -2.0 }
+}
+f64_boundary(flag: Bool) -> f64 {
+    if(flag) { -170141183460469231731687303715884105728.0 }
+    else { 340282366920938463463374607431768211456.0 }
+}
+main() -> { choose(true); f64_boundary(false); () }
