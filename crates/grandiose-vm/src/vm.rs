@@ -1114,6 +1114,9 @@ impl Vm {
                         &[argument] => make_verified_one_argument_frame(
                             a, function, frame, argument, Value::Unit, dst,
                         )?,
+                        &[first, second] => make_verified_two_argument_frame(
+                            a, function, frame, first, second, Value::Unit, dst,
+                        )?,
                         _ => make_verified_frame_from_arguments(
                             a, function, frame, args, Value::Unit, dst,
                         )?,
@@ -2067,6 +2070,47 @@ fn make_verified_one_argument_frame(
     let mut registers = Vec::with_capacity(f.register_types.len());
     registers.push(Some(receiver));
     registers.push(Some(take(caller, argument)?));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Construct the common two-argument direct-call frame without first filling
+/// an all-empty register file. This keeps the two moved arguments in their
+/// final slots and avoids generic slice enumeration in binary helpers.
+#[inline]
+fn make_verified_two_argument_frame(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    first: u32,
+    second: u32,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if f.params.len() != 2 {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 2,
+        });
+    }
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    // Preserve the generic helper's left-to-right relocation order.
+    registers.push(Some(take(caller, first)?));
+    registers.push(Some(take(caller, second)?));
     registers.resize_with(f.register_types.len(), || None);
     Ok(Frame {
         function,
