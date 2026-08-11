@@ -148,6 +148,23 @@ pub enum PassId {
     ValidateFinalArtifact,
 }
 
+/// Internal schedule controls used by compiler diagnostic tests.  This is
+/// deliberately separate from `CompileOptions`: optimization level is part
+/// of the normal compilation contract, whereas selectively suppressing a
+/// transform is only useful for isolating an optimization in a test.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OptimizationPlan {
+    pub(crate) terminal_handler_fusion: bool,
+}
+
+impl Default for OptimizationPlan {
+    fn default() -> Self {
+        Self {
+            terminal_handler_fusion: true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PassOutcome {
     Unchanged,
@@ -10024,10 +10041,14 @@ fn specialize_static_handlers(
     protocols: &[Protocol],
     handler_defs: &[HandlerDef],
     budget: u64,
+    terminal_handler_fusion: bool,
 ) -> (PassOutcome, u64) {
     let mut scratch = program.clone();
-    let (terminal, terminal_work) =
-        specialize_terminal_handlers(&mut scratch, types, protocols, handler_defs, budget);
+    let (terminal, terminal_work) = if terminal_handler_fusion {
+        specialize_terminal_handlers(&mut scratch, types, protocols, handler_defs, budget)
+    } else {
+        (PassOutcome::Unchanged, 0)
+    };
     if terminal == PassOutcome::BudgetExhausted {
         return (terminal, terminal_work);
     }
@@ -11417,6 +11438,7 @@ fn run_transactional_whole_program_pass(
     level: OptimizationLevel,
     global_remaining: &mut u64,
     inline_policy: &mut InlinePolicyState,
+    plan: OptimizationPlan,
 ) -> PassReport {
     let (outcome, work_units) = match pass {
         PassId::SpecializeDirectCalls => specialize_forwarding_direct_calls(program, *global_remaining),
@@ -11427,6 +11449,7 @@ fn run_transactional_whole_program_pass(
             tables.protocols,
             tables.handler_defs,
             *global_remaining,
+            plan.terminal_handler_fusion,
         ),
         PassId::InlineByCost => inline_by_cost_with_policy(
             program,
@@ -13499,6 +13522,7 @@ fn run_whole_program_fixed_point(
     types: &[Type],
     global_remaining: &mut u64,
     inline_policy: &mut InlinePolicyState,
+    plan: OptimizationPlan,
 ) -> Result<(), ValidationError> {
     for _ in 0..FIXED_POINT_ROUNDS {
         if *global_remaining == 0 {
@@ -13511,6 +13535,7 @@ fn run_whole_program_fixed_point(
             level,
             global_remaining,
             inline_policy,
+            plan,
         );
         let stop = matches!(
             report.outcome,
@@ -13579,12 +13604,31 @@ pub(crate) fn optimize_program(
     optimize_program_with_control_tables(program, types, &[], &[], level)
 }
 
+#[cfg(test)]
 pub(crate) fn optimize_program_with_control_tables(
     program: &mut Program,
     types: &[Type],
     protocols: &[Protocol],
     handler_defs: &[HandlerDef],
     level: OptimizationLevel,
+) -> Result<OptimizationReport, ValidationError> {
+    optimize_program_with_control_tables_and_plan(
+        program,
+        types,
+        protocols,
+        handler_defs,
+        level,
+        OptimizationPlan::default(),
+    )
+}
+
+pub(crate) fn optimize_program_with_control_tables_and_plan(
+    program: &mut Program,
+    types: &[Type],
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+    level: OptimizationLevel,
+    plan: OptimizationPlan,
 ) -> Result<OptimizationReport, ValidationError> {
     validate_program(program, types, MirPhase::Raw)?;
     let initial_operations = operation_count(program);
@@ -13653,6 +13697,7 @@ pub(crate) fn optimize_program_with_control_tables(
                 level,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13675,6 +13720,7 @@ pub(crate) fn optimize_program_with_control_tables(
                 level,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13686,6 +13732,7 @@ pub(crate) fn optimize_program_with_control_tables(
                 level,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13706,6 +13753,7 @@ pub(crate) fn optimize_program_with_control_tables(
                 level,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13737,6 +13785,7 @@ pub(crate) fn optimize_program_with_control_tables(
                     level,
                     &mut global_remaining,
                     &mut inline_policy,
+                    plan,
                 );
                 push_checked(&mut passes, report, program, types)?;
             }
@@ -13787,6 +13836,7 @@ pub(crate) fn optimize_program_with_control_tables(
                 types,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             )?;
             // Re-specialization produces Gotos and can expose another trivial
             // join, so give its result the same checked CFG/local cleanup cycle.
@@ -17811,7 +17861,7 @@ mod tests {
         ));
         let original = candidate.clone();
         assert_eq!(
-            specialize_static_handlers(&mut candidate, &types, &[], &[], 0),
+            specialize_static_handlers(&mut candidate, &types, &[], &[], 0, true),
             (PassOutcome::BudgetExhausted, 0)
         );
         assert_eq!(candidate, original);
@@ -18825,6 +18875,7 @@ mod tests {
             OptimizationLevel::O2,
             &mut remaining,
             &mut policy,
+            OptimizationPlan::default(),
         );
 
         assert_eq!(report.outcome, PassOutcome::Changed);

@@ -4749,6 +4749,27 @@ pub struct CompileOptions {
     pub optimization_level: mir::OptimizationLevel,
 }
 
+/// A narrowly scoped opt-out used by optimizer differential tests.
+///
+/// This is intentionally separate from [`CompileOptions`], so ordinary
+/// compiler configuration remains stable and existing option literals do not
+/// acquire test-only fields.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestOptimizerSuppression {
+    TerminalHandlerFusion,
+}
+
+impl TestOptimizerSuppression {
+    fn plan(self) -> mir::optimizer::OptimizationPlan {
+        match self {
+            Self::TerminalHandlerFusion => mir::optimizer::OptimizationPlan {
+                terminal_handler_fusion: false,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompiledPhases {
     pub artifact: Artifact,
@@ -4883,6 +4904,44 @@ pub fn compile_source_to_phases_with_options(
         })
 }
 
+/// Compile source while suppressing one named optimizer transform for a
+/// differential test. Normal compiler entry points always use the complete
+/// optimizer plan.
+#[doc(hidden)]
+pub fn compile_source_to_phases_with_test_optimizer_suppression(
+    source_name: &str,
+    source: &str,
+    options: CompileOptions,
+    suppression: TestOptimizerSuppression,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    let bundle = SourceBundle::distributed(Segment::new(source_name, source), []);
+    let manifest = if bundle.is_canonical_distribution() {
+        TrustedTraitManifest::trusted_distribution()
+    } else {
+        TrustedTraitManifest::trusted_default()
+    };
+    compile_bundle_to_phases_with_manifest_and_options_and_plan(
+        &bundle,
+        &manifest,
+        options,
+        suppression.plan(),
+    )
+    .map(|mut phases| {
+        phases.diagnostics = phases
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| localize_source_diagnostic(&bundle, source_name, diagnostic))
+            .collect();
+        phases
+    })
+    .map_err(|diagnostics| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| localize_source_diagnostic(&bundle, source_name, diagnostic))
+            .collect()
+    })
+}
+
 pub fn compile_source_to_phases_with_manifest(
     source_name: &str,
     source: &str,
@@ -5003,6 +5062,20 @@ pub fn compile_bundle_to_phases_with_manifest_and_options(
     manifest: &TrustedTraitManifest,
     options: CompileOptions,
 ) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    compile_bundle_to_phases_with_manifest_and_options_and_plan(
+        bundle,
+        manifest,
+        options,
+        mir::optimizer::OptimizationPlan::default(),
+    )
+}
+
+fn compile_bundle_to_phases_with_manifest_and_options_and_plan(
+    bundle: &SourceBundle,
+    manifest: &TrustedTraitManifest,
+    options: CompileOptions,
+    optimizer_plan: mir::optimizer::OptimizationPlan,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
     let domains = PrivacyDomains::bundle(bundle);
     compile_stream_phases_with_manifest_and_domains(
         bundle,
@@ -5010,6 +5083,7 @@ pub fn compile_bundle_to_phases_with_manifest_and_options(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        optimizer_plan,
         false,
         None,
     )
@@ -5033,6 +5107,7 @@ pub(crate) fn compile_bundle_to_phases_incremental(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        mir::optimizer::OptimizationPlan::default(),
         false,
         Some(session),
     )
@@ -5056,6 +5131,7 @@ pub(crate) fn compile_bundle_to_phases_incremental_with_interfaces(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        mir::optimizer::OptimizationPlan::default(),
         true,
         Some(session),
     )
@@ -5073,6 +5149,7 @@ fn compile_stream_phases_with_manifest_and_domains(
     domains: &PrivacyDomains,
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
+    optimizer_plan: mir::optimizer::OptimizationPlan,
     include_interfaces: bool,
     mut incremental: Option<&mut crate::compiler_session::IncrementalCompilerSession>,
 ) -> Result<
@@ -5131,6 +5208,7 @@ fn compile_stream_phases_with_manifest_and_domains(
             &domains,
             trusted_standard_library_domain,
             options,
+            optimizer_plan,
             Some((&mut session.type_cache, fingerprints)),
             Some(&mut session.mir_cache),
         ),
@@ -5140,6 +5218,7 @@ fn compile_stream_phases_with_manifest_and_domains(
             &domains,
             trusted_standard_library_domain,
             options,
+            optimizer_plan,
             None,
             None,
         ),
@@ -6686,6 +6765,7 @@ fn compile_program_with_phases(
     privacy_domains: &PrivacyDomains,
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
+    optimizer_plan: mir::optimizer::OptimizationPlan,
     incremental: Option<(
         &mut typeck::IncrementalTypeCache,
         &crate::compiler_session::IncrementalFingerprints,
@@ -9804,12 +9884,13 @@ fn compile_program_with_phases(
             ]
         })?;
     timings.mark("lower-mir");
-    let optimization_result = mir::optimizer::optimize_program_with_control_tables(
+    let optimization_result = mir::optimizer::optimize_program_with_control_tables_and_plan(
         &mut mir_program,
         &artifact.types,
         &artifact.protocols,
         &artifact.handler_defs,
         options.optimization_level,
+        optimizer_plan,
     );
     let mut optimization_report = optimization_result.map_err(|error| {
         vec![

@@ -38,7 +38,7 @@ static DISTRIBUTED_RUNTIME_LEAF_AUTHORITY: OnceLock<eval::RuntimeLeafAuthority> 
 
 pub use ast::ConstKind;
 pub use compiler::{
-    CompileOptions, CompiledPhases, compile_bundle_to_bytecode,
+    CompileOptions, CompiledPhases, TestOptimizerSuppression, compile_bundle_to_bytecode,
     compile_bundle_to_bytecode_with_manifest, compile_bundle_to_bytecode_with_manifest_and_options,
     compile_bundle_to_bytecode_with_options, compile_bundle_to_phases,
     compile_bundle_to_phases_with_manifest, compile_bundle_to_phases_with_manifest_and_options,
@@ -46,7 +46,7 @@ pub use compiler::{
     compile_source_to_bytecode_with_manifest, compile_source_to_bytecode_with_manifest_and_options,
     compile_source_to_bytecode_with_options, compile_source_to_phases,
     compile_source_to_phases_with_manifest, compile_source_to_phases_with_manifest_and_options,
-    compile_source_to_phases_with_options,
+    compile_source_to_phases_with_options, compile_source_to_phases_with_test_optimizer_suppression,
 };
 pub use compiler_mir::{
     OptimizationLevel, OptimizationPass, OptimizationPassOutcome, OptimizationPassReport,

@@ -1,7 +1,8 @@
 use grandiose::{
     CompileOptions, OptimizationLevel, OptimizationPass, OptimizationPassOutcome,
+    TestOptimizerSuppression,
     compile_bundle_to_bytecode, compile_source_to_bytecode, compile_source_to_phases,
-    compile_source_to_phases_with_options,
+    compile_source_to_phases_with_options, compile_source_to_phases_with_test_optimizer_suppression,
     compiler_mir::{CleanupAction, CleanupEdge},
     diagnostic::Diagnostic,
     eval::{Host, Value as InterpreterValue},
@@ -141,6 +142,24 @@ fn o2_fuses_only_cleanup_empty_single_clause_terminal_handler() {
         Vm::new(verify(optimized.artifact).unwrap())
             .run(function_id, vec![])
             .unwrap()
+    );
+}
+
+#[test]
+fn test_suppression_disables_only_terminal_handler_fusion() {
+    let suppressed = compile_source_to_phases_with_test_optimizer_suppression(
+        "terminal-suppressed.glorious",
+        TERMINAL_PROGRAM,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+        TestOptimizerSuppression::TerminalHandlerFusion,
+    )
+    .unwrap();
+
+    assert_eq!(
+        control_outcome(&suppressed),
+        OptimizationPassOutcome::Unchanged
     );
 }
 
