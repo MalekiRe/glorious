@@ -53,7 +53,8 @@ pub use compiler_mir::{
     OptimizationReport,
 };
 pub use llvm_backend::{
-    DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_INCREMENTAL_MANIFEST_SCHEMA, LlvmCalleeDependency, LlvmFunctionManifest,
+    DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_INCREMENTAL_MANIFEST_SCHEMA,
+    LLVM_NATIVE_OBJECT_PARTITION_SCHEMA, LlvmCalleeDependency, LlvmFunctionManifest,
     LlvmFragmentCache, LlvmFunctionFragment, LlvmIncrementalManifest, LlvmModule,
     LlvmNativeFunctionUnit, LlvmNativeObjectUnits, LlvmOptions,
     default_target_data_layout, default_target_triple, emit_llvm_ir,

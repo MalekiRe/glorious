@@ -41,6 +41,12 @@ pub const DEFAULT_NATIVE_ALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
 /// Cached fragments with another schema are never reusable.
 pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 3;
 
+/// Bump whenever the boundary between the shared native unit and the
+/// per-function units changes. Native object caches must include this along
+/// with the compiler/toolchain ABI; an LLVM fragment fingerprint alone cannot
+/// authorize reuse across a changed partition format.
+pub const LLVM_NATIVE_OBJECT_PARTITION_SCHEMA: u32 = 1;
+
 /// The ABI-facing identity of a direct callee used by one emitted fragment.
 /// A callee body change alone deliberately does not invalidate its callers.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -241,8 +247,39 @@ pub fn llvm_incremental_manifest(
     // LLVM layout/runtime helpers inspect the artifact type table globally.
     // Treating it as a module ABI input keeps fragment reuse fail-closed until
     // type-level dependency slicing is available.
+    //
+    // Text/bytes and explicit-abort literals are module globals with indices
+    // assigned from aggregate sorted tables. Adding a literal to an otherwise
+    // unrelated body can therefore change the global address a retained
+    // fragment uses. Keep this coarse module dependency explicit until
+    // literals have their own stable symbol keys.
+    let mut byte_literals = BTreeSet::new();
+    let mut fault_literals = BTreeSet::new();
+    for function in &phases.mir.functions {
+        for block in &function.blocks {
+            if let Terminator::Abort {
+                message: Some(message),
+            } = &block.terminator
+            {
+                fault_literals.insert(message.as_bytes().to_vec());
+            }
+            for instruction in &block.statements {
+                if let InstructionKind::Const { value, .. } = &instruction.kind {
+                    match value {
+                        Constant::Text(value) => {
+                            byte_literals.insert(value.as_bytes().to_vec());
+                        }
+                        Constant::Bytes(value) => {
+                            byte_literals.insert(value.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     let runtime_abi_fingerprint = fingerprint_text(format!(
-        "types={:?};imports={:?};protocols={:?};handlers={:?}",
+        "types={:?};imports={:?};protocols={:?};handlers={:?};bytes={byte_literals:?};faults={fault_literals:?}",
         phases.artifact.types,
         phases.artifact.imports,
         phases.artifact.protocols,
@@ -344,6 +381,10 @@ pub struct LlvmModule {
 /// fresh Wild link from all of their objects.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmNativeObjectUnits {
+    /// Identity of the shared runtime/entry translation unit. A native object
+    /// cache must rebuild this unit whenever the value changes, even when one
+    /// or more source-function fragments remain reusable.
+    pub shared_fingerprint: u64,
     pub shared: LlvmModule,
     pub functions: Vec<LlvmNativeFunctionUnit>,
 }
@@ -495,6 +536,7 @@ pub fn emit_llvm_native_object_units(
         })
         .collect();
     Ok(LlvmNativeObjectUnits {
+        shared_fingerprint: fingerprint_text(&shared_ir),
         shared: LlvmModule {
             ir: shared_ir,
             target_triple: module.target_triple,

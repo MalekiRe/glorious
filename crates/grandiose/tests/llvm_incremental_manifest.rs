@@ -133,6 +133,40 @@ fn target_option_change_invalidates_every_fragment() {
 }
 
 #[test]
+fn global_literal_table_change_invalidates_retained_native_fragments() {
+    let before = phases(
+        r#"
+            literal_anchor() -> String { "z" }
+            literal_edit() -> String { "zz" }
+            main() -> () { let left = literal_anchor(); let right = literal_edit(); () }
+        "#,
+    );
+    // `edited` changes only its own source body, but adding a lexically
+    // earlier literal changes the module-global byte-literal index used by
+    // `stable`. A function-object cache must not retain that stale address.
+    let after = phases(
+        r#"
+            literal_anchor() -> String { "z" }
+            literal_edit() -> String { "a" }
+            main() -> () { let left = literal_anchor(); let right = literal_edit(); () }
+        "#,
+    );
+    let options = LlvmOptions::default();
+    let before_manifest = llvm_incremental_manifest(&before, &options);
+    let after_manifest = llvm_incremental_manifest(&after, &options);
+    let expected = after_manifest
+        .functions
+        .iter()
+        .map(|function| function.declaration)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(after_manifest.invalidated_functions(&before_manifest), expected);
+
+    let before_units = emit_llvm_native_object_units(&before, &options).unwrap();
+    let after_units = emit_llvm_native_object_units(&after, &options).unwrap();
+    assert_ne!(before_units.shared_fingerprint, after_units.shared_fingerprint);
+}
+
+#[test]
 fn fragment_cache_replays_metadata_and_returns_exact_canonical_ir() {
     let phases = phases(
         r#"
