@@ -1173,7 +1173,7 @@ impl Vm {
                         .iter()
                         .map(|r| take(frame, *r))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let receiver = get(frame, 0)?.clone();
+                    let receiver = get(frame, 0)?;
                     let function = frame.function;
                     frame.pc += 1;
                     stack.push(make_verified_frame(a, function, values, receiver, dst)?);
@@ -1213,7 +1213,7 @@ impl Vm {
                     if callee.receiver_mode != Some(0) {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let receiver = get(frame, receiver)?.clone();
+                    let receiver = get(frame, receiver)?;
                     let values = args
                         .iter()
                         .map(|r| take(frame, *r))
@@ -1234,7 +1234,7 @@ impl Vm {
                     if callee.receiver_mode != Some(0) {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let receiver = get(frame, receiver)?.clone();
+                    let receiver = get(frame, receiver)?;
                     let values = args
                         .iter()
                         .map(|r| take(frame, *r))
@@ -1589,7 +1589,7 @@ impl Vm {
                     let resumption_value = if receiver_mode == 2 {
                         take(frame, resumption)?
                     } else {
-                        get(frame, resumption)?.clone()
+                        get(frame, resumption)?
                     };
                     let Value::Resumption(resumption) = resumption_value else {
                         return Err(RuntimeError::TypeConfusion);
@@ -1660,7 +1660,7 @@ impl Vm {
                     let resumption_value = if receiver_mode == 2 {
                         take(frame, resumption)?
                     } else {
-                        get(frame, resumption)?.clone()
+                        get(frame, resumption)?
                     };
                     let Value::Resumption(resumption) = resumption_value else {
                         return Err(RuntimeError::TypeConfusion);
