@@ -12,10 +12,10 @@ use grandiose::{
     artifact_llvm::emit_artifact_llvm_ir,
     compiler_session::CompilationDriver,
     diagnostic::{Diagnostic, Severity},
-    emit_llvm_ir,
+    emit_llvm_ir, emit_llvm_native_object_units,
     interface::{InterfaceSelection, scan_interfaces},
     lexer,
-    llvm_backend::{DEFAULT_NATIVE_ALLOCATION_LIMIT, LlvmOptions},
+    llvm_backend::{DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_NATIVE_OBJECT_PARTITION_SCHEMA, LlvmOptions},
     source_bundle::{Segment, SourceBundle},
 };
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,43 @@ impl TemporaryNativeHost {
 }
 
 impl Drop for TemporaryNativeHost {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A request-owned materialization of cached (or freshly compiled) native
+/// object bytes. It never survives the final Wild link and therefore cannot
+/// be mistaken for a cross-process artifact cache.
+struct TemporaryNativeObject {
+    path: PathBuf,
+}
+
+impl TemporaryNativeObject {
+    fn create(output: &Path, label: &str, ordinal: usize) -> io::Result<Self> {
+        let directory = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let process = std::process::id();
+        for attempt in 0..128u32 {
+            let path = directory.join(format!(
+                ".grc-native-{label}-{process}-{ordinal}-{attempt}.o"
+            ));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Ok(Self { path }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve a temporary native object path",
+        ))
+    }
+}
+
+impl Drop for TemporaryNativeObject {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
@@ -899,6 +936,87 @@ fn compile_loaded(
         } else {
             None
         };
+        // A long-lived compiler service can retain independently compiled O3
+        // function objects across a body-only edit. The linked executable is
+        // never retained: every request materializes its current objects and
+        // takes a fresh required Wild link.
+        if kind == EmitKind::Executable && command.native_incremental {
+            if let Some(driver) = incremental.as_deref_mut() {
+                let units = match emit_llvm_native_object_units(&phases, &llvm_options) {
+                    Ok(units) => units,
+                    Err(diagnostics) => {
+                        return report_diagnostics(
+                            &bundle,
+                            diagnostics,
+                            command.json_diagnostics,
+                            stderr,
+                        );
+                    }
+                };
+                let toolchain_abi = match native_object_toolchain_abi(
+                    &llvm_options,
+                    OptimizationLevel::O3,
+                ) {
+                    Ok(abi) => abi,
+                    Err(error) => {
+                        let _ = writeln!(
+                            stderr,
+                            "grc: error: could not identify native object toolchain ABI: {error}"
+                        );
+                        return 1;
+                    }
+                };
+                let mut objects = Vec::with_capacity(units.functions.len() + 1);
+                let shared_abi = format!(
+                    "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=shared;shared-fingerprint={}",
+                    units.shared_fingerprint,
+                );
+                match materialize_partitioned_native_object(
+                    driver,
+                    &output,
+                    0,
+                    "shared",
+                    &llvm_options,
+                    &units.shared.ir,
+                    &shared_abi,
+                    false,
+                ) {
+                    Ok(object) => objects.push(object),
+                    Err(error) => {
+                        let _ = writeln!(stderr, "grc: error: {error}");
+                        return 1;
+                    }
+                }
+                for (index, function) in units.functions.iter().enumerate() {
+                    let abi = format!(
+                        "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=function;shared-fingerprint={};declaration={};fragment={}",
+                        units.shared_fingerprint, function.declaration, function.fragment_fingerprint
+                    );
+                    match materialize_partitioned_native_object(
+                        driver,
+                        &output,
+                        index + 1,
+                        "function",
+                        &llvm_options,
+                        &function.module.ir,
+                        &abi,
+                        true,
+                    ) {
+                        Ok(object) => objects.push(object),
+                        Err(error) => {
+                            let _ = writeln!(stderr, "grc: error: {error}");
+                            return 1;
+                        }
+                    }
+                }
+                let host = native_host.as_ref().expect("executable native host");
+                if let Err(error) = link_partitioned_native_executable(&output, host, &objects) {
+                    let _ = writeln!(stderr, "grc: error: {error}");
+                    return 1;
+                }
+                return 0;
+            }
+        }
         // A persistent session may reuse immutable object bytes only when the
         // generated IR and every native compiler ABI-affecting option match.
         // The output path is intentionally excluded: a hit always writes the
@@ -1126,6 +1244,104 @@ fn configure_wild_linking(clang: &mut ProcessCommand) {
     clang.arg("--ld-path=wild");
 }
 
+/// Compile or materialize one partitioned LLVM unit at the fixed native O3
+/// level. The driver owns only immutable object bytes; this request owns the
+/// pathname passed to Wild.
+fn materialize_partitioned_native_object(
+    driver: &mut CompilationDriver,
+    output: &Path,
+    ordinal: usize,
+    role: &str,
+    llvm_options: &LlvmOptions,
+    ir: &str,
+    toolchain_abi: &str,
+    source_function: bool,
+) -> Result<TemporaryNativeObject, String> {
+    let object = TemporaryNativeObject::create(output, role, ordinal)
+        .map_err(|error| format!("could not reserve native object path: {error}"))?;
+    if let Some(bytes) = driver.cached_native_partitioned_object(
+        llvm_options,
+        ir,
+        toolchain_abi,
+        source_function,
+    ) {
+        std::fs::write(&object.path, bytes).map_err(|error| {
+            format!(
+                "could not materialize cached native object {}: {error}",
+                object.path.display()
+            )
+        })?;
+        return Ok(object);
+    }
+    let result = ProcessCommand::new("clang")
+        .arg("-x")
+        .arg("ir")
+        .arg("-O3")
+        .arg("-c")
+        .arg("-")
+        .arg("-o")
+        .arg(&object.path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start `clang` for native unit: {error}"))
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| "could not open `clang` stdin for native unit".to_owned())?
+                .write_all(ir.as_bytes())
+                .map_err(|error| format!("could not stream LLVM unit to `clang`: {error}"))?;
+            child
+                .wait_with_output()
+                .map_err(|error| format!("`clang` native unit failed: {error}"))
+        })?;
+    if !result.status.success() {
+        return Err(format!(
+            "native LLVM unit emission failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    let bytes = std::fs::read(&object.path).map_err(|error| {
+        format!(
+            "could not read emitted native object {}: {error}",
+            object.path.display()
+        )
+    })?;
+    driver.cache_native_partitioned_object(llvm_options, ir, toolchain_abi.to_owned(), bytes);
+    driver.record_native_partitioned_object_emitted(source_function);
+    Ok(object)
+}
+
+fn link_partitioned_native_executable(
+    output: &Path,
+    host: &TemporaryNativeHost,
+    objects: &[TemporaryNativeObject],
+) -> Result<(), String> {
+    let mut clang = ProcessCommand::new("clang");
+    clang.arg("-O3");
+    for object in objects {
+        clang.arg(&object.path);
+    }
+    clang.arg(&host.path).arg("-o").arg(output);
+    configure_wild_linking(&mut clang);
+    let result = clang
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("could not start `clang` for Wild link: {error}"))?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "native Wild link failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        ))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionRequest {
@@ -1177,6 +1393,7 @@ struct SessionCacheStats {
     llvm_fragments_reused: usize,
     llvm_fragments_emitted: usize,
     native_objects_reused: usize,
+    native_objects_emitted: usize,
 }
 
 impl From<grandiose::compiler_session::IncrementalCompilationStats> for SessionCacheStats {
@@ -1190,6 +1407,7 @@ impl From<grandiose::compiler_session::IncrementalCompilationStats> for SessionC
             llvm_fragments_reused: stats.reused_llvm_fragments,
             llvm_fragments_emitted: stats.emitted_llvm_fragments,
             native_objects_reused: stats.reused_native_objects,
+            native_objects_emitted: stats.emitted_native_objects,
         }
     }
 }
@@ -1197,17 +1415,20 @@ impl From<grandiose::compiler_session::IncrementalCompilationStats> for SessionC
 /// Stable JSON-line evidence for a native incremental request.
 ///
 /// The units are LLVM-reachable function fragments for IR and native object
-/// units for code generation. At present an ordinary `llvm-object` request
-/// has one object unit; the fields intentionally avoid promising a persistent
-/// filesystem cache or an executable cache. Executables always use a fresh
-/// Wild final link, even when all earlier work was reusable.
+/// units for code generation. Executable units are retained only inside the
+/// serve process; the fields intentionally avoid promising a filesystem cache
+/// or an executable cache. Every executable request takes a fresh Wild link.
 #[derive(Clone, Copy, Serialize)]
 struct NativeIncrementalReport {
     cache_scope: &'static str,
+    strategy: &'static str,
     llvm_fragments_reused: usize,
     llvm_fragments_emitted: usize,
     native_objects_reused: usize,
     native_objects_emitted: usize,
+    function_objects_reused: usize,
+    function_objects_compiled: usize,
+    shared_objects_compiled: usize,
     wild_relink: bool,
 }
 
@@ -1619,6 +1840,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
         );
         let native_object_emission = command.emit == Some(EmitKind::LlvmObject);
         let native_executable_emission = command.emit == Some(EmitKind::Executable);
+        let native_incremental_emission = command.native_incremental;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = compile_loaded(
@@ -1676,16 +1898,18 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 // process. A new process starts cold and a client must not
                 // treat these counters as a persistent artifact cache.
                 cache_scope: "serve-process",
+                strategy: if native_incremental_emission {
+                    "partitioned-function-objects"
+                } else {
+                    "monolithic"
+                },
                 llvm_fragments_reused: stats.reused_llvm_fragments,
                 llvm_fragments_emitted: stats.emitted_llvm_fragments,
                 native_objects_reused: stats.reused_native_objects,
-                // The current object cache is deliberately exact-IR only;
-                // executable paths never reuse a linked binary and always
-                // invoke Clang/Wild for the final link.
-                native_objects_emitted: usize::from(
-                    (native_object_emission || native_executable_emission)
-                        && stats.reused_native_objects == 0,
-                ),
+                native_objects_emitted: stats.emitted_native_objects,
+                function_objects_reused: stats.reused_native_function_objects,
+                function_objects_compiled: stats.emitted_native_function_objects,
+                shared_objects_compiled: stats.emitted_native_shared_objects,
                 wild_relink: native_executable_emission,
             }
         });

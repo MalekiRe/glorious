@@ -47,6 +47,11 @@ pub struct IncrementalCompilationStats {
     /// cache. Object bytes are keyed by the complete generated IR and native
     /// compiler ABI/options; executable links are never eligible.
     pub reused_native_objects: usize,
+    /// Independently compiled native units emitted for the current request.
+    pub emitted_native_objects: usize,
+    pub reused_native_function_objects: usize,
+    pub emitted_native_function_objects: usize,
+    pub emitted_native_shared_objects: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
@@ -71,6 +76,7 @@ pub struct CompilationDriver {
     llvm_cache: VecDeque<CachedLlvmIr>,
     llvm_fragment_cache: LlvmFragmentCache,
     native_object_cache: VecDeque<CachedNativeObject>,
+    native_function_object_cache: VecDeque<CachedNativeFunctionObject>,
     request_revision: u64,
     stats: IncrementalCompilationStats,
     diagnostic_stats: DiagnosticCacheStats,
@@ -101,6 +107,9 @@ struct CachedDiagnostics {
 const LLVM_CACHE_SCHEMA: u32 = 1;
 const LLVM_CACHE_CAPACITY: usize = 4;
 const NATIVE_OBJECT_CACHE_CAPACITY: usize = 4;
+/// Function units are intentionally independent of a source revision. Their
+/// exact IR and native compiler ABI are the complete cache authority.
+const NATIVE_FUNCTION_OBJECT_CACHE_CAPACITY: usize = 128;
 
 #[derive(Clone)]
 struct CachedLlvmIr {
@@ -122,6 +131,16 @@ struct CachedNativeObject {
     bundle: SourceBundle,
     source_fingerprint: [u8; 32],
     options: CompileOptions,
+    target: LlvmOptions,
+    ir: String,
+    toolchain_abi: String,
+    bytes: Vec<u8>,
+    last_used_revision: u64,
+}
+
+#[derive(Clone)]
+struct CachedNativeFunctionObject {
+    schema: u32,
     target: LlvmOptions,
     ir: String,
     toolchain_abi: String,
@@ -292,6 +311,79 @@ impl CompilationDriver {
             .truncate(NATIVE_OBJECT_CACHE_CAPACITY);
     }
 
+    /// Restore one independently compiled native unit. Unlike the monolithic
+    /// object cache this deliberately does not include the source bundle: a
+    /// body-only edit may retain a byte-identical sibling function object.
+    pub fn cached_native_partitioned_object(
+        &mut self,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: &str,
+        source_function: bool,
+    ) -> Option<Vec<u8>> {
+        let index = self.native_function_object_cache.iter().position(|cached| {
+            cached.schema == LLVM_CACHE_SCHEMA
+                && cached.target == *target
+                && cached.ir == ir
+                && cached.toolchain_abi == toolchain_abi
+        })?;
+        let mut cached = self
+            .native_function_object_cache
+            .remove(index)
+            .expect("native function object cache index disappeared");
+        cached.last_used_revision = self.request_revision;
+        let bytes = cached.bytes.clone();
+        self.native_function_object_cache.push_front(cached);
+        self.stats.reused_native_objects = self.stats.reused_native_objects.saturating_add(1);
+        if source_function {
+            self.stats.reused_native_function_objects = self
+                .stats
+                .reused_native_function_objects
+                .saturating_add(1);
+        }
+        Some(bytes)
+    }
+
+    pub fn cache_native_partitioned_object(
+        &mut self,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: String,
+        bytes: Vec<u8>,
+    ) {
+        self.native_function_object_cache.retain(|cached| {
+            cached.schema != LLVM_CACHE_SCHEMA
+                || cached.target != *target
+                || cached.ir != ir
+                || cached.toolchain_abi != toolchain_abi
+        });
+        self.native_function_object_cache.push_front(CachedNativeFunctionObject {
+            schema: LLVM_CACHE_SCHEMA,
+            target: target.clone(),
+            ir: ir.to_owned(),
+            toolchain_abi,
+            bytes,
+            last_used_revision: self.request_revision,
+        });
+        self.native_function_object_cache
+            .truncate(NATIVE_FUNCTION_OBJECT_CACHE_CAPACITY);
+    }
+
+    pub fn record_native_partitioned_object_emitted(&mut self, source_function: bool) {
+        self.stats.emitted_native_objects = self.stats.emitted_native_objects.saturating_add(1);
+        if source_function {
+            self.stats.emitted_native_function_objects = self
+                .stats
+                .emitted_native_function_objects
+                .saturating_add(1);
+        } else {
+            self.stats.emitted_native_shared_objects = self
+                .stats
+                .emitted_native_shared_objects
+                .saturating_add(1);
+        }
+    }
+
     fn compile_bundle_inner(
         &mut self,
         bundle: &SourceBundle,
@@ -327,6 +419,10 @@ impl CompilationDriver {
                 reused_llvm_fragments: 0,
                 emitted_llvm_fragments: 0,
                 reused_native_objects: 0,
+                emitted_native_objects: 0,
+                reused_native_function_objects: 0,
+                emitted_native_function_objects: 0,
+                emitted_native_shared_objects: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
@@ -435,6 +531,10 @@ impl CompilationDriver {
             reused_llvm_fragments: 0,
             emitted_llvm_fragments: 0,
             reused_native_objects: 0,
+            emitted_native_objects: 0,
+            reused_native_function_objects: 0,
+            emitted_native_function_objects: 0,
+            emitted_native_shared_objects: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             frontend: self.frontend_cache.stats(),

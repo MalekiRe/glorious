@@ -310,6 +310,78 @@ fn persistent_serve_reuses_exact_llvm_object_bytes_at_the_current_output_path() 
 }
 
 #[test]
+fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relinks() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("partitioned.glorious");
+    let first_executable = directory.path().join("partitioned-native-first");
+    let second_executable = directory.path().join("partitioned-native-second");
+    let observed = directory.path().join("observed.bin");
+    let observed_path = serde_json::to_string(observed.to_str().unwrap()).unwrap();
+    let source = |value| {
+        format!(
+            r#"
+                value() -> i64 {{ {value} }}
+                main() -> () {{
+                    let current = value();
+                    if current == 1 {{
+                        __g1_fs_write({observed_path}, String::as_bytes(&"one"));
+                    }} else {{
+                        __g1_fs_write({observed_path}, String::as_bytes(&"two"));
+                    }};
+                    ()
+                }}
+            "#
+        )
+    };
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O3",
+            "--emit",
+            "executable",
+            "--native-incremental",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    write(&input, &source(1));
+    let mut session = Session::start();
+    let cold = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(&first_executable),
+    }));
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["wild_relink"], true, "{cold}");
+    assert_eq!(cold["native_incremental"]["strategy"], "partitioned-function-objects", "{cold}");
+    assert_eq!(cold["native_incremental"]["native_objects_reused"], 0, "{cold}");
+    assert!(cold["native_incremental"]["native_objects_emitted"].as_u64().unwrap() >= 3, "{cold}");
+    assert!(first_executable.is_file());
+    assert!(Command::new(&first_executable).status().unwrap().success());
+    assert_eq!(fs::read(&observed).unwrap(), b"one");
+
+    write(&input, &source(2));
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(&second_executable),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(edited["native_incremental"]["wild_relink"], true, "{edited}");
+    assert_eq!(edited["native_incremental"]["strategy"], "partitioned-function-objects", "{edited}");
+    assert!(edited["native_incremental"]["function_objects_reused"].as_u64().unwrap() >= 1, "{edited}");
+    // The edited leaf must be recompiled; the unchanged entry object is
+    // retained. Shared runtime bytes may be independently re-emitted only
+    // when generated globals change.
+    assert!(edited["native_incremental"]["function_objects_compiled"].as_u64().unwrap() >= 1, "{edited}");
+    assert!(second_executable.is_file());
+    assert!(Command::new(&second_executable).status().unwrap().success());
+    assert_eq!(fs::read(&observed).unwrap(), b"two");
+}
+
+#[test]
 fn persistent_serve_separates_native_object_cache_entries_by_optimization_level() {
     let directory = tempdir().unwrap();
     let input = directory.path().join("cache.glorious");
