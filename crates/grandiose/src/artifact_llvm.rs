@@ -246,6 +246,11 @@ fn emit_function(
     // semantics without fabricating phi ownership at this artifact boundary;
     // LLVM's O3 mem2reg pass can eliminate the trivial allocas afterwards.
     let closed_handler_plans = closed_host_handler_plans(artifact, function_id, function)?;
+    let shared_perform_dispatches = closed_shared_perform_dispatches(artifact, function_id);
+    let shared_perform_opaque_registers = shared_perform_dispatches
+        .iter()
+        .map(|dispatch| dispatch.body_register)
+        .collect::<BTreeSet<_>>();
     let closed_handles = closed_handle_sites(artifact, function_id);
     let shared_handles = closed_shared_handle_sites(artifact, function_id, function, &closed_handler_plans);
     let closed_handle_opaque_registers = closed_handle_opaque_registers(artifact, function_id, &closed_handles);
@@ -261,7 +266,12 @@ fn emit_function(
                     .or_else(|| {
                         closed_handle_opaque_registers
                             .contains(&(register as u32))
-                    .then_some("ptr".to_owned())
+                            .then_some("ptr".to_owned())
+                    })
+                    .or_else(|| {
+                        shared_perform_opaque_registers
+                            .contains(&(register as u32))
+                            .then_some("ptr".to_owned())
                     })
                     .or_else(|| shared_handles.values().any(|site| site.body_register == register as u32).then_some("ptr".to_owned()))
                     .ok_or(error)
@@ -790,15 +800,38 @@ fn emit_function(
                     plan.clause_functions.len(),
                     field_count - 1,
                 ));
+                for dispatch in shared_perform_dispatches
+                    .iter()
+                    .filter(|dispatch| dispatch.handler_instruction == instruction_id)
+                {
+                    // This records the only future native dispatch route that
+                    // this frame can authorize. It is intentionally not a
+                    // call: the matching active Handle boundary and actual
+                    // continuation transfer still need lowering together.
+                    output.push_str(&format!(
+                        "  ; closed-host-perform-dispatch handle={} body={} perform={} route=({}, {}) frame-field={} import={}\\n",
+                        dispatch.handle_instruction,
+                        dispatch.body_function,
+                        dispatch.perform_instruction,
+                        dispatch.continuation.protocol,
+                        dispatch.continuation.operation,
+                        dispatch.resumption_field,
+                        dispatch.continuation.import,
+                    ));
+                }
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
             Instruction::MakeCallable { .. } | Instruction::MakeHandler { .. }
                 if closed_handle_opaque_registers.iter().any(|register| {
                     instruction_writes_register(instruction) == Some(*register)
-                }) || shared_handles.values().any(|site| instruction_writes_register(instruction) == Some(site.body_register)) => {
+                }) || shared_perform_opaque_registers.iter().any(|register| {
+                    instruction_writes_register(instruction) == Some(*register)
+                }) || shared_handles.values().any(|site| {
+                    instruction_writes_register(instruction) == Some(site.body_register)
+                }) => {
                 // The callable and handler are lexical proof tokens for this
-                // restricted path. They have no native representation because
-                // the selected body cannot perform an operation.
+                // restricted path. They have no native representation: exact
+                // static plans carry their body/route identity separately.
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
             Instruction::Handle { dst, args, .. } => {
@@ -1737,6 +1770,104 @@ fn closed_host_handler_plans(
     }
     Ok(plans)
 }
+
+/// A statically established future native `Perform` route.  This is not an
+/// import permission: it ties one operation in one directly named body to the
+/// exact lexical shared-handler producer and one one-shot frame field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedSharedPerformDispatch {
+    handler_instruction: u32,
+    handle_instruction: u32,
+    body_register: u32,
+    body_function: u32,
+    perform_instruction: u32,
+    continuation: ClosedHostContinuation,
+    resumption_field: u32,
+}
+
+/// Recognize only the smallest lexical shared-handler shape:
+/// `MakeHandlerShared`, an empty-capture shared body `MakeCallable`, then
+/// `Handle`, all in adjacent owner instructions. The direct adjacency and
+/// exact registers deliberately reject copies, joins, nested frame selection,
+/// and any attempt to discover a handler from an arbitrary `Perform`.
+fn closed_shared_perform_dispatches(
+    artifact: &Artifact,
+    owner_function: u32,
+) -> Vec<ClosedSharedPerformDispatch> {
+    let Some(owner) = artifact.functions.get(owner_function as usize) else { return Vec::new() };
+    let start = owner.code_start as usize;
+    let Some(code) = artifact.code.get(start..start.saturating_add(owner.code_len as usize)) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (index, window) in code.windows(3).enumerate() {
+        let [
+            Instruction::MakeHandlerShared { dst: handler, handler_def, functions, captures },
+            Instruction::MakeCallable { dst: body_register, callable_type, function: body_function, captures: body_captures },
+            Instruction::Handle { dst, handler: actual_handler, body: actual_body, args },
+        ] = window else { continue };
+        if handler != actual_handler || body_register != actual_body || !body_captures.is_empty() {
+            continue;
+        }
+        let Some(frame_plan) = ClosedHostHandlerPlan::build(
+            artifact,
+            *handler_def,
+            functions,
+            captures,
+        ) else { continue };
+        let Some(body) = closed_shared_body_callable(artifact, *body_function, *callable_type) else {
+            continue;
+        };
+        if !closed_host_handle_matches(artifact, owner, *dst, args, &frame_plan.frame, &body) {
+            continue;
+        }
+        let Some(body_function) = artifact.functions.get(body.function as usize) else { continue };
+        let body_start = body_function.code_start as usize;
+        let Some(body_code) = artifact.code.get(body_start..body_start.saturating_add(body_function.code_len as usize)) else {
+            continue;
+        };
+        for (perform_instruction, instruction) in body_code.iter().enumerate() {
+            let Instruction::Perform { protocol, operation, .. } = instruction else { continue };
+            let Some(continuation) = frame_plan.frame.continuations.iter().find(|route| {
+                route.protocol == *protocol && route.operation == *operation
+            }).cloned() else { continue };
+            let Some(resumption_field) = frame_plan.frame.native_resumption_field(*protocol, *operation) else {
+                continue;
+            };
+            found.push(ClosedSharedPerformDispatch {
+                handler_instruction: index as u32,
+                handle_instruction: index as u32 + 2,
+                body_register: *body_register,
+                body_function: body.function,
+                perform_instruction: perform_instruction as u32,
+                continuation,
+                resumption_field,
+            });
+        }
+    }
+    found
+}
+
+fn closed_shared_body_callable(
+    artifact: &Artifact,
+    function: u32,
+    callable_type: TypeId,
+) -> Option<ClosedHostCallable> {
+    let callable = closed_host_callable(artifact, function, callable_type)?;
+    let target = artifact.functions.get(function as usize)?;
+    let Type::Callable { receiver_mode, .. } = artifact.types.get(callable_type as usize)?.representation() else {
+        return None;
+    };
+    if *receiver_mode != 0 || target.receiver_mode != Some(0) {
+        return None;
+    }
+    matches!(
+        target.register_types.first().and_then(|receiver| artifact.types.get(*receiver as usize)).map(Type::representation),
+        Some(Type::RefShared { referent }) if *referent == UNIT,
+    )
+    .then_some(callable)
+}
+
 
 fn frozen_host_protocol_role(protocol: &str, operation: &str) -> Option<FrozenHostImport> {
     match (protocol, operation) {
@@ -2920,6 +3051,79 @@ mod tests {
             })
         );
         assert!(ir.contains("closed-host-handler-frame r1"), "{ir}");
+    }
+
+    #[test]
+    fn shared_perform_dispatch_requires_adjacent_active_lexical_frame_and_frozen_route() {
+        let mut artifact = frozen_handler_artifact_for_continuation_abi();
+        for clause in &mut artifact.handler_defs[0].clauses {
+            clause.callable_signature.outward_protocols.clear();
+        }
+        let shared_unit = artifact.types.len() as u32;
+        artifact.types.push(Type::RefShared { referent: UNIT });
+        let handler = artifact.types.len() as u32;
+        artifact.types.push(Type::Handler {
+            handler_def: 0,
+            capture_type: UNIT,
+            identity_name: "closed-host".into(),
+        });
+        let body_callable = artifact.types.len() as u32;
+        artifact.types.push(Type::Callable {
+            signature: Signature { params: vec![], result: UNIT, outward_protocols: vec![0] },
+            capture_type: UNIT,
+            receiver_mode: 0,
+            identity_name: "perform-body".into(),
+            copy: false,
+            zero_use_allowed: true,
+        });
+        let clauses = (0..4).map(|index| Function {
+            name: format!("clause-{index}"), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: Some(0), register_types: vec![shared_unit],
+            code_start: 6, code_len: 0, label_slot_count: 0,
+        }).collect::<Vec<_>>();
+        let body = Function {
+            name: "perform-body".into(), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![0], receiver_mode: Some(0), register_types: vec![shared_unit, UNIT],
+            code_start: 4, code_len: 2, label_slot_count: 0,
+        };
+        let owner = Function {
+            name: "owner".into(), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: None,
+            register_types: vec![UNIT, handler, body_callable, UNIT],
+            code_start: 0, code_len: 4, label_slot_count: 0,
+        };
+        artifact.functions = clauses.into_iter().chain(std::iter::once(body)).chain(std::iter::once(owner.clone())).collect();
+        artifact.code = vec![
+            Instruction::MakeHandlerShared { dst: 1, handler_def: 0, functions: vec![0, 1, 2, 3], captures: vec![] },
+            Instruction::MakeCallable { dst: 2, callable_type: body_callable, function: 4, captures: vec![] },
+            Instruction::Handle { dst: 3, handler: 1, body: 2, args: vec![] },
+            Instruction::Return { src: None },
+            Instruction::Perform { dst: None, protocol: 0, operation: 0, payloads: vec![] },
+            Instruction::Return { src: None },
+        ];
+
+        let dispatches = closed_shared_perform_dispatches(&artifact, 5);
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].handler_instruction, 0);
+        assert_eq!(dispatches[0].handle_instruction, 2);
+        assert_eq!(dispatches[0].body_register, 2);
+        assert_eq!(dispatches[0].body_function, 4);
+        assert_eq!(dispatches[0].perform_instruction, 0);
+        assert_eq!(dispatches[0].resumption_field, 1);
+        assert_eq!(dispatches[0].continuation.import, 0);
+        let mut ir = String::new();
+        let emission = emit_function(&mut ir, &artifact, 5, &owner, false);
+        assert!(matches!(emission,
+            Err(ArtifactLlvmError::UnsupportedInstruction { instruction: 2, opcode: "closed effect-free handle", .. })
+        ), "{emission:?} {ir}");
+        assert!(ir.contains("closed-host-perform-dispatch handle=2 body=4 perform=0 route=(0, 0) frame-field=1 import=0"), "{ir}");
+
+        artifact.code.swap(0, 1);
+        assert!(closed_shared_perform_dispatches(&artifact, 5).is_empty(), "a frame must be installed before its exact lexical body/Handle chain");
+        artifact.code.swap(0, 1);
+        let Instruction::Perform { protocol, .. } = &mut artifact.code[4] else { unreachable!() };
+        *protocol = 99;
+        assert!(closed_shared_perform_dispatches(&artifact, 5).is_empty(), "non-frozen routes must not acquire a native dispatch");
     }
 
     fn frozen_handler_artifact_for_continuation_abi() -> Artifact {
