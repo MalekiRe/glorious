@@ -7,12 +7,15 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel, ast,
+    CompileOptions, OptimizationLevel, ast,
     compiler_core::{self as core, ExprKind, Stmt},
     modules::{ModuleResolution, ResolvedProgram},
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{Constant, SystemHost, Type, TypeId, UNIT, Value, Vm, verify};
+
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 const INPUT_NAME: &str = "typed-core-input.glorious";
 const WRAPPER: &str = "\nmain() { () }\n";
@@ -1865,23 +1868,10 @@ fn self_hosted_effect_interfaces_match_rust_semantics_and_rejections() {
     assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
     assert_eq!(fs::read(&vm_path).unwrap(), expected_all);
 
-    let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-    let llvm = directory.path().join("self-host-effect-interfaces.ll");
-    let executable = directory.path().join("self-host-effect-interfaces");
-    fs::write(&llvm, module.ir).unwrap();
-    let clang = Command::new("clang")
-        .arg(&llvm)
-        .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-        .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-        .arg("-O0")
-        .arg("-o")
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(
-        clang.status.success(),
-        "{}",
-        String::from_utf8_lossy(&clang.stderr)
+    let executable = native_incremental::build_cached_native(
+        &self_host_effect_bundle(),
+        directory.path(),
+        "self-host-effect-interfaces",
     );
     let native_path = directory.path().join("effect-native.bin");
     let native = Command::new(&executable)
@@ -2689,23 +2679,10 @@ fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
                 "VM whole-corpus typed Core diverged"
             );
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-typed-core.ll");
-            let executable = directory.path().join("self-host-typed-core");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle(),
+                directory.path(),
+                "self-host-typed-core",
             );
 
             let native_all_path = directory.path().join("native-all.bin");
