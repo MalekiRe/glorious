@@ -1190,6 +1190,22 @@ struct ClosedSharedHandleSite {
     frame: ClosedHostHandlerFrame,
 }
 
+/// Static identity of the only route a future `Perform` lowering may use while
+/// a particular closed frame is lexically active.  This is metadata, not an
+/// import capability: callers still need a proven active Handle scope and a
+/// continuation ABI before they may emit any behavior.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedFramePerformRoute {
+    handler_def: u32,
+    protocol: u32,
+    operation: u32,
+    import: u32,
+    one_shot_field: u32,
+    resumption_type: TypeId,
+    operation_result: TypeId,
+    import_result: TypeId,
+}
+
 /// A direct callable producer that is safe to name in the closed-handler ABI.
 /// This is intentionally a lexical identity, rather than an attempt to infer
 /// a callable through copies, joins, or a global target set.
@@ -1423,6 +1439,32 @@ fn emit_closed_shared_handle_scope(
     // same frame cannot deactivate its enclosing lexical scope.
     output.push_str(&format!("  store i1 {prior}, ptr {active}\n"));
     emit_fallthrough(output, function, function_id, instruction_id)
+}
+
+fn closed_frame_perform_route(
+    frame: &ClosedHostHandlerFrame,
+    protocol: u32,
+    operation: u32,
+) -> Option<ClosedFramePerformRoute> {
+    let continuation = frame
+        .continuations
+        .iter()
+        .find(|continuation| {
+            continuation.protocol == protocol && continuation.operation == operation
+        })?;
+    let one_shot_field = frame.native_resumption_field(protocol, operation)?;
+    // Field zero is reserved for lexical Handle activity; a route can never
+    // silently alias it as a consumed-resumption bit.
+    (one_shot_field > 0).then_some(ClosedFramePerformRoute {
+        handler_def: frame.handler_def,
+        protocol,
+        operation,
+        import: continuation.import,
+        one_shot_field,
+        resumption_type: continuation.resumption_type,
+        operation_result: continuation.operation_result,
+        import_result: continuation.import_result,
+    })
 }
 
 fn closed_handle_sites(artifact: &Artifact, owner_function: u32) -> BTreeMap<u32, u32> {
@@ -1727,6 +1769,10 @@ impl ClosedHostHandlerPlan {
             frame,
             clause_functions: functions.to_vec(),
         })
+    }
+
+    fn perform_route(&self, protocol: u32, operation: u32) -> Option<ClosedFramePerformRoute> {
+        closed_frame_perform_route(&self.frame, protocol, operation)
     }
 }
 
@@ -2901,6 +2947,14 @@ mod tests {
         assert!(ir.contains("closed-host-handler-frame r1: def=0 routes=4 clauses=4 active-field=0 one-shot-fields=1..4"), "{ir}");
         assert_eq!(plans[&1].frame.native_resumption_field(0, 0), Some(1));
         assert_eq!(plans[&1].frame.native_resumption_field(3, 0), Some(4));
+        let route = plans[&1].perform_route(3, 0).expect("exact frozen process-args route");
+        assert_eq!(route.handler_def, 0);
+        assert_eq!(route.import, 3);
+        assert_eq!(route.one_shot_field, 4);
+        assert_eq!(route.operation_result, 19);
+        assert_eq!(route.import_result, 19);
+        assert!(plans[&1].perform_route(3, 1).is_none());
+        assert!(plans[&1].perform_route(9, 0).is_none());
 
         artifact.functions[0].receiver_mode = None;
         assert!(closed_host_handler_plans(&artifact, 4, &entry).is_err());
