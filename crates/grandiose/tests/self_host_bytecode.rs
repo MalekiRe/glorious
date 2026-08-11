@@ -1164,8 +1164,8 @@ impl Drop for RetainedSelfHostArtifact {
 // The CLI route is deliberately retained even on success: it is the normal
 // iteration surface for the native self-host compiler, and its command/output
 // logs are the evidence needed to diagnose a cold cache or a bad durable
-// object-cache reuse decision. The cache itself is private to this worktree;
-// only the per-invocation trace directory is fresh.
+// object-cache reuse decision. Each invocation gets a fresh trace directory
+// containing its own durable cache, so parallel test processes cannot collide.
 fn retained_native_cli_trace_directory() -> PathBuf {
     static NEXT_TRACE: AtomicUsize = AtomicUsize::new(0);
 
@@ -1186,12 +1186,6 @@ fn retained_native_cli_trace_directory() -> PathBuf {
     directory
 }
 
-fn private_native_cli_cache_directory() -> PathBuf {
-    std::env::var_os("G1_SELF_HOST_NATIVE_CLI_CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repository_root().join("target/self-host-native-cli-cache"))
-}
-
 fn command_log(output: &std::process::Output) -> String {
     format!(
         "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
@@ -1207,7 +1201,10 @@ fn command_log(output: &std::process::Output) -> String {
 /// only the runtime input to the resulting self-host executable.
 fn compile_release_grc_native_cli(bundle: &SourceBundle, executable: &Path, trace: &Path) {
     let sources = trace.join("native-inputs");
-    let cache = private_native_cli_cache_directory();
+    // `trace` is unique for each gate invocation (process id plus a local
+    // ordinal), so keeping its durable objects here prevents concurrent test
+    // processes from sharing or deleting one another's native cache entries.
+    let cache = trace.join("native-incremental-cache");
     fs::create_dir_all(&sources).unwrap();
     fs::create_dir_all(&cache).unwrap_or_else(|error| {
         panic!(
@@ -2869,7 +2866,7 @@ fn canonical_self_host_native_cli_uses_private_incremental_cache_in_release() {
             let input = trace.join("canonical-self-host.glorious");
             let executable = trace.join("bootstrap-self-host-native-cli");
             let stage2 = trace.join("native-stage2.grbc");
-            let cache = private_native_cli_cache_directory();
+            let cache = trace.join("native-incremental-cache");
             fs::write(&input, monolithic_source.as_bytes()).unwrap();
             compile_release_grc_native_cli(&source_bundle, &executable, &trace);
             run_native_cli_self_host(&executable, &input, &stage2, &trace);

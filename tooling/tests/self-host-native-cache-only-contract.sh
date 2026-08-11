@@ -45,3 +45,13 @@ rg -Fq -- '"--native-incremental".to_owned()' "$release_harness"
 rg -Fq -- '"--native-incremental-cache".to_owned()' "$release_harness"
 rg -Fq -- 'edited["cache_stats"]["bodies_reused"]' "$release_harness"
 rg -Fq -- 'durable_object_manifests(&cache)' "$release_harness"
+
+# The opt-in native CLI self-host gate may run under Rust's parallel test
+# harness. Its durable cache must live below the per-invocation trace root,
+# never in a worktree-wide directory shared by concurrent test processes.
+native_cli_gate="$repo_root/crates/grandiose/tests/self_host_bytecode.rs"
+rg -Fq -- 'let cache = trace.join("native-incremental-cache");' "$native_cli_gate"
+if rg -Fq -- 'G1_SELF_HOST_NATIVE_CLI_CACHE_DIR' "$native_cli_gate"; then
+    echo "native CLI self-host gate permits a shared durable cache override" >&2
+    exit 1
+fi
