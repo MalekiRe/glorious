@@ -150,14 +150,20 @@ fn options_default_is_explicit_o2_and_o1_removes_only_cleanup_free_constant_drop
         o1.optimization_report
     );
     assert_eq!(
+        instruction_count(&explicit_o0, "answer", |instruction| matches!(
+            instruction,
+            Instruction::Const { .. }
+        )),
+        2,
+        "O0 retains the unused literal and the returned value"
+    );
+    assert_eq!(
         instruction_count(&o1, "answer", |instruction| matches!(
             instruction,
             Instruction::Const { .. }
         )),
-        instruction_count(&explicit_o0, "answer", |instruction| matches!(
-            instruction,
-            Instruction::Const { .. }
-        ))
+        1,
+        "O1 removes the dead cleanup-free literal with its Drop"
     );
     assert!(
         !function_code(&o1, "answer")
