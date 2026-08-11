@@ -105,10 +105,21 @@ pub fn emit_verified_artifact_llvm_ir(
     // represent is followed conservatively; dynamic calls remain rejected by
     // `emit_function`, so this never makes an executable depend on a VM
     // fallback or an undefined native symbol.
-    let reachable = reachable_functions(artifact, entry)?;
+    // A closed `Handle` whose body has no effect operations can be represented
+    // as a direct call.  Keep the proof local to this artifact: the handler is
+    // not a process-global host capability, and the body is selected only from
+    // the exact lexical producer chain recognized below.
+    let closed_handle_bodies = closed_handle_body_functions(artifact);
+    let reachable = reachable_functions(artifact, entry, &closed_handle_bodies)?;
     for (function_id, function) in artifact.functions.iter().enumerate() {
         if reachable.contains(&(function_id as u32)) {
-            emit_function(&mut output, artifact, function_id as u32, function)?;
+            emit_function(
+                &mut output,
+                artifact,
+                function_id as u32,
+                function,
+                closed_handle_bodies.contains(&(function_id as u32)),
+            )?;
             output.push('\n');
         }
     }
@@ -151,6 +162,7 @@ pub fn emit_verified_artifact_llvm_ir(
 fn reachable_functions(
     artifact: &Artifact,
     entry: u32,
+    closed_handle_bodies: &BTreeSet<u32>,
 ) -> Result<BTreeSet<u32>, ArtifactLlvmError> {
     let mut reachable = BTreeSet::new();
     let mut pending = vec![entry];
@@ -175,8 +187,12 @@ fn reachable_functions(
                 Instruction::Call { function, .. }
                 | Instruction::TailCall { function, .. }
                 | Instruction::CallKnownReceiver { function, .. }
-                | Instruction::TailCallKnownReceiver { function, .. }
-                | Instruction::MakeCallable { function, .. } => pending.push(*function),
+                | Instruction::TailCallKnownReceiver { function, .. } => pending.push(*function),
+                // A callable target normally has a receiver and therefore is
+                // not directly executable in this ABI.  The one exception is
+                // the body of a statically proven, effect-free closed Handle.
+                Instruction::MakeCallable { function, .. }
+                    if closed_handle_bodies.contains(function) => pending.push(*function),
                 Instruction::MakeHandlerShared { functions, .. } => {
                     pending.extend(functions.iter().copied())
                 }
@@ -199,8 +215,12 @@ fn emit_function(
     artifact: &Artifact,
     function_id: u32,
     function: &Function,
+    allow_empty_owned_receiver: bool,
 ) -> Result<(), ArtifactLlvmError> {
-    if function.receiver_mode.is_some() || !function.outward_protocols.is_empty() {
+    if (!allow_empty_owned_receiver && function.receiver_mode.is_some())
+        || (allow_empty_owned_receiver && !is_empty_owned_receiver(function))
+        || !function.outward_protocols.is_empty()
+    {
         return Err(unsupported(function_id, 0, "receiver/effect function"));
     }
     let result = llvm_type(artifact, function_id, function.return_type)?;
@@ -225,6 +245,8 @@ fn emit_function(
     // semantics without fabricating phi ownership at this artifact boundary;
     // LLVM's O3 mem2reg pass can eliminate the trivial allocas afterwards.
     let closed_handler_plans = closed_host_handler_plans(artifact, function_id, function)?;
+    let closed_handles = closed_handle_sites(artifact, function_id);
+    let closed_handle_opaque_registers = closed_handle_opaque_registers(artifact, function_id, &closed_handles);
     let register_types = function
         .register_types
         .iter()
@@ -234,6 +256,11 @@ fn emit_function(
                 closed_handler_plans
                     .contains_key(&(register as u32))
                     .then_some("ptr".to_owned())
+                    .or_else(|| {
+                        closed_handle_opaque_registers
+                            .contains(&(register as u32))
+                    .then_some("ptr".to_owned())
+                    })
                     .ok_or(error)
             })
         })
@@ -734,6 +761,49 @@ fn emit_function(
                 ));
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
+            Instruction::MakeCallable { .. } | Instruction::MakeHandler { .. }
+                if closed_handle_opaque_registers.iter().any(|register| {
+                    instruction_writes_register(instruction) == Some(*register)
+                }) => {
+                // The callable and handler are lexical proof tokens for this
+                // restricted path. They have no native representation because
+                // the selected body cannot perform an operation.
+                emit_fallthrough(output, function, function_id, instruction_id)?;
+            }
+            Instruction::Handle { dst, args, .. } => {
+                let body = closed_handles.get(&instruction_id).ok_or_else(|| {
+                    unsupported(function_id, instruction_id, "closed effect-free handle")
+                })?;
+                let body_function = artifact.functions.get(*body as usize).ok_or_else(|| {
+                    unsupported(function_id, instruction_id, "closed handle body")
+                })?;
+                if args.len() != body_function.params.len() {
+                    return Err(unsupported(function_id, instruction_id, "handle arity"));
+                }
+                let mut arguments = Vec::with_capacity(args.len());
+                for (index, register) in args.iter().enumerate() {
+                    let ty = llvm_type(artifact, function_id, body_function.params[index])?;
+                    let value = emit_load(
+                        output, &register_types, function_id, instruction_id, *register, &mut temporary,
+                    )?;
+                    arguments.push(format!("{ty} {value}"));
+                }
+                let arguments = arguments.join(", ");
+                let body_result = llvm_type(artifact, function_id, body_function.return_type)?;
+                if body_result == "void" {
+                    output.push_str(&format!("  call void @grbc_fn_{body}({arguments})\n"));
+                } else {
+                    let name = format!("%v{temporary}");
+                    temporary += 1;
+                    output.push_str(&format!(
+                        "  {name} = call {body_result} @grbc_fn_{body}({arguments})\n"
+                    ));
+                    emit_store(
+                        output, &register_types, function_id, instruction_id, *dst, &name,
+                    )?;
+                }
+                emit_fallthrough(output, function, function_id, instruction_id)?;
+            }
             instruction => {
                 return Err(unsupported(
                     function_id,
@@ -1140,6 +1210,108 @@ fn closed_host_handler_continuation_abis(
         }
     }
     found
+}
+
+/// The first executable closed-handler slice deliberately stops before
+/// `Perform`: it proves that the body cannot observe the installed handler,
+/// then lowers the lexical Handle boundary to its direct body call.  This is
+/// useful on its own (generated handler scaffolding no longer blocks native
+/// code) without pretending that a continuation has an ABI before one exists.
+fn closed_handle_body_functions(artifact: &Artifact) -> BTreeSet<u32> {
+    closed_host_handler_continuation_abis(artifact)
+        .into_iter()
+        .filter(|abi| closed_handle_body_is_effect_free(artifact, abi))
+        .map(|abi| abi.body.function)
+        .collect()
+}
+
+fn closed_handle_sites(artifact: &Artifact, owner_function: u32) -> BTreeMap<u32, u32> {
+    closed_host_handler_continuation_abis(artifact)
+        .into_iter()
+        .filter(|abi| {
+            abi.owner_function == owner_function && closed_handle_body_is_effect_free(artifact, abi)
+        })
+        .map(|abi| (abi.handle_instruction, abi.body.function))
+        .collect()
+}
+
+fn closed_handle_opaque_registers(
+    artifact: &Artifact,
+    owner_function: u32,
+    sites: &BTreeMap<u32, u32>,
+) -> BTreeSet<u32> {
+    if sites.is_empty() {
+        return BTreeSet::new();
+    }
+    let abis = closed_host_handler_continuation_abis(artifact);
+    let mut callable_functions = BTreeSet::new();
+    let mut handler_defs = BTreeSet::new();
+    for abi in abis.iter().filter(|abi| {
+        abi.owner_function == owner_function
+            && sites.get(&abi.handle_instruction) == Some(&abi.body.function)
+    }) {
+        callable_functions.insert(abi.body.function);
+        callable_functions.extend(abi.clauses.iter().map(|clause| clause.function));
+        handler_defs.insert(abi.frame.handler_def);
+    }
+    let Some(owner) = artifact.functions.get(owner_function as usize) else { return BTreeSet::new() };
+    let start = owner.code_start as usize;
+    let Some(code) = artifact.code.get(start..start.saturating_add(owner.code_len as usize)) else {
+        return BTreeSet::new();
+    };
+    code.iter()
+        .filter_map(|instruction| match instruction {
+            Instruction::MakeCallable { dst, function, captures, .. }
+                if captures.is_empty() && callable_functions.contains(function) => Some(*dst),
+            Instruction::MakeHandler { dst, handler_def, .. }
+                if handler_defs.contains(handler_def) => Some(*dst),
+            _ => None,
+        })
+        .collect()
+}
+
+fn instruction_writes_register(instruction: &Instruction) -> Option<u32> {
+    match instruction {
+        Instruction::MakeCallable { dst, .. } | Instruction::MakeHandler { dst, .. } => Some(*dst),
+        _ => None,
+    }
+}
+
+fn is_empty_owned_receiver(function: &Function) -> bool {
+    function.receiver_mode == Some(2)
+        && function.register_types.first() == Some(&UNIT)
+}
+
+fn closed_handle_body_is_effect_free(
+    artifact: &Artifact,
+    abi: &ClosedHostHandlerContinuationAbi,
+) -> bool {
+    let Some(function) = artifact.functions.get(abi.body.function as usize) else { return false };
+    if !is_empty_owned_receiver(function) || !function.outward_protocols.is_empty() {
+        return false;
+    }
+    let start = function.code_start as usize;
+    let Some(code) = artifact.code.get(start..start.saturating_add(function.code_len as usize)) else {
+        return false;
+    };
+    code.iter().all(|instruction| matches!(instruction,
+        Instruction::Nop
+        | Instruction::Drop { .. }
+        | Instruction::Deconstruct { .. }
+        | Instruction::Const { .. }
+        | Instruction::Move { .. }
+        | Instruction::Copy { .. }
+        | Instruction::Primitive { .. }
+        | Instruction::Return { .. }
+        | Instruction::Construct { .. }
+        | Instruction::ProjectMove { .. }
+        | Instruction::ProjectCopy { .. }
+        | Instruction::EnumTag { .. }
+        | Instruction::Jump { .. }
+        | Instruction::Switch { .. }
+        | Instruction::Call { .. }
+        | Instruction::TailCall { .. }
+    ))
 }
 
 fn closed_host_callable(
@@ -2301,6 +2473,29 @@ mod tests {
     }
 
     #[test]
+    fn effect_free_closed_handle_lowers_only_its_lexical_body() {
+        let artifact = frozen_handler_artifact_for_continuation_abi();
+        assert_eq!(closed_handle_body_functions(&artifact), BTreeSet::from([1]));
+        let owner = &artifact.functions[0];
+        let body = &artifact.functions[1];
+        let mut ir = String::new();
+        emit_function(&mut ir, &artifact, 0, owner, false).unwrap();
+        emit_function(&mut ir, &artifact, 1, body, true).unwrap();
+        assert!(ir.contains("call void @grbc_fn_1()"), "{ir}");
+        assert!(!ir.contains("g1_host_"), "{ir}");
+        assert!(!ir.contains("MakeHandler"), "{ir}");
+
+        let mut effectful = artifact;
+        effectful.code[8] = Instruction::Perform {
+            dst: None,
+            protocol: 0,
+            operation: 0,
+            payloads: vec![],
+        };
+        assert!(closed_handle_body_functions(&effectful).is_empty());
+    }
+
+    #[test]
     fn closed_host_handler_plan_installs_only_the_capture_free_shared_shape() {
         let mut artifact = frozen_handler_artifact_for_continuation_abi();
         for clause in &mut artifact.handler_defs[0].clauses {
@@ -2354,7 +2549,7 @@ mod tests {
         let plans = closed_host_handler_plans(&artifact, 4, &entry).unwrap();
         assert_eq!(plans[&1].frame.continuations.len(), 4);
         let mut ir = String::new();
-        emit_function(&mut ir, &artifact, 4, &entry).unwrap();
+        emit_function(&mut ir, &artifact, 4, &entry, false).unwrap();
         assert!(ir.contains("closed-host-handler-plan r1: def=0 routes=4 clauses=4"), "{ir}");
 
         artifact.functions[0].receiver_mode = None;
@@ -2408,11 +2603,11 @@ mod tests {
         artifact.types.push(Type::Handler { handler_def: 0, capture_type: handler_capture, identity_name: "frozen".into() });
         artifact.functions = vec![
             Function { name: "owner".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![], receiver_mode: None, register_types: vec![UNIT, body_type, clause_types[0], clause_types[1], clause_types[2], clause_types[3], handler_type, UNIT], code_start: 0, code_len: 8, label_slot_count: 0 },
-            Function { name: "body".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 8, code_len: 0, label_slot_count: 0 },
-            Function { name: "diagnostic".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![0], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 8, code_len: 0, label_slot_count: 0 },
-            Function { name: "read".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![1], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 8, code_len: 0, label_slot_count: 0 },
-            Function { name: "write".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![2], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 8, code_len: 0, label_slot_count: 0 },
-            Function { name: "args".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![3], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 8, code_len: 0, label_slot_count: 0 },
+            Function { name: "body".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 8, code_len: 1, label_slot_count: 0 },
+            Function { name: "diagnostic".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![0], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 9, code_len: 0, label_slot_count: 0 },
+            Function { name: "read".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![1], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 9, code_len: 0, label_slot_count: 0 },
+            Function { name: "write".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![2], register_types: vec![UNIT], receiver_mode: Some(2), code_start: 9, code_len: 0, label_slot_count: 0 },
+            Function { name: "args".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![3], receiver_mode: Some(2), register_types: vec![UNIT], code_start: 9, code_len: 0, label_slot_count: 0 },
         ];
         artifact.code = vec![
             Instruction::MakeCallable { dst: 1, callable_type: body_type, function: 1, captures: vec![] },
@@ -2422,6 +2617,7 @@ mod tests {
             Instruction::MakeCallable { dst: 5, callable_type: clause_types[3], function: 5, captures: vec![] },
             Instruction::MakeHandler { dst: 6, handler_def: 0, clauses: vec![2, 3, 4, 5] },
             Instruction::Handle { dst: 7, handler: 6, body: 1, args: vec![] },
+            Instruction::Return { src: None },
             Instruction::Return { src: None },
         ];
         artifact
