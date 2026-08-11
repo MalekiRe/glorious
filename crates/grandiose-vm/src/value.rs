@@ -321,6 +321,20 @@ impl SlotHandle {
             .cloned()
     }
 
+    /// Read a place without materializing an intermediate `Value` clone.
+    ///
+    /// Operations such as bytecode COPY need to derive their own independent
+    /// value, but can do so directly from the stored value rather than first
+    /// cloning it and then cloning/deep-copying that temporary again.
+    pub(crate) fn with_value<T>(
+        &self,
+        read: impl FnOnce(&Value) -> T,
+    ) -> Result<T, ArenaError> {
+        let arena = self.store.arena.borrow();
+        let value = arena.project(PlaceHandle::new(self.owner, 0))?;
+        Ok(read(value))
+    }
+
     pub(crate) fn take(&self) -> Result<Value, ArenaError> {
         self.store
             .arena

@@ -734,8 +734,7 @@ impl Vm {
                 }
                 Instruction::Copy { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let value = get(frame, src)?;
-                    let v = copy_value(a, fun.register_types[src as usize], &value)?;
+                    let v = copy_register(a, frame, src, fun.register_types[src as usize])?;
                     put(frame, dst, v)?;
                     frame.pc += 1;
                 }
@@ -2446,6 +2445,28 @@ fn get(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
         value => Ok(value.clone()),
     }
 }
+
+/// Copy a register directly from its storage. `get` intentionally returns an
+/// owned value for ordinary reads, but COPY has already committed to creating
+/// the destination's independent value, so cloning the source first would do
+/// the work twice for text, references, and aggregate handles.
+fn copy_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    ty: TypeId,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| copy_value(a, ty, value))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => copy_value(a, ty, value),
+    }
+}
+
 fn put(f: &mut Frame, r: u32, v: Value) -> Result<(), RuntimeError> {
     if f.registers[r as usize].replace(v).is_some() {
         Err(RuntimeError::TypeConfusion)
