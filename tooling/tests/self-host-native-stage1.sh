@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Contract test: stage-1 evidence is native/provenance-bound and retained.
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
+mkdir -p "$repo_root/target"
+scratch=$(mktemp -d "$repo_root/target/self-host-native-stage1-test.XXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT
+mkdir -p "$scratch/repo/tooling" "$scratch/bin"
+cp "$repo_root/tooling/self-host-native-stage1.sh" "$scratch/repo/tooling/"
+
+cat > "$scratch/native" <<'EOF'
+#!/usr/bin/env bash
+printf 'stage-two-bytes' > "$1"
+EOF
+chmod +x "$scratch/native"
+cat > "$scratch/repo/tooling/self-host-native.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  canonical-source) printf 'canonical self host\n' > "$2" ;;
+  provenance)
+    source=$2; output=$3
+    {
+      printf 'schema\t1\nstage\t1\noptimization\tO3\nlinker\twild\n'
+      printf 'native-sha256\t%s\n' "$(sha256sum "$NATIVE_STAGE1_TEST_NATIVE" | awk '{print $1}')"
+      printf 'source-sha256\t%s\n' "$(sha256sum "$source" | awk '{print $1}')"
+    } > "$output"
+    ;;
+  build) printf '%s\n' "$NATIVE_STAGE1_TEST_NATIVE" ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$scratch/repo/tooling/self-host-native.sh"
+cat > "$scratch/bin/readelf" <<'EOF'
+#!/usr/bin/env bash
+printf 'Wild linker marker\n'
+EOF
+chmod +x "$scratch/bin/readelf"
+
+NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
+  "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/run" > "$scratch/out"
+rg -q '^STAGE1_EMITTED' "$scratch/out"
+[[ "$(cat "$scratch/run/stage2.grbc")" == stage-two-bytes ]]
+rg -q $'^result\temitted$' "$scratch/run/metadata.tsv"
+[[ -s "$scratch/run/canonical-source.glorious" && -s "$scratch/run/stage1-provenance.tsv" ]]
+for log in canonical-source provenance build stage1; do [[ -f "$scratch/run/$log.log" ]]; done
+
+if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
+  "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/run" > /dev/null 2> "$scratch/reuse.err"; then
+  echo 'expected retained output directory reuse to fail' >&2
+  exit 1
+fi
+rg -q 'refusing to overwrite retained evidence' "$scratch/reuse.err"
