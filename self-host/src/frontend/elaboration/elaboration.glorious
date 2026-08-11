@@ -2079,9 +2079,11 @@ pub instantiate_effect_member_type(
     instance: EffectInstanceId,
     member: TypeId
 ) -> TypeId {
-    let effect = interface_effect_instance_effect(&*interfaces, instance);
+    let effect_interface = interface_effect_instance_effect(
+        &*interfaces, instance
+    );
     let owner = TypeParameterOwner::Declaration(
-        interface_effect_shell(&*interfaces, effect)
+        interface_effect_shell(&*interfaces, effect_interface)
     );
     let substitutions = Vec::new();
     append_effect_instance_substitutions(
