@@ -1214,12 +1214,11 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     }
                     let receiver = get(frame, receiver)?;
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let callee = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, dst,
+                    )?;
                     frame.pc += 1;
-                    stack.push(make_verified_frame(a, function, values, receiver, dst)?);
+                    stack.push(callee);
                 }
                 Instruction::TailCallKnownReceiver {
                     function,
@@ -1235,13 +1234,10 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     }
                     let receiver = get(frame, receiver)?;
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, return_dst,
+                    )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -1424,12 +1420,10 @@ impl Vm {
                     let (dst, callable, receiver_mode) = (*dst, *callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
-                    let values = args
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut callee = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, dst,
+                    )?;
                     frame.pc += 1;
-                    let mut callee = make_verified_frame(a, function, values, receiver, dst)?;
                     if let Some(guard) = guard {
                         callee.guards.push(guard);
                     }
@@ -1443,13 +1437,10 @@ impl Vm {
                     let (callable, receiver_mode) = (*callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
-                    let values = args
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, return_dst,
+                    )?;
                     if let Some(guard) = guard {
                         replacement.guards.push(guard);
                     }
@@ -1471,13 +1462,10 @@ impl Vm {
                     let handler = take(frame, handler)?;
                     let body = take(frame, body)?;
                     let (function, receiver) = owned_callable_receiver(a, body, 2)?;
-                    let values = args
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut body_frame = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, Some(dst),
+                    )?;
                     frame.pc += 1;
-                    let mut body_frame =
-                        make_verified_frame(a, function, values, receiver, Some(dst))?;
                     body_frame.delimiter = Some(handler);
                     stack.push(body_frame);
                 }
