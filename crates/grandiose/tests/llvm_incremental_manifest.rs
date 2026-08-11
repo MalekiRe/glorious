@@ -6,7 +6,7 @@ use std::{
 
 use grandiose::{
     compile_source_to_phases_with_options, emit_llvm_ir, emit_llvm_ir_with_fragment_cache,
-    emit_llvm_native_object_units,
+    default_target_data_layout, emit_llvm_native_object_units,
     llvm_incremental_manifest, LlvmFragmentCache, LlvmOptions, OptimizationLevel,
 };
 
@@ -164,6 +164,40 @@ fn global_literal_table_change_invalidates_retained_native_fragments() {
     let before_units = emit_llvm_native_object_units(&before, &options).unwrap();
     let after_units = emit_llvm_native_object_units(&after, &options).unwrap();
     assert_ne!(before_units.shared_fingerprint, after_units.shared_fingerprint);
+}
+
+#[test]
+fn native_partition_keys_bind_target_and_shared_entry_abi() {
+    let phases = phases(
+        r#"
+            helper(value: i64) -> i64 { value + 1 }
+            main() -> () { helper(41); () }
+        "#,
+    );
+    let base_options = LlvmOptions::default();
+    let base = emit_llvm_native_object_units(&phases, &base_options).unwrap();
+    let function_keys = |units: &grandiose::LlvmNativeObjectUnits| {
+        units
+            .functions
+            .iter()
+            .map(|unit| (unit.declaration, unit.fragment_fingerprint))
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    let mut aarch64 = base_options.clone();
+    aarch64.target_triple = "aarch64-unknown-linux-gnu".into();
+    aarch64.target_data_layout = default_target_data_layout(&aarch64.target_triple).map(str::to_owned);
+    let target_changed = emit_llvm_native_object_units(&phases, &aarch64).unwrap();
+    assert_eq!(target_changed.shared.target_triple, aarch64.target_triple);
+    assert_ne!(base.shared_fingerprint, target_changed.shared_fingerprint);
+    assert_ne!(function_keys(&base), function_keys(&target_changed));
+
+    let mut no_entry = base_options;
+    no_entry.emit_entry_wrapper = false;
+    let entry_changed = emit_llvm_native_object_units(&phases, &no_entry).unwrap();
+    assert!(!entry_changed.shared.ir.contains("define i32 @main()"));
+    assert_ne!(base.shared_fingerprint, entry_changed.shared_fingerprint);
+    assert_ne!(function_keys(&base), function_keys(&entry_changed));
 }
 
 #[test]
