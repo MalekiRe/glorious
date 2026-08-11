@@ -18,6 +18,7 @@ pub mod frontend_cache;
 pub mod interface;
 pub mod lexer;
 pub mod llvm_backend;
+mod llvm_runtime_abi;
 pub mod lossless;
 pub mod modules;
 pub mod parser;

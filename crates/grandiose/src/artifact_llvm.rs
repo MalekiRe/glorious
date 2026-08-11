@@ -14,6 +14,11 @@ use grandiose_vm::{
     Type, TypeId, UNIT,
 };
 
+use crate::{
+    llvm_backend::default_target_triple,
+    llvm_runtime_abi::{pointer_width_for_target, runtime_fault_declaration},
+};
+
 /// Error emitted when verified bytecode has no defined ABI in the scalar AOT
 /// subset.  `Unsupported` is a success of verification, not permission to
 /// execute through the VM.
@@ -79,8 +84,16 @@ pub fn emit_verified_artifact_llvm_ir(
     let entry = artifact
         .entry_function
         .ok_or(ArtifactLlvmError::MissingEntry)?;
+    // Artifact lowering has no runtime-consuming opcode yet.  It still emits
+    // the canonical declaration so all LLVM producers agree on the exact ABI
+    // which future, independently verified slices must use.  The declaration
+    // alone neither calls the runtime nor authorizes a VM fallback.
+    let target_triple = default_target_triple();
+    let pointer_width = pointer_width_for_target(&target_triple);
     let mut output =
-        String::from("; Grandiose verified .grbc AOT\nsource_filename = \"grandiose.grbc\"\n\n");
+        String::from("; Grandiose verified .grbc AOT\nsource_filename = \"grandiose.grbc\"\n");
+    output.push_str(&runtime_fault_declaration(pointer_width));
+    output.push_str("\n\n");
     // An artifact can retain helper functions which are unreachable from its
     // entry point.  They have no native observable behavior, and rejecting a
     // supported program merely because an unused helper needs a later ABI
@@ -1187,6 +1200,33 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert!(object.is_file());
+    }
+
+    #[test]
+    fn verified_artifact_uses_the_same_runtime_fault_abi_as_source_llvm() {
+        let artifact = with_generated_cleanup_plans(Artifact {
+            entry_function: Some(0),
+            functions: vec![Function {
+                name: "main".into(),
+                flags: 0,
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT],
+                code_start: 0,
+                code_len: 1,
+                label_slot_count: 0,
+            }],
+            code: vec![Instruction::Return { src: None }],
+            ..Artifact::default()
+        })
+        .unwrap();
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        let pointer_width = if cfg!(target_pointer_width = "32") { 32 } else { 64 };
+        assert!(ir.contains(&format!(
+            "declare void @g1_runtime_fault(i32, i32, i32, ptr, i{pointer_width}) cold noreturn"
+        )));
     }
 
     #[test]

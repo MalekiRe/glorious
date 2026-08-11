@@ -13,6 +13,7 @@ use crate::{
     compiler_mir::{self as mir, InstructionKind, Terminator},
     compiler_traits::HostImportRole,
     diagnostic::Diagnostic,
+    llvm_runtime_abi::{pointer_width_for_target, runtime_fault_declaration},
     CompiledPhases,
 };
 
@@ -462,10 +463,7 @@ impl<'a> Emitter<'a> {
         }
         self.line("");
         self.line("declare void @llvm.trap() cold noreturn nounwind");
-        self.line(&format!(
-            "declare void @g1_runtime_fault(i32, i32, i32, ptr, i{}) cold noreturn",
-            self.pointer_width()
-        ));
+        self.line(&runtime_fault_declaration(self.pointer_width()));
         for (bytes, index) in self.runtime_fault_literals.clone() {
             self.line(&format!(
                 "@g1.runtime_fault.{index} = private constant [{} x i8] c\"{}\"",
@@ -12820,19 +12818,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn pointer_width(&self) -> u16 {
-        let triple = self.options.target_triple.as_str();
-        if triple.starts_with("i386")
-            || triple.starts_with("i486")
-            || triple.starts_with("i586")
-            || triple.starts_with("i686")
-            || triple.starts_with("armv7")
-            || triple.starts_with("thumbv7")
-            || triple.starts_with("wasm32")
-        {
-            32
-        } else {
-            64
-        }
+        pointer_width_for_target(&self.options.target_triple)
     }
 }
 
