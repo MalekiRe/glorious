@@ -247,6 +247,7 @@ fn emit_function(
     // LLVM's O3 mem2reg pass can eliminate the trivial allocas afterwards.
     let closed_handler_plans = closed_host_handler_plans(artifact, function_id, function)?;
     let shared_perform_dispatches = closed_shared_perform_dispatches(artifact, function_id);
+    let shared_perform_consumes = closed_shared_perform_consume_sites(artifact, function_id);
     let shared_perform_opaque_registers = shared_perform_dispatches
         .iter()
         .map(|dispatch| dispatch.body_register)
@@ -794,7 +795,7 @@ fn emit_function(
                     &frame_name,
                 )?;
                 output.push_str(&format!(
-                    "  ; closed-host-handler-frame r{dst}: def={} routes={} clauses={} active-field=0 one-shot-fields=1..{}\\n",
+                    "  ; closed-host-handler-frame r{dst}: def={} routes={} clauses={} active-field=0 one-shot-fields=1..{}\n",
                     plan.frame.handler_def,
                     plan.frame.continuations.len(),
                     plan.clause_functions.len(),
@@ -809,7 +810,7 @@ fn emit_function(
                     // call: the matching active Handle boundary and actual
                     // continuation transfer still need lowering together.
                     output.push_str(&format!(
-                        "  ; closed-host-perform-dispatch handle={} body={} perform={} route=({}, {}) frame-field={} import={}\\n",
+                        "  ; closed-host-perform-dispatch handle={} body={} perform={} route=({}, {}) frame-field={} import={}\n",
                         dispatch.handle_instruction,
                         dispatch.body_function,
                         dispatch.perform_instruction,
@@ -835,6 +836,17 @@ fn emit_function(
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
             Instruction::Handle { dst, args, .. } => {
+                if let Some(site) = shared_perform_consumes.get(&instruction_id) {
+                    emit_closed_shared_perform_consumption(
+                        output,
+                        &register_types,
+                        function_id,
+                        instruction_id,
+                        site,
+                        &mut temporary,
+                    )?;
+                    continue;
+                }
                 if let Some(site) = shared_handles.get(&instruction_id) {
                     emit_closed_shared_handle_scope(
                         output, artifact, &register_types, function, function_id, instruction_id,
@@ -1885,6 +1897,7 @@ fn closed_host_handler_plans(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ClosedSharedPerformDispatch {
     handler_instruction: u32,
+    handler_register: u32,
     handle_instruction: u32,
     body_register: u32,
     body_function: u32,
@@ -1944,6 +1957,7 @@ fn closed_shared_perform_dispatches(
             };
             found.push(ClosedSharedPerformDispatch {
                 handler_instruction: index as u32,
+                handler_register: *handler,
                 handle_instruction: index as u32 + 2,
                 body_register: *body_register,
                 body_function: body.function,
@@ -1954,6 +1968,107 @@ fn closed_shared_perform_dispatches(
         }
     }
     found
+}
+
+/// The one native transition currently sound for a shared closed Perform.
+/// It consumes the exact frame bit, then traps: no host value and no
+/// resumption value exists until the complete continuation transfer ABI does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedSharedPerformConsumeSite {
+    handler_register: u32,
+    resumption_field: u32,
+}
+
+fn closed_shared_perform_consume_sites(
+    artifact: &Artifact,
+    owner_function: u32,
+) -> BTreeMap<u32, ClosedSharedPerformConsumeSite> {
+    closed_shared_perform_dispatches(artifact, owner_function)
+        .into_iter()
+        .filter(|dispatch| exact_unit_perform_then_return(artifact, dispatch))
+        .map(|dispatch| (
+            dispatch.handle_instruction,
+            ClosedSharedPerformConsumeSite {
+                handler_register: dispatch.handler_register,
+                resumption_field: dispatch.resumption_field,
+            },
+        ))
+        .collect()
+}
+
+fn exact_unit_perform_then_return(
+    artifact: &Artifact,
+    dispatch: &ClosedSharedPerformDispatch,
+) -> bool {
+    let Some(body) = artifact.functions.get(dispatch.body_function as usize) else { return false };
+    if body.return_type != UNIT || body.params.len() != 0 {
+        return false;
+    }
+    let start = body.code_start as usize;
+    let Some(code) = artifact.code.get(start..start.saturating_add(body.code_len as usize)) else {
+        return false;
+    };
+    matches!(
+        code,
+        [
+            Instruction::Perform { dst: None, protocol, operation, payloads },
+            Instruction::Return { src: None },
+        ] if *protocol == dispatch.continuation.protocol
+            && *operation == dispatch.continuation.operation
+            && payloads.is_empty()
+    )
+}
+
+fn emit_closed_shared_perform_consumption(
+    output: &mut String,
+    register_types: &[String],
+    function_id: u32,
+    instruction_id: u32,
+    site: &ClosedSharedPerformConsumeSite,
+    temporary: &mut u32,
+) -> Result<(), ArtifactLlvmError> {
+    let frame = emit_load(output, register_types, function_id, instruction_id, site.handler_register, temporary)?;
+    let active = format!("%closed_perform_active_{instruction_id}");
+    let used = format!("%closed_perform_used_{instruction_id}");
+    output.push_str(&format!(
+        "  {active} = getelementptr inbounds [5 x i1], ptr {frame}, i64 0, i64 0\n"
+    ));
+    output.push_str(&format!(
+        "  {used} = getelementptr inbounds [5 x i1], ptr {frame}, i64 0, i64 {}\n",
+        site.resumption_field,
+    ));
+    // This Handle is the sole activation point for the exact lexical frame.
+    // Both continuations below terminate, so there is no scope bit to restore.
+    output.push_str(&format!("  store i1 true, ptr {active}\n"));
+    let active_value = format!("%closed_perform_active_value_{instruction_id}");
+    output.push_str(&format!("  {active_value} = load i1, ptr {active}\n"));
+    output.push_str(&format!(
+        "  br i1 {active_value}, label %closed_perform_check_{instruction_id}, label %closed_perform_reject_{instruction_id}\n\
+closed_perform_check_{instruction_id}:\n"
+    ));
+    let used_value = format!("%closed_perform_used_value_{instruction_id}");
+    output.push_str(&format!("  {used_value} = load i1, ptr {used}\n"));
+    output.push_str(&format!(
+        "  br i1 {used_value}, label %closed_perform_reject_{instruction_id}, label %closed_perform_consume_{instruction_id}\n\
+closed_perform_consume_{instruction_id}:\n  store i1 true, ptr {used}\n"
+    ));
+    emit_closed_perform_fault(output, function_id, instruction_id, "closed_perform_consume")?;
+    output.push_str(&format!("closed_perform_reject_{instruction_id}:\n"));
+    emit_closed_perform_fault(output, function_id, instruction_id, "closed_perform_reject")?;
+    Ok(())
+}
+
+fn emit_closed_perform_fault(
+    output: &mut String,
+    function_id: u32,
+    instruction_id: u32,
+    reason: &str,
+) -> Result<(), ArtifactLlvmError> {
+    let width = pointer_width_for_target(&default_target_triple());
+    output.push_str(&format!(
+        "  ; {reason}: host invocation and Resume are intentionally unavailable\n  call void @g1_runtime_fault(i32 1, i32 {function_id}, i32 {instruction_id}, ptr null, i{width} 0)\n  unreachable\n"
+    ));
+    Ok(())
 }
 
 fn closed_shared_body_callable(
@@ -3189,7 +3304,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_perform_dispatch_requires_adjacent_active_lexical_frame_and_frozen_route() {
+    fn shared_perform_consumes_exact_one_shot_frame_bit_then_faults_without_host_or_resume() {
         let mut artifact = frozen_handler_artifact_for_continuation_abi();
         for clause in &mut artifact.handler_defs[0].clauses {
             clause.callable_signature.outward_protocols.clear();
@@ -3246,12 +3361,30 @@ mod tests {
         assert_eq!(dispatches[0].perform_instruction, 0);
         assert_eq!(dispatches[0].resumption_field, 1);
         assert_eq!(dispatches[0].continuation.import, 0);
+        assert_eq!(closed_shared_perform_consume_sites(&artifact, 5).len(), 1);
         let mut ir = String::new();
         let emission = emit_function(&mut ir, &artifact, 5, &owner, false);
-        assert!(matches!(emission,
-            Err(ArtifactLlvmError::UnsupportedInstruction { instruction: 2, opcode: "closed effect-free handle", .. })
-        ), "{emission:?} {ir}");
+        assert!(emission.is_ok(), "{emission:?} {ir}");
         assert!(ir.contains("closed-host-perform-dispatch handle=2 body=4 perform=0 route=(0, 0) frame-field=1 import=0"), "{ir}");
+        assert!(ir.contains("store i1 true, ptr %closed_perform_active_2"), "{ir}");
+        assert!(ir.contains("%closed_perform_used_2 = getelementptr inbounds [5 x i1], ptr"), "{ir}");
+        assert!(ir.contains("store i1 true, ptr %closed_perform_used_2"), "{ir}");
+        assert!(ir.contains("closed_perform_reject_2"), "{ir}");
+        assert!(ir.contains("call void @g1_runtime_fault(i32 1, i32 5, i32 2, ptr null"), "{ir}");
+        assert!(!ir.contains("g1_host_"), "{ir}");
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("closed-perform.ll");
+        let object = directory.path().join("closed-perform.o");
+        let width = pointer_width_for_target(&default_target_triple());
+        fs::write(&source, format!("{}\n{ir}", runtime_fault_declaration(width))).unwrap();
+        assert!(Command::new("clang")
+            .args(["-x", "ir", "-c"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap()
+            .success());
 
         artifact.code.swap(0, 1);
         assert!(closed_shared_perform_dispatches(&artifact, 5).is_empty(), "a frame must be installed before its exact lexical body/Handle chain");
