@@ -652,6 +652,85 @@ fn bytes_full_slice_program(length: usize) -> Artifact {
     }
 }
 
+/// Byte-buffer builders frequently concatenate an optional empty suffix.
+/// Keep the source as an argument so this measures primitive allocation rather
+/// than bytecode constant materialization.
+fn bytes_concat_empty_program() -> Artifact {
+    let mut code = Vec::with_capacity(INNER_OPS * 4 + 1);
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Copy { dst: 2, src: 1 },
+            Instruction::Const {
+                dst: 3,
+                constant: 0,
+            },
+            Instruction::Primitive {
+                dst: 4,
+                op: Primitive::BytesConcat,
+                args: vec![2, 3],
+            },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 4 });
+        }
+    }
+    code.push(Instruction::Return { src: Some(4) });
+    Artifact {
+        constants: vec![Constant::Bytes(vec![])],
+        functions: vec![function(
+            "main",
+            vec![BYTES],
+            BYTES,
+            vec![UNIT, BYTES, BYTES, BYTES, BYTES],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
+/// Empty byte spans must return an immutable empty buffer without creating a
+/// fresh Rc allocation for every parser probe.
+fn bytes_empty_slice_program() -> Artifact {
+    let mut code = Vec::with_capacity(INNER_OPS * 5 + 1);
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Copy { dst: 2, src: 1 },
+            Instruction::Const {
+                dst: 3,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 4,
+                constant: 0,
+            },
+            Instruction::Primitive {
+                dst: 5,
+                op: Primitive::BytesSlice,
+                args: vec![2, 3, 4],
+            },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 5 });
+        }
+    }
+    code.push(Instruction::Return { src: Some(5) });
+    Artifact {
+        constants: vec![Constant::Usize(0)],
+        functions: vec![function(
+            "main",
+            vec![BYTES],
+            BYTES,
+            vec![UNIT, BYTES, BYTES, USIZE, USIZE, BYTES],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
 #[test]
 #[ignore = "run explicitly in release mode; reports VM run throughput"]
 fn vm_execution_microbenchmarks() {
@@ -706,5 +785,19 @@ fn vm_execution_microbenchmarks() {
         bytes_full_slice_program(bytes.len()),
         vec![Value::Bytes(bytes.clone().into())],
         Value::Bytes(bytes.into()),
+    );
+    let bytes = vec![0x5a; 4096];
+    measure_with_args(
+        "bytes_concat_empty",
+        bytes_concat_empty_program(),
+        vec![Value::Bytes(bytes.clone().into())],
+        Value::Bytes(bytes.into()),
+    );
+    let bytes = vec![0x5a; 4096];
+    measure_with_args(
+        "bytes_empty_slice",
+        bytes_empty_slice_program(),
+        vec![Value::Bytes(bytes.into())],
+        Value::Bytes(Vec::<u8>::new().into()),
     );
 }

@@ -4960,6 +4960,15 @@ fn primitive_typed(
         },
         Primitive::BytesConcat => match v {
             [Value::Bytes(a), Value::Bytes(b)] => {
+                // Immutable byte buffers are already owned by the primitive.
+                // Keep the nonempty backing when concatenating an empty
+                // prefix or suffix instead of reallocating a compiler blob.
+                if a.is_empty() {
+                    return Ok(Value::Bytes(b.clone()));
+                }
+                if b.is_empty() {
+                    return Ok(Value::Bytes(a.clone()));
+                }
                 let length = checked_output_len(a.len(), b.len())?;
                 let mut result = Vec::new();
                 reserve_output(&mut result, length)?;
@@ -7276,6 +7285,31 @@ mod tests {
             panic!("BytesConcat returned a non-Bytes value")
         };
         assert!(!Rc::ptr_eq(&left_bytes, &joined_bytes));
+        let nonempty_bytes: Rc<[u8]> = vec![10, 20].into();
+        let Value::Bytes(joined_bytes) = prim(
+            BYTES,
+            Primitive::BytesConcat,
+            &[
+                Value::Bytes(Vec::<u8>::new().into()),
+                Value::Bytes(nonempty_bytes.clone()),
+            ],
+        )
+        .unwrap() else {
+            panic!("BytesConcat empty prefix returned a non-bytes value")
+        };
+        assert!(Rc::ptr_eq(&nonempty_bytes, &joined_bytes));
+        let Value::Bytes(joined_bytes) = prim(
+            BYTES,
+            Primitive::BytesConcat,
+            &[
+                Value::Bytes(nonempty_bytes.clone()),
+                Value::Bytes(Vec::<u8>::new().into()),
+            ],
+        )
+        .unwrap() else {
+            panic!("BytesConcat empty suffix returned a non-bytes value")
+        };
+        assert!(Rc::ptr_eq(&nonempty_bytes, &joined_bytes));
         assert_eq!(
             prim(
                 U8,
