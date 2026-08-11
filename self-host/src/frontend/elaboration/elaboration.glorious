@@ -640,6 +640,19 @@ pub struct CoreHandlerClause {
     body: CoreComputationId
 }
 
+// Conservative inter-body effect analysis input. These are deliberately kept
+// as distinct ordered streams: a handler candidate cannot erase a performed
+// instance until a later coverage proof establishes that every operation and
+// pattern path is closed. Callable edges remain symbolic for the eventual
+// generic fixed point rather than fabricating instances for open row tails.
+pub struct CoreEffectSummary {
+    required_instances: Vec<EffectInstanceId>,
+    handler_candidates: Vec<EffectInstanceId>,
+    direct_calls: Vec<CallableInstanceId>,
+    indirect_calls: Vec<CallableSignatureId>,
+    resumptions: Vec<CoreComputationId>
+}
+
 
 struct IntegerConstant { low0: u32, low1: u32, high0: u32, high1: u32 }
 
@@ -1285,6 +1298,140 @@ F: Use<[0, 0]> {
         stop,
         visitor
     )
+}
+
+core_effect_summary_children(
+    body: &TypedBody,
+    node: CoreNodeId,
+    index: usize,
+    required_instances: &mut Vec<EffectInstanceId>,
+    handler_candidates: &mut Vec<EffectInstanceId>,
+    direct_calls: &mut Vec<CallableInstanceId>,
+    indirect_calls: &mut Vec<CallableSignatureId>,
+    resumptions: &mut Vec<CoreComputationId>
+) {
+    if(index < core_node_child_count(body, node)) {
+        core_effect_summary_node(
+            body,
+            core_node_child_at(body, node, index),
+            required_instances,
+            handler_candidates,
+            direct_calls,
+            indirect_calls,
+            resumptions
+        );
+        core_effect_summary_children(
+            body,
+            node,
+            index + 1,
+            required_instances,
+            handler_candidates,
+            direct_calls,
+            indirect_calls,
+            resumptions
+        )
+    } else { () }
+}
+
+core_effect_summary_handler_candidates<'a>(
+    clauses: Slice<'a, CoreHandlerClause>,
+    index: usize,
+    output: &mut Vec<EffectInstanceId>
+) {
+    if(index < Slice::len(clauses)) {
+        let clause = handle Slice::get(clauses, index) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        Vec::push(&mut *output, core_handler_clause_instance(clause));
+        core_effect_summary_handler_candidates(clauses, index + 1, output)
+    } else { () }
+}
+
+core_effect_summary_node(
+    body: &TypedBody,
+    node: CoreNodeId,
+    required_instances: &mut Vec<EffectInstanceId>,
+    handler_candidates: &mut Vec<EffectInstanceId>,
+    direct_calls: &mut Vec<CallableInstanceId>,
+    indirect_calls: &mut Vec<CallableSignatureId>,
+    resumptions: &mut Vec<CoreComputationId>
+) {
+    handle node {
+        CoreNodeId::Value(_) => (),
+        CoreNodeId::Computation(computation) => handle
+            typed_body_computation_at(body, computation) {
+            CoreComputationView::Call(_, _, instance, _) =>
+                Vec::push(&mut *direct_calls, instance),
+            CoreComputationView::CallIndirect(_, _, signature, _) =>
+                Vec::push(&mut *indirect_calls, signature),
+            CoreComputationView::Perform(_, instance, _, _) =>
+                Vec::push(&mut *required_instances, instance),
+            CoreComputationView::Resume(_, _, _) =>
+                Vec::push(&mut *resumptions, computation),
+            CoreComputationView::Handle(_, _, clauses) =>
+                core_effect_summary_handler_candidates(
+                    clauses, 0, handler_candidates
+                ),
+            _ => ()
+        }
+    };
+    core_effect_summary_children(
+        body,
+        node,
+        0,
+        required_instances,
+        handler_candidates,
+        direct_calls,
+        indirect_calls,
+        resumptions
+    )
+}
+
+// Summarize effect-control demand and callable edges in deterministic Core
+// order. This foundation never turns handler syntax into an outward-row
+// subtraction; that requires the later generic handler coverage proof.
+pub core_effect_summary(body: &TypedBody) -> CoreEffectSummary {
+    let required_instances = Vec::new();
+    let handler_candidates = Vec::new();
+    let direct_calls = Vec::new();
+    let indirect_calls = Vec::new();
+    let resumptions = Vec::new();
+    core_effect_summary_node(
+        body,
+        CoreNodeId::Computation(typed_body_root(body)),
+        &mut required_instances,
+        &mut handler_candidates,
+        &mut direct_calls,
+        &mut indirect_calls,
+        &mut resumptions
+    );
+    CoreEffectSummary {
+        required_instances: required_instances,
+        handler_candidates: handler_candidates,
+        direct_calls: direct_calls,
+        indirect_calls: indirect_calls,
+        resumptions: resumptions
+    }
+}
+
+pub core_effect_summary_required_count(value: &CoreEffectSummary) -> usize {
+    Vec::len(&value.required_instances)
+}
+
+pub core_effect_summary_handler_candidate_count(
+    value: &CoreEffectSummary
+) -> usize { Vec::len(&value.handler_candidates) }
+
+pub core_effect_summary_direct_call_count(value: &CoreEffectSummary) -> usize {
+    Vec::len(&value.direct_calls)
+}
+
+pub core_effect_summary_indirect_call_count(value: &CoreEffectSummary) -> usize {
+    Vec::len(&value.indirect_calls)
+}
+
+pub core_effect_summary_resume_count(value: &CoreEffectSummary) -> u32 {
+    u32_from_usize(Vec::len(&value.resumptions))
 }
 
 pub enum CoreRewriteVisit {
