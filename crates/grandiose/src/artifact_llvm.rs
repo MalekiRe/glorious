@@ -1281,6 +1281,21 @@ struct ClosedFrameContinuationSlot {
     destination_type: TypeId,
 }
 
+/// Immutable schema for the native continuation state still missing from a
+/// frozen-frame Resume.  The target names the exact `Perform` instruction
+/// whose successor would receive the operation result; it is not a dynamic
+/// function pointer or a VM frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClosedFrameContinuationSchema {
+    handler_def: u32,
+    one_shot_field: u32,
+    return_function: u32,
+    perform_instruction: u32,
+    perform_result_slot_type: TypeId,
+    resume_result_slot_type: TypeId,
+    receiver_mode: u32,
+}
+
 /// A direct callable producer that is safe to name in the closed-handler ABI.
 /// This is intentionally a lexical identity, rather than an attempt to infer
 /// a callable through copies, joins, or a global target set.
@@ -1616,6 +1631,56 @@ impl ClosedFrameContinuationAbiPlan {
             .copied()
             .find(|slot| slot.protocol == protocol && slot.operation == operation)
     }
+}
+
+fn closed_frame_continuation_schema(
+    artifact: &Artifact,
+    route: &ClosedFramePerformRoute,
+    return_function: u32,
+    perform_instruction: u32,
+    resume_result_slot_type: TypeId,
+    receiver_mode: u32,
+) -> Option<ClosedFrameContinuationSchema> {
+    // Frozen resumptions transfer ownership exactly once.  The existing VM
+    // trace uses receiver mode 2 for that move; admitting borrowed modes here
+    // would require a separate lifetime ABI.
+    if receiver_mode != 2 || route.one_shot_field == 0 {
+        return None;
+    }
+    let function = artifact.functions.get(return_function as usize)?;
+    if perform_instruction >= function.code_len {
+        return None;
+    }
+    let start = function.code_start as usize;
+    let instruction = artifact
+        .code
+        .get(start.checked_add(perform_instruction as usize)?)?;
+    let Instruction::Perform { dst: Some(dst), protocol, operation, .. } = instruction else {
+        return None;
+    };
+    if *protocol != route.protocol || *operation != route.operation {
+        return None;
+    }
+    let perform_result_slot_type = *function.register_types.get(*dst as usize)?;
+    if perform_result_slot_type != route.operation_result {
+        return None;
+    }
+    let Type::Resumption { input_type, output_type, lower_uses, upper_uses, copy, .. } =
+        artifact.types.get(route.resumption_type as usize)?.representation() else { return None };
+    (*input_type == perform_result_slot_type
+        && *output_type == resume_result_slot_type
+        && *lower_uses == 1
+        && *upper_uses == Some(1)
+        && !*copy)
+        .then_some(ClosedFrameContinuationSchema {
+            handler_def: route.handler_def,
+            one_shot_field: route.one_shot_field,
+            return_function,
+            perform_instruction,
+            perform_result_slot_type,
+            resume_result_slot_type,
+            receiver_mode,
+        })
 }
 
 /// Emit the one-shot state transition for an already validated closed-frame
@@ -3418,6 +3483,34 @@ mod tests {
 
         artifact.functions[0].receiver_mode = None;
         assert!(closed_host_handler_plans(&artifact, 4, &entry).is_err());
+    }
+
+    #[test]
+    fn closed_frame_continuation_schema_requires_exact_perform_target_and_owned_receiver() {
+        let mut artifact = frozen_handler_artifact_for_continuation_abi();
+        let frame = ClosedHostHandlerFrame::build(&artifact, 0).unwrap();
+        let route = closed_frame_perform_route(&frame, 3, 0).unwrap();
+        let return_function = artifact.functions.len() as u32;
+        let code_start = artifact.code.len() as u32;
+        artifact.functions.push(Function {
+            name: "frozen-perform-return".into(), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: None, register_types: vec![UNIT, 19],
+            code_start, code_len: 2, label_slot_count: 0,
+        });
+        artifact.code.extend([
+            Instruction::Perform { dst: Some(1), protocol: 3, operation: 0, payloads: vec![] },
+            Instruction::Return { src: None },
+        ]);
+        let schema = closed_frame_continuation_schema(&artifact, &route, return_function, 0, UNIT, 2)
+            .expect("exact frozen continuation schema");
+        assert_eq!(schema.return_function, return_function);
+        assert_eq!(schema.perform_instruction, 0);
+        assert_eq!(schema.perform_result_slot_type, 19);
+        assert_eq!(schema.resume_result_slot_type, UNIT);
+        assert!(closed_frame_continuation_schema(&artifact, &route, return_function, 0, UNIT, 0).is_none());
+        assert!(closed_frame_continuation_schema(&artifact, &route, return_function, 0, BYTES, 2).is_none());
+        artifact.code[code_start as usize] = Instruction::Perform { dst: Some(1), protocol: 0, operation: 0, payloads: vec![] };
+        assert!(closed_frame_continuation_schema(&artifact, &route, return_function, 0, UNIT, 2).is_none());
     }
 
     #[test]
