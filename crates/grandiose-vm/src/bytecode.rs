@@ -3746,23 +3746,27 @@ fn encode_cleanups(
             {
                 return Err(DecodeError::InvalidTable("cleanup"));
             }
-            // Cleanup plans commonly retire the newest owner, leaving a
-            // suffix of the preceding list. Operand ranges are immutable, so
-            // that suffix can reuse the previous plan's table entries without
-            // changing the decoded cleanup state at either PC range.
-            let (operand_start, operand_count) = previous_registers
-                .filter(|(registers, _)| {
-                    !plan.registers.is_empty() && registers.ends_with(&plan.registers)
-                })
-                .map_or_else(
-                    || intern_operand_list(&plan.registers, operands, operand_lists),
-                    |(registers, operand_start)| {
-                        (
-                            operand_start + (registers.len() - plan.registers.len()) as u32,
-                            plan.registers.len() as u32,
-                        )
-                    },
-                );
+            // Adjacent ownership states often retain either end of their
+            // predecessor. Operand ranges are immutable, so a prefix or
+            // suffix can reuse the previous plan's entries without changing
+            // the decoded cleanup state at either PC range.
+            let shared_start = match previous_registers {
+                Some((registers, operand_start))
+                    if !plan.registers.is_empty() && registers.starts_with(&plan.registers) =>
+                {
+                    Some(operand_start)
+                }
+                Some((registers, operand_start))
+                    if !plan.registers.is_empty() && registers.ends_with(&plan.registers) =>
+                {
+                    Some(operand_start + (registers.len() - plan.registers.len()) as u32)
+                }
+                _ => None,
+            };
+            let (operand_start, operand_count) = shared_start.map_or_else(
+                || intern_operand_list(&plan.registers, operands, operand_lists),
+                |operand_start| (operand_start, plan.registers.len() as u32),
+            );
             put_u32(&mut w, plan.function);
             put_u32(&mut w, plan.first_instruction);
             put_u32(&mut w, plan.end_instruction);
@@ -6411,7 +6415,7 @@ mod tests {
             receiver_mode: None,
             register_types: vec![UNIT, I64, I64, I64],
             code_start: 0,
-            code_len: 2,
+            code_len: 4,
             label_slot_count: 0,
         };
         let plans = vec![
@@ -6425,6 +6429,18 @@ mod tests {
                 function: 0,
                 first_instruction: 1,
                 end_instruction: 2,
+                registers: vec![2],
+            },
+            CleanupPlan {
+                function: 0,
+                first_instruction: 2,
+                end_instruction: 3,
+                registers: vec![2, 3],
+            },
+            CleanupPlan {
+                function: 0,
+                first_instruction: 3,
+                end_instruction: 4,
                 registers: vec![2],
             },
         ];
@@ -6446,10 +6462,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(operands, vec![1, 2]);
+        // [2] first reuses a suffix of [1, 2], and then a prefix of [2, 3].
+        assert_eq!(operands, vec![1, 2, 2, 3]);
         assert_eq!(decode_instructions(&code, &operands, &[]).unwrap(), [instruction]);
         assert_eq!(
-            decode_cleanups(&cleanups, 2, &operands, &[function], &spans).unwrap(),
+            decode_cleanups(&cleanups, 4, &operands, &[function], &spans).unwrap(),
             plans
         );
     }
