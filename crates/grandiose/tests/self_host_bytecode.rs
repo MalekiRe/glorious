@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use grandiose::{
@@ -910,6 +911,110 @@ fn production_self_host_bundle() -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
+}
+
+/// Keep the expensive complete-bundle artifact available when decoding or
+/// verification fails.  This is deliberately integration-test-only: the
+/// production decoder remains fail-closed and unchanged, while a failing RAM
+/// gate leaves an exact `.grbc` input for `grvm`/`G1_VERIFY_TRACE` diagnosis.
+struct RetainedSelfHostArtifact {
+    directory: PathBuf,
+    artifact: PathBuf,
+    keep: bool,
+}
+
+impl RetainedSelfHostArtifact {
+    fn write(bytes: &[u8]) -> Self {
+        let root = std::env::var_os("G1_SELF_HOST_ARTIFACT_TRACE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repository_root().join("target/self-host-artifact-traces"));
+        Self::write_in(&root, bytes)
+    }
+
+    fn write_in(root: &Path, bytes: &[u8]) -> Self {
+        static NEXT_TRACE: AtomicUsize = AtomicUsize::new(0);
+
+        let ordinal = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
+        let directory = root.join(format!(
+            "full-bundle-{}-{}",
+            std::process::id(),
+            ordinal,
+        ));
+        fs::create_dir_all(&directory).unwrap_or_else(|error| {
+            panic!(
+                "failed to create retained self-host artifact directory {}: {error}",
+                directory.display()
+            )
+        });
+        let artifact = directory.join("full-self-host.grbc");
+        fs::write(&artifact, bytes).unwrap_or_else(|error| {
+            panic!(
+                "failed to retain complete self-host artifact {}: {error}",
+                artifact.display()
+            )
+        });
+        Self {
+            directory,
+            artifact,
+            keep: false,
+        }
+    }
+
+    fn preserve(&mut self, phase: &str, error: impl std::fmt::Debug) -> ! {
+        self.keep = true;
+        eprintln!(
+            "self-host artifact trace: {phase} failed: {error:?}; retained {}\n\
+             rerun with `G1_VERIFY_TRACE=1 cargo test --release -p grandiose \\\n+             --test self_host_bytecode full_self_host_bundle_compiles_to_a_verified_artifact_in_release \\\n+             -- --ignored --nocapture` for the decoder's concise function/register trace",
+            self.artifact.display(),
+        );
+        panic!("complete self-host artifact {phase} failed; retained {}", self.artifact.display());
+    }
+
+    fn discard(mut self) {
+        self.keep = false;
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+impl Drop for RetainedSelfHostArtifact {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
+fn decode_and_verify_full_self_host_artifact(bytes: &[u8]) {
+    let mut trace = RetainedSelfHostArtifact::write(bytes);
+    let decoded = match Artifact::decode(bytes) {
+        Ok(decoded) => decoded,
+        Err(error) => trace.preserve("decode", error),
+    };
+    assert_eq!(decoded.encode(), bytes, "the self-host artifact must be canonical");
+    match load_verified(bytes) {
+        Ok(_) => {}
+        Err(errors) => trace.preserve("verification", errors),
+    }
+    trace.discard();
+}
+
+#[test]
+fn retained_self_host_artifact_keeps_only_failed_gate_inputs() {
+    let directory = tempfile::tempdir().expect("trace scratch directory");
+    let success = RetainedSelfHostArtifact::write_in(directory.path(), b"success");
+    let success_path = success.artifact.clone();
+    let success_directory = success.directory.clone();
+    assert_eq!(fs::read(&success_path).unwrap(), b"success");
+    success.discard();
+    assert!(!success_directory.exists(), "successful gate input must be removed");
+
+    let mut failure = RetainedSelfHostArtifact::write_in(directory.path(), b"failure");
+    let failure_path = failure.artifact.clone();
+    let failure_directory = failure.directory.clone();
+    failure.keep = true;
+    drop(failure);
+    assert_eq!(fs::read(&failure_path).unwrap(), b"failure");
+    assert!(failure_directory.exists(), "failed gate input must be retained");
 }
 
 fn self_host_bundle() -> SourceBundle {
@@ -2244,12 +2349,7 @@ fn full_self_host_bundle_compiles_to_a_verified_artifact_in_release() {
             )
             .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
             let bytes = phases.artifact.encode();
-            let decoded = Artifact::decode(&bytes)
-                .expect("the complete self-host artifact must decode");
-            assert_eq!(decoded.encode(), bytes, "the self-host artifact must be canonical");
-            load_verified(&bytes).unwrap_or_else(|errors| {
-                panic!("the complete self-host artifact must load and verify: {errors:#?}")
-            });
+            decode_and_verify_full_self_host_artifact(&bytes);
         })
         .unwrap()
         .join()
