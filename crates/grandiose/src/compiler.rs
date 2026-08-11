@@ -6662,6 +6662,24 @@ fn extend_deferred_trait_families(
     }
 }
 
+/// Build the two ordinal views consumed by Core lowering.  Closure emissions
+/// use the same source expression for both roots, so one traversal provides
+/// both maps.  Named functions may use distinct normalized/discovery trees;
+/// preserve their established independent traversal path.
+fn lowering_expression_ordinal_maps(
+    root: &Expr,
+    discovery_root: &Expr,
+) -> (BTreeMap<usize, u32>, BTreeMap<(usize, usize), u32>) {
+    if std::ptr::eq(root, discovery_root) {
+        specialization::expression_ordinal_maps(root)
+    } else {
+        (
+            specialization::expression_ordinals(root),
+            specialization::expression_ordinal_maps(discovery_root).1,
+        )
+    }
+}
+
 fn compile_program_with_phases(
     program: &Program,
     manifest: &TrustedTraitManifest,
@@ -9242,10 +9260,7 @@ fn compile_program_with_phases(
                 noncancelling_operations: BTreeSet::new(),
             },
             body_instance.clone(),
-            (
-                specialization::expression_ordinals(root),
-                specialization::expression_ordinal_maps(discovery_root).1,
-            ),
+            lowering_expression_ordinal_maps(root, discovery_root),
             root,
         );
         lowerer.active_reference_return_plan = reference_return_plans.get(&signature.id).cloned();
@@ -60647,6 +60662,33 @@ mod reachability_tests {
                 "$trait_deferred$Display$show".to_owned(),
                 "$trait$Display$show".to_owned(),
             ])
+        );
+    }
+
+    #[test]
+    fn ordinal_map_reuse_matches_the_two_walk_lowering_contract() {
+        let program = parse_program(
+            "entry() -> i64 { let callback = () -> i64 { leaf() }; callback() }\n\
+             leaf() -> i64 { 42 }",
+        );
+        let root = &program.functions[0].body;
+        let other_root = &program.functions[1].body;
+
+        let same_root_expected = specialization::expression_ordinal_maps(root);
+        assert_eq!(
+            lowering_expression_ordinal_maps(root, root),
+            same_root_expected,
+            "identical lowering roots reuse the one-pass ordinal maps"
+        );
+
+        let distinct_root_expected = (
+            specialization::expression_ordinals(root),
+            specialization::expression_ordinal_maps(other_root).1,
+        );
+        assert_eq!(
+            lowering_expression_ordinal_maps(root, other_root),
+            distinct_root_expected,
+            "distinct lowering roots retain the legacy independent maps"
         );
     }
 }
