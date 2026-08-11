@@ -1145,10 +1145,10 @@ fn checked_division_reports_the_exact_vm_runtime_error_natively() {
 }
 
 #[test]
-fn checked_shift_reports_the_exact_vm_runtime_error_natively() {
+fn checked_addition_reports_the_exact_vm_runtime_error_natively() {
     let phases = grandiose::compile_source_to_phases_with_options(
-        "llvm-shift-fault.glorious",
-        "selected(value: i64, count: u32) -> i64 { shift_left(value, count) }\nmain() -> () { selected(1, 1); () }",
+        "llvm-addition-overflow.glorious",
+        "selected(value: i64) -> i64 { value + 1 }\nmain() -> () { selected(1); () }",
         grandiose::CompileOptions {
             optimization_level: grandiose::OptimizationLevel::O0,
         },
@@ -1162,10 +1162,10 @@ fn checked_shift_reports_the_exact_vm_runtime_error_natively() {
         .unwrap() as u32;
     assert_eq!(
         Vm::new(verify(phases.artifact.clone()).unwrap())
-            .run(vm_function, vec![Value::I64(1), Value::U64(64)])
+            .run(vm_function, vec![Value::I64(i64::MAX)])
             .unwrap_err()
             .to_string(),
-        "invalid integer shift count"
+        "checked arithmetic overflow"
     );
     let selected = phases
         .mir
@@ -1177,14 +1177,14 @@ fn checked_shift_reports_the_exact_vm_runtime_error_natively() {
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("shift-fault.ll");
+    let source = directory.path().join("addition-overflow.ll");
     let harness = directory.path().join("harness.c");
-    let executable = directory.path().join("shift-fault");
+    let executable = directory.path().join("addition-overflow");
     fs::write(&source, module.ir).unwrap();
     fs::write(
         &harness,
         format!(
-            "#include <stdint.h>\nextern int64_t g1_f{selected}(int64_t, uint32_t);\nint main(void) {{ (void)g1_f{selected}(1, 64); return 0; }}\n"
+            "#include <stdint.h>\n#include <limits.h>\nextern int64_t g1_f{selected}(int64_t);\nint main(void) {{ (void)g1_f{selected}(INT64_MAX); return 0; }}\n"
         ),
     )
     .unwrap();
@@ -1202,10 +1202,8 @@ fn checked_shift_reports_the_exact_vm_runtime_error_natively() {
     );
     let execution = Command::new(executable).output().unwrap();
     assert!(!execution.status.success());
-    assert_eq!(
-        execution.stderr,
-        b"grandiose: invalid integer shift count\n"
-    );
+    assert_eq!(execution.stderr, b"grandiose: checked arithmetic overflow\n");
+>>>>>>> fc75dc6 (test: cover native checked addition fault parity)
 }
 
 #[test]
