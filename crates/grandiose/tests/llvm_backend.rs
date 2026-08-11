@@ -5301,6 +5301,62 @@ fn llvm_and_vm_backends_execute_the_same_vec_program() {
 }
 
 #[test]
+fn llvm_o3_bytebuf_reader_roundtrip_and_truncation_match_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-bytebuf-reader.glorious",
+        r#"
+            selected() -> i64 {
+                let bytes = ByteBuf::new();
+                ByteBuf::write_u16_le(&mut bytes, 4660);
+                ByteBuf::write_u32_le(&mut bytes, wrapping_convert_to_u32(-1985229329));
+                let bytes = ByteBuf::finish(move bytes);
+                let reader = ByteReader::new(&bytes);
+                let first = Option::unwrap_or(ByteReader::read_u16_le(&mut reader), 0);
+                let second = Option::unwrap_or(ByteReader::read_u32_le(&mut reader), 0);
+                let missing = Option::unwrap_or(ByteReader::read_u16_le(&mut reader), 9);
+                wrapping_convert_to_i64(first) * 10000000000
+                    + wrapping_convert_to_i64(second)
+                    + wrapping_convert_to_i64(ByteReader::position(&reader)) * 10
+                    + wrapping_convert_to_i64(missing)
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let expected = i64::from(0x1234_u16) * 10_000_000_000 + i64::from(0x89ab_cdef_u32) + 69;
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(expected)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        expected,
+        "o3-bytebuf-reader",
+    );
+}
+
+#[test]
 fn llvm_arrays_destroy_owned_nested_aggregate_and_enum_elements() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-array-owned-nested.glorious",
