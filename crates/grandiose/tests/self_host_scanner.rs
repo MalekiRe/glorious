@@ -14,6 +14,9 @@ use grandiose::{
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
 
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
+
 static CONTEXTUAL_PUB_ONLY: AtomicBool = AtomicBool::new(false);
 static FIXITY_ONLY: AtomicBool = AtomicBool::new(false);
 
@@ -65,53 +68,6 @@ fn self_host_bundle_with_entry(entry: &str) -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
-}
-
-/// Materialize the same distributed source segments used by the VM probe so
-/// the release CLI observes the identical module graph. The standard library
-/// is intentionally omitted: `grc` installs its trusted distributed standard
-/// library itself, while every user segment is passed explicitly.
-fn materialize_native_bundle(bundle: &SourceBundle, directory: &Path) -> Vec<PathBuf> {
-    let source_root = repository_root().join("self-host/src");
-    bundle
-        .segments()
-        .iter()
-        .skip(1)
-        .map(|segment| {
-            let relative = Path::new(segment.name())
-                .strip_prefix(&source_root)
-                .expect("self-host probe segment must live beneath self-host/src");
-            let path = directory.join("native-source").join(relative);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, segment.source()).unwrap();
-            path
-        })
-        .collect()
-}
-
-/// Native scanner parity goes through the production release CLI, including a
-/// private durable object store. Keep this separate from the test binary's
-/// target directory so parallel worktrees never overwrite each other's
-/// incremental state.
-fn compile_native_probe(bundle: &SourceBundle, directory: &Path, name: &str) -> PathBuf {
-    let executable = directory.join(name);
-    let cache = directory.join("native-incremental-cache");
-    let sources = materialize_native_bundle(bundle, directory);
-    let compiled = Command::new(env!("CARGO_BIN_EXE_grc"))
-        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
-        .arg(&cache)
-        .arg("-o")
-        .arg(&executable)
-        .args(&sources)
-        .output()
-        .unwrap();
-    assert!(
-        compiled.status.success(),
-        "release grc native probe build failed: {}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
-    assert!(executable.is_file(), "release grc did not emit {name}");
-    executable
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
@@ -651,7 +607,11 @@ fn self_hosted_scanner_matches_rust_in_vm_and_native_execution() {
                 );
             }
 
-            let executable = compile_native_probe(&bundle, directory.path(), "self-host-scanner");
+            let executable = native_incremental::build_cached_native(
+                &bundle,
+                directory.path(),
+                "self-host-scanner",
+            );
             let native_all_path = directory.path().join("native-all.bin");
             let native_all = Command::new(&executable)
                 .arg(&native_all_path)
@@ -996,7 +956,11 @@ fn self_host_scanner_recovery_matches_bootstrap() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&vm_output).unwrap(), expected, "VM recovery diverged");
 
-            let executable = compile_native_probe(&bundle, expected_path.path(), "recovery");
+            let executable = native_incremental::build_cached_native(
+                &bundle,
+                expected_path.path(),
+                "recovery",
+            );
             let native = Command::new(&executable)
                 .arg(&native_output)
                 .arg(&input)
