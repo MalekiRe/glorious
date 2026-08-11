@@ -288,6 +288,7 @@ struct InterfaceCallable {
     generic_owner: TypeParameterOwner,
     effects: TypeElementRange,
     effect_tail: Option<u32>,
+    constraints: ConstraintClause,
     where_start: usize,
     where_end: usize
 }
@@ -2541,6 +2542,22 @@ pub interface_callable_effect_at(
             &value.callable_effects,
             usize_from_u32(range.start + ordinal)
         ))
+    } else { None }
+}
+
+pub interface_callable_constraint_goal_count(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> u32 { interface_callable_at(value, id).constraints.goals.count }
+
+pub interface_callable_constraint_goal_id(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId,
+    ordinal: u32
+) -> Option<ConstraintGoalId> {
+    let range = interface_callable_at(value, id).constraints.goals;
+    if(ordinal < range.count) {
+        Option::Some(Id::from_u32(range.start + ordinal))
     } else { None }
 }
 
@@ -7412,6 +7429,19 @@ collect_callable(
         resolution
     ), @collect_callable);
     let where_tokens = super::headers::callable_where_tokens(callable);
+    let constraint_scope = handle resolution {
+        Option::Some(found) => found,
+        None => SignatureTypeScope::Declaration(scope)
+    };
+    let constraints = try(elaborate_constraint_clause(
+        headers,
+        declarations,
+        output,
+        super::headers::callable_where_clause(callable),
+        where_tokens,
+        module,
+        constraint_scope
+    ), @collect_callable);
     let callable_id = alloc_interface_callable(
         output,
         InterfaceCallable {
@@ -7428,6 +7458,7 @@ collect_callable(
             generic_owner: generic_owner,
             effects: effects,
             effect_tail: effect_tail,
+            constraints: constraints,
             where_start: super::syntax::token_start(where_tokens),
             where_end: super::syntax::token_end(where_tokens)
         }
@@ -9634,6 +9665,80 @@ pub intern_callable_instance(
     }
 }
 
+expected_callable_from_fn_constraint(
+    interfaces: &mut TypedInterfaces,
+    callable: InterfaceCallableId,
+    formal: TypeId,
+    owner: TypeParameterOwner,
+    substitutions: &Vec<Option<TypeId>>,
+    ordinal: u32
+) -> Option<TypeId> {
+    if(ordinal < interface_callable_constraint_goal_count(
+        &*interfaces, callable
+    )) {
+        let goal = handle interface_callable_constraint_goal_id(
+            &*interfaces, callable, ordinal
+        ) { None => unreachable(), Option::Some(found) => found };
+        let applicable = constraint_goal_subject(&*interfaces, goal) == formal
+            and { not(constraint_goal_is_negative(&*interfaces, goal)) }
+            and { Id::to_u32(constraint_goal_relation(&*interfaces, goal))
+                == 4294901761 }
+            and { constraint_goal_binder_count(&*interfaces, goal) == 0 }
+            and { constraint_goal_argument_count(&*interfaces, goal) == 1 }
+            and { constraint_goal_binding_count(&*interfaces, goal) == 1 };
+        if(applicable) {
+            let argument = handle constraint_goal_argument_id(
+                &*interfaces, goal, 0
+            ) { None => @expected_callable_from_fn_constraint(None),
+                Option::Some(found) => found };
+            let result_binding = handle constraint_goal_binding_id(
+                &*interfaces, goal, 0
+            ) { None => @expected_callable_from_fn_constraint(None),
+                Option::Some(found) => found };
+            let input = handle constraint_argument_type(&*interfaces, argument) {
+                None => @expected_callable_from_fn_constraint(None),
+                Option::Some(found) => found
+            };
+            let output = handle constraint_binding_type(
+                &*interfaces, result_binding) {
+                None => @expected_callable_from_fn_constraint(None),
+                Option::Some(found) => found
+            };
+            let input = instantiate_call_type(
+                interfaces, input, owner, substitutions
+            );
+            let output = instantiate_call_type(
+                interfaces, output, owner, substitutions
+            );
+            if(call_type_has_unbound_parameter(
+                &*interfaces, input, owner, substitutions
+            ) or { call_type_has_unbound_parameter(
+                &*interfaces, output, owner, substitutions
+            ) }) { None } else { handle type_kind_at(&*interfaces, input) {
+                TypeKind::Tuple(range) => {
+                    let parameters = Vec::new();
+                    for_range(Range::new(0, usize_from_u32(range.count)), {
+                        index => Vec::push(&mut parameters, *Vec::index(
+                            &interfaces.type_elements,
+                            usize_from_u32(range.start) + index
+                        ))
+                    });
+                    let effects = Vec::new();
+                    Option::Some(intern_callable_type(
+                        interfaces,
+                        intern_callable_signature(
+                            interfaces, &parameters, output, &effects, None
+                        )
+                    ))
+                },
+                _ => None
+            } }
+        } else { expected_callable_from_fn_constraint(
+            interfaces, callable, formal, owner, substitutions, ordinal + 1
+        ) }
+    } else { None }
+}
+
 callable_instance_substitution_vec(
     interfaces: &TypedInterfaces,
     instance: CallableInstanceId
@@ -9686,7 +9791,16 @@ elaborate_call_arguments(
             instantiated,
             generic_owner,
             substitutions
-        )) { None } else { Option::Some(instantiated) };
+        )) {
+            expected_callable_from_fn_constraint(
+                interfaces,
+                callable,
+                instantiated,
+                generic_owner,
+                substitutions,
+                0
+            )
+        } else { Option::Some(instantiated) };
         let argument = try(elaborate_expression(
             original,
             headers,
@@ -13611,6 +13725,50 @@ elaborate_float(
     }
 }
 
+infer_function_value_substitutions(
+    interfaces: &TypedInterfaces,
+    callable: InterfaceCallableId,
+    expected: TypeId,
+    owner: TypeParameterOwner,
+    substitutions: &mut Vec<Option<TypeId>>,
+    ordinal: usize
+) -> Bool {
+    handle type_kind_at(interfaces, expected) {
+        TypeKind::Callable(signature) => if(
+            callable_signature_parameter_count(interfaces, signature)
+                == usize_from_u32(interface_callable_parameter_count(
+                    interfaces, callable
+                ))
+        ) {
+            if(ordinal < callable_signature_parameter_count(
+                interfaces, signature
+            )) {
+                infer_call_substitutions(
+                    interfaces,
+                    interface_callable_parameter_at(
+                        interfaces, callable, ordinal
+                    ),
+                    callable_signature_parameter_at(
+                        interfaces, signature, ordinal
+                    ),
+                    owner,
+                    substitutions
+                ) and { infer_function_value_substitutions(
+                    interfaces, callable, expected, owner, substitutions,
+                    ordinal + 1
+                ) }
+            } else { infer_call_substitutions(
+                interfaces,
+                interface_callable_result(interfaces, callable),
+                callable_signature_result_at(interfaces, signature),
+                owner,
+                substitutions
+            ) }
+        } else { false },
+        _ => false
+    }
+}
+
 elaborate_function_value(
     interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
@@ -13627,14 +13785,37 @@ elaborate_function_value(
                     ElaborationError::MissingCallableInterface(token, shell)
                 ),
                 Result::Ok(callable) => if(
-                    interface_callable_generic_count(&*interfaces, callable) != 0
-                    or { interface_callable_effect_count(&*interfaces, callable) != 0 }
+                    interface_callable_effect_count(&*interfaces, callable) != 0
                 ) {
                     // This first source-producible callable path is static,
                     // captureless and pure; inference/effect adapters need a
                     // separate callable scheduler.
                     Result::Err(ElaborationError::FunctionUsedAsValue(token))
                 } else {
+                    let generic_owner = interface_callable_generic_owner(
+                        &*interfaces, callable
+                    );
+                    let substitutions = new_call_substitutions(
+                        interface_callable_generic_count(&*interfaces, callable)
+                    );
+                    if(interface_callable_generic_count(&*interfaces, callable) != 0) {
+                        let expected_type = handle expected {
+                            None => @elaborate_function_value(Result::Err(
+                                ElaborationError::FunctionUsedAsValue(token)
+                            )),
+                            Option::Some(found) => found
+                        };
+                        if(not(infer_function_value_substitutions(
+                            &*interfaces,
+                            callable,
+                            expected_type,
+                            generic_owner,
+                            &mut substitutions,
+                            0
+                        ))) { @elaborate_function_value(Result::Err(
+                            ElaborationError::FunctionUsedAsValue(token)
+                        )) } else { () }
+                    } else { () };
                     let parameters = Vec::new();
                     for_range(Range::new(
                         0,
@@ -13643,22 +13824,31 @@ elaborate_function_value(
                         ))
                     ), { ordinal => Vec::push(
                         &mut parameters,
-                        interface_callable_parameter_at(
-                            &*interfaces, callable, ordinal
+                        instantiate_call_type(
+                            interfaces,
+                            interface_callable_parameter_at(
+                                &*interfaces, callable, ordinal
+                            ),
+                            generic_owner,
+                            &substitutions
                         )
                     ) });
                     let effects = Vec::new();
                     let signature = intern_callable_signature(
                         interfaces,
                         &parameters,
-                        interface_callable_result(&*interfaces, callable),
+                        instantiate_call_type(
+                            interfaces,
+                            interface_callable_result(&*interfaces, callable),
+                            generic_owner,
+                            &substitutions
+                        ),
                         &effects,
                         None
                     );
                     let ty = intern_callable_type(interfaces, signature);
                     try(check_expected_type(ty, expected, token),
                         @elaborate_function_value);
-                    let substitutions = Vec::new();
                     let target = intern_callable_instance(
                         interfaces, callable, &substitutions
                     );

@@ -12,6 +12,7 @@ byte-char-literals	accept	tooling/self-host-native-fixtures/byte-char-literals.g
 float-literals-in-conditional	accept	tooling/self-host-native-fixtures/float-literals-in-conditional.glorious
 indirect-call-pure	accept	tooling/self-host-native-fixtures/indirect-call-pure.glorious
 indirect-call-generic-direct	accept	tooling/self-host-native-fixtures/indirect-call-generic-direct.glorious
+indirect-call-constraint-generic	accept	tooling/self-host-native-fixtures/indirect-call-constraint-generic.glorious
 enum-match	accept	tooling/self-host-native-fixtures/enum-match.glorious
 reference-reborrow	accept	tooling/self-host-native-fixtures/reference-reborrow.glorious
 struct-deconstruction	accept	tooling/self-host-native-fixtures/struct-deconstruction.glorious
