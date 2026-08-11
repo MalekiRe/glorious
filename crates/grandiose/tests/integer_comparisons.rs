@@ -6,6 +6,7 @@ use grandiose_vm::{Instruction, Primitive, Value, Vm, verify};
 
 const SOURCE: &str = r#"
     struct Stats { n: usize }
+    effect OrderedOperand { read(value: i64) -> i64 }
 
     signed_eq(a: i64, b: i64) -> Bool { a == b }
     signed_ne(a: i64, b: i64) -> Bool { a != b }
@@ -28,9 +29,9 @@ const SOURCE: &str = r#"
     size_gt(a: usize, b: usize) -> Bool { a > b }
     size_ge(a: usize, b: usize) -> Bool { a >= b }
 
-    left() -> i64 { 4 }
-    right() -> i64 { 9 }
-    ordered() -> Bool { left() < right() }
+    left() -> i64 / {OrderedOperand} { perform OrderedOperand::read(4) }
+    right() -> i64 / {OrderedOperand} { perform OrderedOperand::read(9) }
+    ordered() -> Bool / {OrderedOperand} { left() < right() }
     literal_left_size(size: usize) -> Bool { 0 < size }
     size(value: usize) -> usize { value }
     field_left() -> Bool {
@@ -204,8 +205,8 @@ fn integer_comparisons_lower_to_each_frozen_primitive_and_source_bool() {
 
 #[test]
 fn comparison_operands_remain_left_to_right() {
-    // O2 may inline these pure helpers completely. O1 retains the calls so
-    // their instruction order directly tests the lowering order.
+    // The helpers perform an outward effect, so their calls are observable and
+    // cannot be folded away before this test checks source operand order.
     let artifact = compile_source_to_bytecode_with_options(
         "ordered-comparison.glorious",
         SOURCE,
