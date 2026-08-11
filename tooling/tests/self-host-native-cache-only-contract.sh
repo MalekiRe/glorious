@@ -34,3 +34,14 @@ done < <(
         '"--emit", "executable"|"--emit executable"|--emit executable' \
         "$test_root"
 )
+
+# The full copied-self-host warm-edit integration harness lives with the CLI
+# protocol tests rather than under self_host_*.  Keep its process-local serve
+# state and private durable cache explicit as well: otherwise it could regress
+# to a fresh native executable compile without this contract's glob seeing it.
+release_harness="$test_root/grc_cli.rs"
+rg -Fq -- 'fn release_selfhost_serve_warm_body_edit_reuses_cached_work()' "$release_harness"
+rg -Fq -- '"--native-incremental".to_owned()' "$release_harness"
+rg -Fq -- '"--native-incremental-cache".to_owned()' "$release_harness"
+rg -Fq -- 'edited["cache_stats"]["bodies_reused"]' "$release_harness"
+rg -Fq -- 'durable_object_manifests(&cache)' "$release_harness"
