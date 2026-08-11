@@ -103,6 +103,25 @@ runner and its private cache. Native executable emission requires `wild`; it
 must fail clearly if Wild is unavailable rather than silently choosing another
 linker.
 
+For a retained, CLI-level iteration trace over the exact canonical monolith,
+use the ignored release gate:
+
+```sh
+tooling/ram-gate.sh cargo test --release -p grandiose --test self_host_bytecode \
+  canonical_self_host_native_cli_uses_private_incremental_cache_in_release \
+  -- --ignored --exact --nocapture
+```
+
+It invokes the release `grc` directly with `-O3 --emit executable
+--native-incremental-cache`, rather than constructing LLVM IR inside the test.
+The durable object cache defaults to
+`target/self-host-native-cli-cache`; it is private to the worktree and survives
+reruns. Each invocation retains its canonical source, executable, Stage-2
+output, and `grc-o3-wild.log`/`native-stage1.log` under
+`target/self-host-native-cli-traces`. Override only those two private paths
+with `G1_SELF_HOST_NATIVE_CLI_CACHE_DIR` and
+`G1_SELF_HOST_NATIVE_CLI_TRACE_DIR` when an isolated experiment needs them.
+
 For the bootstrap fixture corpus that is representable as independent source
 files, run `tooling/self-host-native-tests.sh run`. It builds the canonical
 native executable once through `tooling/self-host-native.sh`, then deterministically

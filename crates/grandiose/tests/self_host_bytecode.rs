@@ -1161,6 +1161,46 @@ impl Drop for RetainedSelfHostArtifact {
     }
 }
 
+// The CLI route is deliberately retained even on success: it is the normal
+// iteration surface for the native self-host compiler, and its command/output
+// logs are the evidence needed to diagnose a cold cache or a bad durable
+// object-cache reuse decision. The cache itself is private to this worktree;
+// only the per-invocation trace directory is fresh.
+fn retained_native_cli_trace_directory() -> PathBuf {
+    static NEXT_TRACE: AtomicUsize = AtomicUsize::new(0);
+
+    let root = std::env::var_os("G1_SELF_HOST_NATIVE_CLI_TRACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("target/self-host-native-cli-traces"));
+    let ordinal = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
+    let directory = root.join(format!(
+        "canonical-monolith-{}-{ordinal}",
+        std::process::id(),
+    ));
+    fs::create_dir_all(&directory).unwrap_or_else(|error| {
+        panic!(
+            "failed to create native CLI trace directory {}: {error}",
+            directory.display()
+        )
+    });
+    directory
+}
+
+fn private_native_cli_cache_directory() -> PathBuf {
+    std::env::var_os("G1_SELF_HOST_NATIVE_CLI_CACHE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("target/self-host-native-cli-cache"))
+}
+
+fn command_log(output: &std::process::Output) -> String {
+    format!(
+        "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    )
+}
+
 fn decode_and_verify_full_self_host_artifact(bytes: &[u8]) {
     let mut trace = RetainedSelfHostArtifact::write(bytes);
     let decoded = match Artifact::decode(bytes) {
@@ -2747,6 +2787,107 @@ fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
             assert!(native.status.success(), "native Stage1 diagnostic:\n{}", String::from_utf8_lossy(&native.stderr));
             assert_eq!(fs::read(&native_output).unwrap(), vm_bytes, "native and VM Stage2 must be byte-identical");
         }).unwrap().join().unwrap();
+}
+
+#[test]
+#[ignore = "expensive release iteration route: compile canonical self-host monolith through grc O3/Wild with a private durable native cache"]
+fn canonical_self_host_native_cli_uses_private_incremental_cache_in_release() {
+    // This is intentionally distinct from the direct-IR diagnostic gates
+    // below. It exercises the production CLI path, which partitions native
+    // functions and restores only manifest-valid objects from this worktree's
+    // durable cache before Wild links the current executable.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source_bundle = production_self_host_bundle();
+            let source_program = modules::parse_bundle(&source_bundle)
+                .expect("self-host source must parse before CLI emission");
+            let source_resolution = modules::resolve_program(&source_bundle, source_program)
+                .expect("self-host source must resolve before CLI emission");
+            let monolithic_source = modules::monolithic_source(
+                &source_bundle,
+                &source_resolution.resolution,
+            )
+            .expect("self-host source must have a canonical monolithic form");
+
+            let trace = retained_native_cli_trace_directory();
+            let input = trace.join("canonical-self-host.glorious");
+            let executable = trace.join("bootstrap-self-host-native-cli");
+            let stage2 = trace.join("native-stage2.grbc");
+            let cache = private_native_cli_cache_directory();
+            fs::create_dir_all(&cache).unwrap_or_else(|error| {
+                panic!(
+                    "failed to create private native CLI cache {}: {error}",
+                    cache.display()
+                )
+            });
+            fs::write(&input, monolithic_source.as_bytes()).unwrap();
+
+            let grc = repository_root().join("target/release/grc");
+            assert!(
+                grc.is_file(),
+                "release grc is required for the native CLI iteration route; run \
+                 `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
+            );
+            let compile = Command::new(&grc)
+                .current_dir(repository_root())
+                .args(["-O3", "--emit", "executable"])
+                .arg("--native-incremental-cache")
+                .arg(&cache)
+                .arg("-o")
+                .arg(&executable)
+                .arg(&input)
+                .output()
+                .expect("release grc must start for native CLI iteration");
+            let compile_log = command_log(&compile);
+            fs::write(trace.join("grc-o3-wild.log"), &compile_log).unwrap();
+            assert!(
+                compile.status.success() && executable.is_file(),
+                "grc O3 native executable emission failed; retained {}\n{compile_log}",
+                trace.display(),
+            );
+
+            let run = Command::new(&executable)
+                .arg(&stage2)
+                .arg(&input)
+                .output()
+                .expect("native CLI self-host executable must start");
+            let run_log = command_log(&run);
+            fs::write(trace.join("native-stage1.log"), &run_log).unwrap();
+            assert!(
+                run.status.success(),
+                "native CLI Stage1 failed; retained {}\n{run_log}",
+                trace.display(),
+            );
+            let bytes = fs::read(&stage2).unwrap_or_else(|error| {
+                panic!(
+                    "native CLI Stage1 did not write {}: {error}; retained {}",
+                    stage2.display(),
+                    trace.display(),
+                )
+            });
+            let decoded = Artifact::decode(&bytes).unwrap_or_else(|error| {
+                panic!(
+                    "native CLI Stage2 did not decode: {error}; retained {}",
+                    trace.display(),
+                )
+            });
+            assert_eq!(decoded.encode(), bytes, "native CLI Stage2 must be canonical");
+            load_verified(&bytes).unwrap_or_else(|errors| {
+                panic!(
+                    "native CLI Stage2 did not verify: {errors:#?}; retained {}",
+                    trace.display(),
+                )
+            });
+            eprintln!(
+                "retained canonical native CLI iteration trace: {} (private cache {})",
+                trace.display(),
+                cache.display(),
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
