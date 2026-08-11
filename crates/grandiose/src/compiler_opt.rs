@@ -17964,7 +17964,6 @@ mod tests {
 
         let report = optimize_program(&mut program, &types, OptimizationLevel::O1).unwrap();
         let body = &program.functions[0];
-        assert_eq!(body.blocks.len(), 2);
         assert_eq!(
             body.blocks
                 .iter()
@@ -17980,7 +17979,26 @@ mod tests {
         else {
             panic!("unknown discriminator must retain the switch");
         };
-        assert_eq!(cases[0].1.target, otherwise.target);
+        // Normalization now retains a distinct empty adapter for each incoming
+        // edge. Both adapters must converge on the one shared dynamic Drop;
+        // they cannot be counted as a second cleanup action.
+        let shared_target = |edge: &Edge| {
+            let adapter = body
+                .blocks
+                .iter()
+                .find(|block| block.id == edge.target)
+                .expect("switch target adapter remains in the CFG");
+            let Terminator::Goto(next) = &adapter.terminator else {
+                panic!("switch target must be an empty cleanup adapter")
+            };
+            assert!(adapter.statements.is_empty());
+            next.target
+        };
+        assert_eq!(
+            shared_target(&cases[0].1),
+            shared_target(otherwise),
+            "both dynamic paths must reach the same retained Drop"
+        );
         assert!(report.passes.iter().any(|pass| {
             pass.pass == PassId::SimplifyCleanup && pass.outcome == PassOutcome::Changed
         }));
@@ -20679,11 +20697,27 @@ mod tests {
             .filter(|entry| entry.pass == PassId::SparseSimplify)
             .map(|entry| entry.outcome)
             .collect::<Vec<_>>();
-        assert_eq!(sparse, [PassOutcome::Changed, PassOutcome::Unchanged]);
+        // The initial O1 sparse fixed point stabilizes after its second run.
+        // Later `Unchanged` entries are deliberately scheduled after CFG
+        // normalization in the post-inline cleanup cycle; they are not extra
+        // iterations of the initial fixed point.
+        assert!(
+            sparse.starts_with(&[PassOutcome::Changed, PassOutcome::Unchanged]),
+            "initial sparse fixed point must stop at its first stabilization: {sparse:?}"
+        );
+        assert!(
+            sparse[2..]
+                .iter()
+                .all(|outcome| *outcome == PassOutcome::Unchanged),
+            "post-normalization sparse checks must not report a new rewrite: {sparse:?}"
+        );
         assert!(candidate.functions[0].blocks[0].statements.is_empty());
+        // Post-inline CFG normalization now removes the old switch entry
+        // entirely once both arms are equivalent. The surviving entry is the
+        // selected return block, which is stronger than retaining a Goto.
         assert!(matches!(
             candidate.functions[0].blocks[0].terminator,
-            Terminator::Goto(Edge { target: 1, .. })
+            Terminator::Return { value: None }
         ));
     }
 
