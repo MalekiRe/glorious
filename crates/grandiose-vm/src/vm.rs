@@ -868,15 +868,7 @@ impl Vm {
                 }
                 Instruction::ProjectMove { dst, src, field } => {
                     let (dst, src, field) = (*dst, *src, *field);
-                    let value = get(frame, src)?;
-                    let aggregate = aggregate_place(&value, true)?;
-                    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
-                    let value = aggregate
-                        .borrow_mut()
-                        .fields
-                        .get_mut(field)
-                        .and_then(Option::take)
-                        .ok_or(RuntimeError::TypeConfusion)?;
+                    let value = move_project_register(a, frame, src, field)?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
@@ -2497,6 +2489,41 @@ fn copy_project_register(
             .with_value(|value| copy_project_value(a, value, field, field_type))
             .map_err(|_| RuntimeError::EmptyRegister(r))?,
         value => copy_project_value(a, value, field, field_type),
+    }
+}
+
+fn move_project_value(
+    a: &ExecutionImage,
+    value: &Value,
+    field: u32,
+) -> Result<Value, RuntimeError> {
+    let aggregate = aggregate_place(value, true)?;
+    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
+    aggregate
+        .borrow_mut()
+        .fields
+        .get_mut(field)
+        .and_then(Option::take)
+        .ok_or(RuntimeError::TypeConfusion)
+}
+
+/// Move a projected field without first cloning the aggregate's register
+/// value. The aggregate shell is still resolved through `aggregate_place`,
+/// preserving the existing uniqueness and reference checks.
+fn move_project_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    field: u32,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| move_project_value(a, value, field))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => move_project_value(a, value, field),
     }
 }
 
