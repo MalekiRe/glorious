@@ -1335,17 +1335,13 @@ impl Vm {
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
-                    let values = captures
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let capture = if *capture_type == crate::bytecode::UNIT {
-                        if !values.is_empty() {
+                        if !captures.is_empty() {
                             return Err(RuntimeError::TypeConfusion);
                         }
                         Value::Unit
                     } else {
-                        Value::aggregate(*capture_type, values)
+                        take_aggregate_from_registers(frame, *capture_type, captures)?
                     };
                     put(
                         frame,
@@ -1434,17 +1430,13 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     };
                     let environment_type = *environment_type;
-                    let values = captures
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let environment = if environment_type == crate::bytecode::UNIT {
-                        if !values.is_empty() {
+                        if !captures.is_empty() {
                             return Err(RuntimeError::TypeConfusion);
                         }
                         Value::Unit
                     } else {
-                        Value::aggregate(environment_type, values)
+                        take_aggregate_from_registers(frame, environment_type, captures)?
                     };
                     let shared = ArenaObject::new_tracked(Some(environment));
                     let clauses = functions
@@ -1476,11 +1468,8 @@ impl Vm {
                     payloads,
                 } => {
                     let (dst, binding_type) = (*dst, *binding_type);
-                    let values = payloads
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    put(frame, dst, Value::aggregate(binding_type, values))?;
+                    let aggregate = take_aggregate_from_registers(frame, binding_type, payloads)?;
+                    put(frame, dst, aggregate)?;
                     frame.pc += 1;
                 }
                 Instruction::CallIndirect {
@@ -2117,6 +2106,27 @@ fn make_frame(
     Ok(frame_from_verified_values(
         f, function, args, receiver, return_dst,
     ))
+}
+
+/// Move an instruction operand list straight into its final aggregate field
+/// storage.  Captures and binding packs previously allocated `Vec<Value>` and
+/// immediately reallocated it into `Vec<Option<Value>>` in `Value::aggregate`.
+#[inline]
+fn take_aggregate_from_registers(
+    frame: &mut Frame,
+    ty: TypeId,
+    registers: &[u32],
+) -> Result<Value, RuntimeError> {
+    let mut fields = Vec::new();
+    reserve_output(&mut fields, registers.len())?;
+    for &register in registers {
+        fields.push(Some(take(frame, register)?));
+    }
+    Ok(Value::Aggregate(ArenaObject::new_tracked(AggregateValue {
+        ty,
+        variant: None,
+        fields,
+    })))
 }
 
 #[inline]
