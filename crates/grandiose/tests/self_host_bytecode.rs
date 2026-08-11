@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicUsize, Ordering},
@@ -912,6 +913,181 @@ fn production_self_host_bundle() -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
+}
+
+// The canonical production compiler takes long enough in the bytecode VM that
+// a native differential would otherwise have to re-run an already proved VM
+// baseline after every native-only change.  This is an *evidence* cache, not a
+// compiler cache: an entry is usable only when it is bound to the complete VM
+// and SystemHost implementation, Stage-1 artifact, and canonical source bytes
+// which produced it.  The payload is then decoded,
+// re-encoded, and verified again before it is used as the oracle.
+//
+// The runtime source identity, rather than the entire test executable, is
+// deliberate: changing only LLVM/native lowering must not invalidate a VM
+// result whose exact bytecode, source input, and VM implementation are already
+// independently bound.
+const VM_STAGE2_EVIDENCE_SCHEMA: &str = "1";
+
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn vm_stage2_evidence_root() -> PathBuf {
+    std::env::var_os("G1_SELF_HOST_VM_STAGE2_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("target/self-host-vm-stage2-evidence"))
+}
+
+fn vm_stage2_runtime_identity() -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"grandiose-vm-stage2-runtime\0schema=1\0");
+    // Keep this explicit.  A recursive filesystem walk would make cache
+    // identity depend on untracked files and differ between worktrees.
+    for source in [
+        include_str!("../../grandiose-vm/Cargo.toml"),
+        include_str!("../../grandiose-vm/src/arena.rs"),
+        include_str!("../../grandiose-vm/src/bytecode.rs"),
+        include_str!("../../grandiose-vm/src/lib.rs"),
+        include_str!("../../grandiose-vm/src/supervisor.rs"),
+        include_str!("../../grandiose-vm/src/system_host.rs"),
+        include_str!("../../grandiose-vm/src/value.rs"),
+        include_str!("../../grandiose-vm/src/verify.rs"),
+        include_str!("../../grandiose-vm/src/vm.rs"),
+        // This binds the fixed SystemHost capability set and argument ordering
+        // in `authoritative_vm_stage2`, as well as the differential itself.
+        include_str!("self_host_bytecode.rs"),
+        include_str!("../../../Cargo.lock"),
+    ] {
+        hash.update(&(source.len() as u64).to_le_bytes());
+        hash.update(source.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
+}
+
+fn exact_manifest_value(manifest: &str, key: &str) -> Option<String> {
+    let mut values = manifest
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter_map(|(found, value)| (found == key).then_some(value));
+    let value = values.next()?;
+    values.next().is_none().then(|| value.to_owned())
+}
+
+fn vm_stage2_evidence_key(stage1: &[u8], source: &[u8], vm_runtime: &str) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"grandiose-vm-stage2-evidence\0schema=1\0");
+    for bytes in [stage1, source, vm_runtime.as_bytes()] {
+        hash.update(&(bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    hash.finalize().to_hex().to_string()
+}
+
+fn load_vm_stage2_evidence(
+    root: &Path,
+    key: &str,
+    stage1: &[u8],
+    source: &[u8],
+    vm_runtime: &str,
+) -> Option<Vec<u8>> {
+    let entry = root.join(key);
+    let manifest = fs::read_to_string(entry.join("manifest.tsv")).ok()?;
+    let artifact = fs::read(entry.join("stage2.grbc")).ok()?;
+    let expected = [
+        ("schema", VM_STAGE2_EVIDENCE_SCHEMA.to_owned()),
+        ("key", key.to_owned()),
+        ("vm-runtime-blake3", vm_runtime.to_owned()),
+        ("stage1-blake3", blake3_hex(stage1)),
+        ("source-blake3", blake3_hex(source)),
+        ("stage2-blake3", blake3_hex(&artifact)),
+    ];
+    expected
+        .into_iter()
+        .all(|(field, value)| {
+            exact_manifest_value(&manifest, field).as_deref() == Some(value.as_str())
+        })
+        .then_some(())?;
+    let decoded = Artifact::decode(&artifact).ok()?;
+    (decoded.encode() == artifact).then_some(())?;
+    load_verified(&artifact).ok()?;
+    Some(artifact)
+}
+
+fn store_vm_stage2_evidence(
+    root: &Path,
+    key: &str,
+    stage1: &[u8],
+    source: &[u8],
+    vm_runtime: &str,
+    stage2: &[u8],
+) {
+    static NEXT_EVIDENCE: AtomicUsize = AtomicUsize::new(0);
+
+    if fs::create_dir_all(root).is_err() || root.join(key).exists() {
+        return;
+    }
+    let temporary = root.join(format!(
+        ".{key}.tmp-{}-{}",
+        std::process::id(),
+        NEXT_EVIDENCE.fetch_add(1, Ordering::Relaxed),
+    ));
+    if fs::create_dir(&temporary).is_err() {
+        return;
+    }
+    let manifest = format!(
+        "schema\t{VM_STAGE2_EVIDENCE_SCHEMA}\nkey\t{key}\nvm-runtime-blake3\t{vm_runtime}\nstage1-blake3\t{}\nsource-blake3\t{}\nstage2-blake3\t{}\n",
+        blake3_hex(stage1),
+        blake3_hex(source),
+        blake3_hex(stage2),
+    );
+    let stored = fs::write(temporary.join("stage2.grbc"), stage2)
+        .and_then(|()| fs::write(temporary.join("manifest.tsv"), manifest));
+    if stored.is_ok() {
+        if let Err(error) = fs::rename(&temporary, root.join(key)) {
+            // Another test process may have completed the same immutable
+            // entry first.  Either outcome leaves only a fully written entry
+            // visible to future readers.
+            if error.kind() != ErrorKind::AlreadyExists {
+                let _ = fs::remove_dir_all(&temporary);
+                return;
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(temporary);
+}
+
+fn authoritative_vm_stage2(
+    stage1_bytes: &[u8],
+    compiler: VerifiedArtifact,
+    entry: u32,
+    source: &[u8],
+    input: &Path,
+    output: &Path,
+) -> Vec<u8> {
+    let vm_runtime = vm_stage2_runtime_identity();
+    let root = vm_stage2_evidence_root();
+    let key = vm_stage2_evidence_key(stage1_bytes, source, &vm_runtime);
+    if let Some(stage2) = load_vm_stage2_evidence(&root, &key, stage1_bytes, source, &vm_runtime) {
+        fs::write(output, &stage2).expect("cached VM Stage2 must materialize");
+        return stage2;
+    }
+    let vm = Vm::with_host(
+        compiler,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![
+            output.as_os_str().to_owned(),
+            input.as_os_str().to_owned(),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let stage2 = fs::read(output).expect("VM Stage1 must emit Stage2");
+    let decoded = Artifact::decode(&stage2).expect("VM Stage2 must decode");
+    assert_eq!(decoded.encode(), stage2, "VM Stage2 must be canonical");
+    load_verified(&stage2).expect("VM Stage2 must verify");
+    store_vm_stage2_evidence(&root, &key, stage1_bytes, source, &vm_runtime, &stage2);
+    stage2
 }
 
 /// Keep the expensive complete-bundle artifact available when decoding or
@@ -2550,13 +2726,14 @@ fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
             let llvm = directory.path().join("stage1.ll");
             let executable = directory.path().join("stage1-native");
             fs::write(&input, source.as_bytes()).unwrap();
-            let vm = Vm::with_host(
+            let vm_bytes = authoritative_vm_stage2(
+                &bytes,
                 vm_stage1,
-                ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(vec![vm_output.clone().into_os_string(), input.clone().into_os_string()]),
-            ).unwrap();
-            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            let vm_bytes = fs::read(&vm_output).expect("VM Stage1 must emit Stage2");
+                entry,
+                source.as_bytes(),
+                &input,
+                &vm_output,
+            );
             fs::write(&llvm, module.ir).unwrap();
             let linked = Command::new("clang")
                 .arg(&llvm)
