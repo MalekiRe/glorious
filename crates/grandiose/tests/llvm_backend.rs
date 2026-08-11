@@ -626,8 +626,9 @@ fn tuples_are_lowered_to_native_llvm_aggregates() {
         "selected() -> (i64, i64) { (1, 2) } first(value: (i64, i64)) -> i64 { let(head, ignored) = move value; ignored; move head } main() -> () { first(selected()); () }",
     )
     .unwrap();
-    assert!(module.ir.contains("insertvalue { i64, i64 }"));
-    assert!(module.ir.contains("extractvalue { i64, i64 }"));
+    assert!(module.ir.contains("= type { i64, i64 }"));
+    assert!(module.ir.contains("insertvalue %g1.type."));
+    assert!(module.ir.contains("extractvalue %g1.type."));
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("aggregate.ll");
@@ -678,8 +679,9 @@ fn enum_tags_and_payloads_lower_to_native_llvm_values() {
         "enum Choice { Yes(i64), No } select(choice: Choice) -> i64 { if(choice is Choice::Yes(value)) { value } else { 0 } } main() -> () { select(Choice::Yes(9)); () }",
     )
     .unwrap();
-    assert!(module.ir.contains("insertvalue { i32, [1 x i128] }"));
-    assert!(module.ir.contains("extractvalue { i32, [1 x i128] }"));
+    assert!(module.ir.contains("= type { i32, [1 x i128] }"));
+    assert!(module.ir.contains("insertvalue %g1.type."));
+    assert!(module.ir.contains("extractvalue %g1.type."));
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("enum.ll");
@@ -725,7 +727,7 @@ fn option_as_ref_reads_the_enum_tag_through_a_shared_reference() {
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
     assert!(module
         .ir
-        .contains("getelementptr inbounds { i32, [1 x i128] }, ptr"));
+        .contains("getelementptr inbounds %g1.type."));
     run_native_i64(module, selected, 42, "llvm-option-as-ref");
 }
 
@@ -4393,7 +4395,10 @@ fn llvm_erases_available_evidence_fields_in_suspended_binding_packs() {
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
     assert!(module
         .ir
-        .contains("insertvalue { i64, i64 } zeroinitializer"));
+        .contains("= type { i64, i64 }"));
+    assert!(module
+        .ir
+        .contains("insertvalue %g1.type."));
     assert!(!module.ir.contains("{ i8, i64, i8, i64 }"));
     run_native_i64(module, selected, 62, "erased-binding-pack");
 }

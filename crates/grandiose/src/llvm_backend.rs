@@ -714,6 +714,18 @@ impl<'a> Emitter<'a> {
         self.line("");
         self.line("declare void @llvm.trap() cold noreturn nounwind");
         self.line(&runtime_fault_declaration(self.pointer_width()));
+        // Keep aggregate layouts named instead of repeating their complete
+        // structural spelling at every alloca, load, GEP, and call site.  The
+        // canonical self-host compiler has deeply nested nominal compiler
+        // tables; spelling those layouts inline makes both the emitted IR and
+        // LLVM's O3 type/import work grow with every use of an aggregate.
+        //
+        // These are concrete LLVM layout aliases, not a source-level ABI: the
+        // fields remain exactly the representation used by `llvm_type` below.
+        // Emit every aggregate deterministically before any definition can
+        // mention it, including aggregates only reached through another
+        // aggregate's fields.
+        self.emit_aggregate_type_declarations()?;
         for (bytes, index) in self.runtime_fault_literals.clone() {
             self.line(&format!(
                 "@g1.runtime_fault.{index} = private constant [{} x i8] c\"{}\"",
@@ -12941,35 +12953,8 @@ impl<'a> Emitter<'a> {
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => "ptr".into(),
             Type::BindingPack { payload_type, .. } => self.llvm_type(*payload_type)?,
-            Type::Tuple { .. } | Type::Struct { .. } => {
-                let fields = self
-                    .runtime_aggregate_fields(id)?
-                    .into_iter()
-                    .map(|field| self.llvm_type(field))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if fields.is_empty() {
-                    "{ i8 }".into()
-                } else {
-                    format!("{{ {} }}", fields.join(", "))
-                }
-            }
-            Type::Enum { variants, .. } => {
-                let fields = variants
-                    .iter()
-                    .map(|variant| variant.fields.len())
-                    .max()
-                    .unwrap_or(0);
-                let slots = (0..fields)
-                    .map(|field| {
-                        self.enum_slot_words(id, field as u32)
-                            .map(|words| format!("[{words} x i128]"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if slots.is_empty() {
-                    "{ i32 }".into()
-                } else {
-                    format!("{{ i32, {} }}", slots.join(", "))
-                }
+            Type::Tuple { .. } | Type::Struct { .. } | Type::Enum { .. } => {
+                format!("%g1.type.{id}")
             }
             other => {
                 return Err(vec![backend_error(format!(
@@ -12977,6 +12962,61 @@ impl<'a> Emitter<'a> {
                 ))]);
             }
         })
+    }
+
+    fn emit_aggregate_type_declarations(&mut self) -> Result<(), Vec<Diagnostic>> {
+        let aggregate_ids = self
+            .phases
+            .artifact
+            .types
+            .iter()
+            .enumerate()
+            .filter_map(|(id, ty)| {
+                matches!(ty.representation(), Type::Tuple { .. } | Type::Struct { .. } | Type::Enum { .. })
+                    .then_some(id as TypeId)
+            })
+            .collect::<Vec<_>>();
+        for id in aggregate_ids {
+            let ty = self.runtime_type(id)?;
+            let body = match ty {
+                Type::Tuple { .. } | Type::Struct { .. } => {
+                    let fields = self
+                        .runtime_aggregate_fields(id)?
+                        .into_iter()
+                        .map(|field| self.llvm_type(field))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if fields.is_empty() {
+                        "{ i8 }".to_owned()
+                    } else {
+                        format!("{{ {} }}", fields.join(", "))
+                    }
+                }
+                Type::Enum { variants, .. } => {
+                    let fields = variants
+                        .iter()
+                        .map(|variant| variant.fields.len())
+                        .max()
+                        .unwrap_or(0);
+                    let slots = (0..fields)
+                        .map(|field| {
+                            self.enum_slot_words(id, field as u32)
+                                .map(|words| format!("[{words} x i128]"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if slots.is_empty() {
+                        "{ i32 }".to_owned()
+                    } else {
+                        format!("{{ i32, {} }}", slots.join(", "))
+                    }
+                }
+                _ => unreachable!("aggregate type collection must match aggregate layout emission"),
+            };
+            self.line(&format!("%g1.type.{id} = type {body}"));
+        }
+        if !self.phases.artifact.types.is_empty() {
+            self.line("");
+        }
+        Ok(())
     }
 
     fn llvm_return_type(&self, id: TypeId) -> Result<String, Vec<Diagnostic>> {
