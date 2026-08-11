@@ -3104,10 +3104,27 @@ fn callable_receiver(
         };
         callable
     } else {
-        let Value::Callable(callable) = get(frame, register)? else {
-            return Err(RuntimeError::TypeConfusion);
-        };
-        callable.clone()
+        match frame.registers[register as usize]
+            .as_ref()
+            .ok_or(RuntimeError::EmptyRegister(register))?
+        {
+            // Avoid cloning the `Value` wrapper and then cloning its handle
+            // again. Shared indirect calls are frequent in closure-heavy
+            // code, so clone the callable handle directly from its register.
+            Value::Callable(callable) => callable.clone(),
+            // A borrowed whole-register place still owns its value in the
+            // slot. `get` materializes that value once; it is already owned
+            // here, so moving its callable handle avoids a second clone.
+            Value::Place(slot) => {
+                let Value::Callable(callable) =
+                    slot.get().map_err(|_| RuntimeError::EmptyRegister(register))?
+                else {
+                    return Err(RuntimeError::TypeConfusion);
+                };
+                callable
+            }
+            _ => return Err(RuntimeError::TypeConfusion),
+        }
     };
     indirect_callable_receiver(a, callable, receiver_mode)
 }
