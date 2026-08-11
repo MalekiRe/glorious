@@ -56757,6 +56757,22 @@ fn cross_validate_cleanup_maps(
                     let pc = map
                         .and_then(|map| map.ordinals.get(old_pc as usize).copied())
                         .unwrap_or(old_pc);
+                    // `serialize_mir_cleanup_plans` visits old PCs in
+                    // increasing order and therefore deliberately retains
+                    // the latest ownership state when a peephole maps a run
+                    // of removed instructions onto one surviving ordinal.
+                    // Earlier preimages are not executable bytecode states;
+                    // requiring each of them to equal the single serialized
+                    // entry would reject a correct compacted artifact.
+                    let superseded_by_later_old_pc = map.is_some_and(|map| {
+                        map.ordinals
+                            .iter()
+                            .skip(old_pc as usize + 1)
+                            .any(|ordinal| *ordinal == pc)
+                    });
+                    if superseded_by_later_old_pc {
+                        continue;
+                    }
                     let actual = artifact
                         .cleanups
                         .iter()
