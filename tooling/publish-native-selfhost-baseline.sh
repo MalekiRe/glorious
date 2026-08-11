@@ -9,10 +9,12 @@ usage() {
   cat >&2 <<'USAGE'
 usage: tooling/publish-native-selfhost-baseline.sh [--worktree DIR] [--output DIR]
 
-Publishes the private target/self-host-native-cache from WORKTREE as a new
-read-only baseline.  The output defaults to the Git-common-dir baseline path.
-It refuses to replace an existing baseline.  Only an O3, Wild-linked native
-compiler with an exact build fingerprint can be published.
+Publishes the verified compiler artifact, fingerprint, and any durable
+partitioned `objects/` from WORKTREE as a new read-only baseline. Every
+receiving worktree gets checksummed private copies; runtime ABI/IR keys still
+validate each object before reuse. The output defaults to the Git-common-dir
+baseline path. It refuses to replace an existing baseline. Only an O3,
+Wild-linked native compiler with an exact build fingerprint can be published.
 USAGE
   exit 2
 }
@@ -67,13 +69,24 @@ cleanup() { rm -rf -- "$stage"; }
 trap cleanup EXIT
 cp -- "$binary" "$stage/grandiose-self-host-native"
 cp -- "$fingerprint" "$stage/build.fingerprint"
+if [[ -d "$cache/objects" ]]; then
+  while IFS= read -r -d '' source; do
+    relative=${source#"$cache/"}
+    mkdir -p "$stage/$(dirname "$relative")"
+    cp -- "$source" "$stage/$relative"
+  done < <(find "$cache/objects" -type f -print0 | LC_ALL=C sort -z)
+fi
 revision=$(git -C "$worktree" rev-parse HEAD)
 {
   printf 'schema\t1\n'
   printf 'revision\t%s\n' "$revision"
   printf 'optimization\tO3\n'
   printf 'cache-fingerprint\t%s\n' "$(<"$fingerprint")"
-  for file in grandiose-self-host-native build.fingerprint; do
+  files=(grandiose-self-host-native build.fingerprint)
+  if [[ -d "$stage/objects" ]]; then
+    while IFS= read -r -d '' file; do files+=("${file#"$stage/"}"); done < <(find "$stage/objects" -type f -print0 | LC_ALL=C sort -z)
+  fi
+  for file in "${files[@]}"; do
     printf 'file\t%s\t%s\n' "$file" "$(sha256sum "$stage/$file" | awk '{print $1}')"
   done
 } > "$stage/manifest.tsv"

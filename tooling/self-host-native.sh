@@ -17,9 +17,12 @@ usage:
   tooling/self-host-native.sh canonical-source <output.glorious>
   tooling/self-host-native.sh provenance <canonical-source.glorious> <stage1.tsv>
 
-`init` creates this worktree's private cache and copies an available verified
-baseline cache directory into it once (or uses the optional explicit baseline).
-The baseline is never modified; every build writes only to this worktree.
+`init` creates this worktree's private cache and copies the verified baseline
+compiler artifact, fingerprint, and any checksummed partitioned `objects/`
+intermediates into it once (or uses the optional explicit baseline). Every
+copy remains private to this worktree; ABI/IR validation safely cold-builds
+stale or absent objects. The baseline is never modified; every build writes
+only to this worktree.
 `build` emits an O3 Wild-linked native self-host
 compiler using durable partition objects below this worktree's private cache;
 objects copied from a seed are never required and missing/invalid intermediates
@@ -57,10 +60,11 @@ initialize() {
         }
         return
     fi
-    # The shared Git-common-dir baseline is read-only. Its checked files are
-    # copied into this worktree's own target directory exactly once by the
-    # dedicated seeder; all later writes stay below this worktree root.  An
-    # absent default baseline is normal for the first worktree to build.
+    # The shared Git-common-dir baseline is read-only. Its checksummed native
+    # compiler artifacts and durable partition objects are copied once into
+    # this worktree; no object path is shared. ABI/IR validation remains the
+    # authority for reuse, so absent or stale entries cold-build safely. All
+    # later writes stay below this worktree root.
     if [[ -n "$seed" ]]; then
         "$route_root/tooling/seed-native-selfhost-cache.sh" \
             --worktree "$route_root" --baseline "$seed"
