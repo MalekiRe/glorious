@@ -38,7 +38,10 @@ done
 
 [[ -n "$artifact" && -n "$output" ]] || usage
 [[ -f "$artifact" ]] || { echo "grbc-native: artifact is missing: $artifact" >&2; exit 2; }
-[[ ! -e "$output" ]] || { echo "grbc-native: refusing to overwrite output: $output" >&2; exit 2; }
+# `-e` is false for a dangling symlink, while clang would follow that symlink
+# and create (or overwrite) its target. Treat every existing directory entry
+# as occupied so this boundary never writes through a caller-provided link.
+[[ ! -e "$output" && ! -L "$output" ]] || { echo "grbc-native: refusing to overwrite output: $output" >&2; exit 2; }
 [[ -x "$grvm" ]] || { echo "grbc-native: release grvm is missing: $grvm" >&2; exit 2; }
 [[ -x "$grc" ]] || { echo "grbc-native: release grc is missing: $grc" >&2; exit 2; }
 command -v clang >/dev/null || { echo "grbc-native: clang is required for O3 LLVM compilation" >&2; exit 2; }

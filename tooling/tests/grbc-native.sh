@@ -57,6 +57,25 @@ fi
 grep -Fq -- '--artifact-llvm-ir' "$scratch/grc.log"
 grep -Fq -- '-O3 --ld-path=wild' "$scratch/clang.log"
 
+# A dangling output symlink must be treated as occupied. `test -e` alone
+# misses it, but clang follows it when opening its output and could create the
+# link target outside this driver-owned output path.
+dangling_output="$scratch/dangling-native"
+dangling_target="$scratch/dangling-target"
+ln -s "$dangling_target" "$dangling_output"
+if GRBC_NATIVE_TEST_ARTIFACT="$artifact" GRBC_NATIVE_TEST_LOG="$scratch/dangling-preflight.log" \
+    GRBC_NATIVE_TEST_GRC_LOG="$scratch/dangling-grc.log" GRBC_NATIVE_TEST_CLANG_LOG="$scratch/dangling-clang.log" \
+    GRBC_NATIVE_TEST_TMPDIR="$scratch" GRBC_NATIVE_TEST_OUTPUT="$dangling_output" TMPDIR="$scratch" PATH="$scratch/bin:$PATH" \
+    "$repo_root/tooling/grbc-native.sh" --artifact "$artifact" --output "$dangling_output" --grvm "$scratch/grvm" --grc "$scratch/grc" \
+    >"$scratch/dangling.stdout" 2>"$scratch/dangling.stderr"; then
+    echo "expected dangling output symlink to be rejected" >&2
+    exit 1
+fi
+[[ ! -e "$dangling_target" ]]
+[[ ! -e "$scratch/dangling-preflight.log" ]]
+[[ ! -e "$scratch/dangling-grc.log" ]]
+[[ ! -e "$scratch/dangling-clang.log" ]]
+
 failed_output="$scratch/unsupported-native"
 if GRBC_NATIVE_TEST_ARTIFACT="$artifact" GRBC_NATIVE_TEST_LOG="$scratch/failure-preflight.log" \
     GRBC_NATIVE_TEST_GRC_LOG="$scratch/failure-grc.log" GRBC_NATIVE_TEST_CLANG_LOG="$scratch/failure-clang.log" \
