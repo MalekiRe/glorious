@@ -2227,6 +2227,7 @@ push_move(
 }
 
 push_binary(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     operator: OperatorUse,
     left: ExprId,
@@ -2234,15 +2235,39 @@ push_binary(
 ) -> ExprId {
     let start = node_tokens(&*value, left).start;
     let end = node_tokens(&*value, right).end;
-    push_node(
-        value,
-        ExprKind::Infix(
-            token_range(operator.start, operator.end),
-            left,
-            right
-        ),
-        token_range(start, end)
-    )
+    // Bootstrap parses declared word operators, including the lazy `else`
+    // control operator, as ordinary calls. Keep punctuation operators in the
+    // compact infix form consumed by primitive elaboration, but give a word
+    // operator an identifier child so normal resolution and call elaboration
+    // see exactly the same shape as the bootstrap compiler.
+    handle super::lexer::token_kind_at(source, operator.start) {
+        TokenKind::Ident(name) => {
+            let names_start = super::syntax::range_mark(&value.names);
+            Vec::push(
+                &mut value.names,
+                ExpressionName::Identifier(name, operator.start)
+            );
+            let callee = push_identifier(
+                value,
+                operator.start,
+                operator.end,
+                names_start
+            );
+            let arguments = Vec::new();
+            Vec::push(&mut arguments, left);
+            Vec::push(&mut arguments, right);
+            push_call(value, callee, &arguments, start, end)
+        },
+        _ => push_node(
+            value,
+            ExprKind::Infix(
+                token_range(operator.start, operator.end),
+                left,
+                right
+            ),
+            token_range(start, end)
+        )
+    }
 }
 
 push_argument_edges(
@@ -5509,9 +5534,9 @@ parse_chain(
         @parse_chain
     );
     handle found {
-            Result::Err(_) => finish_chain(value, output, pending),
+            Result::Err(_) => finish_chain(source, value, output, pending),
             Result::Ok(operator) => if(operator.precedence < minimum) {
-                finish_chain(value, output, pending)
+                finish_chain(source, value, output, pending)
             } else {
                 let left = last_expr(output);
                     if(infix_separated(source, &*value, left, operator)) {
@@ -5530,6 +5555,7 @@ parse_chain(
                             );
                             try(
                                 prepare_operator(
+                                    source,
                                     &mut *value,
                                     &mut *output,
                                     &mut *pending,
@@ -5552,13 +5578,14 @@ parse_chain(
                                 pending
                             )
                     } else {
-                        finish_chain(value, output, pending)
+                        finish_chain(source, value, output, pending)
                     }
             }
     }
 }
 
 reduce_once(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     output: &mut Vec<ExprId>,
     pending: &mut Vec<OperatorUse>
@@ -5566,7 +5593,7 @@ reduce_once(
     let operator = pop_operator(&mut *pending);
     let right = pop_expr(&mut *output);
     let left = pop_expr(&mut *output);
-    let grouped = push_binary(value, operator, left, right);
+    let grouped = push_binary(source, value, operator, left, right);
     Vec::push(&mut *output, grouped)
 }
 
@@ -5600,6 +5627,7 @@ operator_should_reduce(
 }
 
 prepare_operator(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     output: &mut Vec<ExprId>,
     pending: &mut Vec<OperatorUse>,
@@ -5614,8 +5642,8 @@ prepare_operator(
             @prepare_operator
         );
         if(reduce) {
-                reduce_once(&mut *value, &mut *output, &mut *pending);
-                    prepare_operator(value, output, pending, incoming)
+                reduce_once(source, &mut *value, &mut *output, &mut *pending);
+                    prepare_operator(source, value, output, pending, incoming)
         } else {
             Result::Ok(())
         }
@@ -5623,6 +5651,7 @@ prepare_operator(
 }
 
 finish_chain(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     output: &mut Vec<ExprId>,
     pending: &mut Vec<OperatorUse>
@@ -5630,8 +5659,8 @@ finish_chain(
     if(Vec::len(&*pending) == 0) {
         Result::Ok(pop_expr(&mut *output))
     } else {
-        reduce_once(&mut *value, &mut *output, &mut *pending);
-            finish_chain(value, output, pending)
+        reduce_once(source, &mut *value, &mut *output, &mut *pending);
+            finish_chain(source, value, output, pending)
     }
 }
 
