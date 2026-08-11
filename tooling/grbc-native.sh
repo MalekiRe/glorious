@@ -20,6 +20,7 @@ USAGE
 
 readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly repo_root="$(cd -- "$script_dir/.." && pwd -P)"
+readonly native_host_runtime="$repo_root/crates/grandiose/src/native_host_runtime.c"
 artifact=
 output=
 grvm="$repo_root/target/release/grvm"
@@ -46,6 +47,7 @@ done
 [[ -x "$grc" ]] || { echo "grbc-native: release grc is missing: $grc" >&2; exit 2; }
 command -v clang >/dev/null || { echo "grbc-native: clang is required for O3 LLVM compilation" >&2; exit 2; }
 command -v wild >/dev/null || { echo "grbc-native: Wild linker is required for native output" >&2; exit 2; }
+[[ -f "$native_host_runtime" ]] || { echo "grbc-native: bundled native host runtime is missing: $native_host_runtime" >&2; exit 2; }
 
 # This subcommand decodes and verifies only. It does not run bytecode.
 "$grvm" native-preflight "$artifact"
@@ -57,9 +59,12 @@ trap 'rm -f -- "$artifact_ir"' EXIT
 # source compiler fallback and reports unsupported bytecode as an error.
 "$grc" --artifact-llvm-ir "$artifact" -o "$artifact_ir"
 
-# Feed exactly the emitted artifact IR to clang. --ld-path makes Wild the
-# final linker, while -O3 is deliberately fixed for stage convergence.
-clang -x ir -O3 --ld-path=wild "$artifact_ir" -o "$output"
+# Feed exactly the emitted artifact IR plus the bundled, finite host ABI to
+# clang.  `native_host_runtime.c` supplies only the frozen process/fs/
+# diagnostic import symbols; it is not a VM or a fallback execution path.
+# --ld-path makes Wild the final linker, while -O3 is deliberately fixed for
+# stage convergence.
+clang -x ir -O3 --ld-path=wild "$artifact_ir" -x c "$native_host_runtime" -o "$output"
 [[ -x "$output" ]] || {
     echo "grbc-native: clang reported success but produced no executable: $output" >&2
     exit 1

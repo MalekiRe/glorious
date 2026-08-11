@@ -32,9 +32,9 @@ cat > "$scratch/bin/clang" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" > "$GRBC_NATIVE_TEST_CLANG_LOG"
-[[ "$1" == -x && "$2" == ir && "$3" == -O3 && "$4" == --ld-path=wild && "$5" == "$GRBC_NATIVE_TEST_TMPDIR"/grbc-native.*.ll && "$6" == -o && "$7" == "$GRBC_NATIVE_TEST_OUTPUT" ]]
-printf 'native fixture\n' > "$7"
-chmod +x "$7"
+[[ "$1" == -x && "$2" == ir && "$3" == -O3 && "$4" == --ld-path=wild && "$5" == "$GRBC_NATIVE_TEST_TMPDIR"/grbc-native.*.ll && "$6" == -x && "$7" == c && "$8" == "$GRBC_NATIVE_TEST_REPO_ROOT"/crates/grandiose/src/native_host_runtime.c && "$9" == -o && "${10}" == "$GRBC_NATIVE_TEST_OUTPUT" ]]
+printf 'native fixture\n' > "${10}"
+chmod +x "${10}"
 EOF
 chmod +x "$scratch/bin/clang"
 cat > "$scratch/bin/wild" <<'EOF'
@@ -45,7 +45,7 @@ chmod +x "$scratch/bin/wild"
 
 if ! GRBC_NATIVE_TEST_ARTIFACT="$artifact" GRBC_NATIVE_TEST_LOG="$scratch/log" \
     GRBC_NATIVE_TEST_GRC_LOG="$scratch/grc.log" GRBC_NATIVE_TEST_CLANG_LOG="$scratch/clang.log" \
-    GRBC_NATIVE_TEST_TMPDIR="$scratch" GRBC_NATIVE_TEST_OUTPUT="$output" TMPDIR="$scratch" PATH="$scratch/bin:$PATH" \
+    GRBC_NATIVE_TEST_TMPDIR="$scratch" GRBC_NATIVE_TEST_REPO_ROOT="$repo_root" GRBC_NATIVE_TEST_OUTPUT="$output" TMPDIR="$scratch" PATH="$scratch/bin:$PATH" \
     "$repo_root/tooling/grbc-native.sh" --artifact "$artifact" --output "$output" --grvm "$scratch/grvm" --grc "$scratch/grc" \
     >"$scratch/stdout" 2>"$scratch/stderr"; then
     echo "expected supported artifact lowering to succeed" >&2
@@ -65,7 +65,7 @@ dangling_target="$scratch/dangling-target"
 ln -s "$dangling_target" "$dangling_output"
 if GRBC_NATIVE_TEST_ARTIFACT="$artifact" GRBC_NATIVE_TEST_LOG="$scratch/dangling-preflight.log" \
     GRBC_NATIVE_TEST_GRC_LOG="$scratch/dangling-grc.log" GRBC_NATIVE_TEST_CLANG_LOG="$scratch/dangling-clang.log" \
-    GRBC_NATIVE_TEST_TMPDIR="$scratch" GRBC_NATIVE_TEST_OUTPUT="$dangling_output" TMPDIR="$scratch" PATH="$scratch/bin:$PATH" \
+    GRBC_NATIVE_TEST_TMPDIR="$scratch" GRBC_NATIVE_TEST_REPO_ROOT="$repo_root" GRBC_NATIVE_TEST_OUTPUT="$dangling_output" TMPDIR="$scratch" PATH="$scratch/bin:$PATH" \
     "$repo_root/tooling/grbc-native.sh" --artifact "$artifact" --output "$dangling_output" --grvm "$scratch/grvm" --grc "$scratch/grc" \
     >"$scratch/dangling.stdout" 2>"$scratch/dangling.stderr"; then
     echo "expected dangling output symlink to be rejected" >&2
@@ -79,7 +79,7 @@ fi
 failed_output="$scratch/unsupported-native"
 if GRBC_NATIVE_TEST_ARTIFACT="$artifact" GRBC_NATIVE_TEST_LOG="$scratch/failure-preflight.log" \
     GRBC_NATIVE_TEST_GRC_LOG="$scratch/failure-grc.log" GRBC_NATIVE_TEST_CLANG_LOG="$scratch/failure-clang.log" \
-    GRBC_NATIVE_TEST_TMPDIR="$scratch" GRBC_NATIVE_TEST_OUTPUT="$failed_output" GRBC_NATIVE_TEST_LOWERING_FAIL=1 \
+    GRBC_NATIVE_TEST_TMPDIR="$scratch" GRBC_NATIVE_TEST_REPO_ROOT="$repo_root" GRBC_NATIVE_TEST_OUTPUT="$failed_output" GRBC_NATIVE_TEST_LOWERING_FAIL=1 \
     TMPDIR="$scratch" PATH="$scratch/bin:$PATH" \
     "$repo_root/tooling/grbc-native.sh" --artifact "$artifact" --output "$failed_output" --grvm "$scratch/grvm" --grc "$scratch/grc" \
     >"$scratch/failure.stdout" 2>"$scratch/failure.stderr"; then

@@ -11,8 +11,9 @@ use std::{collections::BTreeSet, error::Error, fmt};
 
 use grandiose_vm::{
     load_verified, verify::VerifiedArtifact, Artifact, Constant, Function, Instruction, Primitive,
-    Type, TypeId, UNIT,
+    Type, TypeId, TEXT, UNIT,
 };
+use grandiose_vm::bytecode::Signature;
 
 use crate::{
     llvm_backend::default_target_triple,
@@ -93,6 +94,17 @@ pub fn emit_verified_artifact_llvm_ir(
     let mut output =
         String::from("; Grandiose verified .grbc AOT\nsource_filename = \"grandiose.grbc\"\n");
     output.push_str(&runtime_fault_declaration(pointer_width));
+    // These are declarations only. `emit_host_call` below remains the single
+    // authorization point and validates every import against the frozen G1
+    // manifest identity before emitting either call.
+    if artifact
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::HostCall { .. }))
+    {
+        output.push_str("\ndeclare void @g1_host_fault(i32) cold noreturn\ndeclare i32 @g1_host_diagnostic_write(ptr)\n");
+    }
+    emit_runtime_literals(&mut output, artifact, pointer_width);
     output.push_str("\n\n");
     // An artifact can retain helper functions which are unreachable from its
     // entry point.  They have no native observable behavior, and rejecting a
@@ -250,9 +262,10 @@ fn emit_function(
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
             Instruction::Const { dst, constant } => {
+                let constant_id = *constant;
                 let constant = artifact
                     .constants
-                    .get(*constant as usize)
+                    .get(constant_id as usize)
                     .ok_or_else(|| unsupported(function_id, instruction_id, "invalid constant"))?;
                 let ty = *function
                     .register_types
@@ -264,7 +277,7 @@ fn emit_function(
                     function_id,
                     instruction_id,
                     *dst,
-                    &llvm_constant(artifact, function_id, ty, constant)?,
+                    &llvm_constant(artifact, function_id, ty, constant_id, constant)?,
                 )?;
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
@@ -533,7 +546,8 @@ fn emit_function(
                 ));
                 for (constant, target) in cases {
                     check_target(function, function_id, instruction_id, *target)?;
-                    let constant = artifact.constants.get(*constant as usize).ok_or_else(|| {
+                    let constant_id = *constant;
+                    let constant = artifact.constants.get(constant_id as usize).ok_or_else(|| {
                         unsupported(function_id, instruction_id, "invalid switch constant")
                     })?;
                     let ty = *function
@@ -544,7 +558,7 @@ fn emit_function(
                         })?;
                     output.push_str(&format!(
                         "    {discr_ty} {}, label %bb{target}\n",
-                        llvm_constant(artifact, function_id, ty, constant)?
+                        llvm_constant(artifact, function_id, ty, constant_id, constant)?
                     ));
                 }
                 output.push_str("  ]\n");
@@ -615,6 +629,21 @@ fn emit_function(
                         return Err(unsupported(function_id, instruction_id, "call destination"))
                     }
                 }
+                emit_fallthrough(output, function, function_id, instruction_id)?;
+            }
+            Instruction::HostCall { dst, import, args } => {
+                emit_host_call(
+                    output,
+                    artifact,
+                    &register_types,
+                    function,
+                    function_id,
+                    instruction_id,
+                    *dst,
+                    *import,
+                    args,
+                    &mut temporary,
+                )?;
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
             instruction => {
@@ -718,6 +747,11 @@ fn llvm_type(artifact: &Artifact, function: u32, ty: TypeId) -> Result<String, A
         Some(Type::U128 | Type::I128) => Ok("i128".into()),
         Some(Type::F32) => Ok("float".into()),
         Some(Type::F64) => Ok("double".into()),
+        // This slice admits Text only as an immutable literal passed to the
+        // host diagnostic ABI.  It is exactly the `G1Bytes *` representation
+        // in native_host_runtime.c; Bytes and dynamic Text still have no
+        // artifact AOT allocation/ownership ABI and remain rejected.
+        Some(Type::Text) => Ok("ptr".into()),
         Some(Type::Tuple { fields, .. }) => llvm_aggregate_type(artifact, function, fields),
         Some(Type::Struct { fields, .. }) => llvm_aggregate_type(
             artifact,
@@ -794,6 +828,7 @@ fn llvm_constant(
     _artifact: &Artifact,
     function: u32,
     ty: TypeId,
+    constant_id: u32,
     constant: &Constant,
 ) -> Result<String, ArtifactLlvmError> {
     let value = match constant {
@@ -813,9 +848,125 @@ fn llvm_constant(
         Constant::Char(value) => (*value as u32).to_string(),
         Constant::F32(value) => format!("{value:e}"),
         Constant::F64(value) => format!("{value:e}"),
+        Constant::Text(_) if ty == TEXT => format!("@g1.artifact.bytes.{constant_id}"),
         _ => return Err(ArtifactLlvmError::UnsupportedType { function, ty }),
     };
     Ok(value)
+}
+
+/// Emit the immutable `G1Bytes` literals used by the sole host-call ABI slice.
+/// The layout is intentionally byte-for-byte the source LLVM backend's
+/// `%g1.bytes`: signed reference count, target-width length, then data.  A
+/// count of -1 makes the static literal immortal, which is the only ownership
+/// behavior this artifact slice needs.
+fn emit_runtime_literals(output: &mut String, artifact: &Artifact, pointer_width: u16) {
+    let texts = artifact
+        .constants
+        .iter()
+        .enumerate()
+        .filter_map(|(index, constant)| match constant {
+            Constant::Text(text) => Some((index, text.as_bytes())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if texts.is_empty() {
+        return;
+    }
+    output.push_str(&format!("\n%g1.bytes = type {{ i64, i{pointer_width}, [0 x i8] }}\n"));
+    for (index, bytes) in texts {
+        let escaped = bytes
+            .iter()
+            .map(|byte| format!("\\{byte:02X}"))
+            .collect::<String>();
+        output.push_str(&format!(
+            "@g1.artifact.bytes.{index} = private constant {{ i64, i{pointer_width}, [{} x i8] }} {{ i64 -1, i{pointer_width} {}, [{} x i8] c\"{escaped}\" }}, align 8\n",
+            bytes.len(),
+            bytes.len(),
+            bytes.len(),
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_host_call(
+    output: &mut String,
+    artifact: &Artifact,
+    register_types: &[String],
+    function: &Function,
+    function_id: u32,
+    instruction_id: u32,
+    dst: Option<u32>,
+    import: u32,
+    args: &[u32],
+    temporary: &mut u32,
+) -> Result<(), ArtifactLlvmError> {
+    let import = artifact
+        .imports
+        .get(import as usize)
+        .ok_or_else(|| unsupported(function_id, instruction_id, "invalid host import"))?;
+    // The names and complete signature are the frozen artifact identities
+    // produced by the trusted runtime manifest.  Do not lower a merely
+    // lookalike import: that would silently invent a native host ABI.
+    let diagnostic_write = import.capability == "diagnostic"
+        && import.symbol == "write"
+        && import.signature
+            == Signature {
+                params: vec![TEXT],
+                result: UNIT,
+                outward_protocols: vec![],
+            }
+        && import.may_trap;
+    if !diagnostic_write {
+        return Err(unsupported(function_id, instruction_id, "unsupported host import"));
+    }
+    if args.len() != 1 {
+        return Err(unsupported(function_id, instruction_id, "diagnostic.write arity"));
+    }
+    if let Some(dst) = dst {
+        let destination_ty = function
+            .register_types
+            .get(dst as usize)
+            .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+        if *destination_ty != UNIT {
+            return Err(unsupported(
+                function_id,
+                instruction_id,
+                "diagnostic.write destination type",
+            ));
+        }
+    }
+    let argument = args[0];
+    let argument_ty = function
+        .register_types
+        .get(argument as usize)
+        .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+    if *argument_ty != TEXT {
+        return Err(unsupported(
+            function_id,
+            instruction_id,
+            "diagnostic.write argument type",
+        ));
+    }
+    let value = emit_load(
+        output,
+        register_types,
+        function_id,
+        instruction_id,
+        argument,
+        temporary,
+    )?;
+    let status = format!("%v{temporary}");
+    *temporary += 1;
+    output.push_str(&format!("  {status} = call i32 @g1_host_diagnostic_write(ptr {value})\n"));
+    let failed = format!("%v{temporary}");
+    *temporary += 1;
+    output.push_str(&format!("  {failed} = icmp ne i32 {status}, 0\n"));
+    let fault = format!("host.fault.{function_id}.{instruction_id}");
+    let continuation = format!("host.cont.{function_id}.{instruction_id}");
+    output.push_str(&format!(
+        "  br i1 {failed}, label %{fault}, label %{continuation}\n{fault}:\n  call void @g1_host_fault(i32 4)\n  unreachable\n{continuation}:\n"
+    ));
+    Ok(())
 }
 
 fn scalar_primitive(op: Primitive, ty: &str, args: &[String]) -> Option<String> {
@@ -852,10 +1003,10 @@ fn instruction_name(instruction: &Instruction) -> &'static str {
 mod tests {
     use std::{fs, process::Command};
 
-    use grandiose_vm::bytecode::{EnumVariant, Field};
+    use grandiose_vm::bytecode::{EnumVariant, Field, Import, Signature};
     use grandiose_vm::{
         verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction, Primitive,
-        Type, I64, U32, UNIT,
+        Type, I64, TEXT, U32, UNIT,
     };
 
     use super::*;
@@ -1227,6 +1378,120 @@ mod tests {
         assert!(ir.contains(&format!(
             "declare void @g1_runtime_fault(i32, i32, i32, ptr, i{pointer_width}) cold noreturn"
         )));
+    }
+
+    #[test]
+    fn verified_diagnostic_write_text_literal_uses_the_native_host_abi_without_vm_execution() {
+        let artifact = with_generated_cleanup_plans(Artifact {
+            entry_function: Some(0),
+            // CORE_G1 | HOST_ABI_G1.  The verifier owns these feature bits;
+            // hand-built fixture artifacts spell the frozen wire value.
+            required_features: 1 | (1 << 5),
+            constants: vec![Constant::Text("artifact host ABI\\n".into())],
+            imports: vec![Import {
+                capability: "diagnostic".into(),
+                symbol: "write".into(),
+                signature: Signature {
+                    params: vec![TEXT],
+                    result: UNIT,
+                    outward_protocols: vec![],
+                },
+                may_trap: true,
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                flags: 0,
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, TEXT, UNIT],
+                code_start: 0,
+                code_len: 3,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::HostCall {
+                    dst: Some(2),
+                    import: 0,
+                    args: vec![1],
+                },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        })
+        .unwrap();
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        assert!(ir.contains("%g1.bytes = type { i64, i64, [0 x i8] }"));
+        assert!(ir.contains("@g1.artifact.bytes.0 = private constant"));
+        assert!(ir.contains("declare i32 @g1_host_diagnostic_write(ptr)"));
+        assert!(ir.contains("call i32 @g1_host_diagnostic_write(ptr"));
+        assert!(ir.contains("call void @g1_host_fault(i32 4)"));
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("diagnostic.ll");
+        let executable = directory.path().join("diagnostic");
+        fs::write(&source, ir).unwrap();
+        let runtime = concat!(env!("CARGO_MANIFEST_DIR"), "/src/native_host_runtime.c");
+        let status = Command::new("clang")
+            .args(["-O3", "-x", "ir"])
+            .arg(&source)
+            .args(["-x", "c", runtime, "-o"])
+            .arg(&executable)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let output = Command::new(&executable).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stderr, b"artifact host ABI\\n");
+    }
+
+    #[test]
+    fn host_call_lookalikes_remain_fail_closed() {
+        let mut artifact = with_generated_cleanup_plans(Artifact {
+            entry_function: Some(0),
+            required_features: 1 | (1 << 5),
+            constants: vec![Constant::Text("nope".into())],
+            imports: vec![Import {
+                capability: "diagnostic".into(),
+                symbol: "write".into(),
+                signature: Signature {
+                    params: vec![TEXT],
+                    result: UNIT,
+                    outward_protocols: vec![],
+                },
+                may_trap: true,
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                flags: 0,
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, TEXT, UNIT],
+                code_start: 0,
+                code_len: 3,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Const { dst: 1, constant: 0 },
+                Instruction::HostCall { dst: Some(2), import: 0, args: vec![1] },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        })
+        .unwrap();
+        artifact.imports[0].symbol = "not-write".into();
+        let artifact = with_generated_cleanup_plans(artifact).unwrap();
+        assert!(matches!(
+            emit_artifact_llvm_ir(&artifact.encode()),
+            Err(ArtifactLlvmError::UnsupportedInstruction { opcode: "unsupported host import", .. })
+        ));
     }
 
     #[test]
