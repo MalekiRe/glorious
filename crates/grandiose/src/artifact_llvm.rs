@@ -7,7 +7,7 @@
 //! (direct scalar/value-aggregate functions with ordinary control flow); every other valid G1 instruction
 //! remains an explicit lowering error until it has a native ABI.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 use grandiose_vm::{
     load_verified, verify::VerifiedArtifact, Artifact, Constant, Function, Instruction, Primitive,
@@ -81,9 +81,20 @@ pub fn emit_verified_artifact_llvm_ir(
         .ok_or(ArtifactLlvmError::MissingEntry)?;
     let mut output =
         String::from("; Grandiose verified .grbc AOT\nsource_filename = \"grandiose.grbc\"\n\n");
+    // An artifact can retain helper functions which are unreachable from its
+    // entry point.  They have no native observable behavior, and rejecting a
+    // supported program merely because an unused helper needs a later ABI
+    // slice makes this boundary less useful than necessary.  Emit the exact
+    // static closure of entry instead.  Every function reference we can
+    // represent is followed conservatively; dynamic calls remain rejected by
+    // `emit_function`, so this never makes an executable depend on a VM
+    // fallback or an undefined native symbol.
+    let reachable = reachable_functions(artifact, entry)?;
     for (function_id, function) in artifact.functions.iter().enumerate() {
-        emit_function(&mut output, artifact, function_id as u32, function)?;
-        output.push('\n');
+        if reachable.contains(&(function_id as u32)) {
+            emit_function(&mut output, artifact, function_id as u32, function)?;
+            output.push('\n');
+        }
     }
     let entry_function = artifact
         .functions
@@ -111,6 +122,52 @@ pub fn emit_verified_artifact_llvm_ir(
     }
     output.push_str("  ret i32 0\n}\n");
     Ok(output)
+}
+
+fn reachable_functions(
+    artifact: &Artifact,
+    entry: u32,
+) -> Result<BTreeSet<u32>, ArtifactLlvmError> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![entry];
+    while let Some(function_id) = pending.pop() {
+        if !reachable.insert(function_id) {
+            continue;
+        }
+        let function = artifact
+            .functions
+            .get(function_id as usize)
+            .ok_or_else(|| unsupported(function_id, 0, "invalid function"))?;
+        let start = function.code_start as usize;
+        let end = start
+            .checked_add(function.code_len as usize)
+            .ok_or_else(|| unsupported(function_id, 0, "invalid function code range"))?;
+        let code = artifact
+            .code
+            .get(start..end)
+            .ok_or_else(|| unsupported(function_id, 0, "invalid function code range"))?;
+        for instruction in code {
+            match instruction {
+                Instruction::Call { function, .. }
+                | Instruction::TailCall { function, .. }
+                | Instruction::CallKnownReceiver { function, .. }
+                | Instruction::TailCallKnownReceiver { function, .. }
+                | Instruction::MakeCallable { function, .. } => pending.push(*function),
+                Instruction::MakeHandlerShared { functions, .. } => {
+                    pending.extend(functions.iter().copied())
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(invalid) = reachable
+        .iter()
+        .copied()
+        .find(|function_id| *function_id as usize >= artifact.functions.len())
+    {
+        return Err(unsupported(invalid, 0, "invalid referenced function"));
+    }
+    Ok(reachable)
 }
 
 fn emit_function(
@@ -911,6 +968,33 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn unreachable_unsupported_helpers_do_not_block_entry_closure_lowering() {
+        let mut artifact = scalar_program();
+        let dead_start = artifact.code.len() as u32;
+        artifact.functions.push(Function {
+            name: "dead_tail_helper".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT],
+            code_start: dead_start,
+            code_len: 1,
+            label_slot_count: 0,
+        });
+        artifact.code.push(Instruction::TailCall {
+            function: 0,
+            args: vec![],
+        });
+        let artifact = with_generated_cleanup_plans(artifact).unwrap();
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        assert!(ir.contains("define void @grbc_fn_0()"));
+        assert!(ir.contains("define void @grbc_fn_1()"));
+        assert!(!ir.contains("@grbc_fn_2"));
     }
 
     #[test]
