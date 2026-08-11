@@ -531,17 +531,26 @@ pub fn emit_llvm_native_object_units(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    // Every function unit needs the runtime/global declaration prelude, but
+    // only direct source-function dependencies. Previously each unit started
+    // by cloning the complete prelude and repeatedly deleting every unrelated
+    // source prototype. On a self-host build that made partitioning do a
+    // quadratic amount of whole-prelude copying. Strip all source prototypes
+    // once, then append the small dependency set for each unit below.
+    let runtime_prelude = source_declarations
+        .values()
+        .fold(function_prelude, |prelude, prototype| {
+            prelude.replacen(prototype, "", 1)
+        });
     let functions = source_functions
         .into_iter()
         .map(|(declaration, fragment_fingerprint)| {
             let text = &fragments.fragments[&declaration].emitted_text;
-            let declaration_text = llvm_fragment_declarations(&text);
-            // LLVM permits a later definition only when it replaces the exact
-            // declaration in the module. Remove this unit's prototypes
-            // entirely: recursive and forward references are valid inside a
-            // definition, just as they are in the original monolithic IR.
+            // LLVM permits recursive and forward references inside a
+            // definition, so only direct external source calls need their
+            // prototypes restored to this unit's runtime prelude.
             let prelude = llvm_fragment_source_dependency_prelude(
-                function_prelude.replacen(&declaration_text, "", 1),
+                &runtime_prelude,
                 &text,
                 declaration,
                 &source_declarations,
@@ -574,11 +583,12 @@ pub fn emit_llvm_native_object_units(
 /// keeps a sibling ABI edit from changing an unrelated unit's complete IR,
 /// while the exact emitted IR remains the final cache-key authority.
 fn llvm_fragment_source_dependency_prelude(
-    mut prelude: String,
+    runtime_prelude: &str,
     body: &str,
     self_declaration: u32,
     source_declarations: &BTreeMap<u32, String>,
 ) -> String {
+    let mut prelude = runtime_prelude.to_owned();
     for (declaration, prototype) in source_declarations {
         if *declaration == self_declaration {
             continue;
@@ -590,8 +600,8 @@ fn llvm_fragment_source_dependency_prelude(
             continue;
         };
         let symbol = &prototype[symbol_start..symbol_start + symbol_end];
-        if !body.contains(symbol) {
-            prelude = prelude.replacen(prototype, "", 1);
+        if body.contains(symbol) {
+            prelude.push_str(prototype);
         }
     }
     prelude
