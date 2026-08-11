@@ -55342,6 +55342,10 @@ fn layout_and_peephole(artifact: &mut Artifact) -> bool {
 /// against pre-peephole ordinals can be revalidated afterwards.
 struct PeepholePcMap {
     ordinals: Vec<u32>,
+    /// Number of instructions after the rewrite. `ordinals` may contain this
+    /// endpoint for an unreferenced removed suffix, so it cannot be inferred
+    /// by indexing that vector.
+    new_code_len: u32,
     /// Register renames visible in the state before each old PC when a
     /// snapshot/consumer chain is folded across independent transfers.
     state_renames: Vec<Vec<(u32, u32)>>,
@@ -55790,6 +55794,7 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                     folded,
                     Some(PeepholePcMap {
                         ordinals: (0..code.len() as u32).collect(),
+                        new_code_len: code.len() as u32,
                         state_renames,
                     }),
                 );
@@ -55842,6 +55847,7 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             rewritten,
             Some(PeepholePcMap {
                 ordinals: old_to_new,
+                new_code_len: retained_count as u32,
                 state_renames,
             }),
         )
@@ -55868,12 +55874,35 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                     let mut ordinals = Vec::with_capacity(previous.ordinals.len());
                     let mut state_renames = Vec::with_capacity(previous.state_renames.len());
                     for (old, middle) in previous.ordinals.iter().enumerate() {
-                        ordinals.push(map.ordinals[*middle as usize]);
+                        let middle = *middle as usize;
+                        // `local_once` deliberately gives an unreferenced
+                        // removed suffix the one-past-the-end ordinal. A
+                        // later fixed-point round has no instruction at that
+                        // ordinal to look up, but the suffix is still past
+                        // the end after this round too. Compose that
+                        // sentinel directly instead of indexing the next
+                        // round's old-PC map.
+                        assert!(
+                            middle <= map.ordinals.len(),
+                            "peephole PC map must map only into the next round or its end"
+                        );
+                        let final_ordinal = if middle == map.ordinals.len() {
+                            map.new_code_len
+                        } else {
+                            map.ordinals[middle]
+                        };
+                        ordinals.push(final_ordinal);
                         let mut renames = previous.state_renames[old].clone();
-                        renames.extend(map.state_renames[*middle as usize].iter().copied());
+                        if middle < map.state_renames.len() {
+                            renames.extend(map.state_renames[middle].iter().copied());
+                        }
                         state_renames.push(renames);
                     }
-                    PeepholePcMap { ordinals, state_renames }
+                    PeepholePcMap {
+                        ordinals,
+                        new_code_len: map.new_code_len,
+                        state_renames,
+                    }
                 }
             });
             rewritten = next;
@@ -57240,7 +57269,8 @@ mod mir_edge_emission_tests {
     use super::{
         Constant, Instruction, MirBuilderItem, MirLowerer, Primitive, Span,
         compact_artifact_registers_after_peephole, constant_key, emit_mir_function,
-        layout_and_peephole, layout_mir_blocks, mir, prune_unused_constants,
+        layout_and_peephole, layout_and_peephole_with_maps, layout_mir_blocks, mir,
+        prune_unused_constants,
         serialize_mir_cleanup_plans,
     };
 
@@ -58517,6 +58547,44 @@ mod mir_edge_emission_tests {
         assert!(layout_and_peephole(&mut artifact));
         assert_eq!(artifact.code, vec![Instruction::Return { src: Some(1) }]);
         assert_eq!(artifact.functions[0].code_len, 1);
+    }
+
+    #[test]
+    fn peephole_fixed_point_composes_removed_suffix_ordinal() {
+        // Round one retargets the constant through the transfer, and removes
+        // both the transfer and this unreferenced suffix NOP. Round two can
+        // then see the adjacent dead Const/Return pair. The removed suffix
+        // maps to the one-past-the-end ordinal after round one, so composing
+        // round two must retain that sentinel rather than indexing its map.
+        let mut artifact = Artifact {
+            constants: vec![Constant::I64(7)],
+            code: vec![
+                Instruction::Const { dst: 2, constant: 0 },
+                Instruction::Move { dst: 3, src: 2 },
+                Instruction::Return { src: Some(1) },
+                Instruction::Nop,
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "fixed_point_suffix".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 4,
+            label_slot_count: 0,
+        });
+
+        let (changed, maps) = layout_and_peephole_with_maps(&mut artifact);
+        assert!(changed);
+        assert_eq!(artifact.code, vec![Instruction::Return { src: Some(1) }]);
+        let map = maps[0].as_ref().unwrap();
+        assert_eq!(map.ordinals, vec![0, 0, 0, 1]);
+        assert_eq!(map.new_code_len, artifact.code.len() as u32);
     }
 
     #[test]
