@@ -52,8 +52,9 @@ pub use compiler_mir::{
 };
 pub use llvm_backend::{
     LLVM_INCREMENTAL_MANIFEST_SCHEMA, LlvmCalleeDependency, LlvmFunctionManifest,
-    LlvmIncrementalManifest, LlvmModule, LlvmOptions, default_target_data_layout,
-    default_target_triple, emit_llvm_ir, llvm_incremental_manifest,
+    LlvmFragmentCache, LlvmFunctionFragment, LlvmIncrementalManifest, LlvmModule, LlvmOptions,
+    default_target_data_layout, default_target_triple, emit_llvm_ir,
+    emit_llvm_ir_with_fragment_cache, llvm_incremental_manifest,
 };
 
 pub fn compile_source_to_llvm_ir(

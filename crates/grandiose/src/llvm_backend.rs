@@ -71,6 +71,42 @@ pub struct LlvmIncrementalManifest {
     pub functions: Vec<LlvmFunctionManifest>,
 }
 
+/// Reusable text and side metadata for one independently emitted function.
+///
+/// LLVM intrinsic declarations are emitted at module scope.  Consequently a
+/// fragment is not valid text by itself unless its metadata is replayed into
+/// the enclosing module before those declarations are written.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmFunctionFragment {
+    pub fingerprint: u64,
+    pub emitted_text: String,
+    pub overflow_widths: BTreeSet<(u16, &'static str)>,
+    snapshot_capture_fix_types: BTreeSet<TypeId>,
+}
+
+/// Bounded-by-owner cache for independently emitted LLVM functions.  The
+/// owner chooses its lifetime (the persistent compilation driver retains one
+/// across `--serve` requests); this type deliberately owns no filesystem
+/// state and never serializes unchecked IR.
+#[derive(Clone, Debug, Default)]
+pub struct LlvmFragmentCache {
+    manifest: Option<LlvmIncrementalManifest>,
+    fragments: BTreeMap<u32, LlvmFunctionFragment>,
+    reused_fragments: usize,
+}
+
+impl LlvmFragmentCache {
+    pub fn reused_fragments(&self) -> usize {
+        self.reused_fragments
+    }
+
+    pub fn clear(&mut self) {
+        self.manifest = None;
+        self.fragments.clear();
+        self.reused_fragments = 0;
+    }
+}
+
 impl LlvmIncrementalManifest {
     /// Functions whose cached fragment cannot be reused from `previous`.
     /// An option or runtime ABI change conservatively invalidates all bodies.
@@ -300,6 +336,17 @@ pub fn emit_llvm_ir(
     Emitter::new(phases, options).emit()
 }
 
+/// Emit a complete module while reusing only manifest-valid function bodies.
+/// Module globals, runtime support, effects callbacks, and the entry wrapper
+/// are always regenerated from the current phases.
+pub fn emit_llvm_ir_with_fragment_cache(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+    cache: &mut LlvmFragmentCache,
+) -> Result<LlvmModule, Vec<Diagnostic>> {
+    Emitter::new(phases, options).emit_with_fragment_cache(cache)
+}
+
 struct Emitter<'a> {
     phases: &'a CompiledPhases,
     options: &'a LlvmOptions,
@@ -360,10 +407,39 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit(mut self) -> Result<LlvmModule, Vec<Diagnostic>> {
+    fn emit(self) -> Result<LlvmModule, Vec<Diagnostic>> {
+        self.emit_inner(None)
+    }
+
+    fn emit_with_fragment_cache(
+        self,
+        cache: &mut LlvmFragmentCache,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        self.emit_inner(Some(cache))
+    }
+
+    fn emit_inner(
+        mut self,
+        mut cache: Option<&mut LlvmFragmentCache>,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        if let Some(cache) = cache.as_deref_mut() {
+            cache.reused_fragments = 0;
+        }
         let reachable = self.reachable_functions()?;
         self.llvm_reachable_functions = reachable.iter().copied().collect();
         self.prepare_runtime(&reachable)?;
+        let manifest = cache
+            .as_ref()
+            .map(|_| llvm_incremental_manifest(self.phases, self.options));
+        let invalidated = match (cache.as_ref(), manifest.as_ref()) {
+            (Some(cache), Some(manifest)) => cache
+                .manifest
+                .as_ref()
+                .map_or_else(BTreeSet::new, |previous| {
+                    manifest.invalidated_functions(previous)
+                }),
+            _ => BTreeSet::new(),
+        };
         self.line("; Grandiose LLVM backend");
         self.line(&format!(
             "target triple = \"{}\"",
@@ -407,7 +483,62 @@ impl<'a> Emitter<'a> {
         self.line("");
 
         for function in &reachable {
+            let declaration = self.phases.mir.functions[*function].declaration;
+            let fingerprint = manifest.as_ref().and_then(|manifest| {
+                manifest
+                    .functions
+                    .iter()
+                    .find(|entry| entry.declaration == declaration)
+                    .map(|entry| entry.fragment_fingerprint)
+            });
+            let cached = cache.as_deref_mut().and_then(|cache| {
+                (!invalidated.contains(&declaration))
+                    .then(|| cache.fragments.get(&declaration))
+                    .flatten()
+                    .filter(|fragment| Some(fragment.fingerprint) == fingerprint)
+                    .cloned()
+            });
+            if let Some(fragment) = cached {
+                self.output.push_str(&fragment.emitted_text);
+                self.overflow_widths.extend(fragment.overflow_widths);
+                self.snapshot_capture_fix_types
+                    .extend(fragment.snapshot_capture_fix_types);
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.reused_fragments = cache.reused_fragments.saturating_add(1);
+                }
+                continue;
+            }
+
+            // SSA temporary names are function-local. Reset them for every
+            // fragment so fresh and reused emission have identical canonical
+            // text, then isolate all per-function side metadata for replay.
+            let module_output = std::mem::take(&mut self.output);
+            let module_overflow_widths = std::mem::take(&mut self.overflow_widths);
+            let module_snapshot_capture_fix_types =
+                std::mem::take(&mut self.snapshot_capture_fix_types);
+            self.temporary = 0;
             self.emit_function(*function)?;
+            let emitted_text = std::mem::take(&mut self.output);
+            let overflow_widths = std::mem::take(&mut self.overflow_widths);
+            let snapshot_capture_fix_types = std::mem::take(&mut self.snapshot_capture_fix_types);
+            self.output = module_output;
+            self.overflow_widths = module_overflow_widths;
+            self.snapshot_capture_fix_types = module_snapshot_capture_fix_types;
+            self.output.push_str(&emitted_text);
+            self.overflow_widths.extend(overflow_widths.iter().copied());
+            self.snapshot_capture_fix_types
+                .extend(snapshot_capture_fix_types.iter().copied());
+            if let (Some(cache), Some(fingerprint)) = (cache.as_deref_mut(), fingerprint) {
+                cache.fragments.insert(
+                    declaration,
+                    LlvmFunctionFragment {
+                        fingerprint,
+                        emitted_text,
+                        overflow_widths,
+                        snapshot_capture_fix_types,
+                    },
+                );
+            }
         }
         if self.uses_effect_runtime {
             self.emit_snapshot_capture_fix_callbacks(&reachable)?;
@@ -429,6 +560,16 @@ impl<'a> Emitter<'a> {
         if !declarations.is_empty() {
             self.output.push_str(&declarations);
             self.output.push('\n');
+        }
+        if let (Some(cache), Some(manifest)) = (cache, manifest) {
+            cache.manifest = Some(manifest);
+            cache.fragments.retain(|declaration, _| {
+                self.phases
+                    .mir
+                    .functions
+                    .iter()
+                    .any(|function| function.declaration == *declaration)
+            });
         }
         Ok(LlvmModule {
             ir: self.output,
@@ -7319,15 +7460,8 @@ impl<'a> Emitter<'a> {
                 format!("%{value}")
             })
             .collect::<Vec<_>>();
-        let [
-            top,
-            bottom,
-            resume_slot,
-            resume_init,
-            handler,
-            references,
-            inherited_preserve,
-        ] = fields.as_slice()
+        let [top, bottom, resume_slot, resume_init, handler, references, inherited_preserve] =
+            fields.as_slice()
         else {
             unreachable!()
         };

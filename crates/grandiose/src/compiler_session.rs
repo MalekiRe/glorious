@@ -15,11 +15,11 @@ use grandiose_vm::{Type, TypeId};
 use crate::compiler_typeck::{DeclarationKey, IncrementalTypeCache};
 use crate::diagnostic::Diagnostic;
 use crate::source_bundle::SourceBundle;
-use crate::{
-    CompileOptions, CompiledPhases,
-    llvm_backend::{LlvmModule, LlvmOptions},
-};
 use crate::{compiler_core as core, compiler_mir as mir};
+use crate::{
+    llvm_backend::{LlvmFragmentCache, LlvmModule, LlvmOptions},
+    CompileOptions, CompiledPhases,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IncrementalCompilationStats {
@@ -36,6 +36,9 @@ pub struct IncrementalCompilationStats {
     /// backend cache. This is intentionally separate from phase reuse: LLVM
     /// emission can be avoided even when callers only observe native output.
     pub reused_llvm_ir: usize,
+    /// Individual LLVM functions restored from manifest-valid cached fragments
+    /// while the current module prelude/runtime/wrapper were regenerated.
+    pub reused_llvm_fragments: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
@@ -58,6 +61,7 @@ pub struct CompilationDriver {
     phase_cache: VecDeque<CachedPhases>,
     diagnostic_cache: VecDeque<CachedDiagnostics>,
     llvm_cache: VecDeque<CachedLlvmIr>,
+    llvm_fragment_cache: LlvmFragmentCache,
     request_revision: u64,
     stats: IncrementalCompilationStats,
     diagnostic_stats: DiagnosticCacheStats,
@@ -173,10 +177,12 @@ impl CompilationDriver {
             let module = cached.module.clone();
             self.llvm_cache.push_front(cached);
             self.stats.reused_llvm_ir = self.stats.reused_llvm_ir.saturating_add(1);
+            self.stats.reused_llvm_fragments = 0;
             return Ok(module);
         }
 
-        let module = crate::emit_llvm_ir(phases, target)?;
+        let module =
+            crate::emit_llvm_ir_with_fragment_cache(phases, target, &mut self.llvm_fragment_cache)?;
         self.llvm_cache.push_front(CachedLlvmIr {
             schema: LLVM_CACHE_SCHEMA,
             bundle: bundle.clone(),
@@ -188,6 +194,7 @@ impl CompilationDriver {
         });
         self.llvm_cache.truncate(LLVM_CACHE_CAPACITY);
         self.stats.reused_llvm_ir = 0;
+        self.stats.reused_llvm_fragments = self.llvm_fragment_cache.reused_fragments();
         Ok(module)
     }
 
@@ -223,6 +230,7 @@ impl CompilationDriver {
                 reused_phase_artifacts: 1,
                 reused_historical_phase_artifacts: usize::from(historical),
                 reused_llvm_ir: 0,
+                reused_llvm_fragments: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
@@ -328,6 +336,7 @@ impl CompilationDriver {
             reused_phase_artifacts: 0,
             reused_historical_phase_artifacts: 0,
             reused_llvm_ir: 0,
+            reused_llvm_fragments: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             frontend: self.frontend_cache.stats(),
