@@ -125,6 +125,8 @@ pub struct HandleArm {
     variant_token: usize,
     effect_type: Option<BodyTypeId>,
     binders: PatternBinderRange,
+    resumption: Option<Id<String>>,
+    resumption_token: Option<usize>,
     body: ExprId
 }
 
@@ -1117,6 +1119,8 @@ struct PendingHandleArm {
     variant_token: usize,
     effect_type: Option<BodyTypeId>,
     binders: Vec<PatternBinder>,
+    resumption: Option<Id<String>>,
+    resumption_token: Option<usize>,
     body: ExprId
 }
 
@@ -1192,6 +1196,14 @@ pub effect_operation_effect_type(value: &EffectOperationSyntax) -> BodyTypeId {
 
 pub handle_arm_effect_type(value: &HandleArm) -> Option<BodyTypeId> {
     value.effect_type
+}
+
+pub handle_arm_resumption(value: &HandleArm) -> Option<Id<String>> {
+    value.resumption
+}
+
+pub handle_arm_resumption_token(value: &HandleArm) -> Option<usize> {
+    value.resumption_token
 }
 
 pub body_type_token_start(value: &ParsedBody, ty: BodyTypeId) -> usize {
@@ -3514,6 +3526,28 @@ direct_handle_metadata(
     }
 }
 
+// `with name` is contextual handler syntax, matching the bootstrap parser.
+// Keep it out of the lexer keyword set so an ordinary identifier named
+// `with` remains valid everywhere else.
+parse_handle_resumption(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser
+) -> Result<(Option<Id<String>>, Option<usize>), BodyError> {
+    let token = value.tokens.position;
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(word) => handle super::lexer::lexeme(source, word) {
+            Result::Ok(text) => if(String::eq(text, &"with")) {
+                let binder_token = token + 1;
+                let binder = try(identifier_name(source, binder_token, token), @parse_handle_resumption);
+                value.tokens.position = binder_token + 1;
+                Result::Ok((Option::Some(binder), Option::Some(binder_token)))
+            } else { Result::Ok((None, None)) },
+            Result::Err(_) => Result::Ok((None, None))
+        },
+        _ => Result::Ok((None, None))
+    }
+}
+
 parse_handle_arm(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3572,6 +3606,9 @@ parse_handle_arm(
                     open
                 ), @parse_handle_arm)
             } else { () };
+            let (resumption, resumption_token) = try(
+                parse_handle_resumption(source, value), @parse_handle_arm
+            );
             if(value.tokens.position < value.tokens.limit
                 and {
                     super::lexer::token_matches_at(
@@ -3598,6 +3635,8 @@ parse_handle_arm(
                     variant_token: variant_token,
                     effect_type: selected_effect_type,
                     binders: binders,
+                    resumption: resumption,
+                    resumption_token: resumption_token,
                     body: body
                 })
             } else {
@@ -3639,9 +3678,11 @@ parse_handle_arm(
                 enum_token: enum_token,
                 variant_name: enum_name,
                 variant_token: enum_token,
-                effect_type: None,
-                binders: Vec::new(),
-                body: body
+                    effect_type: None,
+                    binders: Vec::new(),
+                    resumption: None,
+                    resumption_token: None,
+                    body: body
             })
         } else {
             Result::Err(BodyError::ExpectedIdentifier(separator, enum_token))
@@ -3740,6 +3781,8 @@ append_handle_arms(
                 variant_token,
                 effect_type,
                 binders,
+                resumption,
+                resumption_token,
                 body
             } = arm;
             let binder_start =
@@ -3760,6 +3803,8 @@ append_handle_arms(
                 variant_token: variant_token,
                 effect_type: effect_type,
                 binders: binders_range,
+                resumption: resumption,
+                resumption_token: resumption_token,
                 body: body
             });
             append_handle_arms(remaining, value)

@@ -856,6 +856,10 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          probe_simple_effect_path() -> i64 { \
              handle perform Stop::stop() { Stop::stop() => 42 } \
          }",
+        "effect Ask { [1,1] ask(value: i64) -> i64 } \
+         probe_handler_resumption(value: i64) -> i64 { \
+             handle perform Ask::ask(value) { Ask::ask(found) with resume => resume(found) } \
+         }",
         "effect Fail<E> { fail(error: E) -> ! } \
          invoke<E, F>(error: E, body: F) -> ! / {Fail<E>} \
              where F: Fn<(E), Output=!, Effects={Fail<E>}> { body(error) } \

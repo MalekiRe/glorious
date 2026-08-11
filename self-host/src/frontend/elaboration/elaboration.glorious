@@ -2048,6 +2048,44 @@ pub interface_effect_instance_argument_at(
     } else { None }
 }
 
+append_effect_instance_substitutions(
+    interfaces: &TypedInterfaces,
+    instance: EffectInstanceId,
+    ordinal: u32,
+    output: &mut Vec<Option<TypeId>>
+) {
+    handle interface_effect_instance_argument_at(interfaces, instance, ordinal) {
+        None => (),
+        Option::Some(argument) => {
+            Vec::push(&mut *output, Option::Some(argument));
+            append_effect_instance_substitutions(
+                interfaces, instance, ordinal + 1, output
+            )
+        }
+    }
+}
+
+// Effect operation members are stored against the declaration's generic
+// owner. A grounded EffectInstance supplies those arguments at each perform
+// and handler arm, so substitute them before checking payload/result types.
+// Operation-local generics intentionally remain untouched here; callers must
+// instantiate those independently.
+pub instantiate_effect_member_type(
+    interfaces: &mut TypedInterfaces,
+    instance: EffectInstanceId,
+    member: TypeId
+) -> TypeId {
+    let effect = interface_effect_instance_effect(&*interfaces, instance);
+    let owner = TypeParameterOwner::Declaration(
+        interface_effect_shell(&*interfaces, effect)
+    );
+    let substitutions = Vec::new();
+    append_effect_instance_substitutions(
+        &*interfaces, instance, 0, &mut substitutions
+    );
+    instantiate_call_type(interfaces, member, owner, &substitutions)
+}
+
 pub interface_effect_constraint_start(
     value: &TypedInterfaces,
     id: InterfaceEffectId
@@ -9710,13 +9748,14 @@ elaborate_perform_arguments(
     map: &ResolutionMap,
     value: &mut BodyContext,
     expression: u32,
+    instance: EffectInstanceId,
     operation: InterfaceEffectOperationId,
     ordinal: u32,
     operands: &mut Vec<CoreValueId>
 ) -> Result<(), ElaborationError> {
     let count = interface_effect_operation_payload_count(&*interfaces, operation);
     if(ordinal < count) {
-        let expected = handle interface_effect_operation_payload_at(
+        let declared = handle interface_effect_operation_payload_at(
             &*interfaces,
             operation,
             ordinal
@@ -9724,6 +9763,9 @@ elaborate_perform_arguments(
             None => unreachable(),
             Option::Some(found) => found
         };
+        let expected = instantiate_effect_member_type(
+            interfaces, instance, declared
+        );
         let child = super::bodies::expression_child_at(body, expression, ordinal);
         let argument = try(elaborate_expression(
             original,
@@ -9751,6 +9793,7 @@ elaborate_perform_arguments(
             map,
             value,
             expression,
+            instance,
             operation,
             ordinal + 1,
             operands
@@ -9816,7 +9859,11 @@ elaborate_perform(
             found_count
         )))
     } else { () };
-    let result = interface_effect_operation_result(&*interfaces, operation);
+    let result = instantiate_effect_member_type(
+        interfaces,
+        instance,
+        interface_effect_operation_result(&*interfaces, operation)
+    );
     try(check_expected_type(result, expected, token), @elaborate_perform);
     let operands = Vec::new();
     try(elaborate_perform_arguments(
@@ -9828,6 +9875,7 @@ elaborate_perform(
         map,
         value,
         expression,
+        instance,
         operation,
         0,
         &mut operands

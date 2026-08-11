@@ -91,7 +91,8 @@ impl Use<[0, *]> for ResolvedHandleTarget {}
 
 pub struct ResolvedHandleArm {
     target: ResolvedHandleTarget,
-    binders: ResolvedBinderRange
+    binders: ResolvedBinderRange,
+    resumption: Option<LocalId>
 }
 
 impl Use<[0, *]> for ResolvedHandleArm {}
@@ -318,6 +319,10 @@ pub resolved_handle_binders<'a>(
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
+}
+
+pub resolved_handle_resumption(value: &ResolvedHandleArm) -> Option<LocalId> {
+    value.resumption
 }
 
 shell_parent_module(
@@ -1918,6 +1923,33 @@ resolve_handle_arm(
             Slice::len(source_binders)
         )
     } else { () };
+    // A handler resumption is lexical to this arm just like payload binders,
+    // but is kept separately from the payload-pattern range. Later Core
+    // elaboration gives it the operation's instantiated continuation type.
+    let resumption = handle (
+        super::bodies::handle_arm_resumption(arm),
+        super::bodies::handle_arm_resumption_token(arm)
+    ) {
+        (Option::Some(name), Option::Some(token)) => {
+            let local = handle local_id_from_usize(Vec::len(&output.locals)) {
+                Result::Err(_) => @resolve_handle_arm(Result::Err(
+                    ResolutionError::LocalIdExhausted(token, Vec::len(&output.locals))
+                )),
+                Result::Ok(found) => found
+            };
+            Vec::push(&mut output.locals, LocalBinding {
+                name_token: token,
+                block_expression: Id::from_u32(expression)
+            });
+            scope_push(
+                &mut *frame.scope,
+                name,
+                ResolvedTarget::Local(local)
+            );
+            Option::Some(local)
+        },
+        _ => None
+    };
     // Seal the parent arm's contiguous binder range before resolving its
     // body. Nested handles append their own binders to the same flat arena
     // and must not become part of this arm's payload pattern.
@@ -1926,7 +1958,8 @@ resolve_handle_arm(
     *IndexVec::index_mut(&mut output.handle_arms, arm_id) =
         Option::Some(ResolvedHandleArm {
             target: target,
-            binders: resolved_binders
+            binders: resolved_binders,
+            resumption: resumption
         });
     try(resolve_expression(
         headers,
