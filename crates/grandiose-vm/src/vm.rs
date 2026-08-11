@@ -1133,6 +1133,18 @@ impl Vm {
                             };
                             Value::U64(u64::from(value))
                         }
+                        [first, second]
+                            if op == Primitive::TextEq
+                                && first_arg_type == Some(TEXT)
+                                && result_type == U32 =>
+                        {
+                            let (Value::Text(first), Value::Text(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            Value::U64(u64::from(Rc::ptr_eq(&first, &second) || first == second))
+                        }
                         [] => primitive_typed_first_type(a, result_type, op, first_arg_type, &[])?,
                         [first] => {
                             let first = take(frame, *first)?;
@@ -4782,6 +4794,15 @@ fn primitive_typed(
         },
         Primitive::TextConcat => match v {
             [Value::Text(a), Value::Text(b)] => {
+                // Text values are immutable and already owned by this
+                // primitive call.  Preserve that backing when one side is
+                // empty instead of allocating and copying the other string.
+                if a.is_empty() {
+                    return Ok(Value::Text(b.clone()));
+                }
+                if b.is_empty() {
+                    return Ok(Value::Text(a.clone()));
+                }
                 let length = checked_output_len(a.len(), b.len())?;
                 let mut result = String::new();
                 reserve_string_output(&mut result, length)?;
@@ -4792,7 +4813,10 @@ fn primitive_typed(
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::TextEq => match v {
-            [Value::Text(a), Value::Text(b)] => Ok(bool_value(a == b)),
+            // COPY preserves the immutable Rc backing. Parser and symbol
+            // passes regularly compare such aliases, where pointer identity
+            // proves equality without scanning the spelling byte-by-byte.
+            [Value::Text(a), Value::Text(b)] => Ok(bool_value(Rc::ptr_eq(a, b) || a == b)),
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::TextFromUtf8Checked => match v {
@@ -4836,12 +4860,21 @@ fn primitive_typed(
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::BytesSlice => match v {
-            [Value::Bytes(bytes), Value::U64(start), Value::U64(end)] => bytes
-                .get(to_index(*start)?..to_index(*end)?)
-                .map(clone_output)
-                .transpose()?
-                .map(|value| Value::Bytes(value.into()))
-                .ok_or(RuntimeError::IndexOutOfBounds),
+            [Value::Bytes(bytes), Value::U64(start), Value::U64(end)] => {
+                let start = to_index(*start)?;
+                let end = to_index(*end)?;
+                if start == 0 && end == bytes.len() {
+                    // A full immutable slice is an identity operation. Keep
+                    // its backing instead of copying an entire compiler blob.
+                    return Ok(Value::Bytes(bytes.clone()));
+                }
+                bytes
+                    .get(start..end)
+                    .map(clone_output)
+                    .transpose()?
+                    .map(|value| Value::Bytes(value.into()))
+                    .ok_or(RuntimeError::IndexOutOfBounds)
+            }
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::BytesFromArrayMove => match v {
@@ -7009,6 +7042,16 @@ mod tests {
             panic!("TextConcat returned a non-Text value")
         };
         assert!(!Rc::ptr_eq(&left_text, &joined_text));
+        let nonempty_text: Rc<str> = Rc::from("grandiose");
+        let Value::Text(joined_text) = prim(
+            TEXT,
+            Primitive::TextConcat,
+            &[Value::Text(nonempty_text.clone()), Value::Text("".into())],
+        )
+        .unwrap() else {
+            panic!("TextConcat empty suffix returned a non-text value")
+        };
+        assert!(Rc::ptr_eq(&nonempty_text, &joined_text));
         assert_eq!(
             prim(CHAR, Primitive::CharFromU32Checked, &[Value::U64(0x1f600)]),
             Ok(Value::U64(0x1f600))
@@ -7063,6 +7106,20 @@ mod tests {
             ),
             Ok(Value::Bytes(vec![20, 30].into()))
         );
+        let whole_bytes: Rc<[u8]> = vec![10, 20, 30].into();
+        let Value::Bytes(sliced_bytes) = prim(
+            BYTES,
+            Primitive::BytesSlice,
+            &[
+                Value::Bytes(whole_bytes.clone()),
+                Value::U64(0),
+                Value::U64(3),
+            ],
+        )
+        .unwrap() else {
+            panic!("BytesSlice full range returned a non-bytes value")
+        };
+        assert!(Rc::ptr_eq(&whole_bytes, &sliced_bytes));
         let left_bytes: Rc<[u8]> = vec![10, 20].into();
         let Value::Bytes(joined_bytes) = prim(
             BYTES,

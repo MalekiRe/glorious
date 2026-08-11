@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use grandiose_vm::{
     verify, verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction,
-    Primitive, Type, Value, Vm, I64, UNIT,
+    Primitive, Type, Value, Vm, BYTES, I64, TEXT, U32, UNIT, USIZE,
 };
 use grandiose_vm::bytecode::Signature;
 
@@ -39,23 +39,27 @@ fn function(
     }
 }
 
-fn measure(name: &str, artifact: Artifact, expected: Value) {
+fn measure_with_args(name: &str, artifact: Artifact, args: Vec<Value>, expected: Value) {
     let artifact = verify(with_generated_cleanup_plans(artifact).unwrap()).unwrap();
     let vm = Vm::new(artifact);
     assert_eq!(
-        vm.run(0, vec![])
+        vm.run(0, args.clone())
             .unwrap_or_else(|error| panic!("{name}: {error:?}")),
         expected
     );
     let started = Instant::now();
     for _ in 0..ITERS {
-        assert_eq!(vm.run(0, vec![]).unwrap(), expected);
+        assert_eq!(vm.run(0, args.clone()).unwrap(), expected);
     }
     let elapsed = started.elapsed();
     eprintln!(
         "g1-vm-microbench name={name} iterations={ITERS} ns_per_run={}",
         elapsed.as_nanos() / ITERS as u128
     );
+}
+
+fn measure(name: &str, artifact: Artifact, expected: Value) {
+    measure_with_args(name, artifact, vec![], expected);
 }
 
 /// Sustained arithmetic and register movement in a single VM entry.
@@ -451,6 +455,125 @@ fn shared_closure_call_program() -> Artifact {
     }
 }
 
+/// Parser and symbol-table paths commonly compare a copied immutable spelling
+/// against itself.  This keeps the source text large enough for content
+/// comparison to be visible while retaining the VM's normal Copy semantics.
+fn shared_text_equality_program() -> Artifact {
+    let text = "identifier_segment_".repeat(16);
+    let mut code = Vec::with_capacity(INNER_OPS * 4 + 1);
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Copy { dst: 2, src: 1 },
+            Instruction::Primitive {
+                dst: 3,
+                op: Primitive::TextEq,
+                args: vec![1, 2],
+            },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 3 });
+        }
+    }
+    code.push(Instruction::Return { src: Some(3) });
+    Artifact {
+        constants: vec![Constant::Text(text)],
+        functions: vec![function(
+            "main",
+            vec![],
+            U32,
+            vec![UNIT, TEXT, TEXT, U32],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
+/// Concatenating an empty suffix occurs in parser and diagnostic assembly.
+/// The source is an argument so the benchmark measures the primitive's output
+/// ownership rather than re-materializing a large text constant per opcode.
+fn text_concat_empty_program() -> Artifact {
+    let mut code = Vec::with_capacity(INNER_OPS * 4 + 1);
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Copy { dst: 2, src: 1 },
+            Instruction::Const {
+                dst: 3,
+                constant: 0,
+            },
+            Instruction::Primitive {
+                dst: 4,
+                op: Primitive::TextConcat,
+                args: vec![2, 3],
+            },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 4 });
+        }
+    }
+    code.push(Instruction::Return { src: Some(4) });
+    Artifact {
+        constants: vec![Constant::Text(String::new())],
+        functions: vec![function(
+            "main",
+            vec![TEXT],
+            TEXT,
+            vec![UNIT, TEXT, TEXT, TEXT, TEXT],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
+/// Whole-input slices are common when a compiler tracks a byte span that
+/// happens to cover the current buffer. This measures the immutable identity
+/// case without charging construction of the input to each bytecode opcode.
+fn bytes_full_slice_program(length: usize) -> Artifact {
+    let mut code = Vec::with_capacity(INNER_OPS * 5 + 1);
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Copy { dst: 2, src: 1 },
+            Instruction::Const {
+                dst: 3,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 4,
+                constant: 1,
+            },
+            Instruction::Primitive {
+                dst: 5,
+                op: Primitive::BytesSlice,
+                args: vec![2, 3, 4],
+            },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 5 });
+        }
+    }
+    code.push(Instruction::Return { src: Some(5) });
+    Artifact {
+        constants: vec![Constant::Usize(0), Constant::Usize(length as u64)],
+        functions: vec![function(
+            "main",
+            vec![BYTES],
+            BYTES,
+            vec![UNIT, BYTES, BYTES, USIZE, USIZE, BYTES],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
 #[test]
 #[ignore = "run explicitly in release mode; reports VM run throughput"]
 fn vm_execution_microbenchmarks() {
@@ -481,5 +604,24 @@ fn vm_execution_microbenchmarks() {
         "shared_closure_call",
         shared_closure_call_program(),
         Value::I64(1),
+    );
+    measure(
+        "shared_text_equality",
+        shared_text_equality_program(),
+        Value::U64(1),
+    );
+    let text = "parser_identifier_segment_".repeat(128);
+    measure_with_args(
+        "text_concat_empty",
+        text_concat_empty_program(),
+        vec![Value::Text(text.clone().into())],
+        Value::Text(text.into()),
+    );
+    let bytes = vec![0x5a; 4096];
+    measure_with_args(
+        "bytes_full_slice",
+        bytes_full_slice_program(bytes.len()),
+        vec![Value::Bytes(bytes.clone().into())],
+        Value::Bytes(bytes.into()),
     );
 }
