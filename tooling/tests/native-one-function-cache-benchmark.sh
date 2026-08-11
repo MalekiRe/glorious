@@ -52,7 +52,9 @@ trap cleanup EXIT
 
 copied_source="$scratch/src"
 cache="$scratch/private-cache"
-objects="$cache/objects"
+# The CLI writes durable object and manifest entries directly into the
+# directory passed to --native-incremental-cache.
+objects="$cache"
 mkdir -p "$cache"
 cp -a -- "$source_root/." "$copied_source/"
 
