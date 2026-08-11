@@ -479,25 +479,34 @@ pub fn emit_llvm_native_object_units(
     options: &LlvmOptions,
 ) -> Result<LlvmNativeObjectUnits, Vec<Diagnostic>> {
     let mut fragments = LlvmFragmentCache::default();
-    let module = emit_llvm_ir_with_fragment_cache(phases, options, &mut fragments)?;
+    // The self-host compiler's monolithic IR is gigabytes large.  Once it is
+    // emitted, partitioning needs it only for the shared object unit, so move
+    // rather than clone it before replacing source bodies with declarations.
+    let LlvmModule {
+        ir: mut shared_ir,
+        target_triple,
+    } = emit_llvm_ir_with_fragment_cache(phases, options, &mut fragments)?;
     let manifest = llvm_incremental_manifest(phases, options);
     let fingerprints = manifest
         .functions
         .iter()
         .map(|function| (function.declaration, function.fragment_fingerprint))
         .collect::<BTreeMap<_, _>>();
-    let source_fragments = fragments
+    // Fragment text remains owned by the cache until its corresponding final
+    // unit is materialized below.  Avoiding this intermediate clone prevents
+    // a transient extra copy of every source body.
+    let source_functions = fragments
         .fragments
-        .iter()
-        .filter_map(|(declaration, fragment)| {
+        .keys()
+        .filter_map(|declaration| {
             fingerprints
                 .get(declaration)
                 .copied()
-                .map(|fingerprint| (*declaration, fingerprint, fragment.emitted_text.clone()))
+                .map(|fingerprint| (*declaration, fingerprint))
         })
         .collect::<Vec<_>>();
-    let mut shared_ir = module.ir.clone();
-    for (_, _, text) in &source_fragments {
+    for (declaration, _) in &source_functions {
+        let text = &fragments.fragments[declaration].emitted_text;
         // Fragment text came from this exact canonical module emission. A
         // missing replacement would make a supposedly independent unit retain
         // another function body, so fail closed rather than returning it.
@@ -513,13 +522,19 @@ pub fn emit_llvm_native_object_units(
     // Source fragments have already been replaced with declarations above.
     shared_ir = llvm_externalize_internal_definitions(&shared_ir);
     let function_prelude = llvm_declarations_only(&shared_ir);
-    let source_declarations = source_fragments
+    let source_declarations = source_functions
         .iter()
-        .map(|(declaration, _, text)| (*declaration, llvm_fragment_declarations(text)))
+        .map(|(declaration, _)| {
+            (
+                *declaration,
+                llvm_fragment_declarations(&fragments.fragments[declaration].emitted_text),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    let functions = source_fragments
+    let functions = source_functions
         .into_iter()
-        .map(|(declaration, fragment_fingerprint, text)| {
+        .map(|(declaration, fragment_fingerprint)| {
+            let text = &fragments.fragments[&declaration].emitted_text;
             let declaration_text = llvm_fragment_declarations(&text);
             // LLVM permits a later definition only when it replaces the exact
             // declaration in the module. Remove this unit's prototypes
@@ -539,7 +554,7 @@ pub fn emit_llvm_native_object_units(
                         "{prelude}\n{}",
                         llvm_externalize_internal_definitions(&text)
                     ),
-                    target_triple: module.target_triple.clone(),
+                    target_triple: target_triple.clone(),
                 },
             }
         })
@@ -548,7 +563,7 @@ pub fn emit_llvm_native_object_units(
         shared_fingerprint: fingerprint_text(&shared_ir),
         shared: LlvmModule {
             ir: shared_ir,
-            target_triple: module.target_triple,
+            target_triple,
         },
         functions,
     })
