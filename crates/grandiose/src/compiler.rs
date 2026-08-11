@@ -56189,6 +56189,27 @@ fn compact_artifact_registers_after_peephole(artifact: &mut Artifact) -> bool {
         function.register_types = register_types;
         changed = true;
     }
+    // Register compaction can turn distinct cleanup plans into the same
+    // effective ownership state (most commonly when each plan contained a
+    // different cleanup-only temporary).  Cleanup coverage is required on
+    // the wire, but an adjacent span with the same register list adds no
+    // information: extending the preceding span preserves the state at every
+    // PC while reducing both cleanup records and operand-table entries.
+    let mut coalesced: Vec<grandiose_vm::bytecode::CleanupPlan> =
+        Vec::with_capacity(artifact.cleanups.len());
+    for cleanup in std::mem::take(&mut artifact.cleanups) {
+        if let Some(previous) = coalesced.last_mut()
+            && previous.function == cleanup.function
+            && previous.end_instruction == cleanup.first_instruction
+            && previous.registers == cleanup.registers
+        {
+            previous.end_instruction = cleanup.end_instruction;
+            changed = true;
+        } else {
+            coalesced.push(cleanup);
+        }
+    }
+    artifact.cleanups = coalesced;
     changed
 }
 
@@ -57257,6 +57278,47 @@ mod mir_edge_emission_tests {
 
         assert!(compact_artifact_registers_after_peephole(&mut artifact));
         assert_eq!(artifact.functions[0].register_types, [UNIT]);
+        assert!(artifact.cleanups[0].registers.is_empty());
+        let decoded = Artifact::decode(&artifact.encode()).unwrap();
+        verify(decoded).unwrap();
+    }
+
+    #[test]
+    fn post_peephole_compaction_coalesces_identical_cleanup_spans() {
+        let mut artifact = Artifact::default();
+        artifact.code = vec![Instruction::Nop, Instruction::Return { src: None }];
+        artifact.functions.push(BytecodeFunction {
+            name: "coalesce_cleanup_spans".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        });
+        artifact.cleanups = vec![
+            grandiose_vm::bytecode::CleanupPlan {
+                function: 0,
+                first_instruction: 0,
+                end_instruction: 1,
+                registers: vec![1],
+            },
+            grandiose_vm::bytecode::CleanupPlan {
+                function: 0,
+                first_instruction: 1,
+                end_instruction: 2,
+                registers: vec![2],
+            },
+        ];
+
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT]);
+        assert_eq!(artifact.cleanups.len(), 1);
+        assert_eq!(artifact.cleanups[0].first_instruction, 0);
+        assert_eq!(artifact.cleanups[0].end_instruction, 2);
         assert!(artifact.cleanups[0].registers.is_empty());
         let decoded = Artifact::decode(&artifact.encode()).unwrap();
         verify(decoded).unwrap();
