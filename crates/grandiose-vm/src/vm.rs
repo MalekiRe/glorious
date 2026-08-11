@@ -777,15 +777,7 @@ impl Vm {
                 }
                 Instruction::DerefCopy { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let (referent_type, target) = match get(frame, src)? {
-                        Value::Reference {
-                            referent_type,
-                            target,
-                            ..
-                        } => (referent_type, target),
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    let value = copy_reference_target(a, referent_type, &target)?;
+                    let value = copy_reference_register(a, frame, src)?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
@@ -2489,6 +2481,37 @@ fn copy_project_register(
             .with_value(|value| copy_project_value(a, value, field, field_type))
             .map_err(|_| RuntimeError::EmptyRegister(r))?,
         value => copy_project_value(a, value, field, field_type),
+    }
+}
+
+fn copy_reference_value(a: &ExecutionImage, value: &Value) -> Result<Value, RuntimeError> {
+    let Value::Reference {
+        referent_type,
+        target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    copy_reference_target(a, *referent_type, target)
+}
+
+/// DEREF_COPY only observes its reference operand, so it can derive the
+/// target copy straight from register storage rather than cloning the
+/// reference handle through `get` first.
+fn copy_reference_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| copy_reference_value(a, value))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => copy_reference_value(a, value),
     }
 }
 
