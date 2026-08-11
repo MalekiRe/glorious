@@ -9,6 +9,7 @@ use grandiose_vm::{
     verify, verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction,
     Primitive, Type, Value, Vm, I64, UNIT,
 };
+use grandiose_vm::bytecode::Signature;
 
 const ITERS: usize = 20_000;
 /// Every generated artifact executes this many target operations in one VM
@@ -368,6 +369,78 @@ fn binding_pack_program() -> Artifact {
             0,
             code.len() as u32,
         )],
+/// Repeatedly invoke one captureless shared closure. The closure value remains
+/// live across calls, matching compiler visitors and callback-heavy passes.
+fn shared_closure_call_program() -> Artifact {
+    let mut types = Type::predefined();
+    let shared_unit = types.len() as u32;
+    types.push(Type::RefShared { referent: UNIT });
+    let callable = types.len() as u32;
+    types.push(Type::Callable {
+        signature: Signature {
+            params: vec![],
+            result: I64,
+            outward_protocols: vec![],
+        },
+        capture_type: UNIT,
+        receiver_mode: 0,
+        identity_name: "shared microbench closure".into(),
+        copy: true,
+        zero_use_allowed: true,
+    });
+    let mut code = vec![Instruction::MakeCallable {
+        dst: 1,
+        callable_type: callable,
+        function: 1,
+        captures: vec![],
+    }];
+    for index in 0..INNER_OPS {
+        code.push(Instruction::CallIndirect {
+            dst: Some(2),
+            callable: 1,
+            receiver_mode: 0,
+            args: vec![],
+        });
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 2 });
+        }
+    }
+    code.push(Instruction::Drop { register: 1 });
+    code.push(Instruction::Return { src: Some(2) });
+    let body_start = code.len() as u32;
+    code.extend([
+        Instruction::Const {
+            dst: 1,
+            constant: 0,
+        },
+        Instruction::Return { src: Some(1) },
+    ]);
+    Artifact {
+        required_features: 1 | (1 << 1),
+        types,
+        constants: vec![Constant::I64(1)],
+        functions: vec![
+            function(
+                "main",
+                vec![],
+                I64,
+                vec![UNIT, callable, I64],
+                0,
+                body_start,
+            ),
+            Function {
+                name: "closure_body".into(),
+                flags: 0,
+                params: vec![],
+                return_type: I64,
+                outward_protocols: vec![],
+                receiver_mode: Some(0),
+                register_types: vec![shared_unit, I64],
+                code_start: body_start,
+                code_len: 2,
+                label_slot_count: 0,
+            },
+        ],
         code,
         ..Artifact::default()
     }
@@ -399,4 +472,9 @@ fn vm_execution_microbenchmarks() {
         Value::I64(1),
     );
     measure("binding_pack", binding_pack_program(), Value::Unit);
+    measure(
+        "shared_closure_call",
+        shared_closure_call_program(),
+        Value::I64(1),
+    );
 }

@@ -1481,9 +1481,11 @@ impl Vm {
                     let (dst, callable, receiver_mode) = (*dst, *callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
-                    let mut callee = make_verified_frame_from_arguments(
-                        a, function, frame, args, receiver, dst,
-                    )?;
+                    let mut callee = if args.is_empty() {
+                        make_verified_zero_argument_receiver_frame(a, function, receiver, dst)?
+                    } else {
+                        make_verified_frame_from_arguments(a, function, frame, args, receiver, dst)?
+                    };
                     frame.pc += 1;
                     if let Some(guard) = guard {
                         callee.guards.push(guard);
@@ -1499,9 +1501,15 @@ impl Vm {
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_verified_frame_from_arguments(
-                        a, function, frame, args, receiver, return_dst,
-                    )?;
+                    let mut replacement = if args.is_empty() {
+                        make_verified_zero_argument_receiver_frame(
+                            a, function, receiver, return_dst,
+                        )?
+                    } else {
+                        make_verified_frame_from_arguments(
+                            a, function, frame, args, receiver, return_dst,
+                        )?
+                    };
                     if let Some(guard) = guard {
                         replacement.guards.push(guard);
                     }
@@ -2170,6 +2178,43 @@ fn make_verified_zero_argument_frame(
         labels: Vec::new(),
     })
 }
+
+/// Construct a zero-argument closure frame directly with its already-resolved
+/// receiver. Shared closure application is common in compiler traversals; the
+/// generic relocation helper needlessly first creates an all-empty register
+/// file only to overwrite r0.
+#[inline]
+fn make_verified_zero_argument_receiver_frame(
+    a: &ExecutionImage,
+    function: u32,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if !f.params.is_empty() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 0,
+        });
+    }
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
 
 /// Construct the common one-argument direct-call frame without setting up a
 /// slice iterator or first materializing an all-empty register file.
