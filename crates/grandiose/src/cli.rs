@@ -2025,6 +2025,10 @@ struct SessionResponse<'a> {
 
 #[derive(Clone, Copy, Serialize)]
 struct SessionCacheStats {
+    /// Per-segment frontend work for this request. This remains separate from
+    /// phase artifacts because a body edit can reuse most lexed inputs while
+    /// requiring new type/MIR work for the edited callable.
+    frontend: SessionFrontendCacheStats,
     phase_artifacts_reused: usize,
     bodies_reused: usize,
     mir_bodies_reused: usize,
@@ -2036,9 +2040,23 @@ struct SessionCacheStats {
     native_objects_emitted: usize,
 }
 
+/// Frontend cache evidence nested below a persistent compile response.
+/// Counts describe the current request rather than the lifetime of `--serve`.
+#[derive(Clone, Copy, Serialize)]
+struct SessionFrontendCacheStats {
+    segments_lexed: usize,
+    segments_reused: usize,
+    whole_bundle_fallbacks: usize,
+}
+
 impl From<grandiose::compiler_session::IncrementalCompilationStats> for SessionCacheStats {
     fn from(stats: grandiose::compiler_session::IncrementalCompilationStats) -> Self {
         Self {
+            frontend: SessionFrontendCacheStats {
+                segments_lexed: stats.frontend.lexed_segments,
+                segments_reused: stats.frontend.reused_segments,
+                whole_bundle_fallbacks: stats.frontend.whole_bundle_fallbacks,
+            },
             phase_artifacts_reused: stats.reused_phase_artifacts,
             bodies_reused: stats.reused_bodies,
             mir_bodies_reused: stats.reused_mir_bodies,

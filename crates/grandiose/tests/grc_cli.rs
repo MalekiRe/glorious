@@ -351,6 +351,17 @@ fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
         edited["cache_stats"]["bodies_reused"].as_u64().unwrap_or_default() > 0,
         "a one-body edit must reuse self-host body work: {edited}"
     );
+    assert!(
+        edited["cache_stats"]["frontend"]["segments_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "a one-file self-host body edit must reuse unchanged frontend segments: {edited}"
+    );
+    assert_eq!(
+        edited["cache_stats"]["frontend"]["whole_bundle_fallbacks"], 0,
+        "a one-file self-host body edit must not fall back to whole-bundle frontend work: {edited}"
+    );
     let after = durable_object_manifests(&cache);
     let newly_written = after.difference(&before).collect::<Vec<_>>();
     assert!(
