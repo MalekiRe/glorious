@@ -97,6 +97,15 @@ runner and its private cache. Native executable emission requires `wild`; it
 must fail clearly if Wild is unavailable rather than silently choosing another
 linker.
 
+For the bootstrap fixture corpus that is representable as independent source
+files, run `tooling/self-host-native-tests.sh run`. It builds the canonical
+native executable once through `tooling/self-host-native.sh`, then deterministically
+executes every manifest-selected case against that executable. The corpus lives
+in `tooling/self-host-native-corpus.tsv`; use `list` or repeated `--case ID`
+to inspect/select cases. Each failure retains the native compiler output and
+diagnostic log long enough to report the exact source and failure reason. This
+is deliberately native-only: it does not substitute a VM run on failure.
+
 The native runner uses O3 only. Debug or lower-optimization executable output
 must not seed, satisfy, or overwrite this cache.
 
