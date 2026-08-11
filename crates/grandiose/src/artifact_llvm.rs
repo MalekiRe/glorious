@@ -247,6 +247,7 @@ fn emit_function(
     // LLVM's O3 mem2reg pass can eliminate the trivial allocas afterwards.
     let closed_handler_plans = closed_host_handler_plans(artifact, function_id, function)?;
     let shared_perform_dispatches = closed_shared_perform_dispatches(artifact, function_id);
+    let shared_host_preparations = prepared_shared_host_calls(artifact, function_id);
     let shared_perform_consumes = closed_shared_perform_consume_sites(artifact, function_id);
     let shared_perform_opaque_registers = shared_perform_dispatches
         .iter()
@@ -818,6 +819,22 @@ fn emit_function(
                         dispatch.continuation.operation,
                         dispatch.resumption_field,
                         dispatch.continuation.import,
+                    ));
+                }
+                for preparation in shared_host_preparations
+                    .iter()
+                    .filter(|preparation| preparation.handler_instruction == instruction_id)
+                {
+                    // This is signature-only preparation. In particular it
+                    // emits no `call`: an unresumable Perform must continue
+                    // through the fail-closed transition below.
+                    output.push_str(&format!(
+                        "  ; prepared-frozen-host-call body={} perform={} import={} symbol={} abi={}\n",
+                        preparation.body_function,
+                        preparation.perform_instruction,
+                        preparation.import,
+                        preparation.symbol,
+                        preparation.abi,
                     ));
                 }
                 emit_fallthrough(output, function, function_id, instruction_id)?;
@@ -2001,6 +2018,67 @@ fn closed_shared_perform_dispatches(
         }
     }
     found
+}
+
+/// A validated native declaration/signature plan for a future resumed host
+/// call. This deliberately contains no SSA values and no permission to emit
+/// the call; it is just the immutable ABI proof retained beside the lexical
+/// route that established it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedSharedHostCall {
+    handler_instruction: u32,
+    body_function: u32,
+    perform_instruction: u32,
+    import: u32,
+    symbol: &'static str,
+    abi: &'static str,
+}
+
+fn prepared_shared_host_calls(
+    artifact: &Artifact,
+    owner_function: u32,
+) -> Vec<PreparedSharedHostCall> {
+    closed_shared_perform_dispatches(artifact, owner_function)
+        .into_iter()
+        .filter_map(|dispatch| prepare_shared_host_call(artifact, &dispatch))
+        .collect()
+}
+
+fn prepare_shared_host_call(
+    artifact: &Artifact,
+    dispatch: &ClosedSharedPerformDispatch,
+) -> Option<PreparedSharedHostCall> {
+    let import = artifact.imports.get(dispatch.continuation.import as usize)?;
+    let role = frozen_host_import(artifact, import)?;
+    let body = artifact.functions.get(dispatch.body_function as usize)?;
+    let start = body.code_start as usize;
+    let instruction = artifact.code.get(start.checked_add(dispatch.perform_instruction as usize)?)?;
+    let Instruction::Perform { protocol, operation, payloads, .. } = instruction else { return None };
+    if *protocol != dispatch.continuation.protocol
+        || *operation != dispatch.continuation.operation
+        || payloads.len() != import.signature.params.len()
+    {
+        return None;
+    }
+    if payloads.iter().zip(&import.signature.params).any(|(register, expected)| {
+        body.register_types.get(*register as usize) != Some(expected)
+    }) {
+        return None;
+    }
+    let (symbol, abi) = match role {
+        FrozenHostImport::ProcessArgsGet => ("g1_host_process_args_get", "() -> ptr"),
+        FrozenHostImport::FsRead => ("g1_host_fs_read", "(ptr) -> ptr"),
+        FrozenHostImport::FsWrite => ("g1_host_fs_write", "(ptr, ptr) -> i32"),
+        FrozenHostImport::DiagnosticWrite => ("g1_host_diagnostic_write", "(ptr) -> i32"),
+    };
+    Some(PreparedSharedHostCall {
+        handler_instruction: dispatch.handler_instruction,
+        body_function: dispatch.body_function,
+        perform_instruction: dispatch.perform_instruction,
+        import: dispatch.continuation.import,
+        symbol,
+        abi,
+    })
 }
 
 /// The one native transition currently sound for a shared closed Perform.
@@ -3438,6 +3516,27 @@ mod tests {
             .status()
             .unwrap()
             .success());
+
+        // Adding the statically typed Text payload makes this route eligible
+        // for frozen-host call preparation, but it does not make it
+        // executable: no native Perform value or Resume transfer exists yet.
+        artifact.functions[4].register_types[1] = TEXT;
+        let Instruction::Perform { payloads, .. } = &mut artifact.code[4] else { unreachable!() };
+        payloads.push(1);
+        let preparations = prepared_shared_host_calls(&artifact, 5);
+        assert_eq!(preparations.len(), 1);
+        assert_eq!(preparations[0].import, 0);
+        assert_eq!(preparations[0].symbol, "g1_host_diagnostic_write");
+        assert_eq!(preparations[0].abi, "(ptr) -> i32");
+        let mut declarations = String::new();
+        emit_host_import_declarations(&mut declarations, &artifact);
+        assert!(declarations.contains("declare i32 @g1_host_diagnostic_write(ptr)"), "{declarations}");
+        let mut prepared_ir = String::new();
+        assert!(matches!(emit_function(&mut prepared_ir, &artifact, 5, &owner, false),
+            Err(ArtifactLlvmError::UnsupportedInstruction { instruction: 2, opcode: "closed effect-free handle", .. })
+        ));
+        assert!(prepared_ir.contains("prepared-frozen-host-call body=4 perform=0 import=0 symbol=g1_host_diagnostic_write abi=(ptr) -> i32"), "{prepared_ir}");
+        assert!(!prepared_ir.contains("call i32 @g1_host_diagnostic_write"), "{prepared_ir}");
 
         artifact.code.swap(0, 1);
         assert!(closed_shared_perform_dispatches(&artifact, 5).is_empty(), "a frame must be installed before its exact lexical body/Handle chain");
