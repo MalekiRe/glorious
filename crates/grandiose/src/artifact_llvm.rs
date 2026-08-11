@@ -277,9 +277,6 @@ fn emit_function(
                 variant,
                 fields,
             } => {
-                if variant.is_some() {
-                    return Err(unsupported(function_id, instruction_id, "enum construct"));
-                }
                 let destination_ty = *function
                     .register_types
                     .get(*dst as usize)
@@ -291,13 +288,26 @@ fn emit_function(
                         "construct destination type",
                     ));
                 }
-                let field_types = aggregate_fields(artifact, function_id, *ty)?;
+                let field_types = match variant {
+                    Some(variant) => enum_variant_fields(artifact, function_id, *ty, *variant)?,
+                    None => aggregate_fields(artifact, function_id, *ty)?,
+                };
                 if field_types.len() != fields.len() {
                     return Err(unsupported(function_id, instruction_id, "construct arity"));
                 }
-                let aggregate_ty =
-                    register_type(&register_types, function_id, instruction_id, *dst)?;
+                let aggregate_ty = register_type(&register_types, function_id, instruction_id, *dst)?;
                 let mut value = "undef".to_owned();
+                if let Some(variant) = variant {
+                    let name = format!("%v{temporary}");
+                    temporary += 1;
+                    // The only enum ABI admitted by this first slice has no
+                    // payload fields: its complete native value is an i32 tag.
+                    // `enum_variant_fields` enforces that before this point.
+                    output.push_str(&format!(
+                        "  {name} = insertvalue {aggregate_ty} {value}, i32 {variant}, 0\n"
+                    ));
+                    value = name;
+                }
                 for (field, (register, field_ty)) in fields.iter().zip(field_types).enumerate() {
                     let source_ty =
                         *function
@@ -374,6 +384,43 @@ fn emit_function(
                 temporary += 1;
                 output.push_str(&format!(
                     "  {name} = extractvalue {aggregate_ty} {aggregate}, {field}\n"
+                ));
+                emit_store(
+                    output,
+                    &register_types,
+                    function_id,
+                    instruction_id,
+                    *dst,
+                    &name,
+                )?;
+                emit_fallthrough(output, function, function_id, instruction_id)?;
+            }
+            Instruction::EnumTag { dst, src } => {
+                let source_ty = *function
+                    .register_types
+                    .get(*src as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+                enum_variant_fields_for_type(artifact, function_id, source_ty)?;
+                let destination_ty = *function
+                    .register_types
+                    .get(*dst as usize)
+                    .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+                if llvm_type(artifact, function_id, destination_ty)? != "i32" {
+                    return Err(unsupported(function_id, instruction_id, "enum tag destination type"));
+                }
+                let aggregate_ty = register_type(&register_types, function_id, instruction_id, *src)?;
+                let aggregate = emit_load(
+                    output,
+                    &register_types,
+                    function_id,
+                    instruction_id,
+                    *src,
+                    &mut temporary,
+                )?;
+                let name = format!("%v{temporary}");
+                temporary += 1;
+                output.push_str(&format!(
+                    "  {name} = extractvalue {aggregate_ty} {aggregate}, 0\n"
                 ));
                 emit_store(
                     output,
@@ -607,6 +654,12 @@ fn llvm_type(artifact: &Artifact, function: u32, ty: TypeId) -> Result<String, A
             function,
             &fields.iter().map(|field| field.ty).collect::<Vec<_>>(),
         ),
+        Some(Type::Enum { variants, .. }) if variants.iter().all(|variant| variant.fields.is_empty()) => {
+            // A fieldless enum is represented solely by its deterministic G1
+            // variant index. Payload-carrying variants stay fail-closed until
+            // their full tagged-union ABI is specified.
+            Ok("{ i32 }".into())
+        }
         _ => Err(ArtifactLlvmError::UnsupportedType { function, ty }),
     }
 }
@@ -634,6 +687,35 @@ fn aggregate_fields(
     match artifact.types.get(ty as usize).map(Type::representation) {
         Some(Type::Tuple { fields, .. }) => Ok(fields.clone()),
         Some(Type::Struct { fields, .. }) => Ok(fields.iter().map(|field| field.ty).collect()),
+        _ => Err(ArtifactLlvmError::UnsupportedType { function, ty }),
+    }
+}
+
+fn enum_variant_fields(
+    artifact: &Artifact,
+    function: u32,
+    ty: TypeId,
+    variant: u32,
+) -> Result<Vec<TypeId>, ArtifactLlvmError> {
+    let variants = enum_variant_fields_for_type(artifact, function, ty)?;
+    variants
+        .get(variant as usize)
+        .cloned()
+        .ok_or(ArtifactLlvmError::UnsupportedType { function, ty })
+}
+
+/// Validate the intentionally narrow, tag-only enum ABI and return its
+/// variant field lists (all empty). Keeping this separate makes `Construct`
+/// and `EnumTag` agree on exactly the same native representation.
+fn enum_variant_fields_for_type(
+    artifact: &Artifact,
+    function: u32,
+    ty: TypeId,
+) -> Result<Vec<Vec<TypeId>>, ArtifactLlvmError> {
+    match artifact.types.get(ty as usize).map(Type::representation) {
+        Some(Type::Enum { variants, .. }) if variants.iter().all(|variant| variant.fields.is_empty()) => {
+            Ok(variants.iter().map(|_| Vec::new()).collect())
+        }
         _ => Err(ArtifactLlvmError::UnsupportedType { function, ty }),
     }
 }
@@ -700,10 +782,10 @@ fn instruction_name(instruction: &Instruction) -> &'static str {
 mod tests {
     use std::{fs, process::Command};
 
-    use grandiose_vm::bytecode::Field;
+    use grandiose_vm::bytecode::{EnumVariant, Field};
     use grandiose_vm::{
         verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction, Primitive,
-        Type, I64, UNIT,
+        Type, I64, U32, UNIT,
     };
 
     use super::*;
@@ -951,5 +1033,93 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert!(object.is_file());
+    }
+
+    #[test]
+    fn verified_fieldless_enum_construct_and_tag_emit_parseable_llvm_without_vm_execution() {
+        let choice = 19;
+        let mut artifact = Artifact {
+            entry_function: Some(0),
+            constants: vec![],
+            functions: vec![
+                Function {
+                    name: "main".into(),
+                    flags: 0,
+                    params: vec![],
+                    return_type: UNIT,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT],
+                    code_start: 0,
+                    code_len: 2,
+                    label_slot_count: 0,
+                },
+                Function {
+                    name: "enum_tag".into(),
+                    flags: 0,
+                    params: vec![],
+                    return_type: UNIT,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, choice, U32],
+                    code_start: 2,
+                    code_len: 4,
+                    label_slot_count: 0,
+                },
+            ],
+            code: vec![
+                Instruction::Call { dst: None, function: 1, args: vec![] },
+                Instruction::Return { src: None },
+                Instruction::Construct { dst: 1, ty: choice, variant: Some(1), fields: vec![] },
+                Instruction::EnumTag { dst: 2, src: 1 },
+                Instruction::Deconstruct { src: 1 },
+                Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(artifact.types.len(), choice as usize);
+        artifact.types.push(Type::Enum {
+            name: "Choice".into(),
+            variants: vec![
+                EnumVariant { name: "No".into(), fields: vec![] },
+                EnumVariant { name: "Yes".into(), fields: vec![] },
+            ],
+            copy: true,
+        });
+        let artifact = with_generated_cleanup_plans(artifact).unwrap();
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        assert!(ir.contains("insertvalue { i32 } undef, i32 1, 0"));
+        assert!(ir.contains("extractvalue { i32 }"));
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("enum.ll");
+        let object = directory.path().join("enum.o");
+        fs::write(&source, ir).unwrap();
+        let status = Command::new("clang")
+            .args(["-x", "ir", "-c"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(object.is_file());
+    }
+
+    #[test]
+    fn payload_carrying_enums_remain_fail_closed_until_a_tagged_union_abi_exists() {
+        let mut artifact = Artifact::default();
+        artifact.types.push(Type::Enum {
+            name: "Payload".into(),
+            variants: vec![EnumVariant {
+                name: "Some".into(),
+                fields: vec![Field { name: "value".into(), ty: I64 }],
+            }],
+            copy: true,
+        });
+        let enum_type = (artifact.types.len() - 1) as u32;
+        assert!(matches!(
+            llvm_type(&artifact, 0, enum_type),
+            Err(ArtifactLlvmError::UnsupportedType { ty, .. }) if ty == enum_type
+        ));
     }
 }
