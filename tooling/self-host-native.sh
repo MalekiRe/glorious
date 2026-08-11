@@ -14,12 +14,14 @@ usage:
   tooling/self-host-native.sh build
   tooling/self-host-native.sh run <output.grbc> <input.glorious>
   tooling/self-host-native.sh smoke
+  tooling/self-host-native.sh provenance <canonical-source.glorious> <stage1.tsv>
 
 `init` creates this worktree's private cache and optionally copies a verified
 baseline cache directory into it. The baseline is never modified or read from a
 shared writable location. `build` emits an O3 Wild-linked native self-host
 compiler; `run` executes it; `smoke` compiles a tiny source program through
-that native compiler.
+that native compiler. `provenance` builds (or reuses) the canonical native
+stage-1 compiler and writes an immutable O3/Wild provenance manifest for it.
 USAGE
     exit 2
 }
@@ -143,6 +145,14 @@ case "${1:-}" in
         printf '%s\n' 'native_smoke(value: i64) -> i64 { value } main() { () }' > "$smoke_dir/input.glorious"
         "$binary" "$smoke_dir/output.grbc" "$smoke_dir/input.glorious"
         [[ -s "$smoke_dir/output.grbc" ]] || { echo "self-host-native: native smoke emitted no artifact" >&2; exit 1; }
+        ;;
+    provenance)
+        shift
+        (($# == 2)) || usage
+        [[ -f "$1" ]] || { echo "self-host-native: canonical source does not exist: $1" >&2; exit 2; }
+        binary="$(build_native)"
+        exec "$route_root/tooling/write-native-stage-provenance.sh" \
+            --stage 1 --native "$binary" --source "$1" --output "$2"
         ;;
     *) usage ;;
 esac

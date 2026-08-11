@@ -131,6 +131,17 @@ offsets. It reports `CONVERGED` only after `cmp -s` has verified the complete
 artifact bytes; there is no VM runner, bytecode-execution fallback, or
 lower-optimization fallback in this path.
 
+Create stage provenance with
+`tooling/write-native-stage-provenance.sh`. For the canonical bootstrap-native
+stage, `tooling/self-host-native.sh provenance SOURCE stage1.tsv` builds (or
+reuses) the per-worktree O3/Wild runner and publishes its stage-1 manifest.
+For stage 2, the native-stage producer supplies its executable and emitted
+`stage2.grbc` to `write-native-stage-provenance.sh --stage 2`; the helper
+atomically records both hashes and refuses to overwrite retained evidence.
+It intentionally does not claim that recompiling source with the Rust bootstrap
+produces a stage-2 native host. The native lowering bridge must produce that
+host before the stage-2 provenance can be written.
+
 The VM bytecode runner remains mandatory for:
 
 - bootstrap bytecode conformance;
