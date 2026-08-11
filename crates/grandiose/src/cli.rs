@@ -15,14 +15,15 @@ use grandiose::{
     emit_llvm_ir,
     interface::{InterfaceSelection, scan_interfaces},
     lexer,
-    llvm_backend::LlvmOptions,
+    llvm_backend::{DEFAULT_NATIVE_ALLOCATION_LIMIT, LlvmOptions},
     source_bundle::{Segment, SourceBundle},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in one raw source stream\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
 
+const MAX_NATIVE_ALLOCATION_LIMIT: u64 = 1024 * 1024 * 1024;
 const SESSION_PROTOCOL: u32 = 1;
 const SESSION_MAX_LINE_BYTES: usize = 1024 * 1024;
 const SESSION_MAX_ARGUMENTS: usize = 128;
@@ -156,6 +157,7 @@ struct CompileCommand {
     stop_phase: Option<StopPhase>,
     output: Option<PathBuf>,
     emit: Option<EmitKind>,
+    native_allocation_limit: Option<u64>,
     json_diagnostics: bool,
 }
 
@@ -278,6 +280,7 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         stop_phase: None,
         output: None,
         emit: None,
+        native_allocation_limit: None,
         json_diagnostics: false,
     };
     let mut positional_only = false;
@@ -355,6 +358,19 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     }
                     continue;
                 }
+                "--native-allocation-limit" => {
+                    let value = args.next().ok_or_else(|| {
+                        "`--native-allocation-limit` requires a byte count".to_string()
+                    })?;
+                    let value = value.to_str().ok_or_else(|| {
+                        "native allocation limit must be valid UTF-8".to_string()
+                    })?;
+                    let limit = parse_native_allocation_limit(value)?;
+                    if command.native_allocation_limit.replace(limit).is_some() {
+                        return Err("`--native-allocation-limit` may be specified only once".to_string());
+                    }
+                    continue;
+                }
                 "-o" => {
                     let path = args
                         .next()
@@ -422,7 +438,27 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
             "interface JSON is written to stdout and cannot be combined with `-o`".to_string(),
         );
     }
+    if command.native_allocation_limit.is_some() && command.emit != Some(EmitKind::Executable) {
+        return Err("`--native-allocation-limit` is supported only with `--emit executable`".to_string());
+    }
     Ok(Command::Compile(command))
+}
+
+fn parse_native_allocation_limit(value: &str) -> Result<u64, String> {
+    let limit = value.parse::<u64>().map_err(|_| {
+        "`--native-allocation-limit` requires an unsigned byte count".to_string()
+    })?;
+    if limit < DEFAULT_NATIVE_ALLOCATION_LIMIT {
+        return Err(format!(
+            "`--native-allocation-limit` must be at least {DEFAULT_NATIVE_ALLOCATION_LIMIT} bytes"
+        ));
+    }
+    if limit > MAX_NATIVE_ALLOCATION_LIMIT {
+        return Err(format!(
+            "`--native-allocation-limit` must not exceed {MAX_NATIVE_ALLOCATION_LIMIT} bytes"
+        ));
+    }
+    Ok(limit)
 }
 
 fn parse_token_indices(
@@ -807,7 +843,10 @@ fn compile_loaded(
         .output
         .unwrap_or_else(|| default_output(&command.inputs[0], kind));
     if matches!(kind, EmitKind::LlvmObject | EmitKind::Executable) {
-        let llvm_options = LlvmOptions::default();
+        let mut llvm_options = LlvmOptions::default();
+        if let Some(limit) = command.native_allocation_limit {
+            llvm_options.native_allocation_limit = limit;
+        }
         let module = match incremental.as_deref_mut().map_or_else(
             || emit_llvm_ir(&phases, &llvm_options),
             |driver| driver.emit_llvm_ir(&bundle, options, &phases, &llvm_options),
@@ -1919,6 +1958,63 @@ mod tests {
             panic!("expected a compile command")
         };
         assert_eq!(command.optimization_level, OptimizationLevel::O2);
+    }
+
+    #[test]
+    fn parses_native_executable_allocation_limit() {
+        let Command::Compile(command) = parse(
+            [
+                "--emit",
+                "executable",
+                "--native-allocation-limit",
+                "134217728",
+                "input.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .unwrap() else {
+            panic!("expected a compile command")
+        };
+        assert_eq!(command.native_allocation_limit, Some(134217728));
+    }
+
+    #[test]
+    fn native_allocation_limit_is_bounded_and_executable_only() {
+        assert!(parse(
+            ["--native-allocation-limit", "67108863", "input.glorious"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .is_err());
+        assert!(parse(
+            [
+                "--emit",
+                "executable",
+                "--native-allocation-limit",
+                "1073741825",
+                "input.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .is_err());
+        assert!(parse(
+            [
+                "--emit",
+                "llvm-ir",
+                "--native-allocation-limit",
+                "134217728",
+                "input.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .is_err());
     }
 
     #[test]

@@ -30,7 +30,12 @@ const RUNTIME_FAULT_ALLOCATION_OVERFLOW: u32 = 10;
 const RUNTIME_FAULT_ALLOCATION_LIMIT: u32 = 11;
 const RUNTIME_FAULT_UNHANDLED_EFFECT: u32 = 12;
 const RUNTIME_FAULT_EXPLICIT_ABORT: u32 = 13;
-const NATIVE_PRIMITIVE_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+/// Default maximum size of one native-runtime bytes or array allocation.
+///
+/// Ordinary native programs retain this conservative ceiling. The self-host
+/// compiler may opt into a larger, still bounded ceiling through `LlvmOptions`
+/// because its compiler-internal tables exceed this per-allocation size.
+pub const DEFAULT_NATIVE_ALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Bump this whenever LLVM fragment generation changes independently of MIR.
 /// Cached fragments with another schema are never reusable.
@@ -289,6 +294,8 @@ pub struct LlvmOptions {
     pub target_triple: String,
     pub target_data_layout: Option<String>,
     pub emit_entry_wrapper: bool,
+    /// Embedded maximum size of one bytes/array native-runtime allocation.
+    pub native_allocation_limit: u64,
 }
 
 impl Default for LlvmOptions {
@@ -298,6 +305,7 @@ impl Default for LlvmOptions {
             target_data_layout: default_target_data_layout(&target_triple).map(str::to_owned),
             target_triple,
             emit_entry_wrapper: true,
+            native_allocation_limit: DEFAULT_NATIVE_ALLOCATION_LIMIT,
         }
     }
 }
@@ -964,7 +972,8 @@ impl<'a> Emitter<'a> {
         self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("limit.check:");
         self.line(&format!(
-            "  %over.limit = icmp ugt {usize_ty} %length, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+            "  %over.limit = icmp ugt {usize_ty} %length, {}",
+            self.options.native_allocation_limit,
         ));
         self.line("  br i1 %over.limit, label %limit.fault, label %allocate");
         self.line("limit.fault:");
@@ -1249,7 +1258,8 @@ impl<'a> Emitter<'a> {
         self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("limit.check:");
         self.line(&format!(
-            "  %over.limit = icmp ugt {usize_ty} %total.size, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+            "  %over.limit = icmp ugt {usize_ty} %total.size, {}",
+            self.options.native_allocation_limit,
         ));
         self.line("  br i1 %over.limit, label %limit.trap, label %allocate.storage.checked");
         self.line("limit.trap:");
@@ -1356,7 +1366,8 @@ impl<'a> Emitter<'a> {
         self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("limit.check:");
         self.line(&format!(
-            "  %over.limit = icmp ugt {usize_ty} %total.size, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+            "  %over.limit = icmp ugt {usize_ty} %total.size, {}",
+            self.options.native_allocation_limit,
         ));
         self.line("  br i1 %over.limit, label %limit.trap, label %resize.checked");
         self.line("limit.trap:");

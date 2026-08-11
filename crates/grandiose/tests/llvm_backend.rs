@@ -368,6 +368,33 @@ fn compile_cli_executable(
     executable
 }
 
+fn compile_cli_executable_with_native_allocation_limit(
+    directory: &std::path::Path,
+    stem: &str,
+    source_text: &str,
+    limit: u64,
+) -> std::path::PathBuf {
+    let source = directory.join(format!("{stem}.glorious"));
+    let executable = directory.join(stem);
+    fs::write(&source, source_text).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grc"))
+        .arg("--emit")
+        .arg("executable")
+        .arg("--native-allocation-limit")
+        .arg(limit.to_string())
+        .arg("-o")
+        .arg(&executable)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
 #[test]
 fn portable_native_runtime_formats_every_stable_fault_detail() {
     let directory = tempfile::tempdir().unwrap();
@@ -520,6 +547,43 @@ fn cli_native_array_allocation_enforces_the_primitive_output_limit() {
     assert_eq!(
         execution.stderr,
         b"grandiose: runtime allocation limit exceeded\n"
+    );
+}
+
+#[test]
+fn llvm_options_embed_the_selected_native_allocation_limit() {
+    let phases = grandiose::compile_source_to_phases(
+        "native-allocation-limit-override.glorious",
+        "new_values() -> Vec<u8> { Vec::with_capacity(1) }\nmain() -> () { new_values(); () }",
+    )
+    .unwrap();
+    let default_module = grandiose::emit_llvm_ir(&phases, &grandiose::LlvmOptions::default())
+        .unwrap();
+    assert!(default_module
+        .ir
+        .contains("icmp ugt i64 %total.size, 67108864"));
+    let mut options = grandiose::LlvmOptions::default();
+    options.native_allocation_limit = 128 * 1024 * 1024;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module
+        .ir
+        .contains("icmp ugt i64 %total.size, 134217728"));
+}
+
+#[test]
+fn cli_native_executable_can_opt_into_a_larger_bounded_allocation_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = compile_cli_executable_with_native_allocation_limit(
+        directory.path(),
+        "native-array-allocation-limit-override",
+        "new_values() -> Vec<u8> { Vec::with_capacity(40000000) }\nmain() -> () { new_values(); () }",
+        128 * 1024 * 1024,
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
     );
 }
 
@@ -2281,6 +2345,7 @@ fn target_options_control_pointer_sized_integer_layout() {
             target_data_layout: grandiose::default_target_data_layout(&triple).map(str::to_owned),
             target_triple: triple,
             emit_entry_wrapper: true,
+            native_allocation_limit: grandiose::DEFAULT_NATIVE_ALLOCATION_LIMIT,
         },
     )
     .unwrap();
