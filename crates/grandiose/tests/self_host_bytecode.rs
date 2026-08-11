@@ -2518,6 +2518,56 @@ fn full_self_host_bundle_compiles_to_a_verified_artifact_in_release() {
 }
 
 #[test]
+#[ignore = "expensive release differential: native Stage1 must compile the production monolith exactly as the VM does"]
+fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let bundle = production_self_host_bundle();
+            let program = modules::parse_bundle(&bundle).expect("production bundle must parse");
+            let resolved = modules::resolve_program(&bundle, program)
+                .expect("production bundle must resolve");
+            let source = modules::monolithic_source(&bundle, &resolved.resolution)
+                .expect("production bundle must have one canonical source");
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &bundle,
+                CompileOptions { optimization_level: OptimizationLevel::O3 },
+            ).expect("bootstrap must compile production Stage1");
+            let entry = phases.artifact.entry_function.expect("Stage1 entry");
+            let bytes = phases.artifact.encode();
+            let vm_stage1 = load_verified(&bytes).expect("Stage1 must verify");
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default())
+                .expect("Stage1 LLVM emission must succeed");
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("canonical.glorious");
+            let vm_output = directory.path().join("vm-stage2.grbc");
+            let native_output = directory.path().join("native-stage2.grbc");
+            let llvm = directory.path().join("stage1.ll");
+            let executable = directory.path().join("stage1-native");
+            fs::write(&input, source.as_bytes()).unwrap();
+            let vm = Vm::with_host(
+                vm_stage1,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![vm_output.clone().into_os_string(), input.clone().into_os_string()]),
+            ).unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            let vm_bytes = fs::read(&vm_output).expect("VM Stage1 must emit Stage2");
+            fs::write(&llvm, module.ir).unwrap();
+            let linked = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .args(["-O3", "--ld-path=wild", "-o"])
+                .arg(&executable)
+                .output().unwrap();
+            assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+            let native = Command::new(&executable).arg(&native_output).arg(&input).output().unwrap();
+            assert!(native.status.success(), "native Stage1 diagnostic:\n{}", String::from_utf8_lossy(&native.stderr));
+            assert_eq!(fs::read(&native_output).unwrap(), vm_bytes, "native and VM Stage2 must be byte-identical");
+        }).unwrap().join().unwrap();
+}
+
+#[test]
 #[ignore = "expensive release gate: bootstrap and run two complete self-compilation stages"]
 fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
     std::thread::Builder::new()
