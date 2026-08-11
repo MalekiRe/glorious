@@ -13305,8 +13305,8 @@ elaborate_float(
             let primitive = if(type_id == type_id_from_u32(14) or {
                 type_id == type_id_from_u32(15)
             }) {
-                // `IntegerToFloat` similarly dispatches by the result type.
-                wrapping_convert_to_u32(45)
+                // FloatFromBits dispatches by both operand and result widths.
+                wrapping_convert_to_u32(50)
             } else { wrapping_convert_to_u32(0) };
             if(primitive == 0) {
                 Result::Err(ElaborationError::TypeMismatch(
@@ -13317,15 +13317,41 @@ elaborate_float(
                     super::headers::parsed_source(headers), token
                 ) {
                     TokenKind::Number(number) => {
-                        let magnitude = try(integral_float_magnitude(
-                            original, &number, token
-                        ), @elaborate_float);
-                        let constant = push_integer_constant(
-                            &mut value.core, magnitude
-                        );
+                        let span = super::lexer::number_spelling(&number);
+                        let spelling = handle String::slice(original, Range {
+                            start: super::lexer::span_start(&span),
+                            end: super::lexer::span_end(&span)
+                        }) {
+                            Result::Ok(found) => found,
+                            Result::Err(_) => @elaborate_float(Result::Err(
+                                ElaborationError::UnexpectedExpressionToken(token)
+                            ))
+                        };
+                        let magnitude = if(type_id == type_id_from_u32(14)) {
+                            handle parse_f32(&spelling) {
+                                Result::Ok(parsed) => wrapping_convert_to_u128(
+                                    f32_to_bits(move parsed)
+                                ),
+                                Result::Err(_) => @elaborate_float(Result::Err(
+                                    ElaborationError::FloatLiteralUnsupported(token)
+                                ))
+                            }
+                        } else {
+                            handle parse_f64(&spelling) {
+                                Result::Ok(parsed) => wrapping_convert_to_u128(
+                                    f64_to_bits(move parsed)
+                                ),
+                                Result::Err(_) => @elaborate_float(Result::Err(
+                                    ElaborationError::FloatLiteralUnsupported(token)
+                                ))
+                            }
+                        };
+                        let constant = push_integer_constant(&mut value.core, magnitude);
                         let integer = push_value(
                             &mut value.core,
-                            type_id_from_u32(6),
+                            if(type_id == type_id_from_u32(14)) {
+                                type_id_from_u32(4)
+                            } else { type_id_from_u32(5) },
                             CoreValueKind::Integer(constant)
                         );
                         let operands = append_primitive_operand(
