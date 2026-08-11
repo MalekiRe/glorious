@@ -2716,6 +2716,43 @@ emit_host_call<'a>(
     }
 }
 
+// The callable value owns its receiver for this first direct-call slice.
+// The frontend's place-flow pass has already selected move versus copy when
+// materializing `callable`; receiver mode 2 is the owned callable ABI used by
+// the bytecode verifier and by `MakeCallable`.
+emit_call_indirect<'a>(
+    value: &mut MirBuilder<'a>,
+    target: Option<RegisterId>,
+    callable: RegisterId,
+    arguments: Vec<RegisterId>
+) {
+    record_cleanup(value);
+    consume_live(value, callable);
+    consume_arguments(value, &arguments, 0);
+    let pack = alloc_register_pack(value, arguments);
+    Vec::push(&mut value.instructions, MirInstruction::CallIndirect(
+        target, callable, 2, pack
+    ));
+    handle target {
+        None => (),
+        Option::Some(found) => Vec::push(&mut value.live_order, found)
+    }
+}
+
+emit_make_callable<'a>(
+    value: &mut MirBuilder<'a>,
+    target: RegisterId,
+    callable_type: ArtifactTypeId,
+    function: MirFunctionId
+) {
+    record_cleanup(value);
+    let captures = alloc_register_pack(value, Vec::new());
+    Vec::push(&mut value.instructions, MirInstruction::MakeCallable(
+        target, callable_type, function, captures
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
 // A terminal perform consumes its payloads and never returns to this block.
 // Perform itself is the MIR block terminator: emission validates that a
 // terminal operation has no destination and is the final instruction.
@@ -2959,8 +2996,38 @@ lower_value<'a>(
         },
         CoreValueView::Embedded(_, computation) =>
             lower_computation(interfaces, body, value, computation),
-        CoreValueView::Closure(_, _) =>
-            Result::Err(LoweringError::CallableNotLowered(id))
+        CoreValueView::Closure(type_id, site) => {
+            let descriptor = super::super::frontend::elaboration::
+                closure_site_at(body, site);
+            if(Slice::len(super::super::frontend::elaboration::
+                closure_site_captures(body, descriptor)) != 0) {
+                @lower_value(Result::Err(LoweringError::CallableNotLowered(id)))
+            } else {
+                let instance = handle super::super::frontend::elaboration::
+                    closure_site_target(descriptor) {
+                    None => @lower_value(Result::Err(
+                        LoweringError::CallableNotLowered(id)
+                    )),
+                    Option::Some(found) => found
+                };
+                let callable_type = handle mapped_artifact_type(
+                    value.type_map, type_id
+                ) {
+                    None => @lower_value(Result::Err(
+                        LoweringError::CallableNotLowered(id)
+                    )),
+                    Option::Some(found) => found
+                };
+                let target = alloc_register(value);
+                emit_make_callable(
+                    value,
+                    target,
+                    callable_type,
+                    mir_function_id_from_u32(Id::to_u32(instance))
+                );
+                Result::Ok(Option::Some(target))
+            }
+        }
     }
 }
 
@@ -4005,8 +4072,30 @@ lower_computation<'a>(
                     Result::Ok(target)
             } else { Result::Err(LoweringError::UnknownCallable(shell)) }
         },
-        CoreComputationView::CallIndirect(_, callee, _, _) =>
-            Result::Err(LoweringError::CallableNotLowered(callee)),
+        CoreComputationView::CallIndirect(type_id, callee, _, operands) => {
+            let callable = try(
+                lower_value(interfaces, body, value, callee),
+                @lower_computation
+            );
+            let callable_register = handle callable {
+                None => @lower_computation(Result::Err(
+                    LoweringError::CallableNotLowered(callee)
+                )),
+                Option::Some(found) => found
+            };
+            let arguments = Vec::new();
+            try(lower_arguments(
+                interfaces, body, value, operands, &mut arguments
+            ), @lower_computation);
+            let target = if(Id::to_u32(type_id) == 1) {
+                None
+            } else { Option::Some(alloc_register(value)) };
+            emit_call_indirect(value, target, callable_register, arguments);
+            if(Id::to_u32(type_id) == 1) {
+                emit_unreachable(value)
+            } else { () };
+            Result::Ok(target)
+        },
         CoreComputationView::Primitive(_, primitive, operands) => {
             let arguments = Vec::new();
             try(lower_arguments(
@@ -4775,7 +4864,11 @@ pub lower_function<'a>(
                 parameters: parameters,
                 result: result_type,
                 outward_protocols: outward_protocols,
-                receiver_mode: None,
+                // Register zero is the VM's hidden receiver slot. Ordinary
+                // direct calls already supply Unit there, so pure functions
+                // can also serve as deterministic captureless callable
+                // targets without an adapter frame.
+                receiver_mode: Option::Some(2),
                 receiver_type: artifact_type_id(0),
                 register_count: builder.register_count,
                 instructions: builder.instructions,
@@ -4801,7 +4894,7 @@ pub lower_function<'a>(
                 parameters: parameters,
                 result: result_type,
                 outward_protocols: outward_protocols,
-                receiver_mode: None,
+                receiver_mode: Option::Some(2),
                 receiver_type: artifact_type_id(0),
                 register_count: builder.register_count,
                 instructions: builder.instructions,

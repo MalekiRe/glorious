@@ -1032,6 +1032,31 @@ lower_concrete_type_elements<'a>(
     } else { Result::Ok(true) }
 }
 
+lower_callable_parameter_types<'a>(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    signature: elaboration::CallableSignatureId,
+    ordinal: usize,
+    output: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<(), CompileError> {
+    if(ordinal < elaboration::callable_signature_parameter_count(
+        &session.interfaces, signature
+    )) {
+        let semantic = elaboration::callable_signature_parameter_at(
+            &session.interfaces, signature, ordinal
+        );
+        let artifact = try(lower_concrete_type(
+            session, map, types, type_names, semantic
+        ), @lower_callable_parameter_types);
+        Vec::push(&mut *output, artifact);
+        lower_callable_parameter_types(
+            session, map, types, type_names, signature, ordinal + 1, output
+        )
+    } else { Result::Ok(()) }
+}
+
 lower_concrete_struct_fields<'a>(
     session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
@@ -1366,6 +1391,56 @@ lower_concrete_type<'a>(
                     reserved
                 ), @lower_concrete_type);
                 Result::Ok(artifact)
+            } else { if(tag == 14) {
+                let signature = Id::from_u32(a);
+                // Lift the exact parameter/result types before publishing the
+                // opaque callable descriptor. The first vertical slice is
+                // deliberately pure: effect-row and captured closure lowering
+                // remain separate scheduling work.
+                if(elaboration::callable_signature_effect_count(
+                    &session.interfaces, signature
+                ) != 0 or {
+                    Option::is_some(elaboration::callable_signature_effect_tail_at(
+                        &session.interfaces, signature
+                    ))
+                }) {
+                    @lower_concrete_type(Result::Err(
+                        CompileError::UnsupportedInterfaceType(index)
+                    ))
+                } else { () };
+                let parameters = Vec::new();
+                try(lower_callable_parameter_types(
+                    session,
+                    map,
+                    types,
+                    type_names,
+                    signature,
+                    0,
+                    &mut parameters
+                ), @lower_concrete_type);
+                let result = try(lower_concrete_type(
+                    session,
+                    map,
+                    types,
+                    type_names,
+                    elaboration::callable_signature_result_at(
+                        &session.interfaces, signature
+                    )
+                ), @lower_concrete_type);
+                let name_index = checked_u32(Vec::len(&*type_names));
+                Vec::push(&mut *type_names, "callable");
+                lowering::set_callable_type(
+                    types,
+                    reserved,
+                    name_index,
+                    lowering::artifact_type_id(0),
+                    lowering::mir_signature(parameters, result, Vec::new()),
+                    2,
+                    0,
+                    false
+                );
+                lowering::set_mapped_type_copyable(map, semantic, false);
+                Result::Ok(artifact)
             } else { if(tag == 3) {
                 // Dynamically allocated scalars reach lowering only through the
                 // focused-arena Bool marker (scalar kind 16).  The distributed
@@ -1389,7 +1464,7 @@ lower_concrete_type<'a>(
                 ) }
             } else { c; Result::Err(
                 CompileError::UnsupportedInterfaceType(index)
-            ) } } } } }
+            ) } } } } } }
         }
     }
 }

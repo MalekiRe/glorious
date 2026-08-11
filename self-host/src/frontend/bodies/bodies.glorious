@@ -179,6 +179,9 @@ impl Use<[0, *]> for ExpressionName {}
 
 enum ExprKind {
     Identifier(ExpressionNameRange),
+    // `$name` is an explicit function value, deliberately distinct from an
+    // identifier so ordinary names keep their direct-call-only semantics.
+    FunctionValue(ExpressionNameRange),
     Number,
     Float,
     Text(Id<String>),
@@ -234,6 +237,7 @@ pub struct ParsedBody {
 
 pub enum BodyExpressionView<'a> {
     Identifier(BodyTokenRange),
+    FunctionValue(BodyTokenRange),
     Number(BodyTokenRange),
     Float(BodyTokenRange),
     Text(Id<String>, usize),
@@ -1361,6 +1365,7 @@ pub label_token(value: &LabelSyntax) -> usize { value.token }
 node_name_range(value: &ExprNode) -> ExpressionNameRange {
     handle value.kind {
         ExprKind::Identifier(range) => range,
+        ExprKind::FunctionValue(range) => range,
         ExprKind::Construction(range, _) => range,
         ExprKind::Projection(_, range) => range,
         _ => super::syntax::empty_id_range(0)
@@ -1550,6 +1555,7 @@ pub expression_child_count_at(
 ) -> u32 {
     handle expression_view(value, expression) {
         BodyExpressionView::Identifier(_) => 0,
+        BodyExpressionView::FunctionValue(_) => 0,
         BodyExpressionView::Number(_) => 0,
         BodyExpressionView::Float(_) => 0,
         BodyExpressionView::Text(_, _) => 0,
@@ -1722,6 +1728,7 @@ pub expression_view<'a>(
     let node = arena_node_at_raw(&value.nodes, expression);
     handle node.kind {
         ExprKind::Identifier(_) => BodyExpressionView::Identifier(node.tokens),
+        ExprKind::FunctionValue(_) => BodyExpressionView::FunctionValue(node.tokens),
         ExprKind::Number => BodyExpressionView::Number(node.tokens),
         ExprKind::Float => BodyExpressionView::Float(node.tokens),
         ExprKind::Text(name) => BodyExpressionView::Text(name, node.tokens.start),
@@ -2185,6 +2192,20 @@ push_identifier(
             name_start,
             name_end
         )),
+        token_range(start, end)
+    )
+}
+
+push_function_value(
+    value: &mut BodyParser,
+    start: usize,
+    end: usize,
+    name_start: usize
+) -> ExprId {
+    let name_end = Vec::len(&value.names);
+    push_node(
+        value,
+        ExprKind::FunctionValue(name_range(name_start, name_end)),
         token_range(start, end)
     )
 }
@@ -3175,7 +3196,17 @@ parse_callable_reference(
                 @parse_callable_reference
             );
             value.tokens.position = name + 1;
-            parse_identifier_tail(source, value, start, name_start)
+            let result = try(
+                parse_identifier_tail(source, value, start, name_start),
+                @parse_callable_reference
+            );
+            let node = Arena::index_mut(&mut value.nodes, result);
+            let names = handle node.kind {
+                ExprKind::Identifier(found) => found,
+                _ => unreachable()
+            };
+            node.kind = ExprKind::FunctionValue(names);
+            Result::Ok(result)
         }
     }
 }

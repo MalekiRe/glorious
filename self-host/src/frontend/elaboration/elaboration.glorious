@@ -424,6 +424,9 @@ pub struct ClosureSiteDescriptor {
     owner: ShellId,
     source_order: u32,
     signature: CallableSignatureId,
+    // Static `$function` values retain their already-interned direct target.
+    // Lambda lifting will use a distinct scheduled target in a later slice.
+    target: Option<CallableInstanceId>,
     captures: ClosureCaptureRange
 }
 
@@ -3098,6 +3101,45 @@ pub interface_callable_signature_effect_tail(
     value: &CallableSignature
 ) -> Option<u32> { value.effect_tail }
 
+// Lowering needs these by-value projections so it can recursively materialize
+// a callable signature without holding an immutable interface-arena borrow
+// across its mutable type-interning work.
+pub callable_signature_parameter_count(
+    value: &TypedInterfaces,
+    id: CallableSignatureId
+) -> usize {
+    usize_from_u32(callable_signature_at(value, id).parameters.count)
+}
+
+pub callable_signature_parameter_at(
+    value: &TypedInterfaces,
+    id: CallableSignatureId,
+    ordinal: usize
+) -> TypeId {
+    let signature = callable_signature_at(value, id);
+    *Vec::index(
+        &value.callable_signature_parameters,
+        usize_from_u32(signature.parameters.start) + ordinal
+    )
+}
+
+pub callable_signature_result_at(
+    value: &TypedInterfaces,
+    id: CallableSignatureId
+) -> TypeId { callable_signature_at(value, id).result }
+
+pub callable_signature_effect_count(
+    value: &TypedInterfaces,
+    id: CallableSignatureId
+) -> usize {
+    usize_from_u32(callable_signature_at(value, id).effects.count)
+}
+
+pub callable_signature_effect_tail_at(
+    value: &TypedInterfaces,
+    id: CallableSignatureId
+) -> Option<u32> { callable_signature_at(value, id).effect_tail }
+
 type_id_vectors_equal(
     left: &Vec<TypeId>,
     left_start: u32,
@@ -3685,6 +3727,10 @@ pub closure_site_source_order(value: &ClosureSiteDescriptor) -> u32 {
 pub closure_site_signature(
     value: &ClosureSiteDescriptor
 ) -> CallableSignatureId { value.signature }
+
+pub closure_site_target(
+    value: &ClosureSiteDescriptor
+) -> Option<CallableInstanceId> { value.target }
 
 pub closure_site_captures<'a>(
     body: &'a TypedBody,
@@ -8318,6 +8364,7 @@ push_closure_value(
     owner: ShellId,
     source_order: u32,
     signature: CallableSignatureId,
+    target: Option<CallableInstanceId>,
     captures: &Vec<CoreClosureCapture>
 ) -> Result<CoreValueId, ElaborationError> {
     if(not(closure_captures_are_ordered(captures, 0))) {
@@ -8330,6 +8377,7 @@ push_closure_value(
                 owner: owner,
                 source_order: source_order,
                 signature: signature,
+                target: target,
                 captures: super::syntax::id_range(
                     usize_from_u32(start),
                     usize_from_u32(start) + Vec::len(captures)
@@ -10163,6 +10211,79 @@ elaborate_label_destination(
     }, expected, super::bodies::label_token(&label))
 }
 
+elaborate_indirect_call(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    callee_expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    let callee = try(elaborate_expression(
+        original, headers, declarations, interfaces, body, map, value,
+        callee_expression, None
+    ), @elaborate_indirect_call);
+    let signature = if(interface_type_tag_at(
+        &*interfaces, Id::to_usize(callee.type_id)
+    ) == 14) {
+        Id::from_u32(interface_type_a_at(
+            &*interfaces, Id::to_usize(callee.type_id)
+        ))
+    } else { @elaborate_indirect_call(Result::Err(
+        ElaborationError::InvalidCallTarget(
+            token, resolved_target_kind(resolved_target_at(map, callee_expression))
+        )
+    )) };
+    let found_count = super::bodies::expression_child_count_at(body, expression) - 1;
+    let expected_count = callable_signature_parameter_count(&*interfaces, signature);
+    if(usize_from_u32(found_count) != expected_count) {
+        @elaborate_indirect_call(Result::Err(
+            ElaborationError::ArgumentCountMismatch(
+                token, u32_from_usize(expected_count), found_count
+            )
+        ))
+    } else { () };
+    if(callable_signature_effect_count(&*interfaces, signature) != 0
+        or { Option::is_some(&callable_signature_effect_tail_at(
+            &*interfaces, signature
+        )) }) {
+        @elaborate_indirect_call(Result::Err(ElaborationError::InvalidCallTarget(
+            token, resolved_target_kind(resolved_target_at(map, callee_expression))
+        )))
+    } else { () };
+    let lets = new_core_prefix();
+    let callee_value = bind_operand(&mut value.core, callee, &mut lets);
+    let operands = Vec::new();
+    try(try_for_range(Range::new(0, expected_count), { ordinal => {
+        let argument = try(elaborate_expression(
+            original, headers, declarations, interfaces, body, map, value,
+            super::bodies::expression_child_at(
+                body, expression, u32_from_usize(ordinal) + 1
+            ),
+            Option::Some(callable_signature_parameter_at(
+                &*interfaces, signature, ordinal
+            ))
+        ), @elaborate_indirect_call);
+        Vec::push(&mut operands, bind_operand(&mut value.core, argument, &mut lets));
+        Result::Ok(())
+    }}), @elaborate_indirect_call);
+    let result = callable_signature_result_at(&*interfaces, signature);
+    try(check_expected_type(result, expected, token), @elaborate_indirect_call);
+    finish_computation(
+        &mut value.core,
+        result,
+        push_indirect_call(
+            &mut value.core, result, callee_value, signature, &operands
+        ),
+        &lets
+    )
+}
+
 elaborate_call(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -10298,10 +10419,10 @@ elaborate_call(
             variant,
             expected
         ),
-        target => Result::Err(ElaborationError::InvalidCallTarget(
-            token,
-            resolved_target_kind(target)
-        ))
+        _ => elaborate_indirect_call(
+            original, headers, declarations, interfaces, body, map, value,
+            expression, callee, expected
+        )
     }
 }
 
@@ -13425,6 +13546,77 @@ elaborate_float(
     }
 }
 
+elaborate_function_value(
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyContext,
+    expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    handle resolved_target_at(map, expression) {
+        Option::Some(ResolvedTarget::Function(shell)) =>
+            handle interface_callable_for_shell_id(&*interfaces, shell) {
+                Result::Err(_) => Result::Err(
+                    ElaborationError::MissingCallableInterface(token, shell)
+                ),
+                Result::Ok(callable) => if(
+                    interface_callable_generic_count(&*interfaces, callable) != 0
+                    or { interface_callable_effect_count(&*interfaces, callable) != 0 }
+                ) {
+                    // This first source-producible callable path is static,
+                    // captureless and pure; inference/effect adapters need a
+                    // separate callable scheduler.
+                    Result::Err(ElaborationError::FunctionUsedAsValue(token))
+                } else {
+                    let parameters = Vec::new();
+                    for_range(Range::new(
+                        0,
+                        usize_from_u32(interface_callable_parameter_count(
+                            &*interfaces, callable
+                        ))
+                    ), { ordinal => Vec::push(
+                        &mut parameters,
+                        interface_callable_parameter_at(
+                            &*interfaces, callable, ordinal
+                        )
+                    ) });
+                    let effects = Vec::new();
+                    let signature = intern_callable_signature(
+                        interfaces,
+                        &parameters,
+                        interface_callable_result(&*interfaces, callable),
+                        &effects,
+                        None
+                    );
+                    let ty = intern_callable_type(interfaces, signature);
+                    try(check_expected_type(ty, expected, token),
+                        @elaborate_function_value);
+                    let substitutions = Vec::new();
+                    let target = intern_callable_instance(
+                        interfaces, callable, &substitutions
+                    );
+                    let captures = Vec::new();
+                    let core = try(push_closure_value(
+                        &mut value.core,
+                        ty,
+                        super::bodies::body_shell(body),
+                        u32_from_usize(expression),
+                        signature,
+                        Option::Some(target),
+                        &captures
+                    ), @elaborate_function_value);
+                    Result::Ok(Elaborated {
+                        type_id: ty,
+                        form: ElaboratedForm::Value(core)
+                    })
+                }
+            },
+        _ => Result::Err(ElaborationError::FunctionUsedAsValue(token))
+    }
+}
+
 elaborate_expression(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -13457,6 +13649,10 @@ elaborate_expression(
                 expected
             )
             },
+        super::bodies::BodyExpressionView::FunctionValue(_) =>
+            elaborate_function_value(
+                interfaces, body, map, value, expression, expected
+            ),
         super::bodies::BodyExpressionView::Number(_) => elaborate_integer(
             original,
             headers,

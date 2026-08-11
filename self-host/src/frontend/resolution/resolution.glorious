@@ -2079,6 +2079,18 @@ resolve_expression(
             expression,
             module
         ),
+        // Resolution still uses the ordinary qualified-name lookup.  The
+        // elaborator enforces that this explicit `$` form denotes a function.
+        super::bodies::BodyExpressionView::FunctionValue(_) => resolve_identifier(
+            headers,
+            index,
+            declarations,
+            body,
+            &*bindings,
+            output,
+            expression,
+            module
+        ),
         super::bodies::BodyExpressionView::Number(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Float(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Text(_, _) => Result::Ok(()),
