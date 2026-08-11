@@ -243,6 +243,55 @@ fn native_hash_map_remove_then_insert_preserves_aggregate_value_fields() {
     );
 }
 
+#[test]
+fn llvm_o3_nominal_const_defaults_match_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-nominal-const-defaults.glorious",
+        r#"
+            struct Pair<T, const Width: u32 = 2 + 1> { value: T }
+            struct Window<const Start: u32, const End: u32 = Start + 1> {
+                marker: i64
+            }
+            make_pair() -> Pair<i64> { Pair { value: 9 } }
+            make_window() -> Window<3> { Window { marker: 4 } }
+            read_pair(value: Pair<i64, 3>) -> i64 { value.value }
+            read_window(value: Window<3, 4>) -> i64 { value.marker }
+            selected() -> i64 { read_pair(make_pair()) + read_window(make_window()) }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(13)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        13,
+        "o3-nominal-const-defaults",
+    );
+}
+
 const SYNC_OWNED_INDIRECT_EFFECT_SOURCE: &str = r#"
     effect Ask { [1,1] ask() -> i64 }
     tail_candidate() -> i64 / {Ask} {
