@@ -800,15 +800,7 @@ impl Vm {
                 }
                 Instruction::DerefMove { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let target = match get(frame, src)? {
-                        Value::Reference {
-                            unique: true,
-                            target,
-                            ..
-                        } => target,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    let value = take_reference_target(&target)?;
+                    let value = move_reference_register(frame, src)?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
@@ -2543,6 +2535,35 @@ fn reborrow_dereferenced_register(
             .with_value(|value| reborrow_dereferenced_value(value, requested_unique))
             .map_err(|_| RuntimeError::EmptyRegister(r))?,
         value => reborrow_dereferenced_value(value, requested_unique),
+    }
+}
+
+fn move_reference_value(value: &Value) -> Result<Value, RuntimeError> {
+    let Value::Reference {
+        unique: true,
+        target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    take_reference_target(target)
+}
+
+/// Move a unique referent directly through an ordinary reference register.
+/// A place-backed reference still takes the detached read path: its target
+/// can alias the same slot store, so the borrow must end before the target is
+/// mutated.
+fn move_reference_register(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => {
+            let value = slot.get().map_err(|_| RuntimeError::EmptyRegister(r))?;
+            move_reference_value(&value)
+        }
+        value => move_reference_value(value),
     }
 }
 
