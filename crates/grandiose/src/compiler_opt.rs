@@ -13898,8 +13898,10 @@ pub(crate) fn optimize_program_with_control_tables_and_plan(
         function.phase = MirPhase::Optimized;
         function.features = infer_feature_bits(function);
     }
-    validate_program(program, types, MirPhase::Optimized)?;
-    validate_flow_and_cleanup(program, types)?;
+    // The bytecode-input checkpoint below performs these same optimized-MIR
+    // and cleanup validations before deriving representation facts. Nothing
+    // mutates the program between the phase/feature update and that checkpoint,
+    // so let the checkpoint be the single final validation traversal.
     passes.push(validate_bytecode_input_checkpoint(program, types)?);
     Ok(OptimizationReport {
         level,
