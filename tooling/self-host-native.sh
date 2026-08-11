@@ -91,9 +91,12 @@ materialize_canonical_source() {
         echo "self-host-native: refusing to overwrite canonical source: $output" >&2
         exit 2
     }
-    mapfile -t modules < <(module_paths)
-    "$route_grc" -O3 --emit monolithic-source -o "$output" \
-        "$route_root/self-host/src/main.glorious" "${modules[@]}"
+    # Keep this byte-for-byte aligned with the native build's production
+    # closure.  The closure belongs to self-host-production-source.sh; do not
+    # reimplement it here (and, in particular, do not accidentally include
+    # test-only probe modules).
+    "$route_root/tooling/self-host-production-source.sh" materialize \
+        --output "$output" --grc "$route_grc"
     [[ -s "$output" ]] || {
         echo "self-host-native: canonical-source emission produced no source" >&2
         exit 1
@@ -162,7 +165,6 @@ case "${1:-}" in
         shift
         (($# == 1)) || usage
         initialize
-        "$route_root/tooling/ram-gate.sh" cargo build --release -p grandiose --bin grc
         materialize_canonical_source "$1"
         ;;
     provenance)
