@@ -944,13 +944,29 @@ fn compile_loaded(
         if let Some(limit) = command.native_allocation_limit {
             llvm_options.native_allocation_limit = limit;
         }
-        let module = match incremental.as_deref_mut().map_or_else(
-            || emit_llvm_ir(&phases, &llvm_options),
-            |driver| driver.emit_llvm_ir(&bundle, options, &phases, &llvm_options),
-        ) {
-            Ok(module) => module,
-            Err(diagnostics) => {
-                return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
+        // The durable executable route emits independently partitioned LLVM
+        // units below.  Do not first emit a complete monolithic module: it is
+        // unused on that route and made every cache lookup pay for a second
+        // whole-program LLVM emission.
+        let durable_native_cache = kind == EmitKind::Executable
+            && command.native_incremental
+            && command.native_incremental_cache.is_some();
+        let module = if durable_native_cache {
+            None
+        } else {
+            match incremental.as_deref_mut().map_or_else(
+                || emit_llvm_ir(&phases, &llvm_options),
+                |driver| driver.emit_llvm_ir(&bundle, options, &phases, &llvm_options),
+            ) {
+                Ok(module) => Some(module),
+                Err(diagnostics) => {
+                    return report_diagnostics(
+                        &bundle,
+                        diagnostics,
+                        command.json_diagnostics,
+                        stderr,
+                    );
+                }
             }
         };
         let native_host = if kind == EmitKind::Executable {
@@ -1137,6 +1153,7 @@ fn compile_loaded(
                 return 0;
             }
         }
+        let module = module.expect("non-durable native emission needs a monolithic LLVM module");
         // A persistent session may reuse immutable object bytes only when the
         // generated IR and every native compiler ABI-affecting option match.
         // The output path is intentionally excluded: a hit always writes the
