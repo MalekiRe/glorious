@@ -135,6 +135,7 @@ pub enum PassId {
     ScalarizeLocals,
     SimplifyCleanup,
     GlobalSimplify,
+    SpecializeDirectCalls,
     ScalarizeCallables,
     SpecializeControl,
     SpecializeCleanup,
@@ -7329,6 +7330,105 @@ fn global_simplify_exact_callables(
     }
 }
 
+/// Resolve direct calls to a receiverless function whose entire body forwards
+/// one parameter (or returns unit).  This is intentionally narrower than
+/// inlining: it does not clone statements, consume the inline budget, or need
+/// fresh registers.  The original moved argument becomes the continuation's
+/// implicit call-result edge argument, preserving the callee's ownership
+/// transfer exactly.
+fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (PassOutcome, u64) {
+    let scan_work = operation_count(program);
+    if scan_work > budget {
+        return (PassOutcome::BudgetExhausted, scan_work);
+    }
+    let forwarding = program
+        .functions
+        .iter()
+        .filter_map(|function| {
+            let entry = function.blocks.iter().find(|block| block.id == function.entry)?;
+            if function.receiver_mode.is_some()
+                || function.blocks.len() != 1
+                || !entry.statements.is_empty()
+                || !function.return_cleanup.is_empty()
+                || !function.outward_protocols.is_empty()
+                || function.no_return
+            {
+                return None;
+            }
+            let parameter = match entry.terminator {
+                Terminator::Return { value: None } if function.result == UNIT => None,
+                Terminator::Return {
+                    value:
+                        Some(Operand {
+                            register,
+                            mode: UseMode::Move,
+                        }),
+                } => register.checked_sub(1).filter(|index| {
+                    function
+                        .params
+                        .get(*index as usize)
+                        .is_some_and(|ty| *ty == function.result)
+                }),
+                _ => return None,
+            };
+            Some((function.declaration, parameter))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if forwarding.is_empty() {
+        return (PassOutcome::Unchanged, scan_work);
+    }
+
+    let mut changed = false;
+    for caller in &mut program.functions {
+        let mut caller_changed = false;
+        for block in &mut caller.blocks {
+            let Terminator::Call {
+                result,
+                function,
+                args,
+                normal,
+            } = block.terminator.clone()
+            else {
+                continue;
+            };
+            let Some(parameter) = forwarding.get(&function) else {
+                continue;
+            };
+            let replacement = match (parameter, result) {
+                (None, None) => normal,
+                (Some(index), Some(_)) => {
+                    let Some(value) = args.get(*index as usize).copied() else {
+                        continue;
+                    };
+                    let mut edge_args = Vec::with_capacity(normal.args.len() + 1);
+                    edge_args.push(value);
+                    edge_args.extend(normal.args);
+                    Edge {
+                        target: normal.target,
+                        args: edge_args,
+                    }
+                }
+                _ => continue,
+            };
+            block.terminator = Terminator::Goto(replacement);
+            caller_changed = true;
+        }
+        if caller_changed {
+            caller.invalid_analyses |= pass_contract(PassId::SpecializeDirectCalls).invalidates;
+            caller.features = infer_feature_bits(caller);
+            changed = true;
+        }
+    }
+    (
+        if changed {
+            PassOutcome::Changed
+        } else {
+            PassOutcome::Unchanged
+        },
+        scan_work,
+    )
+}
+
 const MAX_SCALARIZED_CALLABLE_OPERATIONS: u64 = 4096;
 
 #[derive(Clone)]
@@ -10992,6 +11092,7 @@ fn pass_contract(pass: PassId) -> PassContract {
         | PassId::SparseSimplify
         | PassId::SimplifyCleanup
         | PassId::GlobalSimplify
+        | PassId::SpecializeDirectCalls
         | PassId::SpecializeCleanup
         | PassId::FormTailCallsAndHoist => changed(analysis::ALL),
         // These preserve the block graph while rewriting definitions and
@@ -11035,6 +11136,7 @@ fn run_transactional_whole_program_pass(
     inline_policy: &mut InlinePolicyState,
 ) -> PassReport {
     let (outcome, work_units) = match pass {
+        PassId::SpecializeDirectCalls => specialize_forwarding_direct_calls(program, *global_remaining),
         PassId::ScalarizeCallables => scalarize_callables(program, tables.types, *global_remaining),
         PassId::SpecializeControl => specialize_static_handlers(
             program,
@@ -13184,6 +13286,17 @@ pub(crate) fn optimize_program_with_control_tables(
                 PassId::SimplifyCleanup,
                 types,
                 &mut global_remaining,
+            );
+            push_checked(&mut passes, report, program, types)?;
+        }
+        if global_remaining != 0 {
+            let report = run_transactional_whole_program_pass(
+                program,
+                PassId::SpecializeDirectCalls,
+                whole_program_tables,
+                level,
+                &mut global_remaining,
+                &mut inline_policy,
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -18109,6 +18222,50 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_direct_call_specialization_reuses_the_moved_argument() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.blocks[0].statements.clear();
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+
+        assert_eq!(
+            specialize_forwarding_direct_calls(&mut candidate, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        let caller = &candidate.functions[0];
+        assert_eq!(caller.blocks[0].statements.len(), 3);
+        assert_eq!(
+            caller.blocks[0].terminator,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![move_operand(1), move_operand(4)],
+            })
+        );
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
+    fn o1_specializes_forwarding_direct_calls_without_inlining() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.blocks[0].statements.clear();
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+
+        let report = optimize_program(&mut candidate, &types, OptimizationLevel::O1).unwrap();
+        assert!(matches!(
+            candidate.functions[0].blocks[0].terminator,
+            Terminator::Goto(_)
+        ));
+        assert!(report.passes.iter().any(|pass| {
+            pass.pass == PassId::SpecializeDirectCalls && pass.outcome == PassOutcome::Changed
+        }));
+    }
+
+    #[test]
     fn whole_program_inlining_only_invalidates_rewritten_bodies() {
         let (mut candidate, types) = inline_leaf_fixture();
         let mut remaining = u64::MAX;
@@ -19937,7 +20094,12 @@ mod tests {
             ValidateCleanupMir,
             NormalizeCfg,
         ];
-        let o1 = [SparseSimplify, ScalarizeLocals, SimplifyCleanup];
+        let o1 = [
+            SparseSimplify,
+            ScalarizeLocals,
+            SimplifyCleanup,
+            SpecializeDirectCalls,
+        ];
         let post_simplify = [NormalizeCfg, SparseSimplify];
         let o2 = [
             GlobalSimplify,
