@@ -785,22 +785,8 @@ impl Vm {
                 | Instruction::DerefReborrowUnique { dst, src } => {
                     let (dst, src) = (*dst, *src);
                     let requested_unique = matches!(ins, Instruction::DerefReborrowUnique { .. });
-                    let (outer_unique, outer_target) = match get(frame, src)? {
-                        Value::Reference { unique, target, .. } => (unique, target),
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    let Value::Reference {
-                        referent_type,
-                        unique: inner_unique,
-                        target,
-                        ..
-                    } = observe_reference_target(&outer_target)?
-                    else {
-                        return Err(RuntimeError::TypeConfusion);
-                    };
-                    if requested_unique && (!outer_unique || !inner_unique) {
-                        return Err(RuntimeError::TypeConfusion);
-                    }
+                    let (referent_type, target) =
+                        reborrow_dereferenced_register(frame, src, requested_unique)?;
                     put(
                         frame,
                         dst,
@@ -2512,6 +2498,51 @@ fn copy_reference_register(
             .with_value(|value| copy_reference_value(a, value))
             .map_err(|_| RuntimeError::EmptyRegister(r))?,
         value => copy_reference_value(a, value),
+    }
+}
+
+fn reborrow_dereferenced_value(
+    value: &Value,
+    requested_unique: bool,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let Value::Reference {
+        unique: outer_unique,
+        target: outer_target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    let Value::Reference {
+        referent_type,
+        unique: inner_unique,
+        target,
+        ..
+    } = observe_reference_target(outer_target)?
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    if requested_unique && (!outer_unique || !inner_unique) {
+        return Err(RuntimeError::TypeConfusion);
+    }
+    Ok((referent_type, target))
+}
+
+/// A dereference reborrow only observes the outer reference. Borrow it from
+/// register storage so the outer target is not cloned just to be inspected.
+fn reborrow_dereferenced_register(
+    f: &Frame,
+    r: u32,
+    requested_unique: bool,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| reborrow_dereferenced_value(value, requested_unique))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => reborrow_dereferenced_value(value, requested_unique),
     }
 }
 
