@@ -7,8 +7,7 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel, modules,
-    TestOptimizerSuppression, compile_bundle_to_phases_with_test_optimizer_suppression,
+    CompileOptions, OptimizationLevel, modules,
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{
@@ -1201,6 +1200,58 @@ fn command_log(output: &std::process::Output) -> String {
     )
 }
 
+/// Build an executable through the production release CLI.  Keeping this
+/// route here (rather than calling `emit_llvm_ir` and a C compiler directly)
+/// makes test iteration exercise the same partition manifest, durable native
+/// object cache, and Wild link path used by developers.
+fn compile_release_grc_native_cli(input: &Path, executable: &Path, trace: &Path) {
+    let cache = private_native_cli_cache_directory();
+    fs::create_dir_all(&cache).unwrap_or_else(|error| {
+        panic!(
+            "failed to create private native CLI cache {}: {error}",
+            cache.display()
+        )
+    });
+    let grc = repository_root().join("target/release/grc");
+    assert!(
+        grc.is_file(),
+        "release grc is required for native CLI tests; run \\
+         `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
+    );
+    let compile = Command::new(&grc)
+        .current_dir(repository_root())
+        .args(["-O3", "--emit", "executable"])
+        .arg("--native-incremental-cache")
+        .arg(&cache)
+        .arg("-o")
+        .arg(executable)
+        .arg(input)
+        .output()
+        .expect("release grc must start for native CLI iteration");
+    let compile_log = command_log(&compile);
+    fs::write(trace.join("grc-o3-wild.log"), &compile_log).unwrap();
+    assert!(
+        compile.status.success() && executable.is_file(),
+        "grc O3 native executable emission failed; retained {}\n{compile_log}",
+        trace.display(),
+    );
+}
+
+fn run_native_cli_self_host(executable: &Path, input: &Path, output: &Path, trace: &Path) {
+    let run = Command::new(executable)
+        .arg(output)
+        .arg(input)
+        .output()
+        .expect("native CLI self-host executable must start");
+    let run_log = command_log(&run);
+    fs::write(trace.join("native-stage1.log"), &run_log).unwrap();
+    assert!(
+        run.status.success(),
+        "native CLI Stage1 failed; retained {}\n{run_log}",
+        trace.display(),
+    );
+}
+
 fn decode_and_verify_full_self_host_artifact(bytes: &[u8]) {
     let mut trace = RetainedSelfHostArtifact::write(bytes);
     let decoded = match Artifact::decode(bytes) {
@@ -1941,7 +1992,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 );
             }
 
-            // The VM-only measurement never emits LLVM IR from `phases`, so once
+            // The VM-only measurement never invokes the release CLI, so once
             // the frontend probes have read their function IDs and the GRBC has
             // been decoded into the VM image, neither the bootstrap
             // compile-phase graph (`phases` holds the whole artifact, core, MIR,
@@ -1949,8 +2000,8 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             // again. Release both *before* starting the VM so the VM-only peak
             // does not retain large compile-phase / encoded-byte data
             // simultaneously with the running VM image. This branch always
-            // returns, so the full (LLVM/native) path below still sees `phases`
-            // as live.
+            // returns, so the optional native CLI path below still sees
+            // `phases` as live.
             let vm_only = std::env::var_os("G1_SELF_HOST_BYTECODE_VM_ONLY").is_some();
             if vm_only {
                 drop(phases);
@@ -1985,40 +2036,23 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             let vm_bytes = fs::read(&vm_output).unwrap();
             assert_compiled_artifact(&vm_bytes);
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-bytecode.ll");
-            let executable = directory.path().join("self-host-bytecode");
-            fs::write(&llvm, module.ir).unwrap();
+            // Native compilation is intentionally opt-in for this otherwise
+            // focused frontend test: it requires a prebuilt release `grc`.
+            // The canonical ignored gates below cover it on every native
+            // iteration through the durable partition cache.
+            if std::env::var_os("G1_SELF_HOST_BYTECODE_NATIVE_CLI").is_none() {
+                return;
+            }
+            let trace = retained_native_cli_trace_directory();
+            let native_input = trace.join("fixture.glorious");
+            let executable = trace.join("self-host-bytecode");
+            let native_output = trace.join("native.grbc");
+            fs::write(&native_input, FIXTURE).unwrap();
             drop(phases);
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O3")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
-            );
-
-            let native_output = directory.path().join("native.grbc");
-            let native = Command::new(&executable)
-                .arg(&native_output)
-                .arg(&input)
-                .output()
-                .unwrap();
-            assert!(
-                native.status.success(),
-                "native self-host compiler failed: {:?}\n{}",
-                native.status,
-                String::from_utf8_lossy(&native.stderr)
-            );
+            compile_release_grc_native_cli(&native_input, &executable, &trace);
+            run_native_cli_self_host(&executable, &native_input, &native_output, &trace);
             let native_bytes = fs::read(&native_output).unwrap();
-            assert_eq!(native_bytes, vm_bytes, "VM and LLVM hosts must agree");
+            assert_eq!(native_bytes, vm_bytes, "VM and native CLI hosts must agree");
             assert_compiled_artifact(&native_bytes);
         })
         .unwrap()
@@ -2753,18 +2787,11 @@ fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
             let entry = phases.artifact.entry_function.expect("Stage1 entry");
             let bytes = phases.artifact.encode();
             let vm_stage1 = load_verified(&bytes).expect("Stage1 must verify");
-            let llvm_options = LlvmOptions {
-                native_allocation_limit: 536_870_912,
-                ..LlvmOptions::default()
-            };
-            let module = grandiose::emit_llvm_ir(&phases, &llvm_options)
-                .expect("Stage1 LLVM emission must succeed");
-            let directory = tempfile::tempdir().unwrap();
-            let input = directory.path().join("canonical.glorious");
-            let vm_output = directory.path().join("vm-stage2.grbc");
-            let native_output = directory.path().join("native-stage2.grbc");
-            let llvm = directory.path().join("stage1.ll");
-            let executable = directory.path().join("stage1-native");
+            let trace = retained_native_cli_trace_directory();
+            let input = trace.join("canonical.glorious");
+            let vm_output = trace.join("vm-stage2.grbc");
+            let native_output = trace.join("native-stage2.grbc");
+            let executable = trace.join("stage1-native");
             fs::write(&input, source.as_bytes()).unwrap();
             let vm_bytes = authoritative_vm_stage2(
                 &bytes,
@@ -2774,26 +2801,22 @@ fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
                 &input,
                 &vm_output,
             );
-            fs::write(&llvm, module.ir).unwrap();
-            let linked = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .args(["-O3", "--ld-path=wild", "-o"])
-                .arg(&executable)
-                .output().unwrap();
-            assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
-            let native = Command::new(&executable).arg(&native_output).arg(&input).output().unwrap();
-            assert!(native.status.success(), "native Stage1 diagnostic:\n{}", String::from_utf8_lossy(&native.stderr));
-            assert_eq!(fs::read(&native_output).unwrap(), vm_bytes, "native and VM Stage2 must be byte-identical");
+            compile_release_grc_native_cli(&input, &executable, &trace);
+            run_native_cli_self_host(&executable, &input, &native_output, &trace);
+            assert_eq!(
+                fs::read(&native_output).unwrap(),
+                vm_bytes,
+                "native and VM Stage2 must be byte-identical; retained {}",
+                trace.display(),
+            );
         }).unwrap().join().unwrap();
 }
 
 #[test]
 #[ignore = "expensive release iteration route: compile canonical self-host monolith through grc O3/Wild with a private durable native cache"]
 fn canonical_self_host_native_cli_uses_private_incremental_cache_in_release() {
-    // This is intentionally distinct from the direct-IR diagnostic gates
-    // below. It exercises the production CLI path, which partitions native
+    // This is intentionally distinct from the VM convergence gates below. It
+    // exercises the production CLI path, which partitions native
     // functions and restores only manifest-valid objects from this worktree's
     // durable cache before Wild links the current executable.
     std::thread::Builder::new()
@@ -2815,50 +2838,9 @@ fn canonical_self_host_native_cli_uses_private_incremental_cache_in_release() {
             let executable = trace.join("bootstrap-self-host-native-cli");
             let stage2 = trace.join("native-stage2.grbc");
             let cache = private_native_cli_cache_directory();
-            fs::create_dir_all(&cache).unwrap_or_else(|error| {
-                panic!(
-                    "failed to create private native CLI cache {}: {error}",
-                    cache.display()
-                )
-            });
             fs::write(&input, monolithic_source.as_bytes()).unwrap();
-
-            let grc = repository_root().join("target/release/grc");
-            assert!(
-                grc.is_file(),
-                "release grc is required for the native CLI iteration route; run \
-                 `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
-            );
-            let compile = Command::new(&grc)
-                .current_dir(repository_root())
-                .args(["-O3", "--emit", "executable"])
-                .arg("--native-incremental-cache")
-                .arg(&cache)
-                .arg("-o")
-                .arg(&executable)
-                .arg(&input)
-                .output()
-                .expect("release grc must start for native CLI iteration");
-            let compile_log = command_log(&compile);
-            fs::write(trace.join("grc-o3-wild.log"), &compile_log).unwrap();
-            assert!(
-                compile.status.success() && executable.is_file(),
-                "grc O3 native executable emission failed; retained {}\n{compile_log}",
-                trace.display(),
-            );
-
-            let run = Command::new(&executable)
-                .arg(&stage2)
-                .arg(&input)
-                .output()
-                .expect("native CLI self-host executable must start");
-            let run_log = command_log(&run);
-            fs::write(trace.join("native-stage1.log"), &run_log).unwrap();
-            assert!(
-                run.status.success(),
-                "native CLI Stage1 failed; retained {}\n{run_log}",
-                trace.display(),
-            );
+            compile_release_grc_native_cli(&input, &executable, &trace);
+            run_native_cli_self_host(&executable, &input, &stage2, &trace);
             let bytes = fs::read(&stage2).unwrap_or_else(|error| {
                 panic!(
                     "native CLI Stage1 did not write {}: {error}; retained {}",
@@ -2975,143 +2957,11 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
 }
 
 #[test]
-#[ignore = "expensive release diagnostic gate: retain the canonical VM/native G9003 divergence"]
-fn canonical_self_host_vm_succeeds_while_bootstrap_llvm_native_reports_g9003() {
-    // This deliberately records the currently known native-only failure rather
-    // than hiding it behind the small frontend fixture. The same O3 bootstrap
-    // artifact must compile the canonical, one-file self-host source in the VM
-    // before the LLVM executable is allowed to report its G9003 diagnostic.
-    //
-    // When the native path is fixed, replace this with a VM/native byte-for-byte
-    // parity assertion rather than weakening the VM half or patching a leaf
-    // runtime mapping.
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let source_bundle = production_self_host_bundle();
-            let source_program = modules::parse_bundle(&source_bundle)
-                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
-            let source_resolution = modules::resolve_program(&source_bundle, source_program)
-                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
-            let monolithic_source =
-                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
-                    .expect("the self-host module graph must have a canonical one-file form");
-
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &source_bundle,
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O3,
-                },
-            )
-            .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
-            let stage1_bytes = phases.artifact.encode();
-            decode_and_verify_full_self_host_artifact(&stage1_bytes);
-            let stage1_entry = phases
-                .artifact
-                .entry_function
-                .expect("the bootstrap compiler must have an entry function");
-            let stage1 = load_verified(&stage1_bytes)
-                .expect("the Rust-bootstrap compiler artifact must verify");
-
-            // This is a deliberately retained regression baseline, not a
-            // transient scratch directory. G1_SELF_HOST_ARTIFACT_TRACE_DIR
-            // redirects it for CI or local investigation.
-            let mut trace = RetainedSelfHostArtifact::write(&stage1_bytes);
-            trace.keep = true;
-            let input = trace.directory.join("canonical-self-host.glorious");
-            let vm_output = trace.directory.join("vm-stage2.grbc");
-            let native_output = trace.directory.join("native-stage2.grbc");
-            fs::write(&input, monolithic_source.as_bytes()).unwrap();
-
-            let vm = Vm::with_host(
-                stage1,
-                ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(vec![
-                    vm_output.clone().into_os_string(),
-                    input.clone().into_os_string(),
-                ]),
-            )
-            .unwrap();
-            assert_eq!(vm.run(stage1_entry, vec![]).unwrap(), Value::Unit);
-            let vm_bytes = fs::read(&vm_output).unwrap_or_else(|error| {
-                panic!(
-                    "the VM self-host compiler did not emit {}: {error}",
-                    vm_output.display()
-                )
-            });
-            decode_and_verify_full_self_host_artifact(&vm_bytes);
-
-            let llvm_options = LlvmOptions {
-                native_allocation_limit: 512 * 1024 * 1024,
-                ..LlvmOptions::default()
-            };
-            let module = grandiose::emit_llvm_ir(&phases, &llvm_options).unwrap();
-            let llvm = trace.directory.join("bootstrap-self-host.ll");
-            let executable = trace.directory.join("bootstrap-self-host");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O3")
-                .arg("--ld-path=wild")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "bootstrap LLVM executable failed to link:\n{}\nretained {}",
-                String::from_utf8_lossy(&clang.stderr),
-                trace.directory.display(),
-            );
-
-            let native = Command::new(&executable)
-                .arg(&native_output)
-                .arg(&input)
-                .output()
-                .unwrap();
-            let native_log = format!(
-                "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
-                native.status,
-                String::from_utf8_lossy(&native.stdout),
-                String::from_utf8_lossy(&native.stderr),
-            );
-            fs::write(trace.directory.join("native-g9003.log"), &native_log).unwrap();
-            assert!(
-                native.status.success(),
-                "the bootstrap LLVM executable must preserve the compiler's diagnostic exit-0 contract; retained {}\\n{native_log}",
-                trace.directory.display(),
-            );
-            assert!(
-                native_log.contains("[G9003]"),
-                "expected the known bootstrap LLVM native G9003 diagnostic; retained {}\n{native_log}",
-                trace.directory.display(),
-            );
-            assert!(
-                !native_output.exists(),
-                "G9003 must not emit a stage-two artifact; retained {}",
-                trace.directory.display(),
-            );
-            eprintln!(
-                "retained canonical VM/native G9003 baseline: {}",
-                trace.directory.display()
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
 #[ignore = "expensive release regression: verify zero-initialized native enums let canonical Stage1 emit Stage2"]
 fn canonical_self_host_native_emits_stage2_after_enum_zero_initialization() {
-    // `Construct` used to seed enum aggregates with LLVM `poison`. Values of
-    // every variant are moved and copied as complete aggregates, so an
-    // inactive payload could escape into native code even though the VM always
-    // initializes it. This native-only gate reaches the G9003 site without
-    // first spending the VM's self-host execution time. Its output must still
-    // decode and verify; merely avoiding the diagnostic is not sufficient.
+    // This remains a named regression gate for enum aggregate initialization,
+    // but it now uses the same cached CLI/Wild executable route as normal
+    // native iteration instead of a hand-linked LLVM module.
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
@@ -3123,285 +2973,24 @@ fn canonical_self_host_native_emits_stage2_after_enum_zero_initialization() {
             let monolithic_source =
                 modules::monolithic_source(&source_bundle, &source_resolution.resolution)
                     .expect("the self-host module graph must have a canonical one-file form");
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &source_bundle,
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O3,
-                },
-            )
-            .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
-            let stage1_bytes = phases.artifact.encode();
-            decode_and_verify_full_self_host_artifact(&stage1_bytes);
-
-            let mut trace = RetainedSelfHostArtifact::write(&stage1_bytes);
-            trace.keep = true;
-            let input = trace.directory.join("canonical-self-host.glorious");
-            let native_output = trace.directory.join("native-stage2.grbc");
+            let trace = retained_native_cli_trace_directory();
+            let input = trace.join("canonical-self-host.glorious");
+            let native_output = trace.join("native-stage2.grbc");
+            let executable = trace.join("bootstrap-self-host-enum-zero");
             fs::write(&input, monolithic_source.as_bytes()).unwrap();
-
-            let module = grandiose::emit_llvm_ir(
-                &phases,
-                &LlvmOptions {
-                    native_allocation_limit: 512 * 1024 * 1024,
-                    ..LlvmOptions::default()
-                },
-            )
-            .expect("zero-initialized Stage1 LLVM emission must succeed");
-            let llvm = trace.directory.join("bootstrap-self-host-enum-zero.ll");
-            let executable = trace.directory.join("bootstrap-self-host-enum-zero");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O3")
-                .arg("--ld-path=wild")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "zero-initialized bootstrap LLVM executable failed to link:\n{}\nretained {}",
-                String::from_utf8_lossy(&clang.stderr),
-                trace.directory.display(),
-            );
-
-            let native = Command::new(&executable)
-                .arg(&native_output)
-                .arg(&input)
-                .output()
-                .unwrap();
-            let native_log = format!(
-                "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
-                native.status,
-                String::from_utf8_lossy(&native.stdout),
-                String::from_utf8_lossy(&native.stderr),
-            );
-            fs::write(trace.directory.join("native-enum-zero.log"), &native_log).unwrap();
-            assert!(
-                native.status.success(),
-                "the zero-initialized bootstrap native compiler failed; retained {}\n{native_log}",
-                trace.directory.display(),
-            );
-            assert!(
-                !native_log.contains("[G9003]"),
-                "zero-initialized enum aggregates did not remove the native G9003 diagnostic; retained {}\n{native_log}",
-                trace.directory.display(),
-            );
+            compile_release_grc_native_cli(&input, &executable, &trace);
+            run_native_cli_self_host(&executable, &input, &native_output, &trace);
             let stage2 = fs::read(&native_output).unwrap_or_else(|error| {
                 panic!(
                     "the zero-initialized native compiler did not emit {}: {error}; retained {}",
                     native_output.display(),
-                    trace.directory.display(),
+                    trace.display(),
                 )
             });
             decode_and_verify_full_self_host_artifact(&stage2);
             eprintln!(
                 "retained zero-initialized native Stage1 output: {}",
-                trace.directory.display()
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
-#[ignore = "expensive release differential: test whether suppressing terminal handler fusion removes native G9003"]
-fn canonical_self_host_native_still_reports_g9003_without_terminal_handler_fusion() {
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let source_bundle = production_self_host_bundle();
-            let source_program = modules::parse_bundle(&source_bundle)
-                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
-            let source_resolution = modules::resolve_program(&source_bundle, source_program)
-                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
-            let monolithic_source =
-                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
-                    .expect("the self-host module graph must have a canonical one-file form");
-
-            let phases = compile_bundle_to_phases_with_test_optimizer_suppression(
-                &source_bundle,
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O3,
-                },
-                TestOptimizerSuppression::TerminalHandlerFusion,
-            )
-            .unwrap_or_else(|errors| {
-                panic!("suppressed bundle-context Stage1 did not compile: {errors:#?}")
-            });
-            let stage1_bytes = phases.artifact.encode();
-            decode_and_verify_full_self_host_artifact(&stage1_bytes);
-
-            let mut trace = RetainedSelfHostArtifact::write(&stage1_bytes);
-            trace.keep = true;
-            let input = trace.directory.join("canonical-self-host.glorious");
-            let native_output = trace.directory.join("native-stage2.grbc");
-            fs::write(&input, monolithic_source.as_bytes()).unwrap();
-
-            let llvm_options = LlvmOptions {
-                native_allocation_limit: 512 * 1024 * 1024,
-                ..LlvmOptions::default()
-            };
-            let module = grandiose::emit_llvm_ir(&phases, &llvm_options)
-                .expect("suppressed Stage1 LLVM emission must succeed");
-            let llvm = trace.directory.join("bootstrap-self-host-suppressed.ll");
-            let executable = trace.directory.join("bootstrap-self-host-suppressed");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O3")
-                .arg("--ld-path=wild")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "suppressed bootstrap LLVM executable failed to link:\n{}\nretained {}",
-                String::from_utf8_lossy(&clang.stderr),
-                trace.directory.display(),
-            );
-
-            let native = Command::new(&executable)
-                .arg(&native_output)
-                .arg(&input)
-                .output()
-                .unwrap();
-            let native_log = format!(
-                "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
-                native.status,
-                String::from_utf8_lossy(&native.stdout),
-                String::from_utf8_lossy(&native.stderr),
-            );
-            fs::write(
-                trace.directory.join("native-terminal-fusion-suppressed.log"),
-                &native_log,
-            )
-            .unwrap();
-            assert!(
-                native.status.success(),
-                "the suppressed bootstrap LLVM executable must preserve the compiler's diagnostic exit-0 contract; retained {}\n{native_log}",
-                trace.directory.display(),
-            );
-            assert!(
-                native_log.contains("[G9003]"),
-                "terminal-handler-fusion suppression removed the known native G9003 diagnostic; retained {}\n{native_log}",
-                trace.directory.display(),
-            );
-            assert!(
-                !native_output.exists(),
-                "G9003 must not emit a stage-two artifact; retained {}",
-                trace.directory.display(),
-            );
-            eprintln!(
-                "retained terminal-handler-fusion-suppressed native G9003 differential: {}",
-                trace.directory.display()
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
-#[ignore = "expensive release differential: test whether suppressing direct resumptive-handler fusion removes native G9003"]
-fn canonical_self_host_native_still_reports_g9003_without_direct_resumptive_handler_fusion() {
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let source_bundle = production_self_host_bundle();
-            let source_program = modules::parse_bundle(&source_bundle)
-                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
-            let source_resolution = modules::resolve_program(&source_bundle, source_program)
-                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
-            let monolithic_source =
-                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
-                    .expect("the self-host module graph must have a canonical one-file form");
-
-            let phases = compile_bundle_to_phases_with_test_optimizer_suppression(
-                &source_bundle,
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O3,
-                },
-                TestOptimizerSuppression::DirectResumptiveHandlerFusion,
-            )
-            .unwrap_or_else(|errors| {
-                panic!("suppressed bundle-context Stage1 did not compile: {errors:#?}")
-            });
-            let stage1_bytes = phases.artifact.encode();
-            decode_and_verify_full_self_host_artifact(&stage1_bytes);
-
-            let mut trace = RetainedSelfHostArtifact::write(&stage1_bytes);
-            trace.keep = true;
-            let input = trace.directory.join("canonical-self-host.glorious");
-            let native_output = trace.directory.join("native-stage2.grbc");
-            fs::write(&input, monolithic_source.as_bytes()).unwrap();
-
-            let llvm_options = LlvmOptions {
-                native_allocation_limit: 512 * 1024 * 1024,
-                ..LlvmOptions::default()
-            };
-            let module = grandiose::emit_llvm_ir(&phases, &llvm_options)
-                .expect("suppressed Stage1 LLVM emission must succeed");
-            let llvm = trace.directory.join("bootstrap-self-host-resumptive-suppressed.ll");
-            let executable = trace.directory.join("bootstrap-self-host-resumptive-suppressed");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O3")
-                .arg("--ld-path=wild")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "suppressed bootstrap LLVM executable failed to link:\n{}\nretained {}",
-                String::from_utf8_lossy(&clang.stderr),
-                trace.directory.display(),
-            );
-
-            let native = Command::new(&executable)
-                .arg(&native_output)
-                .arg(&input)
-                .output()
-                .unwrap();
-            let native_log = format!(
-                "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
-                native.status,
-                String::from_utf8_lossy(&native.stdout),
-                String::from_utf8_lossy(&native.stderr),
-            );
-            fs::write(
-                trace.directory.join("native-direct-resumptive-handler-fusion-suppressed.log"),
-                &native_log,
-            )
-            .unwrap();
-            assert!(
-                native.status.success(),
-                "the suppressed bootstrap LLVM executable must preserve the compiler's diagnostic exit-0 contract; retained {}\n{native_log}",
-                trace.directory.display(),
-            );
-            assert!(
-                native_log.contains("[G9003]"),
-                "direct-resumptive-handler-fusion suppression removed the known native G9003 diagnostic; retained {}\n{native_log}",
-                trace.directory.display(),
-            );
-            assert!(
-                !native_output.exists(),
-                "G9003 must not emit a stage-two artifact; retained {}",
-                trace.directory.display(),
-            );
-            eprintln!(
-                "retained direct-resumptive-handler-fusion-suppressed native G9003 differential: {}",
-                trace.directory.display()
+                trace.display()
             );
         })
         .unwrap()
