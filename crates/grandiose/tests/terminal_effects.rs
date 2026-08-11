@@ -2,6 +2,7 @@ use grandiose::{
     CompileOptions, OptimizationLevel, OptimizationPass, OptimizationPassOutcome,
     TestOptimizerSuppression,
     compile_bundle_to_bytecode, compile_source_to_bytecode, compile_source_to_phases,
+    compile_bundle_to_phases_with_test_optimizer_suppression,
     compile_source_to_phases_with_options, compile_source_to_phases_with_test_optimizer_suppression,
     compiler_mir::{CleanupAction, CleanupEdge},
     diagnostic::Diagnostic,
@@ -161,6 +162,24 @@ fn test_suppression_disables_only_terminal_handler_fusion() {
         control_outcome(&suppressed),
         OptimizationPassOutcome::Unchanged
     );
+}
+
+#[test]
+fn test_suppression_accepts_distributed_bundles_without_source_rewrapping() {
+    let bundle = SourceBundle::distributed(
+        Segment::new("terminal-bundle/main.glorious", TERMINAL_PROGRAM),
+        [],
+    );
+    let suppressed = compile_bundle_to_phases_with_test_optimizer_suppression(
+        &bundle,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+        TestOptimizerSuppression::TerminalHandlerFusion,
+    )
+    .unwrap();
+
+    assert_eq!(control_outcome(&suppressed), OptimizationPassOutcome::Unchanged);
 }
 
 #[test]

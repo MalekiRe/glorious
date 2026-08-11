@@ -5050,6 +5050,29 @@ pub fn compile_bundle_to_phases_with_options(
     compile_bundle_to_phases_with_manifest_and_options(bundle, &manifest, options)
 }
 
+/// Compile a source bundle while suppressing one named optimizer transform for
+/// a differential test. Unlike the source convenience wrapper, this retains
+/// the bundle's distributed-segment identity and selects the same trusted
+/// manifest as ordinary bundle compilation.
+#[doc(hidden)]
+pub fn compile_bundle_to_phases_with_test_optimizer_suppression(
+    bundle: &SourceBundle,
+    options: CompileOptions,
+    suppression: TestOptimizerSuppression,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    let manifest = if bundle.is_canonical_distribution() {
+        TrustedTraitManifest::trusted_distribution()
+    } else {
+        TrustedTraitManifest::trusted_default()
+    };
+    compile_bundle_to_phases_with_manifest_and_options_and_plan(
+        bundle,
+        &manifest,
+        options,
+        suppression.plan(),
+    )
+}
+
 pub fn compile_bundle_to_phases_with_manifest(
     bundle: &SourceBundle,
     manifest: &TrustedTraitManifest,
