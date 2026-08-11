@@ -6,11 +6,14 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel,
     lexer::{Kw, NumberBase, Token, TokenKind},
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
+
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -328,24 +331,8 @@ fn run_lexer_oracle(directory: &Path, corpus: &[PathBuf]) {
     assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
     assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM lexer diverged");
 
-    let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-    let llvm = directory.join("self-host-lexer.ll");
-    let executable = directory.join("self-host-lexer");
-    fs::write(&llvm, module.ir).unwrap();
-    let clang = Command::new("clang")
-        .arg(&llvm)
-        .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-        .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-        .arg("-O0")
-        .arg("-o")
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(
-        clang.status.success(),
-        "{}",
-        String::from_utf8_lossy(&clang.stderr)
-    );
+    let executable =
+        native_incremental::build_cached_native(&self_host_bundle(), directory, "self-host-lexer");
     let native = Command::new(&executable)
         .arg(&native_path)
         .args(corpus)
