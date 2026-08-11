@@ -36081,6 +36081,12 @@ impl<'a> CoreLowerer<'a> {
     fn release_loan(&mut self, origin: core::ReferenceOrigin) {
         if !origin.external {
             self.release_local_loan(origin.root, &origin.path, origin.unique);
+            // A direct loan can have become a reborrow parent while its
+            // temporary handle was transported through a wrapper.  Recompute
+            // its suspension after releasing the direct authority as well as
+            // the explicit parent below; otherwise a stale `suspended` bit
+            // rejects a later owner move after every concrete loan ended.
+            self.refresh_parent_suspension(origin.root);
         }
         if let Some(parent) = origin.parent {
             if origin.external || parent != origin.root {
