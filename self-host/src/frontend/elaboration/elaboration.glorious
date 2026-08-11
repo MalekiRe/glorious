@@ -722,6 +722,14 @@ pub enum ElaborationError {
     CyclicNominalType(usize, u32),
     InvalidResolvedExpression(usize, usize),
     TypeMismatch(usize, u32, u32),
+    // Native self-host investigation only.  The diagnostic carries both the
+    // selected enum instance and its instantiated payload as the compact
+    // TypeKind ABI tuple `(id, tag, a, b, c)`.
+    EnumPayloadInstantiationTrace(
+        usize,
+        u32, u8, u32, u32, u32,
+        u32, u8, u32, u32, u32
+    ),
     FloatLiteralUnsupported(usize),
     IntegerLiteralOutOfRange(usize, u32),
     UnexpectedExpressionToken(usize),
@@ -1845,6 +1853,10 @@ struct PlaceFlow {
 struct BodyContext {
     parameter_count: u32,
     next_source_local: u32,
+    // This is a one-shot native self-host diagnostic aid. It is threaded by
+    // the compiler driver only when its environment-gated command marker is
+    // present; ordinary source and VM compilation always leave it false.
+    enum_payload_expected_trace: Bool,
     place_flow: PlaceFlow,
     active_labels: Vec<ActiveLabelDestination>,
     core: CoreBuilder
@@ -1908,12 +1920,14 @@ new_core_builder(
 
 new_body_context(
     parameter_count: u32,
+    enum_payload_expected_trace: Bool,
     place_flow: PlaceFlow,
     local_types: IndexVec<CoreLocalTag, Option<TypeId>>
 ) -> BodyContext {
     BodyContext {
         parameter_count: parameter_count,
         next_source_local: 0,
+        enum_payload_expected_trace: enum_payload_expected_trace,
         place_flow: place_flow,
         active_labels: Vec::new(),
         core: new_core_builder(local_types)
@@ -3180,6 +3194,20 @@ pub interface_type_c_at(value: &TypedInterfaces, index: usize) -> u32 {
         },
         _ => 0
     }
+}
+
+type_trace_components(
+    interfaces: &TypedInterfaces,
+    ty: TypeId
+) -> (u32, u8, u32, u32, u32) {
+    let index = Id::to_usize(ty);
+    (
+        Id::to_u32(ty),
+        interface_type_tag_at(interfaces, index),
+        interface_type_a_at(interfaces, index),
+        interface_type_b_at(interfaces, index),
+        interface_type_c_at(interfaces, index)
+    )
 }
 
 pub interface_type_flags_at(value: &TypedInterfaces, index: usize) -> u32 {
@@ -11671,7 +11699,16 @@ elaborate_enum_payloads(
             instance,
             declared_payload_type
         );
-        let payload = try(elaborate_expression(
+        let payload_expression = super::bodies::expression_child_at(
+            body,
+            expression,
+            ordinal + 1
+        );
+        let payload_token = super::bodies::expression_token_start_at(
+            body,
+            payload_expression
+        );
+        let payload = handle elaborate_expression(
             original,
             headers,
             declarations,
@@ -11679,13 +11716,45 @@ elaborate_enum_payloads(
             body,
             map,
             value,
-            super::bodies::expression_child_at(
-                body,
-                expression,
-                ordinal + 1
-            ),
+            payload_expression,
             Option::Some(payload_type)
-        ), @elaborate_enum_payloads);
+        ) {
+            // When the native-only trace switch is on, preserve the exact
+            // payload-instantiation boundary in the ordinary TypeMismatch
+            // envelope. `expected` is the selected enum instance and `found`
+            // is the payload type calculated from it. This distinguishes a
+            // stale/wrong payload instantiation from failure to propagate the
+            // surrounding expected enum into `nominal_instance_for_expected`.
+            Result::Err(ElaborationError::TypeMismatch(
+                original_token,
+                original_expected,
+                original_found
+            )) => if(
+                value.enum_payload_expected_trace
+            ) {
+                let (instance_id, instance_tag, instance_a, instance_b, instance_c) =
+                    type_trace_components(&*interfaces, instance);
+                let (payload_id, payload_tag, payload_a, payload_b, payload_c) =
+                    type_trace_components(&*interfaces, payload_type);
+                @elaborate_enum_payloads(Result::Err(
+                    ElaborationError::EnumPayloadInstantiationTrace(
+                        payload_token,
+                        instance_id, instance_tag,
+                        instance_a, instance_b, instance_c,
+                        payload_id, payload_tag,
+                        payload_a, payload_b, payload_c
+                    )
+                ))
+            } else { @elaborate_enum_payloads(Result::Err(
+                ElaborationError::TypeMismatch(
+                    original_token,
+                    original_expected,
+                    original_found
+                )
+            )) },
+            Result::Err(error) => @elaborate_enum_payloads(Result::Err(error)),
+            Result::Ok(found) => found
+        };
         let operand = embed_operand(&mut value.core, payload);
         Vec::push(&mut *fields, ConstructionField {
             field: ordinal,
@@ -14674,7 +14743,8 @@ pub elaborate_function_instance_body(
     interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
     resolved: &super::resolution::ResolvedBody,
-    instance: CallableInstanceId
+    instance: CallableInstanceId,
+    enum_payload_expected_trace: Bool
 ) -> Result<TypedBody, ElaborationError> {
     let shell = super::bodies::body_shell(body);
     let callable = callable_instance_callable(interfaces, instance);
@@ -14691,6 +14761,7 @@ pub elaborate_function_instance_body(
                 callable_instance_parameter_count(interfaces, instance);
             let builder = new_body_context(
                 parameter_count,
+                enum_payload_expected_trace,
                 build_place_flow(
                     body,
                     resolved,
@@ -14720,6 +14791,7 @@ pub elaborate_function_instance_body(
             let BodyContext {
                 parameter_count: _,
                 next_source_local: _,
+                enum_payload_expected_trace: _,
                 place_flow: _,
                 active_labels: _,
                 core
@@ -14801,7 +14873,8 @@ pub elaborate_function_body(
                 interfaces,
                 body,
                 resolved,
-                instance
+                instance,
+                false
             )
         }
     }

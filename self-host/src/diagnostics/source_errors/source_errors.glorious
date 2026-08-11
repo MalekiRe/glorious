@@ -884,6 +884,9 @@ elaboration_local_code(error: &ElaborationError) -> u32 {
         ElaborationError::CyclicNominalType(_, _) => 24,
         ElaborationError::InvalidResolvedExpression(_, _) => 25,
         ElaborationError::TypeMismatch(_, _, _) => 3,
+        ElaborationError::EnumPayloadInstantiationTrace(
+            _, _, _, _, _, _, _, _, _, _, _
+        ) => 3,
         ElaborationError::FloatLiteralUnsupported(_) => 2,
         ElaborationError::IntegerLiteralOutOfRange(_, _) => 5,
         ElaborationError::UnexpectedExpressionToken(_) => 26,
@@ -920,6 +923,9 @@ elaboration_arguments(error: &ElaborationError) -> (u32, u32) {
         ElaborationError::CyclicNominalType(_, nominal) => (nominal, nominal),
         ElaborationError::TypeMismatch(_, expected, found) =>
             (expected, found),
+        ElaborationError::EnumPayloadInstantiationTrace(
+            _, instance, _, _, _, _, payload, _, _, _, _
+        ) => (instance, payload),
         ElaborationError::IntegerLiteralOutOfRange(_, ty) => (ty, ty),
         ElaborationError::MissingCallableInterface(_, shell) =>
             (0, Id::to_u32(shell)),
@@ -1185,6 +1191,14 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
+        ElaborationError::EnumPayloadInstantiationTrace(
+            token, _, _, _, _, _, _, _, _, _, _
+        ) => token_argument_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
         ElaborationError::FloatLiteralUnsupported(token) => token_shape(
             DiagnosticClass::Type,
             token,
@@ -1376,11 +1390,60 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
     }
 }
 
-elaboration_message(phase: DiagnosticPhase) -> String {
-    if(phase is DiagnosticPhase::InterfaceCollection) {
+enum_payload_trace_message(
+    instance_id: u32,
+    instance_tag: u8,
+    instance_a: u32,
+    instance_b: u32,
+    instance_c: u32,
+    payload_id: u32,
+    payload_tag: u8,
+    payload_a: u32,
+    payload_b: u32,
+    payload_c: u32
+) -> String {
+    let output = Formatter::new();
+    Formatter::literal(&mut output, &"self-host compiler: enum payload trace; instance=(id=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(instance_id));
+    Formatter::literal(&mut output, &", tag=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(instance_tag));
+    Formatter::literal(&mut output, &", a=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(instance_a));
+    Formatter::literal(&mut output, &", b=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(instance_b));
+    Formatter::literal(&mut output, &", c=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(instance_c));
+    Formatter::literal(&mut output, &"); payload=(id=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(payload_id));
+    Formatter::literal(&mut output, &", tag=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(payload_tag));
+    Formatter::literal(&mut output, &", a=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(payload_a));
+    Formatter::literal(&mut output, &", b=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(payload_b));
+    Formatter::literal(&mut output, &", c=");
+    Formatter::append_u64(&mut output, wrapping_convert_to_u64(payload_c));
+    Formatter::literal(&mut output, &")");
+    handle Formatter::finish(output) {
+        Result::Ok(found) => found,
+        Result::Err(_) => "self-host compiler: enum payload trace rendering failed"
+    }
+}
+
+elaboration_message(phase: DiagnosticPhase, error: &ElaborationError) -> String {
+    handle *error {
+        ElaborationError::EnumPayloadInstantiationTrace(
+            _, instance_id, instance_tag, instance_a, instance_b, instance_c,
+            payload_id, payload_tag, payload_a, payload_b, payload_c
+        ) => enum_payload_trace_message(
+            instance_id, instance_tag, instance_a, instance_b, instance_c,
+            payload_id, payload_tag, payload_a, payload_b, payload_c
+        ),
+        _ => if(phase is DiagnosticPhase::InterfaceCollection) {
         "self-host compiler: interface collection failed"
     } else {
         "self-host compiler: body elaboration failed"
+    }
     }
 }
 
@@ -1392,7 +1455,7 @@ pub elaboration_diagnostic(
     make_frontend_diagnostic(
         phase,
         elaboration_local_code(error),
-        elaboration_message(phase),
+        elaboration_message(phase, error),
         owner_from_shell(shell),
         elaboration_shape(error)
     )

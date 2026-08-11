@@ -19,6 +19,13 @@ typedef struct {
 
 static int g1_process_argc;
 static char **g1_process_argv;
+static int g1_self_host_enum_payload_trace;
+
+/* Kept out of the normal program argv. The self-host driver recognizes this
+ * synthetic final argument only when the explicit debugging environment is
+ * set, so bytecode and ordinary native compiler output remain unchanged. */
+static const char g1_self_host_enum_payload_trace_argument[] =
+    "--g1-self-host-enum-payload-trace";
 
 enum {
     G1_HOST_FAULT_PROCESS_ARGS = 1,
@@ -132,10 +139,13 @@ static char *g1_host_path(G1Bytes *path) {
 void g1_host_process_init(int argc, char **argv) {
     g1_process_argc = argc > 0 ? argc - 1 : 0;
     g1_process_argv = argc > 0 ? argv + 1 : argv;
+    g1_self_host_enum_payload_trace =
+        getenv("G1_SELF_HOST_ENUM_PAYLOAD_TRACE") != NULL;
 }
 
 G1Array *g1_host_process_args_get(void) {
-    size_t length = (size_t)g1_process_argc;
+    size_t length = (size_t)g1_process_argc +
+        (size_t)g1_self_host_enum_payload_trace;
     G1Array *array = malloc(sizeof(G1Array));
     if (array == NULL) {
         return NULL;
@@ -163,9 +173,12 @@ G1Array *g1_host_process_args_get(void) {
     array->data = elements;
     array->initialized = initialized;
     for (size_t index = 0; index < length; ++index) {
-        size_t argument_length = strlen(g1_process_argv[index]);
+        const char *argument_text = index < (size_t)g1_process_argc
+            ? g1_process_argv[index]
+            : g1_self_host_enum_payload_trace_argument;
+        size_t argument_length = strlen(argument_text);
         if (!g1_host_utf8_valid(
-                (const unsigned char *)g1_process_argv[index],
+                (const unsigned char *)argument_text,
                 argument_length)) {
             for (size_t initialized_index = 0; initialized_index < index;
                  ++initialized_index) {
@@ -187,7 +200,7 @@ G1Array *g1_host_process_args_get(void) {
             free(array);
             return NULL;
         }
-        memcpy(argument->data, g1_process_argv[index], argument_length);
+        memcpy(argument->data, argument_text, argument_length);
         elements[index] = argument;
         initialized[index] = 1;
         array->length = index + 1;
