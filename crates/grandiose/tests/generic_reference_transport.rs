@@ -904,7 +904,7 @@ fn higher_order_selected_lifetime_cannot_escape_or_alias_its_owner() {
         (
             "higher-order-lifetime-opaque-route.glorious",
             opaque_route,
-            "exactly one compatible reference",
+            "select exactly one compatible parameter",
         ),
     ] {
         for optimization_level in [
