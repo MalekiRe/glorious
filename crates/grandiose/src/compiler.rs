@@ -6528,6 +6528,140 @@ fn bind_runtime_manifest(
     }
 }
 
+/// Direct source-level callable references for one immutable program snapshot.
+///
+/// Both specialization discovery and final emission reachability need the same
+/// transitive closure, but they have different roots and operate before/after
+/// nominal instantiation.  Record each body's direct edges once per snapshot;
+/// closure expansion below then never needs to revisit expression trees.
+type FunctionDependencyGraph = BTreeMap<String, BTreeSet<String>>;
+
+fn collect_function_dependencies(expression: &Expr, found: &mut BTreeSet<String>) {
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match &expression.kind {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                for statement in statements.iter() {
+                    match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => pending.push(value),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => {
+                            pending.push(value);
+                            if let AssignmentPlaceKind::Dereference { reference, .. } =
+                                &destination.kind
+                            {
+                                pending.push(reference);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
+            ExprKind::Struct { fields, .. } => {
+                pending.extend(fields.iter().map(|(_, value)| value));
+            }
+            ExprKind::Field(subject, _)
+            | ExprKind::Move(subject)
+            | ExprKind::Unary {
+                operand: subject, ..
+            } => pending.push(subject),
+            ExprKind::Call(callee, arguments) => {
+                pending.push(callee);
+                pending.extend(arguments.iter());
+            }
+            ExprKind::Perform { args, .. } => pending.extend(args.iter()),
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                pending.push(computation);
+                pending.extend(clauses.iter().map(|clause| &clause.body));
+            }
+            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                pending.push(body)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                pending.push(lhs);
+                pending.push(rhs);
+            }
+            ExprKind::LabelDestination { body, .. } => pending.push(body),
+            ExprKind::Is { subject, .. } => pending.push(subject),
+            ExprKind::Variable(path) => {
+                if let [name] = path.as_ref() {
+                    found.insert(name.to_string());
+                }
+            }
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::String(_) => {}
+            ExprKind::LabelReference(_) => {}
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                pending.push(resumption);
+                pending.extend(value.iter().map(AsRef::as_ref));
+            }
+            ExprKind::Cancel { resumption } => pending.push(resumption),
+        }
+    }
+}
+
+fn function_dependency_graph(program: &Program) -> FunctionDependencyGraph {
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            let mut dependencies = BTreeSet::new();
+            collect_function_dependencies(&function.body, &mut dependencies);
+            (function.name.clone(), dependencies)
+        })
+        .collect()
+}
+
+fn close_function_dependencies(
+    names: &mut BTreeSet<String>,
+    dependencies: &FunctionDependencyGraph,
+) {
+    let mut pending = names.iter().cloned().collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        let Some(edges) = dependencies.get(&name) else {
+            continue;
+        };
+        for dependency in edges {
+            if names.insert(dependency.clone()) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+}
+
+fn extend_deferred_trait_families(
+    names: &mut BTreeSet<String>,
+    functions_by_name: &BTreeMap<&str, &Function>,
+) {
+    for deferred in names.clone() {
+        let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
+            continue;
+        };
+        let Some((trait_name, method)) = rest.rsplit_once('$') else {
+            continue;
+        };
+        let prefix = format!("$trait${trait_name}$");
+        let suffix = format!("${method}");
+        names.extend(
+            functions_by_name
+                .keys()
+                .filter(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
+                .map(|name| (*name).to_owned()),
+        );
+    }
+}
+
 fn compile_program_with_phases(
     program: &Program,
     manifest: &TrustedTraitManifest,
@@ -6635,6 +6769,7 @@ fn compile_program_with_phases(
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect::<BTreeMap<_, _>>();
+    let dependency_graph = function_dependency_graph(program);
     let mut discovery_names = program
         .functions
         .iter()
@@ -6652,44 +6787,9 @@ fn compile_program_with_phases(
     for drop in &program.drops {
         collect_function_dependencies(&drop.body, &mut discovery_names);
     }
-    loop {
-        let before = discovery_names.len();
-        for name in discovery_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut discovery_names);
-            }
-        }
-        if discovery_names.len() == before {
-            break;
-        }
-    }
-    for deferred in discovery_names.clone() {
-        let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
-            continue;
-        };
-        let Some((trait_name, method)) = rest.rsplit_once('$') else {
-            continue;
-        };
-        let prefix = format!("$trait${trait_name}$");
-        let suffix = format!("${method}");
-        discovery_names.extend(
-            functions_by_name
-                .keys()
-                .filter(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
-                .map(|name| (*name).to_owned()),
-        );
-    }
-    loop {
-        let before = discovery_names.len();
-        for name in discovery_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut discovery_names);
-            }
-        }
-        if discovery_names.len() == before {
-            break;
-        }
-    }
+    close_function_dependencies(&mut discovery_names, &dependency_graph);
+    extend_deferred_trait_families(&mut discovery_names, &functions_by_name);
+    close_function_dependencies(&mut discovery_names, &dependency_graph);
     let discovery_roots = discovery_names
         .into_iter()
         .map(typeck::DeclarationKey::Function)
@@ -6756,87 +6856,12 @@ fn compile_program_with_phases(
     timings.mark("instantiate-and-reject-subset");
     let program = &normalized_program;
     timings.mark("normalize-discover");
-    fn collect_function_dependencies(expression: &Expr, found: &mut BTreeSet<String>) {
-        let mut pending = vec![expression];
-        while let Some(expression) = pending.pop() {
-            match &expression.kind {
-                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                    for statement in statements.iter() {
-                        match statement {
-                            Stmt::Let { value, .. }
-                            | Stmt::Deconstruct { value, .. }
-                            | Stmt::Expr(value) => pending.push(value),
-                            Stmt::Assign {
-                                destination, value, ..
-                            } => {
-                                pending.push(value);
-                                if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                    &destination.kind
-                                {
-                                    pending.push(reference);
-                                }
-                            }
-                        }
-                    }
-                }
-                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
-                ExprKind::Struct { fields, .. } => {
-                    pending.extend(fields.iter().map(|(_, value)| value));
-                }
-                ExprKind::Field(subject, _)
-                | ExprKind::Move(subject)
-                | ExprKind::Unary {
-                    operand: subject, ..
-                } => pending.push(subject),
-                ExprKind::Call(callee, arguments) => {
-                    pending.push(callee);
-                    pending.extend(arguments.iter());
-                }
-                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::Handle {
-                    computation,
-                    clauses,
-                } => {
-                    pending.push(computation);
-                    pending.extend(clauses.iter().map(|clause| &clause.body));
-                }
-                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                    pending.push(body)
-                }
-                ExprKind::Binary { lhs, rhs, .. } => {
-                    pending.push(lhs);
-                    pending.push(rhs);
-                }
-                ExprKind::LabelDestination { body, .. } => pending.push(body),
-                ExprKind::Is { subject, .. } => pending.push(subject),
-                ExprKind::Variable(path) => {
-                    if let [name] = path.as_ref() {
-                        found.insert(name.to_string());
-                    }
-                }
-                ExprKind::Unit
-                | ExprKind::Int(_)
-                | ExprKind::Float(_)
-                | ExprKind::Char(_)
-                | ExprKind::Byte(_)
-                | ExprKind::ByteString(_)
-                | ExprKind::String(_) => {}
-                ExprKind::LabelReference(_) => {}
-                ExprKind::Resume { resumption, value }
-                | ExprKind::TailResume { resumption, value } => {
-                    pending.push(resumption);
-                    pending.extend(value.iter().map(AsRef::as_ref));
-                }
-                ExprKind::Cancel { resumption } => pending.push(resumption),
-            }
-        }
-    }
-
     let functions_by_name = program
         .functions
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect::<BTreeMap<_, _>>();
+    let dependency_graph = function_dependency_graph(program);
     let mut retained_names = program
         .functions
         .iter()
@@ -6857,48 +6882,13 @@ fn compile_program_with_phases(
     for drop in &program.drops {
         collect_function_dependencies(&drop.body, &mut retained_names);
     }
-    loop {
-        let before = retained_names.len();
-        for name in retained_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut retained_names);
-            }
-        }
-        if retained_names.len() == before {
-            break;
-        }
-    }
+    close_function_dependencies(&mut retained_names, &dependency_graph);
     // Deferred generic trait calls become ordinary specialization requests
     // once their enclosing specialization grounds the receiver. Retain the
     // finite coherent implementation family as a fail-closed Core fallback
     // for symbolic or ambiguous sites; reachability alone authorizes no match.
-    for deferred in retained_names.clone() {
-        let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
-            continue;
-        };
-        let Some((trait_name, method)) = rest.rsplit_once('$') else {
-            continue;
-        };
-        let prefix = format!("$trait${trait_name}$");
-        let suffix = format!("${method}");
-        retained_names.extend(
-            functions_by_name
-                .keys()
-                .filter(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
-                .map(|name| (*name).to_owned()),
-        );
-    }
-    loop {
-        let before = retained_names.len();
-        for name in retained_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut retained_names);
-            }
-        }
-        if retained_names.len() == before {
-            break;
-        }
-    }
+    extend_deferred_trait_families(&mut retained_names, &functions_by_name);
+    close_function_dependencies(&mut retained_names, &dependency_graph);
     retained_names.retain(|name| functions_by_name.contains_key(name.as_str()));
     let mut retained_sources = retained_names
         .into_iter()
@@ -48836,9 +48826,15 @@ impl MirLowerer {
             Kind::TemporaryProjectBorrow { source, .. }
             | Kind::LabelDestination { body: source, .. }
             | Kind::Leave { value: source, .. }
-            | Kind::PatternTest { subject: source, .. }
-            | Kind::Project { subject: source, .. }
-            | Kind::Cancel { resumption: source } => Self::contains_reborrow_of_local(source, local),
+            | Kind::PatternTest {
+                subject: source, ..
+            }
+            | Kind::Project {
+                subject: source, ..
+            }
+            | Kind::Cancel { resumption: source } => {
+                Self::contains_reborrow_of_local(source, local)
+            }
             Kind::Call { args, .. }
             | Kind::TailCall { args, .. }
             | Kind::CallSelf { args }
@@ -48852,9 +48848,9 @@ impl MirLowerer {
             | Kind::TailCallKnownReceiver { receiver, args, .. } => {
                 Self::contains_reborrow_of_local(receiver, local) || any(args)
             }
-            Kind::ControlLoop { initial_args, body, .. } => {
-                any(initial_args) || Self::contains_reborrow_of_local(body, local)
-            }
+            Kind::ControlLoop {
+                initial_args, body, ..
+            } => any(initial_args) || Self::contains_reborrow_of_local(body, local),
             Kind::CallIndirect { callable, args, .. }
             | Kind::TailCallIndirect { callable, args, .. } => {
                 Self::contains_reborrow_of_local(callable, local) || any(args)
@@ -49917,9 +49913,8 @@ impl MirLowerer {
                             self.transfer_owner(owner);
                         }
                     }
-                    let (destination, _) = *join.get_or_insert_with(|| {
-                        (self.label(), self.allocate(match_result))
-                    });
+                    let (destination, _) =
+                        *join.get_or_insert_with(|| (self.label(), self.allocate(match_result)));
                     self.terminate(mir::Terminator::Goto(mir::Edge {
                         target: destination,
                         args: vec![Self::operand(handler_result, mir::UseMode::Move)],
@@ -49961,9 +49956,8 @@ impl MirLowerer {
                     self.transfer_owner(owner);
                 }
             }
-            let (destination, _) = *join.get_or_insert_with(|| {
-                (self.label(), self.allocate(match_result))
-            });
+            let (destination, _) =
+                *join.get_or_insert_with(|| (self.label(), self.allocate(match_result)));
             self.terminate(mir::Terminator::Goto(mir::Edge {
                 target: destination,
                 args: vec![Self::operand(value, mir::UseMode::Move)],
@@ -52665,7 +52659,10 @@ impl MirLowerer {
                     .unique_reference_types
                     .values()
                     .any(|ty| *ty == expression.ty)
-                    || expression.reference.as_ref().is_some_and(|origin| origin.unique);
+                    || expression
+                        .reference
+                        .as_ref()
+                        .is_some_and(|origin| origin.unique);
                 if *copy {
                     self.push(
                         expression.span,
@@ -53167,15 +53164,13 @@ impl MirLowerer {
                             .values()
                             .any(|reference| *reference == argument.ty);
                         let dependent_unique_reborrow = match &argument.kind {
-                            core::ExprKind::Local { local, copy: false } => argument
-                                .reference
-                                .as_ref()
-                                .is_some_and(|origin| {
+                            core::ExprKind::Local { local, copy: false } => {
+                                argument.reference.as_ref().is_some_and(|origin| {
                                     origin.unique && origin.root == *local && origin.path.is_empty()
-                                })
-                                && args[index + 1..].iter().any(|later| {
-                                    Self::contains_reborrow_of_local(later, *local)
-                                }),
+                                }) && args[index + 1..]
+                                    .iter()
+                                    .any(|later| Self::contains_reborrow_of_local(later, *local))
+                            }
                             _ => false,
                         };
                         (matches!(argument.kind, core::ExprKind::Local { copy: false, .. })
@@ -55739,7 +55734,9 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 target = next as usize;
             }
             if target < folded.len() {
-                folded[pc] = Instruction::Jump { target: target as u32 };
+                folded[pc] = Instruction::Jump {
+                    target: target as u32,
+                };
             }
         }
         // A switch case that reaches its `otherwise` successor cannot change
@@ -55792,7 +55789,9 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             }
             match &folded[pc] {
                 Instruction::Jump { target } => pending.push(*target as usize),
-                Instruction::Switch { cases, otherwise, .. } => {
+                Instruction::Switch {
+                    cases, otherwise, ..
+                } => {
                     pending.push(*otherwise as usize);
                     pending.extend(cases.iter().map(|(_, target)| *target as usize));
                 }
@@ -57575,8 +57574,7 @@ mod mir_edge_emission_tests {
         Constant, Instruction, MirBuilderItem, MirLowerer, Primitive, Span,
         compact_artifact_registers_after_peephole, constant_key, emit_mir_function,
         layout_and_peephole, layout_and_peephole_with_maps, layout_mir_blocks, mir,
-        prune_unused_constants,
-        serialize_mir_cleanup_plans,
+        prune_unused_constants, serialize_mir_cleanup_plans,
     };
 
     #[test]
@@ -58656,10 +58654,10 @@ mod mir_edge_emission_tests {
             label_slot_count: 0,
         });
         assert!(
-            !emitted.code.iter().any(|instruction| matches!(
-                instruction,
-                Instruction::Move { dst: 3, src: 2 }
-            )),
+            !emitted
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::Move { dst: 3, src: 2 })),
             "a dead switch must not append a synthetic edge transfer"
         );
         let program = mir::Program {
@@ -59117,7 +59115,10 @@ mod mir_edge_emission_tests {
         let mut artifact = Artifact {
             constants: vec![Constant::I64(7)],
             code: vec![
-                Instruction::Const { dst: 2, constant: 0 },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
                 Instruction::Move { dst: 3, src: 2 },
                 Instruction::Return { src: Some(1) },
             ],
@@ -59151,7 +59152,10 @@ mod mir_edge_emission_tests {
         let mut artifact = Artifact {
             constants: vec![Constant::I64(7)],
             code: vec![
-                Instruction::Const { dst: 2, constant: 0 },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
                 Instruction::Move { dst: 3, src: 2 },
                 Instruction::Return { src: Some(1) },
                 Instruction::Nop,
@@ -59429,7 +59433,10 @@ mod mir_edge_emission_tests {
         let mut artifact = Artifact::default();
         artifact.constants = vec![Constant::I64(7), Constant::I64(7)];
         artifact.code = vec![
-            Instruction::Const { dst: 1, constant: 1 },
+            Instruction::Const {
+                dst: 1,
+                constant: 1,
+            },
             Instruction::Return { src: Some(1) },
         ];
         artifact.functions.push(BytecodeFunction {
@@ -59447,9 +59454,18 @@ mod mir_edge_emission_tests {
 
         assert!(prune_unused_constants(&mut artifact));
         assert_eq!(artifact.constants, vec![Constant::I64(7)]);
-        assert_eq!(artifact.code[0], Instruction::Const { dst: 1, constant: 0 });
+        assert_eq!(
+            artifact.code[0],
+            Instruction::Const {
+                dst: 1,
+                constant: 0
+            }
+        );
         let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
-        assert_eq!(Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(), Value::I64(7));
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(7)
+        );
     }
 
     #[test]
@@ -59457,8 +59473,14 @@ mod mir_edge_emission_tests {
         let mut artifact = Artifact::default();
         artifact.constants = vec![Constant::F32(0.0), Constant::F32(-0.0)];
         artifact.code = vec![
-            Instruction::Const { dst: 1, constant: 0 },
-            Instruction::Const { dst: 2, constant: 1 },
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 2,
+                constant: 1,
+            },
             Instruction::Return { src: Some(2) },
         ];
         artifact.functions.push(BytecodeFunction {
@@ -59477,8 +59499,7 @@ mod mir_edge_emission_tests {
         assert!(!prune_unused_constants(&mut artifact));
         assert_eq!(artifact.constants.len(), 2);
         let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
-        let Value::F32(result) = Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap()
-        else {
+        let Value::F32(result) = Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap() else {
             panic!("signed-zero function returned a non-f32 value")
         };
         assert_eq!(result.to_bits(), (-0.0_f32).to_bits());
@@ -59515,12 +59536,7 @@ mod mir_edge_emission_tests {
 
         assert!(layout_and_peephole(&mut artifact));
         assert_eq!(artifact.functions[0].code_len, 1);
-        assert_eq!(
-            artifact.code,
-            [
-                Instruction::Return { src: None },
-            ]
-        );
+        assert_eq!(artifact.code, [Instruction::Return { src: None },]);
         let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
         assert_eq!(
             Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
@@ -60579,4 +60595,58 @@ fn unsupported(span: Span, title: &str, message: impl Into<String>) -> Diagnosti
 
 fn type_error(span: Span, message: impl Into<String>) -> Diagnostic {
     Diagnostic::error("bytecode subset type error", message, span).with_code(TYPE_CODE)
+}
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+
+    fn parse_program(source: &str) -> Program {
+        crate::parser::parse(crate::lexer::lex(source).expect("source lexes"))
+            .expect("source parses")
+    }
+
+    #[test]
+    fn dependency_graph_preserves_nested_source_calls_in_the_reachable_set() {
+        let program = parse_program(
+            "entry() -> i64 { let callback = () -> i64 { leaf() }; callback() }\n\
+             leaf() -> i64 { 42 }\n\
+             unused() -> i64 { 0 }",
+        );
+        let graph = function_dependency_graph(&program);
+        let mut reachable = BTreeSet::from(["entry".to_owned()]);
+
+        close_function_dependencies(&mut reachable, &graph);
+        reachable.retain(|name| graph.contains_key(name));
+
+        assert_eq!(
+            reachable,
+            BTreeSet::from(["entry".to_owned(), "leaf".to_owned()])
+        );
+    }
+
+    #[test]
+    fn deferred_trait_family_expansion_keeps_only_the_matching_method_family() {
+        let mut program =
+            parse_program("first() -> () { () }\nsecond() -> () { () }\nthird() -> () { () }");
+        program.functions[0].name = "$trait$Display$show".to_owned();
+        program.functions[1].name = "$trait$Display$debug".to_owned();
+        program.functions[2].name = "$trait$Other$show".to_owned();
+        let functions_by_name = program
+            .functions
+            .iter()
+            .map(|function| (function.name.as_str(), function))
+            .collect::<BTreeMap<_, _>>();
+        let mut reachable = BTreeSet::from(["$trait_deferred$Display$show".to_owned()]);
+
+        extend_deferred_trait_families(&mut reachable, &functions_by_name);
+
+        assert_eq!(
+            reachable,
+            BTreeSet::from([
+                "$trait_deferred$Display$show".to_owned(),
+                "$trait$Display$show".to_owned(),
+            ])
+        );
+    }
 }
