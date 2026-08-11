@@ -130,7 +130,16 @@ verify_canonical_source() {
 build_native() {
     initialize
     command -v wild >/dev/null || { echo "self-host-native: Wild linker is required" >&2; exit 1; }
-    "$route_root/tooling/ram-gate.sh" cargo build --release -p grandiose --bin grc
+    # This tool can be invoked from a parent stage runner whose working
+    # directory is a different checkout.  Cargo selects its target directory
+    # from the working directory, so run it explicitly from this route's
+    # immutable worktree.  In particular, a detached stage-one snapshot must
+    # never accidentally build its bootstrap compiler into the live checkout
+    # and then look for it below the snapshot.
+    (
+        cd -- "$route_root"
+        "$route_root/tooling/ram-gate.sh" cargo build --release -p grandiose --bin grc
+    )
     local fingerprint
     fingerprint="$(native_fingerprint)"
     if [[ -x "$route_binary" && -f "$route_fingerprint" ]] && \

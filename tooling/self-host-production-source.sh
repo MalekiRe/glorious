@@ -78,7 +78,14 @@ materialize() {
             echo "self-host-production-source: bootstrap compiler is not executable: $grc" >&2
             exit 2
         }
-        "$repo_root/tooling/ram-gate.sh" cargo build --release -p grandiose --bin grc
+        # The helper is called by the snapshot-native route through an
+        # absolute path.  Do not let Cargo inherit a caller's (possibly live
+        # checkout) directory: the requested compiler lives in this helper's
+        # repository and must be built there.
+        (
+            cd -- "$repo_root"
+            "$repo_root/tooling/ram-gate.sh" cargo build --release -p grandiose --bin grc
+        )
     fi
     [[ -x "$grc" ]] || { echo "self-host-production-source: bootstrap compiler was not built: $grc" >&2; exit 1; }
 
