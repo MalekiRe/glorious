@@ -776,6 +776,10 @@ fn compile_loaded(
             }
         };
         let native_host = if kind == EmitKind::Executable {
+            if let Err(error) = require_wild_linker() {
+                let _ = writeln!(stderr, "grc: error: {error}");
+                return 1;
+            }
             match TemporaryNativeHost::create(&output) {
                 Ok(host) => Some(host),
                 Err(error) => {
@@ -793,6 +797,7 @@ fn compile_loaded(
         clang.arg("-x").arg("ir").arg("-");
         if let Some(native_host) = &native_host {
             clang.arg("-x").arg("c").arg(&native_host.path);
+            configure_wild_linking(&mut clang);
         }
         clang
             .arg(clang_optimization_flag(command.optimization_level))
@@ -875,6 +880,38 @@ fn clang_optimization_flag(level: OptimizationLevel) -> &'static str {
         OptimizationLevel::O2 => "-O2",
         OptimizationLevel::O3 => "-O3",
     }
+}
+
+/// Ensure executable emission cannot silently fall back to the platform
+/// linker. Wild is intentionally a required part of the native executable
+/// path; object emission remains a Clang-only compilation step.
+fn require_wild_linker() -> Result<(), String> {
+    match ProcessCommand::new("wild")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "Wild linker is required for `--emit executable`, but `wild --version` exited with {status}; install `wild-linker` and ensure `wild` is on PATH"
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(
+            "Wild linker is required for `--emit executable`, but `wild` was not found on PATH; install `wild-linker` and ensure `wild` is on PATH".into(),
+        ),
+        Err(error) => Err(format!(
+            "Wild linker is required for `--emit executable`, but `wild` could not be started: {error}"
+        )),
+    }
+}
+
+/// Clang remains responsible for compiling generated LLVM IR and the bundled
+/// C runtime, while Wild owns the final native link. `--ld-path` is Clang's
+/// direct linker-path option and avoids the `ld.wild` symlink required by
+/// `-fuse-ld=wild`.
+fn configure_wild_linking(clang: &mut ProcessCommand) {
+    clang.arg("--ld-path=wild");
 }
 
 #[derive(Deserialize)]
@@ -1785,5 +1822,21 @@ mod tests {
         assert_eq!(clang_optimization_flag(OptimizationLevel::O1), "-O1");
         assert_eq!(clang_optimization_flag(OptimizationLevel::O2), "-O2");
         assert_eq!(clang_optimization_flag(OptimizationLevel::O3), "-O3");
+    }
+
+    #[test]
+    fn native_executable_linking_routes_clang_through_wild_only() {
+        let mut executable = ProcessCommand::new("clang");
+        configure_wild_linking(&mut executable);
+        let executable_args = executable
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(executable_args, ["--ld-path=wild"]);
+
+        // `--emit llvm-object` must remain a compile-only Clang path, so it
+        // never receives final-linker arguments.
+        let object = ProcessCommand::new("clang");
+        assert!(object.get_args().next().is_none());
     }
 }
