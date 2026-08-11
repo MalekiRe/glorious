@@ -2219,6 +2219,7 @@ fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
         "closure_captures_are_ordered",
         "push_closure_value",
         "push_indirect_call",
+        "Result::Ok(finish_computation(",
         "CoreValueView::Closure",
         "CoreComputationView::CallIndirect",
         "interface_callable_signature_effect_tail",

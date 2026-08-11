@@ -10541,14 +10541,14 @@ elaborate_indirect_call(
     }}), @elaborate_indirect_call);
     let result = callable_signature_result_at(&*interfaces, signature);
     try(check_expected_type(result, expected, token), @elaborate_indirect_call);
-    finish_computation(
+    Result::Ok(finish_computation(
         &mut value.core,
         result,
         push_indirect_call(
             &mut value.core, result, callee_value, signature, &operands
         ),
         &lets
-    )
+    ))
 }
 
 elaborate_call(
