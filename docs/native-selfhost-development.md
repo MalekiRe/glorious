@@ -113,6 +113,24 @@ The runner must not silently fall back to VM execution when its native artifact
 is absent or incompatible. It should reseed/rebuild the private cache or emit
 a diagnostic explaining why native compilation cannot proceed.
 
+### Native staged convergence evidence
+
+`tooling/self-host-native-convergence.sh` is the native-only convergence
+checker. It takes a stage-1 and a stage-2 **native executable**, their checked
+provenance manifests, and the canonical compiler source. Each manifest binds
+the executable SHA-256, source SHA-256, `optimization=O3`, and `linker=wild`;
+the stage-2 manifest additionally binds the SHA-256 of the bytecode compiler
+artifact it represents. The checker runs stage 1 to emit `stage2.grbc`, refuses
+a stale or unrelated stage-2 native executable, then runs stage 2 to emit
+`stage3.grbc`.
+
+It keeps its output directory on every outcome. `metadata.tsv` records exact
+artifact hashes, sizes, statuses, and result. A failed comparison also writes
+`stage2-stage3.diff` with both SHA-256 values and the first differing byte
+offsets. It reports `CONVERGED` only after `cmp -s` has verified the complete
+artifact bytes; there is no VM runner, bytecode-execution fallback, or
+lower-optimization fallback in this path.
+
 The VM bytecode runner remains mandatory for:
 
 - bootstrap bytecode conformance;
