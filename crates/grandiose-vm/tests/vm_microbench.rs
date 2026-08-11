@@ -311,6 +311,68 @@ fn tuple_construct_project_program() -> Artifact {
     }
 }
 
+/// Repeatedly builds and destroys a two-field refinement binding pack.  The
+/// self-host compiler uses these records to carry inferred local bindings, so
+/// this isolates operand-list iteration and aggregate field materialization.
+fn binding_pack_program() -> Artifact {
+    let mut types = Type::predefined();
+    types.push(
+        Type::Tuple {
+            fields: vec![I64, I64],
+            copy: false,
+        }
+        .restricted(false, true),
+    );
+    types.push(
+        Type::BindingPack {
+            payload_type: 19,
+            identity_name: "microbench bindings".into(),
+            copy: false,
+        }
+        .restricted(false, true),
+    );
+    let mut code = Vec::with_capacity(INNER_OPS * 4 + 2);
+    for _ in 0..INNER_OPS {
+        code.extend([
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 2,
+                constant: 1,
+            },
+            Instruction::MakeBindingPack {
+                dst: 3,
+                binding_type: 20,
+                payloads: vec![1, 2],
+            },
+            Instruction::Drop { register: 3 },
+        ]);
+    }
+    code.extend([
+        Instruction::Const {
+            dst: 4,
+            constant: 2,
+        },
+        Instruction::Return { src: Some(4) },
+    ]);
+    Artifact {
+        types,
+        constants: vec![Constant::I64(1), Constant::I64(2), Constant::Unit],
+        functions: vec![function(
+            "main",
+            vec![],
+            UNIT,
+            vec![UNIT, I64, I64, 20, UNIT],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
 #[test]
 #[ignore = "run explicitly in release mode; reports VM run throughput"]
 fn vm_execution_microbenchmarks() {
@@ -319,7 +381,11 @@ fn vm_execution_microbenchmarks() {
         arithmetic_register_program(),
         Value::I64(INNER_OPS as i64),
     );
-    measure("signed_comparison", signed_comparison_program(), Value::U64(1));
+    measure(
+        "signed_comparison",
+        signed_comparison_program(),
+        Value::U64(1),
+    );
     measure("branch_jump", branch_jump_program(), Value::I64(7));
     measure("direct_call", direct_call_program(), Value::I64(1));
     measure(
@@ -332,4 +398,5 @@ fn vm_execution_microbenchmarks() {
         tuple_construct_project_program(),
         Value::I64(1),
     );
+    measure("binding_pack", binding_pack_program(), Value::Unit);
 }
