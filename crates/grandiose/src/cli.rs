@@ -11,21 +11,21 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, OptimizationLevel,
     artifact_llvm::emit_artifact_llvm_ir,
     compile_bundle_to_phases_with_options,
     compiler_session::CompilationDriver,
     diagnostic::{Diagnostic, Severity},
     emit_llvm_ir, emit_llvm_native_object_units,
-    interface::{InterfaceSelection, scan_interfaces},
+    interface::{scan_interfaces, InterfaceSelection},
     lexer,
     llvm_backend::{
-        DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_NATIVE_OBJECT_PARTITION_SCHEMA, LlvmOptions,
+        LlvmOptions, DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_NATIVE_OBJECT_PARTITION_SCHEMA,
     },
     source_bundle::{Segment, SourceBundle},
+    CompileOptions, OptimizationLevel,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-incremental-cache DIR  durable private partitioned objects (-O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n\nnative incremental environment:\n  G1_NATIVE_OBJECT_WORKERS requests 1..=4 concurrent durable native object workers; the compiler clamps it to available parallelism (default: the same safe bound).\n";
 
@@ -972,9 +972,9 @@ fn compile_loaded(
             None
         };
         // A long-lived compiler service can retain independently compiled O3
-        // function objects across a body-only edit. The linked executable is
-        // never retained: every request materializes its current objects and
-        // takes a fresh required Wild link.
+        // function objects across a body-only edit. The durable route below
+        // additionally retains a final link only behind an exact manifest;
+        // process-local requests still take a fresh Wild link.
         if kind == EmitKind::Executable && command.native_incremental {
             if let Some(cache_dir) = &command.native_incremental_cache {
                 let units = match emit_llvm_native_object_units(&phases, &llvm_options) {
@@ -988,19 +988,17 @@ fn compile_loaded(
                         );
                     }
                 };
-                let toolchain_abi = match native_object_toolchain_abi(
-                    &llvm_options,
-                    OptimizationLevel::O3,
-                ) {
-                    Ok(abi) => abi,
-                    Err(error) => {
-                        let _ = writeln!(
+                let toolchain_abi =
+                    match native_object_toolchain_abi(&llvm_options, OptimizationLevel::O3) {
+                        Ok(abi) => abi,
+                        Err(error) => {
+                            let _ = writeln!(
                             stderr,
                             "grc: error: could not identify native object toolchain ABI: {error}"
                         );
-                        return 1;
-                    }
-                };
+                            return 1;
+                        }
+                    };
                 let mut jobs = Vec::with_capacity(units.functions.len() + 1);
                 let shared_abi = format!(
                     "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=shared;shared={}",
@@ -1033,7 +1031,10 @@ fn compile_loaded(
                     }
                 };
                 let objects = match materialize_disk_partitioned_native_objects(
-                    &output, cache_dir, workers, jobs,
+                    &output,
+                    cache_dir,
+                    workers,
+                    jobs.clone(),
                 ) {
                     Ok(objects) => objects,
                     Err(error) => {
@@ -1041,8 +1042,21 @@ fn compile_loaded(
                         return 1;
                     }
                 };
+                let link_inputs = match DiskNativeLinkInputs::new(&jobs, &objects) {
+                    Ok(inputs) => inputs,
+                    Err(error) => {
+                        let _ = writeln!(stderr, "grc: error: {error}");
+                        return 1;
+                    }
+                };
                 let host = native_host.as_ref().expect("executable native host");
-                if let Err(error) = link_partitioned_native_executable(&output, host, &objects) {
+                if let Err(error) = materialize_disk_linked_native_executable(
+                    &output,
+                    host,
+                    &objects,
+                    cache_dir,
+                    &link_inputs,
+                ) {
                     let _ = writeln!(stderr, "grc: error: {error}");
                     return 1;
                 }
@@ -1060,19 +1074,17 @@ fn compile_loaded(
                         );
                     }
                 };
-                let toolchain_abi = match native_object_toolchain_abi(
-                    &llvm_options,
-                    OptimizationLevel::O3,
-                ) {
-                    Ok(abi) => abi,
-                    Err(error) => {
-                        let _ = writeln!(
+                let toolchain_abi =
+                    match native_object_toolchain_abi(&llvm_options, OptimizationLevel::O3) {
+                        Ok(abi) => abi,
+                        Err(error) => {
+                            let _ = writeln!(
                             stderr,
                             "grc: error: could not identify native object toolchain ABI: {error}"
                         );
-                        return 1;
-                    }
-                };
+                            return 1;
+                        }
+                    };
                 let mut objects = Vec::with_capacity(units.functions.len() + 1);
                 let shared_abi = format!(
                     "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=shared;shared-fingerprint={}",
@@ -1428,11 +1440,95 @@ fn native_object_bytes_are_plausible(bytes: &[u8]) -> bool {
         || bytes.starts_with(&[0xaa, 0x64])
 }
 
+#[derive(Clone)]
 struct DiskNativeObjectJob {
     ordinal: usize,
     role: &'static str,
     ir: String,
     abi: String,
+}
+
+/// The ordered identities which make one final native link reproducible.
+/// These are derived before materializing request-local object paths, so they
+/// remain stable across processes and output destinations.
+struct DiskNativeLinkInputs {
+    objects: Vec<String>,
+}
+
+impl DiskNativeLinkInputs {
+    fn new(
+        jobs: &[DiskNativeObjectJob],
+        objects: &[TemporaryNativeObject],
+    ) -> Result<Self, String> {
+        if jobs.len() != objects.len() {
+            return Err("native link input count did not match materialized objects".into());
+        }
+        let mut identities = Vec::with_capacity(jobs.len());
+        for (job, object) in jobs.iter().zip(objects) {
+            let key = DiskCacheKey::new(Path::new("."), &job.ir, &job.abi);
+            let bytes = std::fs::read(&object.path).map_err(|error| {
+                format!(
+                    "could not read materialized native object {}: {error}",
+                    object.path.display()
+                )
+            })?;
+            identities.push(format!("{}:{}", key.digest, blake3::hash(&bytes).to_hex()));
+        }
+        Ok(Self {
+            objects: identities,
+        })
+    }
+
+    fn manifest_prefix(&self, link_abi: &str) -> String {
+        let mut text = format!("schema=1\nlink-abi={link_abi}\n");
+        for (ordinal, object) in self.objects.iter().enumerate() {
+            text.push_str(&format!("object-{ordinal}={object}\n"));
+        }
+        text
+    }
+}
+
+struct DiskLinkCacheKey {
+    digest: String,
+    executable: PathBuf,
+    manifest: PathBuf,
+    lock: PathBuf,
+}
+
+impl DiskLinkCacheKey {
+    fn new(cache_dir: &Path, inputs: &DiskNativeLinkInputs, link_abi: &str) -> Self {
+        let digest = blake3::hash(inputs.manifest_prefix(link_abi).as_bytes())
+            .to_hex()
+            .to_string();
+        let directory = cache_dir.join("links");
+        Self {
+            executable: directory.join(format!("{digest}.exe")),
+            manifest: directory.join(format!("{digest}.manifest")),
+            lock: directory.join(format!(".{digest}.lock")),
+            digest,
+        }
+    }
+
+    fn manifest_text(&self, inputs: &DiskNativeLinkInputs, link_abi: &str, bytes: &[u8]) -> String {
+        format!(
+            "{}digest={}\nexecutable-blake3={}\n",
+            inputs.manifest_prefix(link_abi),
+            self.digest,
+            blake3::hash(bytes).to_hex(),
+        )
+    }
+
+    fn read_valid(&self, inputs: &DiskNativeLinkInputs, link_abi: &str) -> Option<Vec<u8>> {
+        let (Ok(bytes), Ok(manifest)) = (
+            std::fs::read(&self.executable),
+            std::fs::read_to_string(&self.manifest),
+        ) else {
+            return None;
+        };
+        (manifest == self.manifest_text(inputs, link_abi, &bytes)
+            && native_object_bytes_are_plausible(&bytes))
+        .then_some(bytes)
+    }
 }
 
 fn bounded_durable_native_object_workers(
@@ -1766,6 +1862,98 @@ fn link_partitioned_native_executable(
             String::from_utf8_lossy(&result.stderr)
         ))
     }
+}
+
+fn native_link_toolchain_abi() -> Result<String, String> {
+    let clang = ProcessCommand::new("clang")
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("could not identify Clang for native link: {error}"))?;
+    if !clang.status.success() {
+        return Err(format!("`clang --version` exited with {}", clang.status));
+    }
+    let wild = ProcessCommand::new("wild")
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("could not identify Wild for native link: {error}"))?;
+    if !wild.status.success() {
+        return Err(format!("`wild --version` exited with {}", wild.status));
+    }
+    Ok(format!(
+        "schema=1;clang={:?};wild={:?};command=clang-O3-objects-host---ld-path=wild;host={}",
+        clang.stdout,
+        wild.stdout,
+        blake3::hash(&[NATIVE_HOST_RUNTIME, NATIVE_RUNTIME].concat()).to_hex(),
+    ))
+}
+
+/// Reuse a durable linked executable only when its manifest binds the exact
+/// ordered object bytes, bundled host runtime, and current Clang/Wild ABI.
+/// A miss always follows the ordinary required Wild link path.
+fn materialize_disk_linked_native_executable(
+    output: &Path,
+    host: &TemporaryNativeHost,
+    objects: &[TemporaryNativeObject],
+    cache_dir: &Path,
+    inputs: &DiskNativeLinkInputs,
+) -> Result<(), String> {
+    let link_abi = native_link_toolchain_abi()?;
+    let key = DiskLinkCacheKey::new(cache_dir, inputs, &link_abi);
+    std::fs::create_dir_all(key.executable.parent().expect("link cache parent"))
+        .map_err(|error| format!("could not create native link cache: {error}"))?;
+    let _lock = DiskCacheLock::acquire(key.lock.clone())?;
+    let bytes = if let Some(bytes) = key.read_valid(inputs, &link_abi) {
+        bytes
+    } else {
+        let temporary = disk_cache_temporary(
+            key.executable.parent().expect("link cache parent"),
+            &key.digest,
+            "executable.tmp",
+        )?;
+        if let Err(error) = link_partitioned_native_executable(&temporary, host, objects) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+        let bytes = std::fs::read(&temporary)
+            .map_err(|error| format!("could not read linked native executable: {error}"))?;
+        if !native_object_bytes_are_plausible(&bytes) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err("Wild emitted an unrecognized native executable".into());
+        }
+        if let Err(error) = std::fs::rename(&temporary, &key.executable) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!(
+                "could not publish native link cache executable: {error}"
+            ));
+        }
+        let manifest_temporary = disk_cache_temporary(
+            key.manifest.parent().expect("link cache parent"),
+            &key.digest,
+            "manifest.tmp",
+        )?;
+        if let Err(error) = std::fs::write(
+            &manifest_temporary,
+            key.manifest_text(inputs, &link_abi, &bytes),
+        ) {
+            let _ = std::fs::remove_file(&manifest_temporary);
+            return Err(format!(
+                "could not write native link cache manifest: {error}"
+            ));
+        }
+        if let Err(error) = std::fs::rename(&manifest_temporary, &key.manifest) {
+            let _ = std::fs::remove_file(&manifest_temporary);
+            return Err(format!(
+                "could not publish native link cache manifest: {error}"
+            ));
+        }
+        bytes
+    };
+    std::fs::write(output, bytes).map_err(|error| {
+        format!(
+            "could not materialize cached native executable {}: {error}",
+            output.display()
+        )
+    })
 }
 
 #[derive(Deserialize)]
@@ -2609,6 +2797,53 @@ mod tests {
     }
 
     #[test]
+    fn durable_link_manifest_binds_ordered_object_content_and_link_abi() {
+        let directory = tempfile::tempdir().unwrap();
+        let ordered = DiskNativeLinkInputs {
+            objects: vec!["shared:aaa".into(), "function:bbb".into()],
+        };
+        let reordered = DiskNativeLinkInputs {
+            objects: vec!["function:bbb".into(), "shared:aaa".into()],
+        };
+        let changed_bytes = DiskNativeLinkInputs {
+            objects: vec!["shared:ccc".into(), "function:bbb".into()],
+        };
+        let first = DiskLinkCacheKey::new(directory.path(), &ordered, "clang=A;wild=B;host=C");
+        let reordered =
+            DiskLinkCacheKey::new(directory.path(), &reordered, "clang=A;wild=B;host=C");
+        let changed_bytes =
+            DiskLinkCacheKey::new(directory.path(), &changed_bytes, "clang=A;wild=B;host=C");
+        let changed_linker =
+            DiskLinkCacheKey::new(directory.path(), &ordered, "clang=A;wild=changed;host=C");
+        assert_ne!(first.digest, reordered.digest);
+        assert_ne!(first.digest, changed_bytes.digest);
+        assert_ne!(first.digest, changed_linker.digest);
+    }
+
+    #[test]
+    fn durable_link_manifest_rejects_a_tampered_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let inputs = DiskNativeLinkInputs {
+            objects: vec!["shared:aaa".into()],
+        };
+        let key = DiskLinkCacheKey::new(directory.path(), &inputs, "clang=A;wild=B;host=C");
+        std::fs::create_dir_all(key.executable.parent().unwrap()).unwrap();
+        let bytes = b"\x7fELF linked executable";
+        std::fs::write(&key.executable, bytes).unwrap();
+        std::fs::write(
+            &key.manifest,
+            key.manifest_text(&inputs, "clang=A;wild=B;host=C", bytes),
+        )
+        .unwrap();
+        assert_eq!(
+            key.read_valid(&inputs, "clang=A;wild=B;host=C"),
+            Some(bytes.to_vec())
+        );
+        std::fs::write(&key.executable, b"\x7fELF tampered executable").unwrap();
+        assert_eq!(key.read_valid(&inputs, "clang=A;wild=B;host=C"), None);
+    }
+
+    #[test]
     fn parses_indexed_token_inspection() {
         let command = parse(
             ["--inspect-token", "bundle.glorious", "17", "42"]
@@ -2813,54 +3048,46 @@ mod tests {
         let mut stderr = Vec::new();
         assert_eq!(compile(command, &mut stdout, &mut stderr), 1);
         assert!(stdout.is_empty());
-        assert!(
-            String::from_utf8(stderr)
-                .unwrap()
-                .contains("requires a persistent `grc --serve` request")
-        );
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("requires a persistent `grc --serve` request"));
     }
 
     #[test]
     fn native_allocation_limit_is_bounded_and_executable_only() {
-        assert!(
-            parse(
-                ["--native-allocation-limit", "67108863", "input.glorious"]
-                    .into_iter()
-                    .map(OsString::from)
-                    .collect(),
-            )
-            .is_err()
-        );
-        assert!(
-            parse(
-                [
-                    "--emit",
-                    "executable",
-                    "--native-allocation-limit",
-                    "1073741825",
-                    "input.glorious",
-                ]
+        assert!(parse(
+            ["--native-allocation-limit", "67108863", "input.glorious"]
                 .into_iter()
                 .map(OsString::from)
                 .collect(),
-            )
-            .is_err()
-        );
-        assert!(
-            parse(
-                [
-                    "--emit",
-                    "llvm-ir",
-                    "--native-allocation-limit",
-                    "134217728",
-                    "input.glorious",
-                ]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            )
-            .is_err()
-        );
+        )
+        .is_err());
+        assert!(parse(
+            [
+                "--emit",
+                "executable",
+                "--native-allocation-limit",
+                "1073741825",
+                "input.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .is_err());
+        assert!(parse(
+            [
+                "--emit",
+                "llvm-ir",
+                "--native-allocation-limit",
+                "134217728",
+                "input.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -3017,15 +3244,13 @@ mod tests {
             };
             assert_eq!(command.stop_phase, Some(expected));
         }
-        assert!(
-            parse(
-                ["--phase", "lex", "--check", "input.glorious"]
-                    .into_iter()
-                    .map(OsString::from)
-                    .collect()
-            )
-            .is_err()
-        );
+        assert!(parse(
+            ["--phase", "lex", "--check", "input.glorious"]
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        )
+        .is_err());
     }
 
     #[test]
@@ -3034,13 +3259,11 @@ mod tests {
             parse(vec![OsString::from("--capabilities")]).unwrap(),
             Command::Capabilities
         ));
-        assert!(
-            parse(vec![
-                OsString::from("--capabilities"),
-                OsString::from("input.glorious")
-            ])
-            .is_err()
-        );
+        assert!(parse(vec![
+            OsString::from("--capabilities"),
+            OsString::from("input.glorious")
+        ])
+        .is_err());
     }
 
     #[test]
@@ -3049,13 +3272,11 @@ mod tests {
             parse(vec![OsString::from("--serve")]).unwrap(),
             Command::Serve
         ));
-        assert!(
-            parse(vec![
-                OsString::from("--serve"),
-                OsString::from("input.glorious")
-            ])
-            .is_err()
-        );
+        assert!(parse(vec![
+            OsString::from("--serve"),
+            OsString::from("input.glorious")
+        ])
+        .is_err());
     }
 
     #[test]

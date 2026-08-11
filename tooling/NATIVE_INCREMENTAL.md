@@ -59,8 +59,10 @@ malformed, or digest-mismatched cache entries are discarded and rebuilt.
 
 The cache directory is an input/output artifact owned by one worktree; copy a
 seed into a new worktree rather than sharing a mutable directory between
-worktrees. Cached executables are intentionally never used: every successful
-invocation links the current objects through Wild.
+worktrees. It may also retain a linked executable, but only under a
+cryptographic manifest that binds the ordered object keys and bytes, bundled
+host runtime, and the Clang/Wild link ABI. A missing, corrupt, or non-identical
+manifest requires a fresh Wild link; this never weakens the Wild requirement.
 
 The native-stage integration must expose this response shape on a successful
 request (additional fields are permitted):
