@@ -1206,6 +1206,16 @@ struct ClosedFramePerformRoute {
     import_result: TypeId,
 }
 
+/// A value-transfer ABI proven safe for a future closed-frame dispatch.
+///
+/// There is deliberately no structural cast or pointer reinterpretation here.
+/// The current artifact AOT ABI has not modeled any result wrapper conversion,
+/// so type identity is the only admissible transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClosedFrameResultTransfer {
+    Identity { ty: TypeId },
+}
+
 /// A direct callable producer that is safe to name in the closed-handler ABI.
 /// This is intentionally a lexical identity, rather than an attempt to infer
 /// a callable through copies, joins, or a global target set.
@@ -1465,6 +1475,16 @@ fn closed_frame_perform_route(
         operation_result: continuation.operation_result,
         import_result: continuation.import_result,
     })
+}
+
+fn closed_frame_result_transfer(
+    route: &ClosedFramePerformRoute,
+) -> Option<ClosedFrameResultTransfer> {
+    (route.operation_result == route.import_result).then_some(
+        ClosedFrameResultTransfer::Identity {
+            ty: route.operation_result,
+        },
+    )
 }
 
 fn closed_handle_sites(artifact: &Artifact, owner_function: u32) -> BTreeMap<u32, u32> {
@@ -2953,6 +2973,16 @@ mod tests {
         assert_eq!(route.one_shot_field, 4);
         assert_eq!(route.operation_result, 19);
         assert_eq!(route.import_result, 19);
+        assert_eq!(
+            closed_frame_result_transfer(&route),
+            Some(ClosedFrameResultTransfer::Identity { ty: 19 })
+        );
+        let mut mismatched_import_result = route.clone();
+        mismatched_import_result.import_result = UNIT;
+        assert!(closed_frame_result_transfer(&mismatched_import_result).is_none());
+        let mut mismatched_operation_result = route.clone();
+        mismatched_operation_result.operation_result = BYTES;
+        assert!(closed_frame_result_transfer(&mismatched_operation_result).is_none());
         assert!(plans[&1].perform_route(3, 1).is_none());
         assert!(plans[&1].perform_route(9, 0).is_none());
 
