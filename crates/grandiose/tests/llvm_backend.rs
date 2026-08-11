@@ -1249,6 +1249,65 @@ fn float_char_and_bit_primitives_emit_valid_llvm_ir() {
 }
 
 #[test]
+fn llvm_o3_float_arithmetic_and_bits_match_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-float-bit-parity.glorious",
+        "selected() -> u64 { f64_to_bits(f64_add(1.0, 0.5)) }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    let expected = 1.5_f64.to_bits();
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::U64(expected)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("float-bit-parity.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("float-bit-parity");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern uint64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == UINT64_C({expected}) ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = clang_with_native_runtime()
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(Command::new(executable).status().unwrap().success());
+}
+
+#[test]
 fn nonescaping_closures_use_the_specialized_direct_call_path() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-closure.glorious",
