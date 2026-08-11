@@ -51,7 +51,9 @@ pub use compiler_mir::{
     OptimizationReport,
 };
 pub use llvm_backend::{
-    LlvmModule, LlvmOptions, default_target_data_layout, default_target_triple, emit_llvm_ir,
+    LLVM_INCREMENTAL_MANIFEST_SCHEMA, LlvmCalleeDependency, LlvmFunctionManifest,
+    LlvmIncrementalManifest, LlvmModule, LlvmOptions, default_target_data_layout,
+    default_target_triple, emit_llvm_ir, llvm_incremental_manifest,
 };
 
 pub fn compile_source_to_llvm_ir(

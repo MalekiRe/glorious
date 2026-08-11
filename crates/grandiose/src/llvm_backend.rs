@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use grandiose_vm::{Constant, Primitive, Type, TypeId};
 
 use crate::{
-    CompiledPhases,
+    compiler_core::stable_fingerprint,
     compiler_mir::{self as mir, InstructionKind, Terminator},
     compiler_traits::HostImportRole,
     diagnostic::Diagnostic,
+    CompiledPhases,
 };
 
 const RUNTIME_FAULT_ARITHMETIC_OVERFLOW: u32 = 1;
@@ -29,6 +30,185 @@ const RUNTIME_FAULT_ALLOCATION_LIMIT: u32 = 11;
 const RUNTIME_FAULT_UNHANDLED_EFFECT: u32 = 12;
 const RUNTIME_FAULT_EXPLICIT_ABORT: u32 = 13;
 const NATIVE_PRIMITIVE_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Bump this whenever LLVM fragment generation changes independently of MIR.
+/// Cached fragments with another schema are never reusable.
+pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 1;
+
+/// The ABI-facing identity of a direct callee used by one emitted fragment.
+/// A callee body change alone deliberately does not invalidate its callers.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LlvmCalleeDependency {
+    pub declaration: u32,
+    pub interface_fingerprint: u64,
+}
+
+/// Cache key for one independently emitted LLVM function fragment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmFunctionManifest {
+    pub declaration: u32,
+    pub interface_fingerprint: u64,
+    pub body_fingerprint: u64,
+    pub callee_interfaces: Vec<LlvmCalleeDependency>,
+    /// Includes the selected target/runtime ABI and every interface dependency.
+    pub fragment_fingerprint: u64,
+}
+
+/// Deterministic cache/invalidation manifest for function-granular LLVM IR.
+///
+/// This intentionally describes reusable fragments rather than caching the
+/// current monolithic IR string. A future cache can retain a matching function
+/// body while rebuilding declarations, runtime support, globals, and the entry
+/// wrapper for every module invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmIncrementalManifest {
+    pub schema: u32,
+    pub target_triple: String,
+    pub target_data_layout: Option<String>,
+    pub emit_entry_wrapper: bool,
+    /// Changes to the global type/runtime ABI invalidate every fragment.
+    pub runtime_abi_fingerprint: u64,
+    pub functions: Vec<LlvmFunctionManifest>,
+}
+
+impl LlvmIncrementalManifest {
+    /// Functions whose cached fragment cannot be reused from `previous`.
+    /// An option or runtime ABI change conservatively invalidates all bodies.
+    pub fn invalidated_functions(&self, previous: &Self) -> BTreeSet<u32> {
+        if self.schema != previous.schema
+            || self.target_triple != previous.target_triple
+            || self.target_data_layout != previous.target_data_layout
+            || self.emit_entry_wrapper != previous.emit_entry_wrapper
+            || self.runtime_abi_fingerprint != previous.runtime_abi_fingerprint
+        {
+            return self
+                .functions
+                .iter()
+                .map(|function| function.declaration)
+                .collect();
+        }
+        let previous = previous
+            .functions
+            .iter()
+            .map(|function| (function.declaration, function.fragment_fingerprint))
+            .collect::<BTreeMap<_, _>>();
+        self.functions
+            .iter()
+            .filter_map(|function| {
+                (previous.get(&function.declaration) != Some(&function.fragment_fingerprint))
+                    .then_some(function.declaration)
+            })
+            .collect()
+    }
+}
+
+fn fingerprint_text(text: impl std::fmt::Display) -> u64 {
+    stable_fingerprint(text.to_string().as_bytes())
+}
+
+fn function_interface_fingerprint(function: &mir::Function) -> u64 {
+    fingerprint_text(format!(
+        "decl={} params={:?} result={} receiver={:?}:{} no_return={} outward={:?}",
+        function.declaration,
+        function.params,
+        function.result,
+        function.receiver_mode,
+        function.receiver_type,
+        function.no_return,
+        function.outward_protocols,
+    ))
+}
+
+fn function_body_fingerprint(function: &mir::Function) -> u64 {
+    // Blocks and ownership/flow evidence are all consumed by LLVM emission.
+    // Source spans are retained in this representation, so harmless source
+    // edits may rebuild a fragment, but no semantic edit can accidentally
+    // reuse stale native code.
+    fingerprint_text(format!(
+        "regs={:?} entry={} blocks={:?} phase={:?} features={:?} cleanup={:?} flow={:?} invalid={}",
+        function.register_types,
+        function.entry,
+        function.blocks,
+        function.phase,
+        function.features,
+        function.return_cleanup,
+        function.flow,
+        function.invalid_analyses,
+    ))
+}
+
+/// Build cache keys for independently emitted LLVM function fragments.
+pub fn llvm_incremental_manifest(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+) -> LlvmIncrementalManifest {
+    let interfaces = phases
+        .mir
+        .functions
+        .iter()
+        .map(|function| {
+            (
+                function.declaration,
+                function_interface_fingerprint(function),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    // LLVM layout/runtime helpers inspect the artifact type table globally.
+    // Treating it as a module ABI input keeps fragment reuse fail-closed until
+    // type-level dependency slicing is available.
+    let runtime_abi_fingerprint = fingerprint_text(format!(
+        "types={:?};imports={:?};protocols={:?};handlers={:?}",
+        phases.artifact.types,
+        phases.artifact.imports,
+        phases.artifact.protocols,
+        phases.artifact.handler_defs,
+    ));
+    let functions = phases
+        .mir
+        .functions
+        .iter()
+        .map(|function| {
+            let mut callees = function
+                .blocks
+                .iter()
+                .filter_map(|block| known_direct_call_target(&block.terminator, function.declaration))
+                .filter_map(|declaration| {
+                    interfaces.get(&declaration).copied().map(|interface_fingerprint| {
+                        LlvmCalleeDependency {
+                            declaration,
+                            interface_fingerprint,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            callees.sort();
+            callees.dedup();
+            let interface_fingerprint = interfaces[&function.declaration];
+            let body_fingerprint = function_body_fingerprint(function);
+            let fragment_fingerprint = fingerprint_text(format!(
+                "schema={LLVM_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};runtime={runtime_abi_fingerprint};interface={interface_fingerprint};body={body_fingerprint};callees={callees:?}",
+                options.target_triple,
+                options.target_data_layout,
+                options.emit_entry_wrapper,
+            ));
+            LlvmFunctionManifest {
+                declaration: function.declaration,
+                interface_fingerprint,
+                body_fingerprint,
+                callee_interfaces: callees,
+                fragment_fingerprint,
+            }
+        })
+        .collect();
+    LlvmIncrementalManifest {
+        schema: LLVM_INCREMENTAL_MANIFEST_SCHEMA,
+        target_triple: options.target_triple.clone(),
+        target_data_layout: options.target_data_layout.clone(),
+        emit_entry_wrapper: options.emit_entry_wrapper,
+        runtime_abi_fingerprint,
+        functions,
+    }
+}
 
 fn effect_frame_tail_target(terminator: &Terminator) -> Option<u32> {
     match terminator {
