@@ -11,9 +11,12 @@ use grandiose::{
         GenericParams, StructDecl, TraitMethod, TypeSyntax, TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel,
 };
 use grandiose_vm::{verify, SystemHost, Value, Vm};
+
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -906,23 +909,10 @@ fn self_host_unit_unit_and_never_results_are_retained() {
                 "VM unit and never headers diverged",
             );
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-headers.ll");
-            let executable = directory.path().join("self-host-headers");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::headers::application"),
+                directory.path(),
+                "self-host-headers",
             );
             let native_output = directory.path().join("native.bin");
             let native = Command::new(&executable)
@@ -1160,45 +1150,10 @@ fn self_hosted_headers_match_rust_in_vm_and_native_execution() {
                 assert_wire_eq(&vm_actual, &expected, "VM aggregate headers diverged");
             }
 
-            let asan = std::env::var_os("G1_SELF_HOST_HEADERS_ASAN").is_some();
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let debug_directory = repository_root().join("target/self-host-headers-debug");
-            if asan {
-                fs::create_dir_all(&debug_directory).unwrap();
-                let functions = phases
-                    .mir
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, function)| format!("{index}\t{}\n", function.name))
-                    .collect::<String>();
-                fs::write(debug_directory.join("functions.txt"), functions).unwrap();
-            }
-            let llvm = if asan {
-                debug_directory.join("self-host-headers.ll")
-            } else {
-                directory.path().join("self-host-headers.ll")
-            };
-            let executable = if asan {
-                debug_directory.join("self-host-headers")
-            } else {
-                directory.path().join("self-host-headers")
-            };
-            fs::write(&llvm, module.ir).unwrap();
-            let mut clang_command = Command::new("clang");
-            clang_command
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0");
-            if asan {
-                clang_command.args(["-fsanitize=address", "-fno-omit-frame-pointer", "-g"]);
-            }
-            let clang = clang_command.arg("-o").arg(&executable).output().unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::headers::application"),
+                directory.path(),
+                "self-host-headers",
             );
 
             let native_all_path = directory.path().join("native-all.bin");
@@ -1292,23 +1247,10 @@ fn self_host_header_reference_lifetimes_match_bootstrap() {
                 "VM reference contract diverged"
             );
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-headers.ll");
-            let executable = directory.path().join("self-host-headers");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::headers::application"),
+                directory.path(),
+                "self-host-headers",
             );
             let native_path = directory.path().join("native.bin");
             let native = Command::new(&executable)
@@ -1372,23 +1314,10 @@ fn self_host_header_mixed_nominal_arguments_match_bootstrap() {
                 "VM mixed nominal headers diverged",
             );
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-headers.ll");
-            let executable = directory.path().join("self-host-headers");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::headers::application"),
+                directory.path(),
+                "self-host-headers",
             );
             let native_output = directory.path().join("native.bin");
             let native = Command::new(&executable)
@@ -1489,23 +1418,10 @@ fn self_host_header_generic_where_effect_rows_match_bootstrap() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&vm_output).unwrap(), expected, "VM headers diverged");
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-headers.ll");
-            let executable = directory.path().join("self-host-headers");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::headers::application"),
+                directory.path(),
+                "self-host-headers",
             );
             let native = Command::new(&executable)
                 .arg(&native_output)
@@ -1603,23 +1519,10 @@ fn self_host_header_higher_ranked_binders_match_bootstrap() {
                 "VM higher-ranked binder headers diverged",
             );
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-headers.ll");
-            let executable = directory.path().join("self-host-headers");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::headers::application"),
+                directory.path(),
+                "self-host-headers",
             );
             let native_output = directory.path().join("native.bin");
             let native = Command::new(&executable)
