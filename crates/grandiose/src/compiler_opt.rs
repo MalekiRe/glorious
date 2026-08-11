@@ -13051,6 +13051,48 @@ fn run_fixed_point(
     Ok(())
 }
 
+/// Complete the post-inline cleanup cycle. Sparse simplification performs
+/// propagation and local DCE; CFG normalization then deletes the newly dead
+/// arms and trivial joins. Either rewrite can expose work for the other, so
+/// alternate them under the same deterministic cap and global work budget.
+fn run_post_inline_cleanup_fixed_point(
+    passes: &mut Vec<PassReport>,
+    program: &mut Program,
+    types: &[Type],
+    global_remaining: &mut u64,
+) -> Result<(), ValidationError> {
+    for _ in 0..FIXED_POINT_ROUNDS {
+        if *global_remaining == 0 {
+            break;
+        }
+        let normalize = run_transactional_pass(
+            program,
+            PassId::NormalizeCfg,
+            types,
+            global_remaining,
+        );
+        let normalize_stop = matches!(normalize.outcome, PassOutcome::Unchanged);
+        let normalize_exhausted = matches!(normalize.outcome, PassOutcome::BudgetExhausted);
+        push_checked(passes, normalize, program, types)?;
+        if *global_remaining == 0 || normalize_exhausted {
+            break;
+        }
+        let sparse = run_transactional_pass(
+            program,
+            PassId::SparseSimplify,
+            types,
+            global_remaining,
+        );
+        let sparse_stop = matches!(sparse.outcome, PassOutcome::Unchanged);
+        let sparse_exhausted = matches!(sparse.outcome, PassOutcome::BudgetExhausted);
+        push_checked(passes, sparse, program, types)?;
+        if sparse_exhausted || (normalize_stop && sparse_stop) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Run the fixed generation-1 MIR pass schedule. Unimplemented optional MIR
 /// passes are reported explicitly rather than silently approximated. Frontend
 /// ownership/cleanup construction and bytecode lowering occur in their owning
@@ -13237,11 +13279,15 @@ pub(crate) fn optimize_program_with_control_tables(
 
     // Sparse/global simplification and inlining can turn a Switch into a
     // Goto or expose an unreachable continuation after the mandatory early
-    // normalization has run. Normalize once more before representation
-    // lowering so those dead blocks are not serialized into the VM artifact.
+    // normalization has run. Alternate propagation/DCE with checked CFG
+    // cleanup before representation lowering.
     if level.at_least(OptimizationLevel::O1) {
-        let normalize = run_mandatory_normalize(program);
-        push_checked(&mut passes, normalize, program, types)?;
+        run_post_inline_cleanup_fixed_point(
+            &mut passes,
+            program,
+            types,
+            &mut global_remaining,
+        )?;
     }
 
     // Proof-only references are a mandatory representation lowering at every
@@ -19846,7 +19892,7 @@ mod tests {
             NormalizeCfg,
         ];
         let o1 = [SparseSimplify, ScalarizeLocals, SimplifyCleanup];
-        let post_simplify = [NormalizeCfg];
+        let post_simplify = [NormalizeCfg, SparseSimplify];
         let o2 = [
             GlobalSimplify,
             ScalarizeCallables,
