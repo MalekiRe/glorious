@@ -36688,12 +36688,6 @@ impl<'a> CoreLowerer<'a> {
                         true,
                     )?;
                 }
-                if self.suspended.contains(&local.local) {
-                    return Err(self.borrow_error(
-                        operand.span,
-                        format!("reference `{}` is suspended by a live reborrow", path[0]),
-                    ));
-                }
                 let active = self.loans.get(&local.local).copied().unwrap_or_default();
                 if active.unique
                     || unique && active.shared > 0

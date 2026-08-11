@@ -4995,18 +4995,26 @@ fn releasing_one_projected_child_keeps_its_live_sibling_registered() {
 fn shared_call_result_downgrades_a_transferred_unique_loan() {
     let source = r#"
         downgrade<'a>(value: &'a mut i64) -> &'a i64 { &*value }
-        exercise() -> () {
+        exercise() -> i64 {
             let value = 21;
             let first = downgrade(&mut value);
             let second = &value;
-            first;
-            second;
-            ()
+            *first + *second
         }
-        main() -> { exercise() }
+        main() -> { exercise(); () }
     "#;
     let artifact = compile_source_to_bytecode("shared-call-downgrade.glorious", source).unwrap();
-    verify(artifact).unwrap();
+    let exercise = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "exercise")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(exercise, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
 }
 
 #[test]
