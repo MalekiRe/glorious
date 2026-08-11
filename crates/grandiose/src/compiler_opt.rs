@@ -17869,7 +17869,15 @@ mod tests {
         ));
         let original = candidate.clone();
         assert_eq!(
-            specialize_static_handlers(&mut candidate, &types, &[], &[], 0, true),
+            specialize_static_handlers(
+                &mut candidate,
+                &types,
+                &[],
+                &[],
+                0,
+                true,
+                true,
+            ),
             (PassOutcome::BudgetExhausted, 0)
         );
         assert_eq!(candidate, original);
