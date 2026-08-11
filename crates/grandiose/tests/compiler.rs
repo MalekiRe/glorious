@@ -5179,7 +5179,7 @@ fn captureless_callback_tuple_reference_signatures_transport_aggregate_origins()
 }
 
 #[test]
-fn captureless_reference_callback_requires_a_direct_compatible_origin() {
+fn captureless_reference_callback_projects_a_nominal_reference_origin() {
     let source = r#"
         struct Holder { value: &i64 }
         apply<F, T, R>(value: T, body: F) -> R
@@ -5187,17 +5187,38 @@ fn captureless_reference_callback_requires_a_direct_compatible_origin() {
         bad(holder: Holder) -> &i64 {
             apply(holder, { item => item.value })
         }
+        answer() -> i64 {
+            let value = 42;
+            let holder = Holder { value: &value };
+            *bad(move holder)
+        }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("nominal-reference-closure-origin.glorious", source)
-        .unwrap_err();
+    let artifact =
+        compile_source_to_bytecode("nominal-reference-closure-origin.glorious", source).unwrap();
+    let answer = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
     assert!(
-        errors.iter().any(|error| {
-            error.code.is_some()
-                && error.span.is_some()
-                && error.message.contains("exactly one compatible reference")
+        artifact.reference_return_contracts.iter().any(|contract| {
+            artifact.functions[contract.function as usize].name == "bad"
+                && contract.routes.iter().any(|route| matches!(
+                    route.origin,
+                    grandiose_vm::bytecode::ReferenceReturnOrigin::Parameter {
+                        parameter: 0,
+                        ref path,
+                    }
+                        if path == &[0]
+                ))
         }),
-        "{errors:#?}"
+        "missing projected parameter origin: {:#?}",
+        artifact.reference_return_contracts
+    );
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap()).run(answer, vec![]).unwrap(),
+        Value::I64(42)
     );
 }
 
