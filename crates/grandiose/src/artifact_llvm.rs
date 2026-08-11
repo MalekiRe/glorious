@@ -109,7 +109,8 @@ pub fn emit_verified_artifact_llvm_ir(
     // as a direct call.  Keep the proof local to this artifact: the handler is
     // not a process-global host capability, and the body is selected only from
     // the exact lexical producer chain recognized below.
-    let closed_handle_bodies = closed_handle_body_functions(artifact);
+    let mut closed_handle_bodies = closed_handle_body_functions(artifact);
+    closed_handle_bodies.extend(closed_shared_handle_body_functions(artifact));
     let reachable = reachable_functions(artifact, entry, &closed_handle_bodies)?;
     for (function_id, function) in artifact.functions.iter().enumerate() {
         if reachable.contains(&(function_id as u32)) {
@@ -246,6 +247,7 @@ fn emit_function(
     // LLVM's O3 mem2reg pass can eliminate the trivial allocas afterwards.
     let closed_handler_plans = closed_host_handler_plans(artifact, function_id, function)?;
     let closed_handles = closed_handle_sites(artifact, function_id);
+    let shared_handles = closed_shared_handle_sites(artifact, function_id, function, &closed_handler_plans);
     let closed_handle_opaque_registers = closed_handle_opaque_registers(artifact, function_id, &closed_handles);
     let register_types = function
         .register_types
@@ -261,6 +263,7 @@ fn emit_function(
                             .contains(&(register as u32))
                     .then_some("ptr".to_owned())
                     })
+                    .or_else(|| shared_handles.values().any(|site| site.body_register == register as u32).then_some("ptr".to_owned()))
                     .ok_or(error)
             })
         })
@@ -792,13 +795,20 @@ fn emit_function(
             Instruction::MakeCallable { .. } | Instruction::MakeHandler { .. }
                 if closed_handle_opaque_registers.iter().any(|register| {
                     instruction_writes_register(instruction) == Some(*register)
-                }) => {
+                }) || shared_handles.values().any(|site| instruction_writes_register(instruction) == Some(site.body_register)) => {
                 // The callable and handler are lexical proof tokens for this
                 // restricted path. They have no native representation because
                 // the selected body cannot perform an operation.
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
             Instruction::Handle { dst, args, .. } => {
+                if let Some(site) = shared_handles.get(&instruction_id) {
+                    emit_closed_shared_handle_scope(
+                        output, artifact, &register_types, function, function_id, instruction_id,
+                        *dst, args, site, &mut temporary,
+                    )?;
+                    continue;
+                }
                 let body = closed_handles.get(&instruction_id).ok_or_else(|| {
                     unsupported(function_id, instruction_id, "closed effect-free handle")
                 })?;
@@ -1139,6 +1149,14 @@ struct ClosedHostHandlerPlan {
     clause_functions: Vec<u32>,
 }
 
+#[derive(Clone, Debug)]
+struct ClosedSharedHandleSite {
+    handler_register: u32,
+    body_register: u32,
+    body_function: u32,
+    frame: ClosedHostHandlerFrame,
+}
+
 /// A direct callable producer that is safe to name in the closed-handler ABI.
 /// This is intentionally a lexical identity, rather than an attempt to infer
 /// a callable through copies, joins, or a global target set.
@@ -1262,6 +1280,118 @@ fn closed_handle_body_functions(artifact: &Artifact) -> BTreeSet<u32> {
         .collect()
 }
 
+fn closed_shared_handle_body_functions(artifact: &Artifact) -> BTreeSet<u32> {
+    artifact.functions.iter().enumerate().flat_map(|(function_id, function)| {
+        let Ok(plans) = closed_host_handler_plans(artifact, function_id as u32, function) else {
+            return BTreeSet::new();
+        };
+        closed_shared_handle_sites(artifact, function_id as u32, function, &plans)
+            .into_values()
+            .map(|site| site.body_function)
+            .collect()
+    }).collect()
+}
+
+/// Recognize a direct lexical use of a materialized shared frame.  The body
+/// must be the same closed, empty-receiver, effect-free callable used by the
+/// existing Handle slice.  No copied handler/body values are admitted.
+fn closed_shared_handle_sites(
+    artifact: &Artifact,
+    _function_id: u32,
+    function: &Function,
+    plans: &BTreeMap<u32, ClosedHostHandlerPlan>,
+) -> BTreeMap<u32, ClosedSharedHandleSite> {
+    let start = function.code_start as usize;
+    let Some(code) = artifact.code.get(start..start.saturating_add(function.code_len as usize)) else {
+        return BTreeMap::new();
+    };
+    let mut callables = BTreeMap::new();
+    let mut active_plans = BTreeMap::new();
+    let mut sites = BTreeMap::new();
+    for (offset, instruction) in code.iter().enumerate() {
+        match instruction {
+            Instruction::MakeCallable { dst, callable_type, function, captures }
+                if captures.is_empty() => {
+                    if let Some(callable) = closed_host_callable(artifact, *function, *callable_type) {
+                        callables.insert(*dst, callable);
+                    } else {
+                        callables.remove(dst);
+                    }
+                }
+            Instruction::MakeCallable { dst, .. } => { callables.remove(dst); }
+            Instruction::MakeHandlerShared { dst, .. } => {
+                if let Some(plan) = plans.get(dst) {
+                    active_plans.insert(*dst, plan.clone());
+                }
+            }
+            Instruction::Move { dst, .. } | Instruction::Copy { dst, .. } => {
+                callables.remove(dst);
+                active_plans.remove(dst);
+            }
+            Instruction::Handle { dst, handler, body, args } => {
+                let Some(plan) = active_plans.get(handler) else { continue };
+                let Some(body_callable) = callables.get(body) else { continue };
+                let Some(body_function) = artifact.functions.get(body_callable.function as usize) else { continue };
+                let Some(result_type) = frame_result_type(artifact, plan.frame.handler_def) else { continue };
+                if !is_effect_free_closed_body(artifact, body_function)
+                    || body_function.return_type != result_type
+                    || function.register_types.get(*dst as usize) != Some(&result_type)
+                    || args.iter().map(|register| function.register_types.get(*register as usize).copied()).collect::<Option<Vec<_>>>() != Some(body_function.params.clone())
+                {
+                    continue;
+                }
+                sites.insert(offset as u32, ClosedSharedHandleSite {
+                    handler_register: *handler,
+                    body_register: *body,
+                    body_function: body_callable.function,
+                    frame: plan.frame.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    sites
+}
+
+fn emit_closed_shared_handle_scope(
+    output: &mut String,
+    artifact: &Artifact,
+    register_types: &[String],
+    function: &Function,
+    function_id: u32,
+    instruction_id: u32,
+    dst: u32,
+    args: &[u32],
+    site: &ClosedSharedHandleSite,
+    temporary: &mut u32,
+) -> Result<(), ArtifactLlvmError> {
+    let frame = emit_load(output, register_types, function_id, instruction_id, site.handler_register, temporary)?;
+    let fields = site.frame.native_field_count();
+    let active = format!("%closed_handler_active_{instruction_id}");
+    output.push_str(&format!("  {active} = getelementptr inbounds [{fields} x i1], ptr {frame}, i64 0, i64 0\n"));
+    let prior = format!("%closed_handler_prior_active_{instruction_id}");
+    output.push_str(&format!("  {prior} = load i1, ptr {active}\n  store i1 true, ptr {active}\n"));
+    let body = artifact.functions.get(site.body_function as usize).ok_or_else(|| unsupported(function_id, instruction_id, "closed shared handle body"))?;
+    let arguments = args.iter().enumerate().map(|(index, register)| {
+        let ty = llvm_type(artifact, function_id, body.params[index])?;
+        let value = emit_load(output, register_types, function_id, instruction_id, *register, temporary)?;
+        Ok(format!("{ty} {value}"))
+    }).collect::<Result<Vec<_>, ArtifactLlvmError>>()?.join(", ");
+    let result = llvm_type(artifact, function_id, body.return_type)?;
+    if result == "void" {
+        output.push_str(&format!("  call void @grbc_fn_{}({arguments})\n", site.body_function));
+    } else {
+        let value = format!("%v{temporary}");
+        *temporary += 1;
+        output.push_str(&format!("  {value} = call {result} @grbc_fn_{}({arguments})\n", site.body_function));
+        emit_store(output, register_types, function_id, instruction_id, dst, &value)?;
+    }
+    // Restore, rather than clear, the prior bit so a nested Handle using the
+    // same frame cannot deactivate its enclosing lexical scope.
+    output.push_str(&format!("  store i1 {prior}, ptr {active}\n"));
+    emit_fallthrough(output, function, function_id, instruction_id)
+}
+
 fn closed_handle_sites(artifact: &Artifact, owner_function: u32) -> BTreeMap<u32, u32> {
     closed_host_handler_continuation_abis(artifact)
         .into_iter()
@@ -1311,9 +1441,11 @@ fn closed_handle_body_is_effect_free(
     abi: &ClosedHostHandlerContinuationAbi,
 ) -> bool {
     let Some(function) = artifact.functions.get(abi.body.function as usize) else { return false };
-    if !is_empty_owned_receiver(function) || !function.outward_protocols.is_empty() {
-        return false;
-    }
+    is_effect_free_closed_body(artifact, function)
+}
+
+fn is_effect_free_closed_body(artifact: &Artifact, function: &Function) -> bool {
+    if !is_empty_owned_receiver(function) || !function.outward_protocols.is_empty() { return false; }
     let start = function.code_start as usize;
     let Some(code) = artifact.code.get(start..start.saturating_add(function.code_len as usize)) else {
         return false;
@@ -2641,6 +2773,55 @@ mod tests {
 
         artifact.functions[0].receiver_mode = None;
         assert!(closed_host_handler_plans(&artifact, 4, &entry).is_err());
+    }
+
+    #[test]
+    fn shared_handler_handle_restores_its_exact_lexical_scope_bit() {
+        let mut artifact = frozen_handler_artifact_for_continuation_abi();
+        let body_callable = artifact.functions[0].register_types[1];
+        for clause in &mut artifact.handler_defs[0].clauses {
+            clause.callable_signature.outward_protocols.clear();
+        }
+        let shared_unit = artifact.types.len() as u32;
+        artifact.types.push(Type::RefShared { referent: UNIT });
+        let handler = artifact.types.len() as u32;
+        artifact.types.push(Type::Handler { handler_def: 0, capture_type: UNIT, identity_name: "shared-closed".into() });
+        let clauses = (0..4).map(|index| Function {
+            name: format!("clause-{index}"), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: Some(0), register_types: vec![shared_unit],
+            code_start: 0, code_len: 0, label_slot_count: 0,
+        });
+        let body = Function {
+            name: "effect-free-body".into(), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: Some(2), register_types: vec![UNIT],
+            code_start: 0, code_len: 0, label_slot_count: 0,
+        };
+        let entry = Function {
+            name: "shared-owner".into(), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: None,
+            register_types: vec![UNIT, handler, body_callable], code_start: 0, code_len: 4,
+            label_slot_count: 0,
+        };
+        artifact.functions = clauses.chain(std::iter::once(body)).chain(std::iter::once(entry.clone())).collect();
+        artifact.code = vec![
+            Instruction::MakeCallable { dst: 2, callable_type: body_callable, function: 4, captures: vec![] },
+            Instruction::MakeHandlerShared { dst: 1, handler_def: 0, functions: vec![0, 1, 2, 3], captures: vec![] },
+            Instruction::Handle { dst: 0, handler: 1, body: 2, args: vec![] },
+            Instruction::Return { src: None },
+        ];
+        let plans = closed_host_handler_plans(&artifact, 5, &entry).unwrap();
+        let sites = closed_shared_handle_sites(&artifact, 5, &entry, &plans);
+        assert_eq!(sites.len(), 1);
+        let mut ir = String::new();
+        emit_function(&mut ir, &artifact, 5, &entry, false).unwrap();
+        assert!(ir.contains("store i1 true, ptr %closed_handler_active_2"), "{ir}");
+        assert!(ir.contains("store i1 %closed_handler_prior_active_2, ptr %closed_handler_active_2"), "{ir}");
+        assert!(ir.contains("call void @grbc_fn_4()"), "{ir}");
+        assert!(!ir.contains("g1_host_"), "{ir}");
+
+        // A copied handler is not the exact materialized frame register.
+        artifact.code[2] = Instruction::Handle { dst: 0, handler: 0, body: 2, args: vec![] };
+        assert!(closed_shared_handle_sites(&artifact, 5, &entry, &plans).is_empty());
     }
 
     #[test]
