@@ -7,7 +7,7 @@
 //! (direct scalar/value-aggregate functions with ordinary control flow); every other valid G1 instruction
 //! remains an explicit lowering error until it has a native ABI.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{collections::{BTreeMap, BTreeSet}, error::Error, fmt};
 
 use grandiose_vm::{
     load_verified, verify::VerifiedArtifact, Artifact, Constant, Function, Instruction, Primitive,
@@ -224,11 +224,19 @@ fn emit_function(
     // after their join.  Entry-block scalar slots preserve that virtual-register
     // semantics without fabricating phi ownership at this artifact boundary;
     // LLVM's O3 mem2reg pass can eliminate the trivial allocas afterwards.
+    let closed_handler_plans = closed_host_handler_plans(artifact, function_id, function)?;
     let register_types = function
         .register_types
         .iter()
-        .copied()
-        .map(|ty| llvm_type(artifact, function_id, ty))
+        .enumerate()
+        .map(|(register, ty)| {
+            llvm_type(artifact, function_id, *ty).or_else(|error| {
+                closed_handler_plans
+                    .contains_key(&(register as u32))
+                    .then_some("ptr".to_owned())
+                    .ok_or(error)
+            })
+        })
         .collect::<Result<Vec<_>, _>>()?;
     for (register, llvm_ty) in register_types.iter().enumerate() {
         if llvm_ty != "void" {
@@ -711,6 +719,21 @@ fn emit_function(
                 )?;
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
+            Instruction::MakeHandlerShared { dst, .. } => {
+                let plan = closed_handler_plans.get(dst).ok_or_else(|| {
+                    unsupported(function_id, instruction_id, "closed host handler plan")
+                })?;
+                // This is intentionally metadata only. `Handle` and `Perform`
+                // still fail closed until the lexical continuation ABI has a
+                // native implementation.
+                output.push_str(&format!(
+                    "  ; closed-host-handler-plan r{dst}: def={} routes={} clauses={}\\n",
+                    plan.frame.handler_def,
+                    plan.frame.continuations.len(),
+                    plan.clause_functions.len(),
+                ));
+                emit_fallthrough(output, function, function_id, instruction_id)?;
+            }
             instruction => {
                 return Err(unsupported(
                     function_id,
@@ -1006,6 +1029,18 @@ struct ClosedHostHandlerFrame {
     continuations: Vec<ClosedHostContinuation>,
 }
 
+/// A statically installed, but not yet executable, closed host-handler plan.
+///
+/// The first AOT slice records this only at the `MakeHandlerShared` site.  It
+/// intentionally does not lower `Handle` or `Perform`: executing either
+/// without the complete lexical continuation ABI would turn a locally handled
+/// effect into an unsound process-global host call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedHostHandlerPlan {
+    frame: ClosedHostHandlerFrame,
+    clause_functions: Vec<u32>,
+}
+
 impl ClosedHostHandlerFrame {
     /// Recognize the exact four-protocol, one-shot handler shape emitted by
     /// the production self-host manifest.  Any partial handler, extra clause,
@@ -1085,6 +1120,89 @@ impl ClosedHostHandlerFrame {
         }
         Some(Self { handler_def, continuations })
     }
+}
+
+impl ClosedHostHandlerPlan {
+    /// Accept only the capture-free shared-handler ABI that the next lowering
+    /// slice can reason about.  Clause functions retain their lexical shared
+    /// receiver, have no outward effects, and exactly match the handler
+    /// definition's callable signatures.  This deliberately excludes every
+    /// ordinary dynamic handler shape.
+    fn build(
+        artifact: &Artifact,
+        handler_def: u32,
+        functions: &[u32],
+        captures: &[u32],
+    ) -> Option<Self> {
+        let frame = ClosedHostHandlerFrame::build(artifact, handler_def)?;
+        let definition = artifact.handler_defs.get(handler_def as usize)?;
+        if !captures.is_empty() || functions.len() != definition.clauses.len() {
+            return None;
+        }
+        for (function_id, clause) in functions.iter().zip(&definition.clauses) {
+            let function = artifact.functions.get(*function_id as usize)?;
+            if function.receiver_mode != Some(0)
+                || !function.outward_protocols.is_empty()
+                || function.params != clause.callable_signature.params
+                || function.return_type != clause.callable_signature.result
+                || function.outward_protocols != clause.callable_signature.outward_protocols
+            {
+                return None;
+            }
+            let receiver = *function.register_types.first()?;
+            if !matches!(
+                artifact.types.get(receiver as usize).map(Type::representation),
+                Some(Type::RefShared { referent }) if *referent == UNIT
+            ) {
+                return None;
+            }
+        }
+        Some(Self {
+            frame,
+            clause_functions: functions.to_vec(),
+        })
+    }
+}
+
+fn closed_host_handler_plans(
+    artifact: &Artifact,
+    function_id: u32,
+    function: &Function,
+) -> Result<BTreeMap<u32, ClosedHostHandlerPlan>, ArtifactLlvmError> {
+    let start = function.code_start as usize;
+    let end = start
+        .checked_add(function.code_len as usize)
+        .ok_or_else(|| unsupported(function_id, 0, "invalid function code range"))?;
+    let code = artifact
+        .code
+        .get(start..end)
+        .ok_or_else(|| unsupported(function_id, 0, "invalid function code range"))?;
+    let mut plans = BTreeMap::new();
+    for (offset, instruction) in code.iter().enumerate() {
+        let Instruction::MakeHandlerShared {
+            dst,
+            handler_def,
+            functions,
+            captures,
+        } = instruction
+        else {
+            continue;
+        };
+        let plan = ClosedHostHandlerPlan::build(artifact, *handler_def, functions, captures)
+            .ok_or_else(|| unsupported(function_id, offset as u32, "closed host handler plan"))?;
+        let handler_ty = *function
+            .register_types
+            .get(*dst as usize)
+            .ok_or_else(|| unsupported(function_id, offset as u32, "invalid register"))?;
+        if !matches!(
+            artifact.types.get(handler_ty as usize).map(Type::representation),
+            Some(Type::Handler { handler_def: actual, .. }) if *actual == *handler_def
+        ) || plans.insert(*dst, plan).is_some()
+        {
+            return Err(unsupported(function_id, offset as u32, "closed host handler plan"));
+        }
+    }
+    Ok(plans)
 }
 
 fn frozen_host_protocol_role(protocol: &str, operation: &str) -> Option<FrozenHostImport> {
@@ -1973,6 +2091,84 @@ mod tests {
 
         artifact.protocols[0].operations[0].resumption_upper = Some(2);
         assert!(ClosedHostHandlerFrame::build(&artifact, 0).is_none());
+    }
+
+    #[test]
+    fn closed_host_handler_plan_installs_only_the_capture_free_lexical_shape() {
+        let array_text = 19;
+        let mut artifact = Artifact {
+            required_features: 1 | (1 << 5),
+            imports: vec![
+                Import { capability: "diagnostic".into(), symbol: "write".into(), signature: Signature { params: vec![TEXT], result: UNIT, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "fs.read".into(), symbol: "read".into(), signature: Signature { params: vec![TEXT], result: BYTES, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "fs.write".into(), symbol: "write".into(), signature: Signature { params: vec![TEXT, BYTES], result: UNIT, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "process.args".into(), symbol: "get".into(), signature: Signature { params: vec![], result: array_text, outward_protocols: vec![] }, may_trap: true },
+            ],
+            protocols: vec![
+                Protocol { display_name: "Diagnostic".into(), type_arguments: vec![], operations: vec![Operation { name: "write".into(), payload_signature: Signature { params: vec![TEXT], result: UNIT, outward_protocols: vec![] }, result_type: UNIT, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+                Protocol { display_name: "FileRead".into(), type_arguments: vec![], operations: vec![Operation { name: "read".into(), payload_signature: Signature { params: vec![TEXT], result: UNIT, outward_protocols: vec![] }, result_type: BYTES, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+                Protocol { display_name: "FileWrite".into(), type_arguments: vec![], operations: vec![Operation { name: "write".into(), payload_signature: Signature { params: vec![TEXT, BYTES], result: UNIT, outward_protocols: vec![] }, result_type: UNIT, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+                Protocol { display_name: "ProcessArgs".into(), type_arguments: vec![], operations: vec![Operation { name: "get".into(), payload_signature: Signature { params: vec![], result: UNIT, outward_protocols: vec![] }, result_type: array_text, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(artifact.types.len(), array_text as usize);
+        artifact.types.push(Type::Array { element: TEXT });
+        for (protocol, input_type) in [(0, UNIT), (1, BYTES), (2, UNIT), (3, array_text)] {
+            artifact.types.push(Type::Resumption {
+                input_type,
+                output_type: UNIT,
+                effect_signature: Signature { params: vec![], result: UNIT, outward_protocols: vec![] },
+                lower_uses: 1,
+                upper_uses: Some(1),
+                identity_name: format!("frozen-{protocol}"),
+                copy: false,
+            });
+        }
+        artifact.handler_defs.push(HandlerDef {
+            result_type: UNIT,
+            partial: false,
+            clauses: (0..4)
+                .map(|protocol| HandlerClause {
+                    protocol,
+                    operation: 0,
+                    callable_signature: Signature { params: vec![], result: UNIT, outward_protocols: vec![] },
+                    resumption_type: Some(array_text + 1 + protocol),
+                })
+                .collect(),
+        });
+        let shared_unit = artifact.types.len() as u32;
+        artifact.types.push(Type::RefShared { referent: UNIT });
+        let handler = artifact.types.len() as u32;
+        artifact.types.push(Type::Handler {
+            handler_def: 0,
+            capture_type: UNIT,
+            identity_name: "closed-host".into(),
+        });
+        artifact.functions.extend((0..4).map(|index| Function {
+            name: format!("clause-{index}"), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: Some(0), register_types: vec![shared_unit],
+            code_start: 0, code_len: 1, label_slot_count: 0,
+        }));
+        artifact.functions.push(Function {
+            name: "plan-entry".into(), flags: 0, params: vec![], return_type: UNIT,
+            outward_protocols: vec![], receiver_mode: None, register_types: vec![UNIT, handler],
+            code_start: 0, code_len: 2, label_slot_count: 0,
+        });
+        artifact.code = vec![
+            Instruction::MakeHandlerShared { dst: 1, handler_def: 0, functions: vec![0, 1, 2, 3], captures: vec![] },
+            Instruction::Return { src: None },
+        ];
+
+        let entry = artifact.functions[4].clone();
+        let plans = closed_host_handler_plans(&artifact, 4, &entry).unwrap();
+        assert_eq!(plans[&1].frame.continuations.len(), 4);
+        let mut ir = String::new();
+        emit_function(&mut ir, &artifact, 4, &entry).unwrap();
+        assert!(ir.contains("closed-host-handler-plan r1: def=0 routes=4 clauses=4"), "{ir}");
+
+        artifact.functions[0].receiver_mode = None;
+        assert!(closed_host_handler_plans(&artifact, 4, &entry).is_err());
     }
 
     #[test]
