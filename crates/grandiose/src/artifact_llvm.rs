@@ -750,14 +750,42 @@ fn emit_function(
                 let plan = closed_handler_plans.get(dst).ok_or_else(|| {
                     unsupported(function_id, instruction_id, "closed host handler plan")
                 })?;
-                // This is intentionally metadata only. `Handle` and `Perform`
-                // still fail closed until the lexical continuation ABI has a
-                // native implementation.
+                // The frame is deliberately materialized at the lexical
+                // producer, rather than reconstructed from an import at a
+                // later Perform. Field zero is the dynamic Handle-scope bit;
+                // one field per frozen route records its one-shot resumption
+                // consumption. `Handle`/`Perform` still fail closed below,
+                // but their future lowering has an exact native state object
+                // to thread, validate, and invalidate.
+                let frame_name = format!("%closed_handler_frame_{instruction_id}");
+                let field_count = plan.frame.native_field_count();
+                output.push_str(&format!("  {frame_name} = alloca [{field_count} x i1]\n"));
+                for field in 0..field_count {
+                    let pointer = format!("%closed_handler_frame_{instruction_id}_field_{field}");
+                    output.push_str(&format!(
+                        "  {pointer} = getelementptr inbounds [{field_count} x i1], ptr {frame_name}, i64 0, i64 {field}\n"
+                    ));
+                    // The frame begins inactive; lexical `Handle` is the
+                    // only future instruction permitted to activate it.
+                    output.push_str(&format!("  store i1 false, ptr {pointer}\n"));
+                }
+                // The handler register carries the address of this exact
+                // frame. This is intentionally a local pointer only; it is
+                // not a host-runtime handle and does not authorize imports.
+                emit_store(
+                    output,
+                    &register_types,
+                    function_id,
+                    instruction_id,
+                    *dst,
+                    &frame_name,
+                )?;
                 output.push_str(&format!(
-                    "  ; closed-host-handler-plan r{dst}: def={} routes={} clauses={}\\n",
+                    "  ; closed-host-handler-frame r{dst}: def={} routes={} clauses={} active-field=0 one-shot-fields=1..{}\\n",
                     plan.frame.handler_def,
                     plan.frame.continuations.len(),
                     plan.clause_functions.len(),
+                    field_count - 1,
                 ));
                 emit_fallthrough(output, function, function_id, instruction_id)?;
             }
@@ -1398,6 +1426,23 @@ fn frame_result_type(artifact: &Artifact, handler_def: u32) -> Option<TypeId> {
 }
 
 impl ClosedHostHandlerFrame {
+    /// Native lexical-frame layout: field zero is Handle-scope activity, and
+    /// each remaining field is the consumed bit for one exact frozen route.
+    /// Routes are sorted by protocol/operation in `build`, so this layout is
+    /// deterministic across independent compiler invocations.
+    fn native_field_count(&self) -> u32 {
+        1 + self.continuations.len() as u32
+    }
+
+    fn native_resumption_field(&self, protocol: u32, operation: u32) -> Option<u32> {
+        self.continuations
+            .iter()
+            .position(|continuation| {
+                continuation.protocol == protocol && continuation.operation == operation
+            })
+            .map(|index| index as u32 + 1)
+    }
+
     /// Recognize the exact four-protocol, one-shot handler shape emitted by
     /// the production self-host manifest.  Any partial handler, extra clause,
     /// lookalike protocol, or non-one-shot continuation remains outside this
@@ -2587,7 +2632,12 @@ mod tests {
         assert_eq!(plans[&1].frame.continuations.len(), 4);
         let mut ir = String::new();
         emit_function(&mut ir, &artifact, 4, &entry, false).unwrap();
-        assert!(ir.contains("closed-host-handler-plan r1: def=0 routes=4 clauses=4"), "{ir}");
+        assert!(ir.contains("%closed_handler_frame_0 = alloca [5 x i1]"), "{ir}");
+        assert!(ir.contains("store i1 false, ptr %closed_handler_frame_0_field_0"), "{ir}");
+        assert!(ir.contains("store ptr %closed_handler_frame_0, ptr %slot1"), "{ir}");
+        assert!(ir.contains("closed-host-handler-frame r1: def=0 routes=4 clauses=4 active-field=0 one-shot-fields=1..4"), "{ir}");
+        assert_eq!(plans[&1].frame.native_resumption_field(0, 0), Some(1));
+        assert_eq!(plans[&1].frame.native_resumption_field(3, 0), Some(4));
 
         artifact.functions[0].receiver_mode = None;
         assert!(closed_host_handler_plans(&artifact, 4, &entry).is_err());
@@ -2688,7 +2738,7 @@ mod tests {
                 opcode: "closed effect-free handle",
             })
         );
-        assert!(ir.contains("closed-host-handler-plan r1"), "{ir}");
+        assert!(ir.contains("closed-host-handler-frame r1"), "{ir}");
     }
 
     fn frozen_handler_artifact_for_continuation_abi() -> Artifact {
