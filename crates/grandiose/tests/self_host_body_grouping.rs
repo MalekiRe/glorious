@@ -1322,6 +1322,18 @@ fn self_host_body_contextual_blocks_match_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_body_lazy_if_float_conditionals_match_bootstrap_ast() {
+    // `if` and `else` stay contextual identifiers in the lexer. The body
+    // parser must nevertheless accept both braced arms, including a
+    // floating-point condition payload. The bootstrap body wire oracle has no
+    // lazy-if encoding yet, so its status-3 sentinel cannot stand in for the
+    // self-host parser acceptance assertion here.
+    let source = "select(condition: Bool, value: f32) -> f32 { if(condition) { value } else { 0.0 } }";
+    let output = self_host_body_output(&[source]);
+    assert_eq!(&output[..5], &[1, 0, 0, 0, 0], "{output:?}");
+}
+
+#[test]
 fn self_host_body_library_loop_trailing_blocks_match_bootstrap_ast() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)

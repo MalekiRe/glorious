@@ -2605,6 +2605,125 @@ parse_contextual_block(
     ))
 }
 
+// Source `if(condition) { positive } else { negative }` is deliberately
+// represented as the same two ordinary calls consumed by elaboration and MIR
+// lowering: `else(if(condition, positive), negative)`.  `if` and `else` are
+// contextual identifiers rather than lexer keywords, so this stays aligned
+// with the bootstrap parser and leaves other identifier uses untouched.
+parse_if_expression(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize
+) -> Result<ExprId, BodyError> {
+    let if_callee = try(parse_identifier(source, value, start), @parse_if_expression);
+    let open = value.tokens.position;
+    try(expect(
+        value,
+        source,
+        TokenPattern::LParen,
+        BodyError::ExpectedCallClose(open, start)
+    ), @parse_if_expression);
+    let arguments = Vec::new();
+    try(parse_call_arguments(
+        original,
+        source,
+        declarations,
+        nominal,
+        value,
+        owner,
+        depth + 1,
+        &mut arguments,
+        open
+    ), @parse_if_expression);
+    if(Vec::len(&arguments) != 1) {
+        Result::Err(BodyError::ExpectedExpression(start, value.tokens.position))
+    } else {
+        let block_start = value.tokens.position;
+        try(expect(
+            value,
+            source,
+            TokenPattern::LBrace,
+            BodyError::ExpectedExpression(block_start, start)
+        ), @parse_if_expression);
+        // parse_contextual_block consumes the opening brace itself, whereas
+        // `expect` above only validates it. Restore the cursor to that brace.
+        value.tokens.position = block_start;
+        let positive = try(parse_contextual_block(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            depth + 1
+        ), @parse_if_expression);
+        let else_start = value.tokens.position;
+        if(not(token_is_contextual_ident(source, else_start, &"else"))) {
+            Result::Err(BodyError::ExpectedExpression(else_start, start))
+        } else {
+            let else_callee = try(parse_identifier(
+                source,
+                value,
+                else_start
+            ), @parse_if_expression);
+            let negative_start = value.tokens.position;
+            try(expect(
+                value,
+                source,
+                TokenPattern::LBrace,
+                BodyError::ExpectedExpression(negative_start, else_start)
+            ), @parse_if_expression);
+            value.tokens.position = negative_start;
+            let negative = try(parse_contextual_block(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth + 1
+            ), @parse_if_expression);
+            let if_arguments = Vec::new();
+            Vec::push(&mut if_arguments, *Vec::index(&arguments, 0));
+            Vec::push(&mut if_arguments, positive);
+            let positive_end = node_tokens(&*value, positive).end;
+            let conditional = push_call(
+                value,
+                if_callee,
+                &if_arguments,
+                start,
+                positive_end
+            );
+            let else_arguments = Vec::new();
+            Vec::push(&mut else_arguments, conditional);
+            Vec::push(&mut else_arguments, negative);
+            let negative_end = node_tokens(&*value, negative).end;
+            let combined = push_call(
+                value,
+                else_callee,
+                &else_arguments,
+                start,
+                negative_end
+            );
+            parse_postfix(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth + 1,
+                combined
+            )
+        }
+    }
+}
+
 shell_owner(
     declarations: &super::scanner::DeclarationIndex,
     shell: ShellId
@@ -4203,6 +4322,22 @@ parse_atom(
                         )
                     } else { false }
                 } else { false };
+                if(token_is_contextual_ident(source, start, &"if")
+                    and { next < value.tokens.limit }
+                    and { super::lexer::token_matches_at(
+                        source, next, TokenPattern::LParen
+                    ) }) {
+                    parse_if_expression(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth,
+                        start
+                    )
+                } else {
                 let control = handle super::lexer::lexeme(source, name) {
                     None => 0,
                     Option::Some(text) => if(String::eq(text, &"label")
@@ -4219,6 +4354,7 @@ parse_atom(
                     Result::Err(BodyError::ExpectedExpression(start, start))
                 } else {
                     parse_identifier(source, value, start)
+                }
                 }
             },
             TokenKind::Dollar => parse_callable_reference(source, value, start),
