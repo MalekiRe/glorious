@@ -1497,30 +1497,20 @@ impl Vm {
                     {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let resumption_value = if receiver_mode == 2 {
-                        take(frame, resumption)?
-                    } else {
-                        get(frame, resumption)?
-                    };
-                    let Value::Resumption(resumption) = resumption_value else {
-                        return Err(RuntimeError::TypeConfusion);
-                    };
-                    let value = take(frame, value)?;
                     let mut captured = if receiver_mode == 2 {
+                        let resumption_value = take(frame, resumption)?;
+                        let Value::Resumption(resumption) = resumption_value else {
+                            return Err(RuntimeError::TypeConfusion);
+                        };
                         resumption
                             .try_borrow_mut()
                             .map_err(|_| RuntimeError::TypeConfusion)?
                             .take()
                             .ok_or(RuntimeError::TypeConfusion)?
                     } else {
-                        let stored = resumption
-                            .try_borrow()
-                            .map_err(|_| RuntimeError::TypeConfusion)?;
-                        clone_resumption_snapshot(
-                            a,
-                            stored.as_ref().ok_or(RuntimeError::TypeConfusion)?,
-                        )?
+                        clone_resumption_register(a, frame, resumption)?
                     };
+                    let value = take(frame, value)?;
                     if captured.resumption_type != expected_resumption_type {
                         return Err(RuntimeError::TypeConfusion);
                     }
@@ -1568,30 +1558,20 @@ impl Vm {
                     {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let resumption_value = if receiver_mode == 2 {
-                        take(frame, resumption)?
-                    } else {
-                        get(frame, resumption)?
-                    };
-                    let Value::Resumption(resumption) = resumption_value else {
-                        return Err(RuntimeError::TypeConfusion);
-                    };
-                    let value = take(frame, value)?;
                     let mut captured = if receiver_mode == 2 {
+                        let resumption_value = take(frame, resumption)?;
+                        let Value::Resumption(resumption) = resumption_value else {
+                            return Err(RuntimeError::TypeConfusion);
+                        };
                         resumption
                             .try_borrow_mut()
                             .map_err(|_| RuntimeError::TypeConfusion)?
                             .take()
                             .ok_or(RuntimeError::TypeConfusion)?
                     } else {
-                        let stored = resumption
-                            .try_borrow()
-                            .map_err(|_| RuntimeError::TypeConfusion)?;
-                        clone_resumption_snapshot(
-                            a,
-                            stored.as_ref().ok_or(RuntimeError::TypeConfusion)?,
-                        )?
+                        clone_resumption_register(a, frame, resumption)?
                     };
+                    let value = take(frame, value)?;
                     if captured.resumption_type != expected_resumption_type {
                         return Err(RuntimeError::TypeConfusion);
                     }
@@ -3695,6 +3675,32 @@ impl SnapshotCloneContext {
 /// before any values are copied, so shared references can be remapped to the
 /// corresponding node in each replay. Targets outside the captured graph stay
 /// shared with their external owner. Unique references are never cloneable.
+fn clone_resumption_register(
+    a: &ExecutionImage,
+    frame: &Frame,
+    register: u32,
+) -> Result<ResumptionValue, RuntimeError> {
+    fn clone_value(a: &ExecutionImage, value: &Value) -> Result<ResumptionValue, RuntimeError> {
+        let Value::Resumption(resumption) = value else {
+            return Err(RuntimeError::TypeConfusion);
+        };
+        let stored = resumption
+            .try_borrow()
+            .map_err(|_| RuntimeError::TypeConfusion)?;
+        clone_resumption_snapshot(a, stored.as_ref().ok_or(RuntimeError::TypeConfusion)?)
+    }
+
+    let value = frame.registers[register as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(register))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| clone_value(a, value))
+            .map_err(|_| RuntimeError::EmptyRegister(register))?,
+        value => clone_value(a, value),
+    }
+}
+
 fn clone_resumption_snapshot(
     a: &ExecutionImage,
     source: &ResumptionValue,
