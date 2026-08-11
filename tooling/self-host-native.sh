@@ -21,7 +21,9 @@ usage:
 baseline cache directory into it once (or uses the optional explicit baseline).
 The baseline is never modified; every build writes only to this worktree.
 `build` emits an O3 Wild-linked native self-host
-compiler; `run` executes it; `smoke` compiles a tiny source program through
+compiler using durable partition objects below this worktree's private cache;
+objects copied from a seed are never required and missing/invalid intermediates
+begin cold. `run` executes it; `smoke` compiles a tiny source program through
 that native compiler. `provenance` builds (or reuses) the canonical native
 stage-1 compiler and writes an immutable O3/Wild provenance manifest for it.
 `canonical-source` materializes the exact monolithic source closure used by
@@ -35,6 +37,7 @@ readonly route_cache="$route_root/target/self-host-native-cache"
 readonly route_manifest="$route_cache/native-route.manifest"
 readonly route_binary="$route_cache/grandiose-self-host-native"
 readonly route_fingerprint="$route_cache/build.fingerprint"
+readonly route_objects="$route_cache/objects"
 readonly route_grc="$route_root/target/release/grc"
 
 inside_worktree() {
@@ -151,7 +154,7 @@ build_native() {
     # The compiler itself legitimately needs larger compiler-internal tables
     # than the 64 MiB ceiling retained for ordinary native programs. Keep the
     # override explicit, bounded, and confined to this private self-host route.
-    "$route_grc" -O3 --emit executable --native-allocation-limit 536870912 -o "$route_binary" "${inputs[@]}"
+    "$route_grc" -O3 --emit executable --native-incremental-cache "$route_objects" --native-allocation-limit 536870912 -o "$route_binary" "${inputs[@]}"
     [[ -x "$route_binary" ]] || { echo "self-host-native: native compiler was not emitted" >&2; exit 1; }
     printf '%s\n' "$fingerprint" > "$route_fingerprint"
     printf '%s\n' "$route_binary"

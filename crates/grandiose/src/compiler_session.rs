@@ -111,6 +111,21 @@ const NATIVE_OBJECT_CACHE_CAPACITY: usize = 4;
 /// exact IR and native compiler ABI are the complete cache authority.
 const NATIVE_FUNCTION_OBJECT_CACHE_CAPACITY: usize = 128;
 
+/// Cached native units are process-local, but they are still treated as
+/// untrusted bytes at the materialization boundary.  Recognize the portable
+/// object-file container magics emitted by Clang; a truncated or otherwise
+/// corrupt cache entry is evicted and recompiled rather than handed to Wild.
+fn native_object_bytes_are_plausible(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x7fELF")
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xce])
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+        || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0x4c, 0x01]) // COFF i386
+        || bytes.starts_with(&[0x64, 0x86]) // COFF x86_64
+        || bytes.starts_with(&[0xaa, 0x64]) // COFF arm64
+}
+
 #[derive(Clone)]
 struct CachedLlvmIr {
     schema: u32,
@@ -270,6 +285,9 @@ impl CompilationDriver {
             .native_object_cache
             .remove(index)
             .expect("native object cache index disappeared");
+        if !native_object_bytes_are_plausible(&cached.bytes) {
+            return None;
+        }
         cached.last_used_revision = self.request_revision;
         let bytes = cached.bytes.clone();
         self.native_object_cache.push_front(cached);
@@ -321,25 +339,29 @@ impl CompilationDriver {
         toolchain_abi: &str,
         source_function: bool,
     ) -> Option<Vec<u8>> {
-        let index = self.native_function_object_cache.iter().position(|cached| {
-            cached.schema == LLVM_CACHE_SCHEMA
-                && cached.target == *target
-                && cached.ir == ir
-                && cached.toolchain_abi == toolchain_abi
-        })?;
+        let index = self
+            .native_function_object_cache
+            .iter()
+            .position(|cached| {
+                cached.schema == LLVM_CACHE_SCHEMA
+                    && cached.target == *target
+                    && cached.ir == ir
+                    && cached.toolchain_abi == toolchain_abi
+            })?;
         let mut cached = self
             .native_function_object_cache
             .remove(index)
             .expect("native function object cache index disappeared");
+        if !native_object_bytes_are_plausible(&cached.bytes) {
+            return None;
+        }
         cached.last_used_revision = self.request_revision;
         let bytes = cached.bytes.clone();
         self.native_function_object_cache.push_front(cached);
         self.stats.reused_native_objects = self.stats.reused_native_objects.saturating_add(1);
         if source_function {
-            self.stats.reused_native_function_objects = self
-                .stats
-                .reused_native_function_objects
-                .saturating_add(1);
+            self.stats.reused_native_function_objects =
+                self.stats.reused_native_function_objects.saturating_add(1);
         }
         Some(bytes)
     }
@@ -357,14 +379,15 @@ impl CompilationDriver {
                 || cached.ir != ir
                 || cached.toolchain_abi != toolchain_abi
         });
-        self.native_function_object_cache.push_front(CachedNativeFunctionObject {
-            schema: LLVM_CACHE_SCHEMA,
-            target: target.clone(),
-            ir: ir.to_owned(),
-            toolchain_abi,
-            bytes,
-            last_used_revision: self.request_revision,
-        });
+        self.native_function_object_cache
+            .push_front(CachedNativeFunctionObject {
+                schema: LLVM_CACHE_SCHEMA,
+                target: target.clone(),
+                ir: ir.to_owned(),
+                toolchain_abi,
+                bytes,
+                last_used_revision: self.request_revision,
+            });
         self.native_function_object_cache
             .truncate(NATIVE_FUNCTION_OBJECT_CACHE_CAPACITY);
     }
@@ -372,15 +395,11 @@ impl CompilationDriver {
     pub fn record_native_partitioned_object_emitted(&mut self, source_function: bool) {
         self.stats.emitted_native_objects = self.stats.emitted_native_objects.saturating_add(1);
         if source_function {
-            self.stats.emitted_native_function_objects = self
-                .stats
-                .emitted_native_function_objects
-                .saturating_add(1);
+            self.stats.emitted_native_function_objects =
+                self.stats.emitted_native_function_objects.saturating_add(1);
         } else {
-            self.stats.emitted_native_shared_objects = self
-                .stats
-                .emitted_native_shared_objects
-                .saturating_add(1);
+            self.stats.emitted_native_shared_objects =
+                self.stats.emitted_native_shared_objects.saturating_add(1);
         }
     }
 
@@ -857,5 +876,28 @@ mod tests {
             driver.cached_native_object(&bundle, o2, &target, ir, "clang=changed"),
             None
         );
+    }
+
+    #[test]
+    fn corrupt_partitioned_native_object_is_evicted_before_reuse() {
+        let mut driver = CompilationDriver::new();
+        let target = LlvmOptions::default();
+        driver.cache_native_partitioned_object(
+            &target,
+            "; function fragment",
+            "clang=example;opt=-O3".into(),
+            vec![0, 1, 2],
+        );
+        assert_eq!(
+            driver.cached_native_partitioned_object(
+                &target,
+                "; function fragment",
+                "clang=example;opt=-O3",
+                true,
+            ),
+            None,
+            "corrupt bytes must be dropped so the caller recompiles the unit"
+        );
+        assert!(driver.native_function_object_cache.is_empty());
     }
 }

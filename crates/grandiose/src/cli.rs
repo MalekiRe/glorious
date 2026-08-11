@@ -8,20 +8,23 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options,
     artifact_llvm::emit_artifact_llvm_ir,
+    compile_bundle_to_phases_with_options,
     compiler_session::CompilationDriver,
     diagnostic::{Diagnostic, Severity},
     emit_llvm_ir, emit_llvm_native_object_units,
-    interface::{InterfaceSelection, scan_interfaces},
+    interface::{scan_interfaces, InterfaceSelection},
     lexer,
-    llvm_backend::{DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_NATIVE_OBJECT_PARTITION_SCHEMA, LlvmOptions},
+    llvm_backend::{
+        LlvmOptions, DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_NATIVE_OBJECT_PARTITION_SCHEMA,
+    },
     source_bundle::{Segment, SourceBundle},
+    CompileOptions, OptimizationLevel,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-incremental-cache DIR  durable private partitioned objects (-O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
 
 const MAX_NATIVE_ALLOCATION_LIMIT: u64 = 1024 * 1024 * 1024;
 const SESSION_PROTOCOL: u32 = 1;
@@ -198,6 +201,7 @@ struct CompileCommand {
     /// objects. The persistent server owns the cache; a one-shot invocation
     /// is rejected before it could accidentally use the monolithic route.
     native_incremental: bool,
+    native_incremental_cache: Option<PathBuf>,
     native_allocation_limit: Option<u64>,
     json_diagnostics: bool,
 }
@@ -322,6 +326,7 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         output: None,
         emit: None,
         native_incremental: false,
+        native_incremental_cache: None,
         native_allocation_limit: None,
         json_diagnostics: false,
     };
@@ -407,16 +412,34 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     command.native_incremental = true;
                     continue;
                 }
+                "--native-incremental-cache" => {
+                    let path = args.next().ok_or_else(|| {
+                        "`--native-incremental-cache` requires a directory".to_string()
+                    })?;
+                    if command
+                        .native_incremental_cache
+                        .replace(PathBuf::from(path))
+                        .is_some()
+                    {
+                        return Err(
+                            "`--native-incremental-cache` may be specified only once".to_string()
+                        );
+                    }
+                    command.native_incremental = true;
+                    continue;
+                }
                 "--native-allocation-limit" => {
                     let value = args.next().ok_or_else(|| {
                         "`--native-allocation-limit` requires a byte count".to_string()
                     })?;
-                    let value = value.to_str().ok_or_else(|| {
-                        "native allocation limit must be valid UTF-8".to_string()
-                    })?;
+                    let value = value
+                        .to_str()
+                        .ok_or_else(|| "native allocation limit must be valid UTF-8".to_string())?;
                     let limit = parse_native_allocation_limit(value)?;
                     if command.native_allocation_limit.replace(limit).is_some() {
-                        return Err("`--native-allocation-limit` may be specified only once".to_string());
+                        return Err(
+                            "`--native-allocation-limit` may be specified only once".to_string()
+                        );
                     }
                     continue;
                 }
@@ -488,7 +511,9 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         );
     }
     if command.native_allocation_limit.is_some() && command.emit != Some(EmitKind::Executable) {
-        return Err("`--native-allocation-limit` is supported only with `--emit executable`".to_string());
+        return Err(
+            "`--native-allocation-limit` is supported only with `--emit executable`".to_string(),
+        );
     }
     if command.native_incremental && command.emit != Some(EmitKind::Executable) {
         return Err("`--native-incremental` requires `--emit executable`".to_string());
@@ -500,9 +525,9 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
 }
 
 fn parse_native_allocation_limit(value: &str) -> Result<u64, String> {
-    let limit = value.parse::<u64>().map_err(|_| {
-        "`--native-allocation-limit` requires an unsigned byte count".to_string()
-    })?;
+    let limit = value
+        .parse::<u64>()
+        .map_err(|_| "`--native-allocation-limit` requires an unsigned byte count".to_string())?;
     if limit < DEFAULT_NATIVE_ALLOCATION_LIMIT {
         return Err(format!(
             "`--native-allocation-limit` must be at least {DEFAULT_NATIVE_ALLOCATION_LIMIT} bytes"
@@ -755,7 +780,7 @@ fn declared_external_module_paths(file: &Path, source: &str) -> Vec<PathBuf> {
 }
 
 fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
-    if command.native_incremental {
+    if command.native_incremental && command.native_incremental_cache.is_none() {
         let _ = writeln!(
             stderr,
             "grc: error: `--native-incremental` requires a persistent `grc --serve` request"
@@ -941,6 +966,69 @@ fn compile_loaded(
         // never retained: every request materializes its current objects and
         // takes a fresh required Wild link.
         if kind == EmitKind::Executable && command.native_incremental {
+            if let Some(cache_dir) = &command.native_incremental_cache {
+                let units = match emit_llvm_native_object_units(&phases, &llvm_options) {
+                    Ok(units) => units,
+                    Err(diagnostics) => {
+                        return report_diagnostics(
+                            &bundle,
+                            diagnostics,
+                            command.json_diagnostics,
+                            stderr,
+                        )
+                    }
+                };
+                let toolchain_abi =
+                    match native_object_toolchain_abi(&llvm_options, OptimizationLevel::O3) {
+                        Ok(abi) => abi,
+                        Err(error) => {
+                            let _ = writeln!(
+                            stderr,
+                            "grc: error: could not identify native object toolchain ABI: {error}"
+                        );
+                            return 1;
+                        }
+                    };
+                let mut objects = Vec::with_capacity(units.functions.len() + 1);
+                let shared_abi = format!("{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=shared;shared={}", units.shared_fingerprint);
+                match materialize_disk_partitioned_native_object(
+                    &output,
+                    0,
+                    "shared",
+                    &units.shared.ir,
+                    &shared_abi,
+                    cache_dir,
+                ) {
+                    Ok(object) => objects.push(object),
+                    Err(error) => {
+                        let _ = writeln!(stderr, "grc: error: {error}");
+                        return 1;
+                    }
+                }
+                for (index, function) in units.functions.iter().enumerate() {
+                    let abi = format!("{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;shared={};decl={};fragment={}", units.shared_fingerprint, function.declaration, function.fragment_fingerprint);
+                    match materialize_disk_partitioned_native_object(
+                        &output,
+                        index + 1,
+                        "function",
+                        &function.module.ir,
+                        &abi,
+                        cache_dir,
+                    ) {
+                        Ok(object) => objects.push(object),
+                        Err(error) => {
+                            let _ = writeln!(stderr, "grc: error: {error}");
+                            return 1;
+                        }
+                    }
+                }
+                let host = native_host.as_ref().expect("executable native host");
+                if let Err(error) = link_partitioned_native_executable(&output, host, &objects) {
+                    let _ = writeln!(stderr, "grc: error: {error}");
+                    return 1;
+                }
+                return 0;
+            }
             if let Some(driver) = incremental.as_deref_mut() {
                 let units = match emit_llvm_native_object_units(&phases, &llvm_options) {
                     Ok(units) => units,
@@ -953,19 +1041,17 @@ fn compile_loaded(
                         );
                     }
                 };
-                let toolchain_abi = match native_object_toolchain_abi(
-                    &llvm_options,
-                    OptimizationLevel::O3,
-                ) {
-                    Ok(abi) => abi,
-                    Err(error) => {
-                        let _ = writeln!(
+                let toolchain_abi =
+                    match native_object_toolchain_abi(&llvm_options, OptimizationLevel::O3) {
+                        Ok(abi) => abi,
+                        Err(error) => {
+                            let _ = writeln!(
                             stderr,
                             "grc: error: could not identify native object toolchain ABI: {error}"
                         );
-                        return 1;
-                    }
-                };
+                            return 1;
+                        }
+                    };
                 let mut objects = Vec::with_capacity(units.functions.len() + 1);
                 let shared_abi = format!(
                     "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=shared;shared-fingerprint={}",
@@ -1259,12 +1345,9 @@ fn materialize_partitioned_native_object(
 ) -> Result<TemporaryNativeObject, String> {
     let object = TemporaryNativeObject::create(output, role, ordinal)
         .map_err(|error| format!("could not reserve native object path: {error}"))?;
-    if let Some(bytes) = driver.cached_native_partitioned_object(
-        llvm_options,
-        ir,
-        toolchain_abi,
-        source_function,
-    ) {
+    if let Some(bytes) =
+        driver.cached_native_partitioned_object(llvm_options, ir, toolchain_abi, source_function)
+    {
         std::fs::write(&object.path, bytes).map_err(|error| {
             format!(
                 "could not materialize cached native object {}: {error}",
@@ -1311,6 +1394,101 @@ fn materialize_partitioned_native_object(
     })?;
     driver.cache_native_partitioned_object(llvm_options, ir, toolchain_abi.to_owned(), bytes);
     driver.record_native_partitioned_object_emitted(source_function);
+    Ok(object)
+}
+
+fn native_object_bytes_are_plausible(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x7fELF")
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+        || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0x4c, 0x01])
+        || bytes.starts_with(&[0x64, 0x86])
+        || bytes.starts_with(&[0xaa, 0x64])
+}
+
+/// Durable, worktree-owned object cache. The digest includes complete unit IR
+/// and the exact Clang/runtime ABI string; objects are copied into request
+/// paths and every invocation still takes a new Wild link.
+fn materialize_disk_partitioned_native_object(
+    output: &Path,
+    ordinal: usize,
+    role: &str,
+    ir: &str,
+    abi: &str,
+    cache_dir: &Path,
+) -> Result<TemporaryNativeObject, String> {
+    std::fs::create_dir_all(cache_dir).map_err(|error| {
+        format!(
+            "could not create native incremental cache {}: {error}",
+            cache_dir.display()
+        )
+    })?;
+    let key = blake3::hash(format!("schema=1\nabi={abi}\nir={ir}").as_bytes())
+        .to_hex()
+        .to_string();
+    let cached = cache_dir.join(format!("{key}.o"));
+    let manifest = cache_dir.join(format!("{key}.manifest"));
+    let object = TemporaryNativeObject::create(output, role, ordinal)
+        .map_err(|error| format!("could not reserve native object path: {error}"))?;
+    if let (Ok(bytes), Ok(existing_manifest)) =
+        (std::fs::read(&cached), std::fs::read_to_string(&manifest))
+    {
+        let object_digest = blake3::hash(&bytes).to_hex();
+        let manifest_text =
+            format!("schema=1\ndigest={key}\nobject-blake3={object_digest}\nabi={abi}\n");
+        if existing_manifest == manifest_text && native_object_bytes_are_plausible(&bytes) {
+            std::fs::write(&object.path, bytes)
+                .map_err(|error| format!("could not materialize cached native object: {error}"))?;
+            return Ok(object);
+        }
+    }
+    // A missing mate, malformed manifest, or mismatched object digest is a
+    // cache miss. Remove both paths so a future request cannot observe a
+    // half-published entry.
+    let _ = std::fs::remove_file(&cached);
+    let _ = std::fs::remove_file(&manifest);
+    let result = ProcessCommand::new("clang")
+        .args(["-x", "ir", "-O3", "-c", "-"])
+        .arg("-o")
+        .arg(&object.path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start `clang` for native unit: {error}"))
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .ok_or_else(|| "could not open `clang` stdin".to_owned())?
+                .write_all(ir.as_bytes())
+                .map_err(|error| error.to_string())?;
+            child.wait_with_output().map_err(|error| error.to_string())
+        })?;
+    if !result.status.success() {
+        return Err(format!(
+            "native LLVM unit emission failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    let bytes = std::fs::read(&object.path)
+        .map_err(|error| format!("could not read emitted native object: {error}"))?;
+    if !native_object_bytes_are_plausible(&bytes) {
+        return Err("clang emitted an unrecognized native object".into());
+    }
+    let object_digest = blake3::hash(&bytes).to_hex();
+    let manifest_text =
+        format!("schema=1\ndigest={key}\nobject-blake3={object_digest}\nabi={abi}\n");
+    let temporary = cache_dir.join(format!(".{key}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("could not write native cache object: {error}"))?;
+    std::fs::rename(&temporary, &cached)
+        .map_err(|error| format!("could not publish native cache object: {error}"))?;
+    let manifest_temporary = cache_dir.join(format!(".{key}.{}.manifest.tmp", std::process::id()));
+    std::fs::write(&manifest_temporary, manifest_text)
+        .map_err(|error| format!("could not write native cache manifest: {error}"))?;
+    std::fs::rename(&manifest_temporary, &manifest)
+        .map_err(|error| format!("could not publish native cache manifest: {error}"))?;
     Ok(object)
 }
 
@@ -2542,15 +2720,13 @@ mod tests {
             };
             assert_eq!(command.stop_phase, Some(expected));
         }
-        assert!(
-            parse(
-                ["--phase", "lex", "--check", "input.glorious"]
-                    .into_iter()
-                    .map(OsString::from)
-                    .collect()
-            )
-            .is_err()
-        );
+        assert!(parse(
+            ["--phase", "lex", "--check", "input.glorious"]
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        )
+        .is_err());
     }
 
     #[test]
@@ -2559,13 +2735,11 @@ mod tests {
             parse(vec![OsString::from("--capabilities")]).unwrap(),
             Command::Capabilities
         ));
-        assert!(
-            parse(vec![
-                OsString::from("--capabilities"),
-                OsString::from("input.glorious")
-            ])
-            .is_err()
-        );
+        assert!(parse(vec![
+            OsString::from("--capabilities"),
+            OsString::from("input.glorious")
+        ])
+        .is_err());
     }
 
     #[test]
@@ -2574,13 +2748,11 @@ mod tests {
             parse(vec![OsString::from("--serve")]).unwrap(),
             Command::Serve
         ));
-        assert!(
-            parse(vec![
-                OsString::from("--serve"),
-                OsString::from("input.glorious")
-            ])
-            .is_err()
-        );
+        assert!(parse(vec![
+            OsString::from("--serve"),
+            OsString::from("input.glorious")
+        ])
+        .is_err());
     }
 
     #[test]

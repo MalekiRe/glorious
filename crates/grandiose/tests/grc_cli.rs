@@ -5,7 +5,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
 };
 
-use grandiose_vm::{Artifact, verify};
+use grandiose_vm::{verify, Artifact};
 use tempfile::tempdir;
 
 fn write(path: &Path, source: &str) {
@@ -198,7 +198,10 @@ fn release_warm_llvm_serve_iteration_records_cache_evidence() {
     );
     let interface_changed = request(&mut session, 4, arguments());
     assert_eq!(interface_changed["status"], 0, "{interface_changed}");
-    assert_eq!(interface_changed["llvm_ir_cache"], "miss", "{interface_changed}");
+    assert_eq!(
+        interface_changed["llvm_ir_cache"], "miss",
+        "{interface_changed}"
+    );
     assert_eq!(interface_changed["cache_stats"]["llvm_ir_reused"], 0);
     assert_eq!(
         interface_changed["cache_stats"]["llvm_fragments_reused"], 0,
@@ -354,9 +357,21 @@ fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relin
     }));
     assert_eq!(cold["status"], 0, "{cold}");
     assert_eq!(cold["native_incremental"]["wild_relink"], true, "{cold}");
-    assert_eq!(cold["native_incremental"]["strategy"], "partitioned-function-objects", "{cold}");
-    assert_eq!(cold["native_incremental"]["native_objects_reused"], 0, "{cold}");
-    assert!(cold["native_incremental"]["native_objects_emitted"].as_u64().unwrap() >= 3, "{cold}");
+    assert_eq!(
+        cold["native_incremental"]["strategy"], "partitioned-function-objects",
+        "{cold}"
+    );
+    assert_eq!(
+        cold["native_incremental"]["native_objects_reused"], 0,
+        "{cold}"
+    );
+    assert!(
+        cold["native_incremental"]["native_objects_emitted"]
+            .as_u64()
+            .unwrap()
+            >= 3,
+        "{cold}"
+    );
     assert!(first_executable.is_file());
     assert!(Command::new(&first_executable).status().unwrap().success());
     assert_eq!(fs::read(&observed).unwrap(), b"one");
@@ -369,16 +384,111 @@ fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relin
         "arguments": arguments(&second_executable),
     }));
     assert_eq!(edited["status"], 0, "{edited}");
-    assert_eq!(edited["native_incremental"]["wild_relink"], true, "{edited}");
-    assert_eq!(edited["native_incremental"]["strategy"], "partitioned-function-objects", "{edited}");
-    assert!(edited["native_incremental"]["function_objects_reused"].as_u64().unwrap() >= 1, "{edited}");
+    assert_eq!(
+        edited["native_incremental"]["wild_relink"], true,
+        "{edited}"
+    );
+    assert_eq!(
+        edited["native_incremental"]["strategy"], "partitioned-function-objects",
+        "{edited}"
+    );
+    assert!(
+        edited["native_incremental"]["function_objects_reused"]
+            .as_u64()
+            .unwrap()
+            >= 1,
+        "{edited}"
+    );
     // The edited leaf must be recompiled; the unchanged entry object is
     // retained. Shared runtime bytes may be independently re-emitted only
     // when generated globals change.
-    assert!(edited["native_incremental"]["function_objects_compiled"].as_u64().unwrap() >= 1, "{edited}");
+    assert!(
+        edited["native_incremental"]["function_objects_compiled"]
+            .as_u64()
+            .unwrap()
+            >= 1,
+        "{edited}"
+    );
     assert!(second_executable.is_file());
     assert!(Command::new(&second_executable).status().unwrap().success());
     assert_eq!(fs::read(&observed).unwrap(), b"two");
+}
+
+#[test]
+fn disk_native_incremental_cache_reuses_sibling_object_across_processes() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("disk-cache.glorious");
+    let cache = directory.path().join("objects");
+    let first = directory.path().join("first-native");
+    let second = directory.path().join("second-native");
+    let source = |value| format!("leaf() -> i64 {{ {value} }} main() -> () {{ leaf(); () }}");
+    write(&input, &source(1));
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&first)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    let object_count = |directory: &Path| {
+        fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "o")
+            })
+            .count()
+    };
+    let cold = object_count(&cache);
+    assert!(cold >= 2);
+    write(&input, &source(2));
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&second)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        object_count(&cache),
+        cold + 1,
+        "only the edited leaf should add an object"
+    );
+    assert!(
+        first.is_file() && second.is_file(),
+        "each invocation must link a fresh executable"
+    );
+    let victim = fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "o"))
+        .unwrap();
+    let corrupt = b"\x7fELF plausible-but-corrupt";
+    fs::write(&victim, corrupt).unwrap();
+    let recovered = directory.path().join("recovered-native");
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&recovered)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    assert_ne!(
+        fs::read(&victim).unwrap(),
+        corrupt,
+        "digest mismatch must rebuild the cached object"
+    );
+    assert!(recovered.is_file());
 }
 
 #[test]
@@ -432,7 +542,10 @@ fn persistent_serve_separates_native_object_cache_entries_by_optimization_level(
     assert_eq!(warm_o3["status"], 0, "{warm_o3}");
     assert_eq!(warm_o3["llvm_ir_cache"], "hit", "{warm_o3}");
     assert_eq!(warm_o3["native_object_cache"], "hit", "{warm_o3}");
-    assert_eq!(fs::read(&warm_o3_output).unwrap(), fs::read(&o3_output).unwrap());
+    assert_eq!(
+        fs::read(&warm_o3_output).unwrap(),
+        fs::read(&o3_output).unwrap()
+    );
 }
 
 #[test]
@@ -1098,12 +1211,10 @@ fn session_protocol_errors_and_resource_limits_do_not_poison_the_process() {
         "arguments": ["--phase", "check", input.display().to_string()]
     }));
     assert_eq!(wrong_version["status"], 2);
-    assert!(
-        wrong_version["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("incompatible")
-    );
+    assert!(wrong_version["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("incompatible"));
     let unknown = session.request(serde_json::json!({
         "protocol": 1,
         "id": 3,
@@ -1119,21 +1230,17 @@ fn session_protocol_errors_and_resource_limits_do_not_poison_the_process() {
         "arguments": arguments
     }));
     assert_eq!(limited["status"], 2);
-    assert!(
-        limited["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("argument-count")
-    );
+    assert!(limited["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("argument-count"));
 
     let oversized = session.raw(&"x".repeat(1024 * 1024 + 1));
     assert_eq!(oversized["status"], 2);
-    assert!(
-        oversized["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("request exceeds session byte limit")
-    );
+    assert!(oversized["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("request exceeds session byte limit"));
 
     let oversized_source = directory.path().join("oversized.glorious");
     fs::File::create(&oversized_source)
@@ -1147,12 +1254,10 @@ fn session_protocol_errors_and_resource_limits_do_not_poison_the_process() {
         "arguments": ["--phase", "lex", oversized_source.display().to_string()]
     }));
     assert_eq!(source_limited["status"], 1);
-    assert!(
-        source_limited["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("source-byte limit exceeded")
-    );
+    assert!(source_limited["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("source-byte limit exceeded"));
 
     let healthy = session.request(serde_json::json!({
         "protocol": 1,
@@ -1271,11 +1376,9 @@ fn interface_emission_uses_parser_spans_and_separates_the_standard_library() {
             && declaration["name_start_byte"] == 18
             && declaration["name_end_byte"] == 24
     }));
-    assert!(
-        !declarations
-            .iter()
-            .any(|declaration| declaration["file"] == "<grandiose:std>")
-    );
+    assert!(!declarations
+        .iter()
+        .any(|declaration| declaration["file"] == "<grandiose:std>"));
 
     let standard = grc()
         .args(["--emit", "std-interfaces-json"])
@@ -1283,13 +1386,11 @@ fn interface_emission_uses_parser_spans_and_separates_the_standard_library() {
         .unwrap();
     assert!(standard.status.success());
     let declarations: serde_json::Value = serde_json::from_slice(&standard.stdout).unwrap();
-    assert!(
-        declarations
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|declaration| declaration["file"] == "<grandiose:std>")
-    );
+    assert!(declarations
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|declaration| declaration["file"] == "<grandiose:std>"));
 }
 
 #[test]
