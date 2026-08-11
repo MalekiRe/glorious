@@ -55501,6 +55501,24 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 folded[pc] = Instruction::Jump { target: target as u32 };
             }
         }
+        // A switch whose every successor is the same target observes no
+        // information that can affect execution.  Its discriminator is an
+        // ordinary, non-consuming read, so replacing it with the equivalent
+        // unconditional branch both avoids dynamic tag dispatch and lets the
+        // normal jump-threading/compaction passes remove the branch entirely
+        // when the target is fallthrough.  This also covers empty-case
+        // switches, which always take `otherwise`.
+        for instruction in &mut folded {
+            let Instruction::Switch {
+                cases, otherwise, ..
+            } = instruction
+            else {
+                continue;
+            };
+            if cases.iter().all(|(_, target)| *target == *otherwise) {
+                *instruction = Instruction::Jump { target: *otherwise };
+            }
+        }
         // Threading can leave an intermediate jump with no remaining incoming
         // edge. Conservatively trace only known terminal/control forms; every
         // other opcode is treated as fallthrough. That may retain extra code,
@@ -58250,6 +58268,41 @@ mod mir_edge_emission_tests {
                 Instruction::Jump { target: 0 },
             ]
         );
+    }
+
+    #[test]
+    fn peephole_replaces_same_successor_switch_with_fallthrough() {
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Switch {
+                    discr: 1,
+                    cases: vec![(0, 1), (1, 1)],
+                    otherwise: 1,
+                },
+                Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "same_successor_switch".into(),
+            flags: 0,
+            params: vec![U32],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, U32],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, [Instruction::Return { src: None }]);
+        assert_eq!(artifact.functions[0].code_len, 1);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let vm = Vm::new(verify(artifact).unwrap());
+        assert_eq!(vm.run(0, vec![Value::U64(0)]).unwrap(), Value::Unit);
+        assert_eq!(vm.run(0, vec![Value::U64(99)]).unwrap(), Value::Unit);
     }
 
     #[test]
