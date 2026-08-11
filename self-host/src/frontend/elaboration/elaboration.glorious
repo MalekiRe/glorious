@@ -3639,6 +3639,10 @@ pub core_handler_clause_operation(
     value: &CoreHandlerClause
 ) -> InterfaceEffectOperationId { value.operation }
 
+pub core_handler_clause_instance(
+    value: &CoreHandlerClause
+) -> EffectInstanceId { value.instance }
+
 pub core_handler_clause_payloads<'a>(
     value: &'a CoreHandlerClause
 ) -> Slice<'a, CoreLocalId> { Vec::as_slice(&value.payloads) }

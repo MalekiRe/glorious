@@ -1644,6 +1644,32 @@ write_variant_dispatch_arms<'a>(
     } else { Result::Ok(()) }
 }
 
+write_handler_clauses<'a>(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    source_local_limit: u32,
+    clauses: Slice<'a, super::super::frontend::elaboration::CoreHandlerClause>,
+    ordinal: usize
+) -> Result<(), ElaborationError> {
+    if(ordinal < Slice::len(clauses)) {
+        let clause = handle Slice::get(clauses, ordinal) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        ByteBuf::write_u32_le(output, Id::to_u32(super::super::frontend::elaboration::core_handler_clause_instance(clause)));
+        ByteBuf::write_u32_le(output, Id::to_u32(super::super::frontend::elaboration::core_handler_clause_operation(clause)));
+        let payloads = super::super::frontend::elaboration::core_handler_clause_payloads(clause);
+        ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(payloads)));
+        Slice::for_each(payloads, { local => ByteBuf::write_u32_le(output, Id::to_u32(*local)) });
+        handle super::super::frontend::elaboration::core_handler_clause_resumption(clause) {
+            None => ByteBuf::push(output, 0),
+            Option::Some(local) => { ByteBuf::push(output, 1); ByteBuf::write_u32_le(output, Id::to_u32(local)) }
+        };
+        try(write_computation_expression(output, source, declarations, resolved, body, super::super::frontend::elaboration::core_handler_clause_body(clause), source_local_limit, true), @write_handler_clauses);
+        write_handler_clauses(output, source, declarations, resolved, body, source_local_limit, clauses, ordinal + 1)
+    } else { Result::Ok(()) }
+}
+
 write_computation_expression(
     output: &mut ByteBuf,
     source: &super::super::frontend::lexer::LexedSource,
@@ -1783,7 +1809,19 @@ write_computation_expression(
                 output, source, declarations, resolved, body,
                 source_local_limit, operands
             )
-        }
+        },
+        // Tag 12 is a structural Typed-Core handler record. It deliberately
+        // observes handler data without claiming backend execution support.
+        CoreComputationView::Handle(ty, handled, clauses) => {
+            ByteBuf::push(output, 12);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(clauses)));
+            try(write_computation_expression(output, source, declarations, resolved, body, handled, source_local_limit, false), @write_computation_expression);
+            write_handler_clauses(output, source, declarations, resolved, body, source_local_limit, clauses, 0)
+        },
+        CoreComputationView::Resume(_, _, _) => Result::Err(
+            ElaborationError::UnsupportedExpression(Id::to_usize(computation))
+        )
     }
 }
 
