@@ -1047,14 +1047,18 @@ impl Vm {
                     args,
                 } => {
                     let (dst, function) = (*dst, *function);
-                    let callee = make_verified_frame_from_arguments(
-                        a,
-                        function,
-                        frame,
-                        args,
-                        Value::Unit,
-                        dst,
-                    )?;
+                    let callee = if args.is_empty() {
+                        make_verified_zero_argument_frame(a, function, dst)?
+                    } else {
+                        make_verified_frame_from_arguments(
+                            a,
+                            function,
+                            frame,
+                            args,
+                            Value::Unit,
+                            dst,
+                        )?
+                    };
                     frame.pc += 1;
                     stack.push(callee);
                 }
@@ -1938,6 +1942,40 @@ fn make_frame(
     Ok(frame_from_verified_values(
         f, function, args, receiver, return_dst,
     ))
+}
+
+#[inline]
+fn make_verified_zero_argument_frame(
+    a: &ExecutionImage,
+    function: u32,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if !f.params.is_empty() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 0,
+        });
+    }
+    // The general relocation helper begins with an all-empty register file and
+    // overwrites r0.  Build the known unit receiver first instead, mirroring
+    // the already optimized entry-frame path.
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(Value::Unit));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
 }
 
 /// Construct a verified callee frame while relocating arguments straight from
