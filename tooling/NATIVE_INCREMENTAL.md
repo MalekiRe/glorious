@@ -85,12 +85,15 @@ functions, not a monolithic LLVM module. The shared runtime/entry object is
 not a function cache hit and must be reported separately. `wild_relink: true`
 is non-negotiable: every successful executable request links the complete
 current object set with Wild, including function objects restored from the
-process-local cache. A linked executable is never cached or reused.
+process-local cache. The separate durable one-shot route may materialize a
+linked executable only after its exact link manifest validates; a serve
+request never uses that durable link cache.
 
 The release contract test for this integration must issue a cold request and
 then a same-ABI leaf-body edit through one `grc --serve` process. It must
-assert that the second response has at least one reused function object, one
-compiled function object, `strategy: "partitioned-function-objects"`, and
-`wild_relink: true`; it must also assert that both requested executable paths
-exist. This is evidence of safe per-function reuse plus a fresh final link,
-without depending on wall-clock timing.
+assert that the second response has exactly two reused function objects (the
+unchanged entry and an unrelated leaf) and exactly one compiled object (the
+edited leaf), `strategy: "partitioned-function-objects"`, and `wild_relink:
+true`; it must also assert that both requested executable paths exist. This
+is evidence of independent-function reuse plus a fresh final link, without
+depending on wall-clock timing.

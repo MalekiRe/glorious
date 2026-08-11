@@ -323,10 +323,12 @@ fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relin
     let source = |value| {
         format!(
             r#"
-                value() -> i64 {{ {value} }}
+                edited_leaf() -> i64 {{ {value} }}
+                unrelated_leaf() -> i64 {{ 10 }}
                 main() -> () {{
-                    let current = value();
-                    if current == 1 {{
+                    let current = edited_leaf();
+                    let unrelated = unrelated_leaf();
+                    if current + unrelated == 11 {{
                         __g1_fs_write({observed_path}, String::as_bytes(&"one"));
                     }} else {{
                         __g1_fs_write({observed_path}, String::as_bytes(&"two"));
@@ -365,11 +367,9 @@ fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relin
         cold["native_incremental"]["native_objects_reused"], 0,
         "{cold}"
     );
-    assert!(
-        cold["native_incremental"]["native_objects_emitted"]
-            .as_u64()
-            .unwrap()
-            >= 3,
+    assert_eq!(
+        cold["native_incremental"]["function_objects_compiled"],
+        3,
         "{cold}"
     );
     assert!(first_executable.is_file());
@@ -392,22 +392,14 @@ fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relin
         edited["native_incremental"]["strategy"], "partitioned-function-objects",
         "{edited}"
     );
-    assert!(
-        edited["native_incremental"]["function_objects_reused"]
-            .as_u64()
-            .unwrap()
-            >= 1,
-        "{edited}"
+    assert_eq!(
+        edited["native_incremental"]["function_objects_reused"],
+        2,
+        "only the unchanged entry and unrelated-leaf objects may be reused after a leaf body edit: {edited}"
     );
-    // The edited leaf must be recompiled; the unchanged entry object is
-    // retained. Shared runtime bytes may be independently re-emitted only
-    // when generated globals change.
-    assert!(
-        edited["native_incremental"]["function_objects_compiled"]
-            .as_u64()
-            .unwrap()
-            >= 1,
-        "{edited}"
+    assert_eq!(
+        edited["native_incremental"]["function_objects_compiled"], 1,
+        "only the changed leaf may be recompiled after a body-only edit: {edited}"
     );
     assert!(second_executable.is_file());
     assert!(Command::new(&second_executable).status().unwrap().success());
