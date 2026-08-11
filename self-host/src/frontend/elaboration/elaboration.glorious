@@ -10174,12 +10174,6 @@ elaborate_perform(
             found_count
         )))
     } else { () };
-    let result = instantiate_effect_member_type(
-        interfaces,
-        instance,
-        interface_effect_operation_result(&*interfaces, operation)
-    );
-    try(check_expected_type(result, expected, token), @elaborate_perform);
     let operands = Vec::new();
     try(elaborate_perform_arguments(
         original,
@@ -10195,6 +10189,16 @@ elaborate_perform(
         0,
         &mut operands
     ), @elaborate_perform);
+    // Elaborate recursive payloads before instantiating the operation result.
+    // Keeping the mutable interface arena on one side of this recursive
+    // boundary avoids suspending that borrow in bootstrap bytecode lowering.
+    let result_member = interface_effect_operation_result(
+        &*interfaces, operation
+    );
+    let result = instantiate_effect_member_type(
+        interfaces, instance, result_member
+    );
+    try(check_expected_type(result, expected, token), @elaborate_perform);
     let operand_start = super::syntax::range_mark(&value.core.operands);
     append_core_values(&mut value.core.operands, &operands, 0);
     let operand_end = Vec::len(&value.core.operands);
