@@ -1,5 +1,5 @@
 use grandiose::{compile_source_to_bytecode, compile_source_to_phases};
-use grandiose_vm::{Artifact, Value, Vm, verify};
+use grandiose_vm::{Artifact, Instruction, Value, Vm, verify};
 
 fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
     artifact
@@ -336,6 +336,49 @@ fn open_effect_row_flows_through_statically_inlined_mutable_callback() {
     "#;
 
     compile_source_to_bytecode("static-open-effect-row.glorious", source).unwrap();
+}
+
+#[test]
+fn closed_effect_use_bounded_callback_erases_to_direct_calls() {
+    let source = r#"
+        apply<L, F>(value: i64, stop: L, body: F) -> i64
+        where L: Label<i64>,
+              F: Fn<(i64, L), Output=i64, Effects={}>,
+              F: Use<[0,0]> {
+            body(value, stop)
+        }
+
+        answer() -> i64 {
+            apply(41, @answer, { value, _ => value + 1 })
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("closed-use-callback.glorious", source).unwrap();
+    let answer = function_id(&phases.artifact, "answer");
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(answer, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    assert!(
+        phases
+            .artifact
+            .functions
+            .iter()
+            .all(|function| !function.name.starts_with("apply")),
+        "the grounded callback wrapper must not survive as a runtime callable"
+    );
+    let answer_function = &phases.artifact.functions[answer as usize];
+    let answer_code = &phases.artifact.code[answer_function.code_start as usize
+        ..(answer_function.code_start + answer_function.code_len) as usize];
+    assert!(
+        answer_code.iter().all(|instruction| !matches!(
+            instruction,
+            Instruction::MakeCallable { .. } | Instruction::CallIndirect { .. }
+        )),
+        "the sealed Fn + Use + closed-effect callback must retain a direct runtime path: {answer_code:#?}"
+    );
 }
 
 #[test]
