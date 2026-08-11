@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use grandiose_vm::{
     verify, verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction,
-    Primitive, Value, Vm, I64, UNIT,
+    Primitive, Type, Value, Vm, I64, UNIT,
 };
 
 const ITERS: usize = 20_000;
@@ -248,6 +248,69 @@ fn frame_argument_setup_program() -> Artifact {
     }
 }
 
+/// Compiler data structures are predominantly small product values. Exercise
+/// constructing a two-field tuple, moving out both fields, and deconstructing
+/// the emptied shell repeatedly in one verified VM entry.
+fn tuple_construct_project_program() -> Artifact {
+    let mut types = Type::predefined();
+    let pair = types.len() as u32;
+    types.push(Type::Tuple {
+        fields: vec![I64, I64],
+        copy: false,
+    });
+    let mut code = Vec::with_capacity(INNER_OPS * 7 + 1);
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 2,
+                constant: 1,
+            },
+            Instruction::Construct {
+                dst: 3,
+                ty: pair,
+                variant: None,
+                fields: vec![1, 2],
+            },
+            Instruction::ProjectMove {
+                dst: 1,
+                src: 3,
+                field: 0,
+            },
+            Instruction::ProjectMove {
+                dst: 2,
+                src: 3,
+                field: 1,
+            },
+            Instruction::Deconstruct { src: 3 },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.extend([
+                Instruction::Drop { register: 1 },
+                Instruction::Drop { register: 2 },
+            ]);
+        }
+    }
+    code.push(Instruction::Return { src: Some(1) });
+    Artifact {
+        types,
+        constants: vec![Constant::I64(1), Constant::I64(2)],
+        functions: vec![function(
+            "main",
+            vec![],
+            I64,
+            vec![UNIT, I64, I64, pair],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
 #[test]
 #[ignore = "run explicitly in release mode; reports VM run throughput"]
 fn vm_execution_microbenchmarks() {
@@ -263,5 +326,10 @@ fn vm_execution_microbenchmarks() {
         "frame_argument_setup",
         frame_argument_setup_program(),
         Value::I64(2),
+    );
+    measure(
+        "tuple_construct_project",
+        tuple_construct_project_program(),
+        Value::I64(1),
     );
 }

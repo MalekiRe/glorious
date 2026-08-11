@@ -864,14 +864,28 @@ impl Vm {
                     fields,
                 } => {
                     let (dst, ty, variant) = (*dst, *ty, *variant);
-                    let values = fields
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    // Small two-field products dominate the compiler's AST,
+                    // typed core, and MIR records. Build their final aggregate
+                    // slots directly instead of allocating an intermediate
+                    // operand vector and then a second field vector.
+                    let value = match fields.as_slice() {
+                        [first, second] => Value::aggregate_with_variant(
+                            ty,
+                            variant,
+                            [take(frame, *first)?, take(frame, *second)?],
+                        ),
+                        _ => {
+                            let values = fields
+                                .iter()
+                                .map(|r| take(frame, *r))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Value::aggregate_with_variant(ty, variant, values)
+                        }
+                    };
                     put(
                         frame,
                         dst,
-                        Value::aggregate_with_variant(ty, variant, values),
+                        value,
                     )?;
                     frame.pc += 1;
                 }
