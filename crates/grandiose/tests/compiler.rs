@@ -7203,6 +7203,46 @@ fn unit_return_uses_the_none32_operand_form() {
 }
 
 #[test]
+fn o1_partially_evaluates_direct_callee_literals_at_constant_callers() {
+    let phases = compile_source_to_phases_with_options(
+        "direct-callee-literal.glorious",
+        r#"
+            add_one(value: i64) -> i64 { value + 1 }
+            run() -> i64 { add_one(40) }
+            main() -> { () }
+        "#,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O1,
+        },
+    )
+    .unwrap();
+    let run = phases
+        .artifact
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .unwrap();
+    let code = function_code(&phases.artifact, run);
+    assert!(
+        !code.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::Call { .. } | Instruction::Primitive { .. }
+        )),
+        "constant direct call should lower to a constant result: {code:?}"
+    );
+    let run_id = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "run")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact).unwrap()).run(run_id, vec![]).unwrap(),
+        Value::I64(41)
+    );
+}
+
+#[test]
 fn direct_calls_resolve_forward_declarations() {
     let source = "main() -> { finish() } finish() -> { () }";
     let artifact = compile_source_to_bytecode("forward.glorious", source).unwrap();

@@ -7337,10 +7337,19 @@ enum DirectCallSpecialization {
     Constant(Constant),
     Primitive {
         primitive: Primitive,
-        arguments: Vec<u32>,
+        arguments: Vec<DirectPrimitiveArgument>,
         argument_types: Vec<TypeId>,
         result_type: TypeId,
     },
+}
+
+/// A scalar operand of a tiny direct callee.  Keeping callee literals in the
+/// summary lets call specialization partially evaluate functions such as
+/// `add_one(x)` without cloning their body into every caller.
+#[derive(Clone)]
+enum DirectPrimitiveArgument {
+    Parameter(u32),
+    Constant(Constant),
 }
 
 fn scalar_constant_type(ty: TypeId) -> bool {
@@ -7406,15 +7415,7 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                     },
                 ) if dst == register => DirectCallSpecialization::Constant(value.clone()),
                 (
-                    [Instruction {
-                        kind:
-                            InstructionKind::Primitive {
-                                dst,
-                                primitive,
-                                args,
-                            },
-                        ..
-                    }],
+                    statements,
                     Terminator::Return {
                         value:
                             Some(Operand {
@@ -7422,18 +7423,54 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                                 mode: UseMode::Move,
                             }),
                     },
-                ) if dst == register => {
+                ) => {
+                    let (primitive_statement, prefix) = statements.split_last()?;
+                    let InstructionKind::Primitive {
+                        dst,
+                        primitive,
+                        args,
+                    } = &primitive_statement.kind else {
+                        return None;
+                    };
+                    if *dst != *register || !prefix.iter().all(|statement| matches!(
+                        statement.kind,
+                        InstructionKind::Const { .. }
+                    )) {
+                        return None;
+                    }
+                    let constants = prefix.iter().filter_map(|statement| match &statement.kind {
+                        InstructionKind::Const { dst, value } => Some((*dst, value)),
+                        _ => None,
+                    }).collect::<BTreeMap<_, _>>();
                     let arguments = args
                         .iter()
                         .map(|argument| {
-                            (argument.mode == UseMode::Copy)
-                                .then(|| argument.register.checked_sub(1))
-                                .flatten()
+                            if argument.mode != UseMode::Copy {
+                                return None;
+                            }
+                            if let Some(index) = argument.register.checked_sub(1)
+                                && function.params.get(index as usize).is_some()
+                            {
+                                Some(DirectPrimitiveArgument::Parameter(index))
+                            } else {
+                                constants.get(&argument.register).cloned().cloned().map(
+                                    DirectPrimitiveArgument::Constant,
+                                )
+                            }
                         })
                         .collect::<Option<Vec<_>>>()?;
                     let argument_types = arguments
                         .iter()
-                        .map(|index| function.params.get(*index as usize).copied())
+                        .zip(args)
+                        .map(|(argument, operand)| match argument {
+                            DirectPrimitiveArgument::Parameter(index) => {
+                                function.params.get(*index as usize).copied()
+                            }
+                            DirectPrimitiveArgument::Constant(_) => function
+                                .register_types
+                                .get(operand.register as usize)
+                                .copied(),
+                        })
                         .collect::<Option<Vec<_>>>()?;
                     if !argument_types.iter().copied().all(scalar_constant_type)
                         || function.register_types.get(*dst as usize) != Some(&function.result)
@@ -7549,11 +7586,12 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                         .collect::<BTreeMap<_, _>>();
                     let constants = arguments
                         .iter()
-                        .map(|index| args.get(*index as usize))
-                        .map(|argument| {
-                            argument
+                        .map(|argument| match argument {
+                            DirectPrimitiveArgument::Parameter(index) => args
+                                .get(*index as usize)
                                 .and_then(|argument| values.get(&argument.register))
-                                .cloned()
+                                .cloned(),
+                            DirectPrimitiveArgument::Constant(value) => Some(value.clone()),
                         })
                         .collect::<Option<Vec<_>>>();
                     let Some(constants) = constants else {
@@ -18583,6 +18621,47 @@ mod tests {
                 args: vec![move_operand(6), move_operand(4)],
             })
         );
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
+    fn specializes_constant_argument_through_direct_primitive_with_callee_literal() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.params = vec![I64];
+        callee.register_types = vec![UNIT, I64, I64, I64];
+        callee.blocks[0].statements = vec![
+            instruction(InstructionKind::Const {
+                dst: 2,
+                value: Constant::I64(1),
+            }),
+            instruction(InstructionKind::Primitive {
+                dst: 3,
+                primitive: Primitive::IntCheckedAdd,
+                args: vec![operand(1), operand(2)],
+            }),
+        ];
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(3)),
+        };
+        let Terminator::Call { args, .. } = &mut candidate.functions[0].blocks[0].terminator else {
+            unreachable!()
+        };
+        args.truncate(1);
+
+        assert_eq!(
+            specialize_forwarding_direct_calls(&mut candidate, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        let caller = &candidate.functions[0];
+        assert!(matches!(
+            caller.blocks[0].statements.last().map(|statement| &statement.kind),
+            Some(InstructionKind::Const {
+                dst: 6,
+                value: Constant::I64(41),
+            })
+        ));
+        assert!(matches!(caller.blocks[0].terminator, Terminator::Goto(_)));
         validate_program(&candidate, &types, MirPhase::Raw).unwrap();
     }
 
