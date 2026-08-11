@@ -365,6 +365,18 @@ struct Emitter<'a> {
     llvm_reachable_functions: BTreeSet<usize>,
 }
 
+/// A function-local LLVM SSA name.  Keep generated names alphabetic rather
+/// than numeric: numeric `%0` identifiers share LLVM's implicit numbering
+/// space with unnamed blocks and parameters.
+#[derive(Clone, Copy, Debug)]
+struct Temporary(u32);
+
+impl std::fmt::Display for Temporary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "g1.tmp.{}", self.0)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum EffectRoutingMode {
     Initial,
@@ -2674,6 +2686,9 @@ impl<'a> Emitter<'a> {
             "define {result} @g1_f{index}({}) {{",
             direct_params.join(", ")
         ));
+        // Numeric SSA temporaries require an explicit entry label: otherwise
+        // LLVM assigns the implicit entry block `%0` first.
+        self.line("entry:");
         if function.outward_protocols.is_empty() {
             let return_slot = self.temp();
             let return_init = self.temp();
@@ -4514,7 +4529,7 @@ impl<'a> Emitter<'a> {
         requested_mode: u32,
         cleanup_callable: bool,
         args: &[mir::Operand],
-    ) -> Result<(TypeId, Option<u32>), Vec<Diagnostic>> {
+    ) -> Result<(TypeId, Option<Temporary>), Vec<Diagnostic>> {
         let callable_type = self.register_runtime_type(caller, callable_operand.register)?;
         let Type::Callable {
             signature,
@@ -6194,7 +6209,7 @@ impl<'a> Emitter<'a> {
                     .ok_or_else(|| vec![unsupported(function, "non-integer conversion target")])?;
                 if primitive == Primitive::IntConvertChecked {
                     let mut invalid = None;
-                    let mut add_guard = |this: &mut Self, guard: u32| {
+                    let mut add_guard = |this: &mut Self, guard: Temporary| {
                         invalid = Some(if let Some(previous) = invalid {
                             let combined = this.temp();
                             this.line(&format!("  %{combined} = or i1 %{previous}, %{guard}"));
@@ -9311,7 +9326,7 @@ impl<'a> Emitter<'a> {
         result: Option<u32>,
         import: HostImportRole,
         args: &[mir::Operand],
-    ) -> Result<Option<u32>, Vec<Diagnostic>> {
+    ) -> Result<Option<Temporary>, Vec<Diagnostic>> {
         let expected_args = match import {
             HostImportRole::ProcessArgsGet => Vec::new(),
             HostImportRole::FsRead | HostImportRole::DiagnosticWrite => vec![Type::Text],
@@ -12723,10 +12738,10 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn temp(&mut self) -> u32 {
+    fn temp(&mut self) -> Temporary {
         let temporary = self.temporary;
         self.temporary += 1;
-        temporary
+        Temporary(temporary)
     }
 
     fn line(&mut self, line: &str) {
@@ -12734,7 +12749,7 @@ impl<'a> Emitter<'a> {
         self.output.push('\n');
     }
 
-    fn emit_trap_if(&mut self, condition: u32) {
+    fn emit_trap_if(&mut self, condition: Temporary) {
         let trap = self.temp();
         let continuation = self.temp();
         self.line(&format!(
@@ -12761,7 +12776,7 @@ impl<'a> Emitter<'a> {
         self.line("  unreachable");
     }
 
-    fn emit_runtime_fault_if(&mut self, condition: u32, detail: u32) {
+    fn emit_runtime_fault_if(&mut self, condition: Temporary, detail: u32) {
         let fault = self.temp();
         let continuation = self.temp();
         self.line(&format!(
@@ -12792,7 +12807,7 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_host_fault_if(&mut self, condition: u32, operation: u32) {
+    fn emit_host_fault_if(&mut self, condition: Temporary, operation: u32) {
         let fault = self.temp();
         let continuation = self.temp();
         self.line(&format!(
