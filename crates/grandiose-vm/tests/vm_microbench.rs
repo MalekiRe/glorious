@@ -369,6 +369,11 @@ fn binding_pack_program() -> Artifact {
             0,
             code.len() as u32,
         )],
+        code,
+        ..Artifact::default()
+    }
+}
+
 /// Repeatedly invoke one captureless shared closure. The closure value remains
 /// live across calls, matching compiler visitors and callback-heavy passes.
 fn shared_closure_call_program() -> Artifact {
