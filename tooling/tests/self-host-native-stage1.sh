@@ -54,6 +54,13 @@ case "$1" in
     } > "$output"
     ;;
   build)
+    if [[ -n "${NATIVE_STAGE1_TEST_RETRY_REPORT:-}" ]]; then
+      key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      objects="$route_root/target/self-host-native-cache/objects"
+      cmp "$objects/$key.o" "$NATIVE_STAGE1_TEST_RETRY_OBJECT"
+      cmp "$objects/$key.manifest" "$NATIVE_STAGE1_TEST_RETRY_MANIFEST"
+      printf 'private retry seed imported\n' > "$NATIVE_STAGE1_TEST_RETRY_REPORT"
+    fi
     if [[ "${NATIVE_STAGE1_TEST_ADVANCE_HEAD:-0}" == 1 ]]; then
       git -C "$NATIVE_STAGE1_TEST_REPO" commit --allow-empty -qm 'advance live head during native build'
     fi
@@ -122,6 +129,20 @@ salvage_objects="$scratch/salvage-run/native-cache-retry-seed/objects"
 [[ -f "$salvage_objects/$salvage_key.manifest" ]]
 [[ ! -e "$salvage_objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.o" ]]
 rg -q $'^native-cache-retry-objects\t1$' "$scratch/salvage-run/metadata.tsv"
+salvage_object_sum=$(sha256sum "$salvage_objects/$salvage_key.o" | awk '{print $1}')
+
+# A later Stage1 run selects the retained seed explicitly. It receives private
+# copies in its disposable snapshot; the prior retained evidence remains the
+# source of truth and is never modified.
+NATIVE_STAGE1_TEST_NATIVE="$scratch/native" NATIVE_STAGE1_TEST_STAGE2="$scratch/retry-run/stage2.grbc" \
+  NATIVE_STAGE1_TEST_VERIFY_LOG="$scratch/retry-verify.log" NATIVE_STAGE1_TEST_RETRY_REPORT="$scratch/retry-report" \
+  NATIVE_STAGE1_TEST_RETRY_OBJECT="$salvage_objects/$salvage_key.o" \
+  NATIVE_STAGE1_TEST_RETRY_MANIFEST="$salvage_objects/$salvage_key.manifest" PATH="$scratch/bin:$PATH" \
+  "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/retry-run" --retry-seed "$scratch/salvage-run" > "$scratch/retry.out"
+[[ "$(cat "$scratch/retry-report")" == 'private retry seed imported' ]]
+rg -q $"^native-cache-retry-source\\t$scratch/salvage-run$" "$scratch/retry-run/metadata.tsv"
+rg -q $'^native-cache-retry-imported\t1$' "$scratch/retry-run/metadata.tsv"
+[[ "$(sha256sum "$salvage_objects/$salvage_key.o" | awk '{print $1}')" == "$salvage_object_sum" ]]
 
 if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
   "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/run" > /dev/null 2> "$scratch/reuse.err"; then

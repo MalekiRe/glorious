@@ -9,12 +9,15 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'USAGE'
-usage: tooling/self-host-native-stage1.sh run [--output-dir DIR]
+usage: tooling/self-host-native-stage1.sh run [--output-dir DIR] [--retry-seed PRIOR-RUN]
 
 Materializes the canonical production self-host source, creates immutable O3 /
 Wild stage-1 provenance, and runs that exact native executable to emit
 stage2.grbc.  DIR, when supplied, must not already exist.  Every result,
 including a compiler failure, retains source, provenance, logs, and metadata.
+`--retry-seed` selects a prior retained run whose private
+native-cache-retry-seed is copied into the new disposable snapshot before its
+O3 build. The seed is validated and never modified or shared live.
 USAGE
     exit 2
 }
@@ -28,9 +31,11 @@ command=${1:-}
 [[ "$command" == run ]] || usage
 shift
 output_dir=
+retry_seed=
 while (($#)); do
     case "$1" in
         --output-dir) output_dir=${2:?missing value}; shift 2 ;;
+        --retry-seed) retry_seed=${2:?missing value}; shift 2 ;;
         -h|--help) usage ;;
         *) usage ;;
     esac
@@ -51,6 +56,7 @@ readonly source="$output_dir/canonical-source.glorious"
 readonly provenance="$output_dir/stage1-provenance.tsv"
 readonly stage2="$output_dir/stage2.grbc"
 readonly metadata="$output_dir/metadata.tsv"
+retry_seed_objects=0
 
 printf 'artifacts\t%s\n' "$output_dir" >&2
 
@@ -111,6 +117,10 @@ manifest_value() {
 record_failure() {
     local phase=$1 status=$2
     printf 'schema\t1\nphase\t%s\nexit\t%s\n' "$phase" "$status" > "$metadata"
+    if ((retry_seed_objects > 0)); then
+        printf 'native-cache-retry-source\t%s\n' "$retry_seed" >> "$metadata"
+        printf 'native-cache-retry-imported\t%s\n' "$retry_seed_objects" >> "$metadata"
+    fi
     salvage_snapshot_native_cache
     printf 'result\tfailed\n' >> "$metadata"
     echo "native-stage1: $phase failed; retained evidence: $output_dir" >&2
@@ -178,6 +188,57 @@ salvage_snapshot_native_cache() {
     } >> "$metadata"
 }
 
+seed_snapshot_native_cache() {
+    local source_objects destination stage object manifest key
+    local schema digest object_blake abi copied count=0
+    [[ -n "$retry_seed" ]] || return 0
+    source_objects="$retry_seed/native-cache-retry-seed/objects"
+    [[ -d "$source_objects" ]] || {
+        echo "native-stage1: retry seed has no retained native cache objects: $retry_seed" >&2
+        return 1
+    }
+    destination="$snapshot_dir/target/self-host-native-cache/objects"
+    [[ ! -e "$destination" || -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
+        echo "native-stage1: snapshot native cache is unexpectedly nonempty before retry seeding" >&2
+        return 1
+    }
+    mkdir -p "$destination"
+    stage=$(mktemp -d "$snapshot_dir/target/.native-cache-retry.XXXXXX") || return 1
+    shopt -s nullglob
+    for object in "$source_objects"/*.o; do
+        key=${object##*/}
+        key=${key%.o}
+        manifest="$source_objects/$key.manifest"
+        [[ "$key" =~ ^[0-9a-f]{64}$ && -f "$manifest" ]] || continue
+        schema=$(sed -n '1p' "$manifest")
+        digest=$(sed -n '2p' "$manifest")
+        object_blake=$(sed -n '3p' "$manifest")
+        abi=$(sed -n '4p' "$manifest")
+        [[ "$schema" == schema=1 && "$digest" == "digest=$key" ]] || continue
+        [[ "$object_blake" =~ ^object-blake3=[0-9a-f]{64}$ && "$abi" == abi=* ]] || continue
+        cp -- "$object" "$stage/$key.o" || continue
+        cp -- "$manifest" "$stage/$key.manifest" || {
+            rm -f -- "$stage/$key.o"
+            continue
+        }
+        copied=$(sha256sum "$stage/$key.o" | awk '{print $1}')
+        [[ -n "$copied" ]] || continue
+        count=$((count + 1))
+    done
+    shopt -u nullglob
+    if ((count == 0)); then
+        rm -rf -- "$stage"
+        echo "native-stage1: retry seed contains no complete native cache pairs: $retry_seed" >&2
+        return 1
+    fi
+    mv -- "$stage"/*.o "$stage"/*.manifest "$destination/" || {
+        rm -rf -- "$stage"
+        return 1
+    }
+    rmdir -- "$stage"
+    retry_seed_objects=$count
+}
+
 run_logged() {
     local phase=$1
     shift
@@ -204,6 +265,7 @@ cleanup_snapshot() {
 trap cleanup_snapshot EXIT
 run_logged snapshot git -C "$repo_root" worktree add --detach "$snapshot_dir" "$run_head"
 [[ "$(snapshot_head)" == "$run_head" ]] || record_failure snapshot 1
+seed_snapshot_native_cache || record_failure retry-seed 1
 readonly snapshot_native_tool="$snapshot_dir/tooling/self-host-native.sh"
 [[ -x "$snapshot_native_tool" ]] || record_failure snapshot 1
 run_logged canonical-source "$snapshot_native_tool" canonical-source "$source"
@@ -248,6 +310,10 @@ set -e
     printf 'snapshot-head\t%s\n' "$run_head"
     printf 'repository-head\t%s\n' "$run_head"
     printf 'stage1-exit\t%s\n' "$stage1_status"
+    if ((retry_seed_objects > 0)); then
+        printf 'native-cache-retry-source\t%s\n' "$retry_seed"
+        printf 'native-cache-retry-imported\t%s\n' "$retry_seed_objects"
+    fi
 } > "$metadata"
 if [[ $stage1_status -ne 0 ]]; then
     printf 'result\tfailed\n' >> "$metadata"
