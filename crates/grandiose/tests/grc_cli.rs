@@ -259,6 +259,60 @@ fn persistent_serve_reuses_exact_llvm_object_bytes_at_the_current_output_path() 
 }
 
 #[test]
+fn persistent_serve_separates_native_object_cache_entries_by_optimization_level() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("cache.glorious");
+    let o0_output = directory.path().join("o0.o");
+    let o3_output = directory.path().join("o3.o");
+    let warm_o3_output = directory.path().join("warm-o3.o");
+    write(
+        &input,
+        "leaf(value: i64) -> i64 { value + 1 } main() -> () { leaf(41); () }",
+    );
+    let arguments = |optimization: &str, output: &Path| {
+        serde_json::json!([
+            optimization,
+            "--emit",
+            "llvm-object",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+
+    let cold_o0 = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments("-O0", &o0_output),
+    }));
+    assert_eq!(cold_o0["status"], 0, "{cold_o0}");
+    assert_eq!(cold_o0["native_object_cache"], "miss", "{cold_o0}");
+
+    let cold_o3 = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments("-O3", &o3_output),
+    }));
+    assert_eq!(cold_o3["status"], 0, "{cold_o3}");
+    assert_eq!(cold_o3["llvm_ir_cache"], "miss", "{cold_o3}");
+    assert_eq!(cold_o3["native_object_cache"], "miss", "{cold_o3}");
+
+    let warm_o3 = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 3,
+        "method": "compile",
+        "arguments": arguments("-O3", &warm_o3_output),
+    }));
+    assert_eq!(warm_o3["status"], 0, "{warm_o3}");
+    assert_eq!(warm_o3["llvm_ir_cache"], "hit", "{warm_o3}");
+    assert_eq!(warm_o3["native_object_cache"], "hit", "{warm_o3}");
+    assert_eq!(fs::read(&warm_o3_output).unwrap(), fs::read(&o3_output).unwrap());
+}
+
+#[test]
 fn multiple_inputs_compile_in_argument_order_at_every_optimization_level() {
     let directory = tempdir().unwrap();
     let primary = directory.path().join("main.glorious");
