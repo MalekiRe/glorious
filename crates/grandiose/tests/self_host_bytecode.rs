@@ -1758,7 +1758,13 @@ fn self_hosted_terminal_text_perform_emits_vm_effect_and_is_unhandled() {
             let output = directory.path().join("terminal-perform.grbc");
             fs::write(
                 &input,
-                "effect Stop { stop(message: Text) -> ! } \
+                // `Template` is a declaration template, not a runtime
+                // protocol until a ground instance is requested. Keep it next
+                // to a real terminal perform so the decoded artifact proves
+                // that the self-host compiler does not serialize an empty
+                // declaration-shaped placeholder.
+                "effect Template<T> { discard(value: T) -> ! } \
+                 effect Stop { stop(message: Text) -> ! } \
                  trigger() -> ! / {Stop} { perform Stop::stop(\"terminal\") } \
                  main() { () }",
             )

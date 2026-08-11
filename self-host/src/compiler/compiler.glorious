@@ -1813,21 +1813,14 @@ lower_effect_protocols(
         let protocol = handle elaboration::interface_effect_id_at(&session.interfaces, index) {
             None => unreachable(), Option::Some(found) => found
         };
-        // Generic effect instances are not materialized in this initial
-        // terminal-perform slice; their declarations still reserve a stable
-        // protocol ordinal for later specialization work.
+        // A generic declaration is only a template.  The bootstrap compiler
+        // materializes protocols for ground instances discovered at performs,
+        // rows, or specialized bodies; it does not serialize an empty
+        // declaration-shaped placeholder.  Until that instance collection is
+        // available here, omit an unused template entirely.  In particular,
+        // its declaration ordinal is not a runtime protocol identity.
         if(elaboration::interface_effect_generic_count(&session.interfaces, protocol) != 0) {
-            handle function_name(
-                &*session, elaboration::interface_effect_shell(&session.interfaces, protocol)
-            ) {
-                Result::Err(error) => Result::Err(error),
-                Result::Ok(name) => {
-                    lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
-                        name, Vec::new(), Vec::new()
-                    ));
-                    lower_effect_protocols(session, map, types, type_names, index + 1, output)
-                }
-            }
+            lower_effect_protocols(session, map, types, type_names, index + 1, output)
         } else {
             let operations = Vec::new();
             handle lower_effect_operations(
