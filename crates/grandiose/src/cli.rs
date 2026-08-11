@@ -797,6 +797,47 @@ fn compile_loaded(
         } else {
             None
         };
+        // A persistent session may reuse immutable object bytes only when the
+        // generated IR and every native compiler ABI-affecting option match.
+        // The output path is intentionally excluded: a hit always writes the
+        // bytes to this request's `-o`. Executables are never cached because
+        // each one must take the required Wild final-link path.
+        let native_object_toolchain_abi = if kind == EmitKind::LlvmObject && incremental.is_some() {
+            match native_object_toolchain_abi(&llvm_options, command.optimization_level) {
+                Ok(abi) => Some(abi),
+                Err(error) => {
+                    let _ = writeln!(
+                        stderr,
+                        "grc: error: could not identify native object toolchain ABI: {error}"
+                    );
+                    return 1;
+                }
+            }
+        } else {
+            None
+        };
+        if let (Some(driver), Some(toolchain_abi)) = (
+            incremental.as_deref_mut(),
+            native_object_toolchain_abi.as_deref(),
+        ) {
+            if let Some(bytes) = driver.cached_native_object(
+                &bundle,
+                options,
+                &llvm_options,
+                &module.ir,
+                toolchain_abi,
+            ) {
+                if let Err(error) = std::fs::write(&output, bytes) {
+                    let _ = writeln!(
+                        stderr,
+                        "grc: error: could not write {}: {error}",
+                        output.display()
+                    );
+                    return 1;
+                }
+                return 0;
+            }
+        }
         let mut clang = ProcessCommand::new("clang");
         clang.arg("-x").arg("ir").arg("-");
         if let Some(native_host) = &native_host {
@@ -848,6 +889,29 @@ fn compile_loaded(
             );
             return 1;
         }
+        if let (Some(driver), Some(toolchain_abi)) =
+            (incremental.as_deref_mut(), native_object_toolchain_abi)
+        {
+            let bytes = match std::fs::read(&output) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = writeln!(
+                        stderr,
+                        "grc: error: could not read emitted object {}: {error}",
+                        output.display()
+                    );
+                    return 1;
+                }
+            };
+            driver.cache_native_object(
+                &bundle,
+                options,
+                &llvm_options,
+                &module.ir,
+                toolchain_abi,
+                bytes,
+            );
+        }
         return 0;
     }
     let bytes = match kind {
@@ -890,6 +954,41 @@ fn clang_optimization_flag(level: OptimizationLevel) -> &'static str {
         OptimizationLevel::O2 => "-O2",
         OptimizationLevel::O3 => "-O3",
     }
+}
+
+/// Object cache keys include the native compiler identity, host target, and
+/// every option passed (or represented) by this compilation path. This is
+/// intentionally queried per request: updating Clang under a long-lived serve
+/// session must invalidate previously generated object bytes.
+fn native_object_toolchain_abi(
+    llvm_options: &LlvmOptions,
+    optimization_level: OptimizationLevel,
+) -> io::Result<String> {
+    let version = ProcessCommand::new("clang").arg("--version").output()?;
+    if !version.status.success() {
+        return Err(io::Error::other(format!(
+            "`clang --version` exited with {}",
+            version.status
+        )));
+    }
+    let target = ProcessCommand::new("clang")
+        .arg("-print-target-triple")
+        .output()?;
+    if !target.status.success() {
+        return Err(io::Error::other(format!(
+            "`clang -print-target-triple` exited with {}",
+            target.status
+        )));
+    }
+    Ok(format!(
+        "schema=1;clang-version={};clang-target={};input=-x-ir-stdin;compile-only=true;opt={};llvm-target={};llvm-layout={:?};entry-wrapper={}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&target.stdout),
+        clang_optimization_flag(optimization_level),
+        llvm_options.target_triple,
+        llvm_options.target_data_layout,
+        llvm_options.emit_entry_wrapper,
+    ))
 }
 
 /// Ensure executable emission cannot silently fall back to the platform
@@ -946,10 +1045,13 @@ struct SessionResponse<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     source_fingerprint: Option<&'a str>,
     /// Present only for LLVM emission requests. It exposes IR-cache behavior
-    /// at the persistent-session boundary without pretending that the native
-    /// linker/object output itself is cached.
+    /// at the persistent-session boundary.
     #[serde(skip_serializing_if = "Option::is_none")]
     llvm_ir_cache: Option<&'a str>,
+    /// Present only for LLVM object requests. Executable requests must always
+    /// link afresh through Wild and therefore never report this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_object_cache: Option<&'a str>,
 }
 
 struct SessionSnapshot {
@@ -1195,6 +1297,7 @@ fn session_protocol_error(
                 .as_ref()
                 .map(|snapshot| snapshot.source_fingerprint.as_str()),
             llvm_ir_cache: None,
+            native_object_cache: None,
         },
     )
 }
@@ -1266,6 +1369,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                     .as_ref()
                     .map(|snapshot| snapshot.source_fingerprint.as_str()),
                 llvm_ir_cache: None,
+                native_object_cache: None,
             };
             return if write_session_response(output, &response).is_ok() {
                 0
@@ -1338,6 +1442,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                         .as_ref()
                         .map(|last| last.source_fingerprint.as_str()),
                     llvm_ir_cache: None,
+                    native_object_cache: None,
                 };
                 if write_session_response(output, &response).is_err() {
                     return 1;
@@ -1349,6 +1454,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             command.emit,
             Some(EmitKind::LlvmIr | EmitKind::LlvmObject | EmitKind::Executable)
         );
+        let native_object_emission = command.emit == Some(EmitKind::LlvmObject);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = compile_loaded(
@@ -1391,6 +1497,13 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 "miss"
             }
         });
+        let native_object_cache = (status == 0 && native_object_emission).then(|| {
+            if state.compiler.stats().reused_native_objects != 0 {
+                "hit"
+            } else {
+                "miss"
+            }
+        });
         let response = SessionResponse {
             protocol: SESSION_PROTOCOL,
             id: Some(request.id),
@@ -1401,6 +1514,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             transaction,
             source_fingerprint,
             llvm_ir_cache,
+            native_object_cache,
         };
         if write_session_response(output, &response).is_err() {
             return 1;

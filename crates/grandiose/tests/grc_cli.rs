@@ -129,6 +129,58 @@ fn persistent_serve_reuses_llvm_ir_and_invalidates_after_a_body_edit() {
 }
 
 #[test]
+fn persistent_serve_reuses_exact_llvm_object_bytes_at_the_current_output_path() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("cache.glorious");
+    let first_output = directory.path().join("first.o");
+    let second_output = directory.path().join("second.o");
+    write(&input, "main() -> () { () }");
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-object",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+
+    let first = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(&first_output),
+    }));
+    assert_eq!(first["status"], 0, "{first}");
+    assert_eq!(first["native_object_cache"], "miss", "{first}");
+    let first_object = fs::read(&first_output).unwrap();
+
+    let second = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(&second_output),
+    }));
+    assert_eq!(second["status"], 0, "{second}");
+    assert_eq!(second["llvm_ir_cache"], "hit", "{second}");
+    assert_eq!(second["native_object_cache"], "hit", "{second}");
+    assert_eq!(fs::read(&second_output).unwrap(), first_object);
+
+    write(&input, "main() -> () { let marker = (); marker }");
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 3,
+        "method": "compile",
+        "arguments": arguments(&second_output),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(edited["native_object_cache"], "miss", "{edited}");
+    assert_ne!(fs::read(&second_output).unwrap(), first_object);
+}
+
+#[test]
 fn multiple_inputs_compile_in_argument_order_at_every_optimization_level() {
     let directory = tempdir().unwrap();
     let primary = directory.path().join("main.glorious");

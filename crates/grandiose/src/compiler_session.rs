@@ -39,6 +39,10 @@ pub struct IncrementalCompilationStats {
     /// Individual LLVM functions restored from manifest-valid cached fragments
     /// while the current module prelude/runtime/wrapper were regenerated.
     pub reused_llvm_fragments: usize,
+    /// Exact native object artifacts restored from the persistent backend
+    /// cache. Object bytes are keyed by the complete generated IR and native
+    /// compiler ABI/options; executable links are never eligible.
+    pub reused_native_objects: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
@@ -62,6 +66,7 @@ pub struct CompilationDriver {
     diagnostic_cache: VecDeque<CachedDiagnostics>,
     llvm_cache: VecDeque<CachedLlvmIr>,
     llvm_fragment_cache: LlvmFragmentCache,
+    native_object_cache: VecDeque<CachedNativeObject>,
     request_revision: u64,
     stats: IncrementalCompilationStats,
     diagnostic_stats: DiagnosticCacheStats,
@@ -91,6 +96,7 @@ struct CachedDiagnostics {
 /// deliberately invalidates all retained LLVM text after backend changes.
 const LLVM_CACHE_SCHEMA: u32 = 1;
 const LLVM_CACHE_CAPACITY: usize = 4;
+const NATIVE_OBJECT_CACHE_CAPACITY: usize = 4;
 
 #[derive(Clone)]
 struct CachedLlvmIr {
@@ -100,6 +106,22 @@ struct CachedLlvmIr {
     options: CompileOptions,
     target: LlvmOptions,
     module: LlvmModule,
+    last_used_revision: u64,
+}
+
+#[derive(Clone)]
+struct CachedNativeObject {
+    /// The source/options/target values are retained in addition to the exact
+    /// IR so cache retention remains inspectable and an object cannot survive
+    /// a backend-cache schema change accidentally.
+    schema: u32,
+    bundle: SourceBundle,
+    source_fingerprint: [u8; 32],
+    options: CompileOptions,
+    target: LlvmOptions,
+    ir: String,
+    toolchain_abi: String,
+    bytes: Vec<u8>,
     last_used_revision: u64,
 }
 
@@ -198,6 +220,73 @@ impl CompilationDriver {
         Ok(module)
     }
 
+    /// Return immutable native object bytes only for the exact emitted IR and
+    /// complete native compiler ABI/options. The caller owns writing bytes to
+    /// its current `-o` path; paths and executables are deliberately absent
+    /// from this cache.
+    pub fn cached_native_object(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: &str,
+    ) -> Option<Vec<u8>> {
+        let source_fingerprint = llvm_source_fingerprint(bundle);
+        let index = self.native_object_cache.iter().position(|cached| {
+            cached.schema == LLVM_CACHE_SCHEMA
+                && cached.source_fingerprint == source_fingerprint
+                && cached.bundle == *bundle
+                && cached.options == options
+                && cached.target == *target
+                && cached.ir == ir
+                && cached.toolchain_abi == toolchain_abi
+        })?;
+        let mut cached = self
+            .native_object_cache
+            .remove(index)
+            .expect("native object cache index disappeared");
+        cached.last_used_revision = self.request_revision;
+        let bytes = cached.bytes.clone();
+        self.native_object_cache.push_front(cached);
+        self.stats.reused_native_objects = self.stats.reused_native_objects.saturating_add(1);
+        Some(bytes)
+    }
+
+    pub fn cache_native_object(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: String,
+        bytes: Vec<u8>,
+    ) {
+        let source_fingerprint = llvm_source_fingerprint(bundle);
+        self.native_object_cache.retain(|cached| {
+            cached.schema != LLVM_CACHE_SCHEMA
+                || cached.source_fingerprint != source_fingerprint
+                || cached.bundle != *bundle
+                || cached.options != options
+                || cached.target != *target
+                || cached.ir != ir
+                || cached.toolchain_abi != toolchain_abi
+        });
+        self.native_object_cache.push_front(CachedNativeObject {
+            schema: LLVM_CACHE_SCHEMA,
+            bundle: bundle.clone(),
+            source_fingerprint,
+            options,
+            target: target.clone(),
+            ir: ir.to_owned(),
+            toolchain_abi,
+            bytes,
+            last_used_revision: self.request_revision,
+        });
+        self.native_object_cache
+            .truncate(NATIVE_OBJECT_CACHE_CAPACITY);
+    }
+
     fn compile_bundle_inner(
         &mut self,
         bundle: &SourceBundle,
@@ -231,6 +320,7 @@ impl CompilationDriver {
                 reused_historical_phase_artifacts: usize::from(historical),
                 reused_llvm_ir: 0,
                 reused_llvm_fragments: 0,
+                reused_native_objects: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
@@ -337,6 +427,7 @@ impl CompilationDriver {
             reused_historical_phase_artifacts: 0,
             reused_llvm_ir: 0,
             reused_llvm_fragments: 0,
+            reused_native_objects: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             frontend: self.frontend_cache.stats(),
@@ -596,6 +687,52 @@ mod tests {
         assert_eq!(
             dependency_ir,
             crate::emit_llvm_ir(&dependency_phases, &target).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_object_cache_requires_exact_ir_options_and_toolchain_abi() {
+        let o2 = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let o3 = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle("main() -> () { () }");
+        let changed_bundle = invalid_bundle("main() -> () { let value = (); value }");
+        let target = LlvmOptions::default();
+        let ir = "; exact generated IR";
+        let abi = "clang=example;target=example;opt=-O2";
+        let bytes = vec![0x7f, b'E', b'L', b'F'];
+        let mut driver = CompilationDriver::new();
+
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, ir, abi),
+            None
+        );
+        driver.cache_native_object(&bundle, o2, &target, ir, abi.into(), bytes.clone());
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, ir, abi),
+            Some(bytes),
+            "cache values are artifact bytes, never an output path"
+        );
+        assert_eq!(
+            driver.cached_native_object(&bundle, o3, &target, ir, abi),
+            None,
+            "optimization options are part of the native object ABI"
+        );
+        assert_eq!(
+            driver.cached_native_object(&changed_bundle, o2, &target, ir, abi),
+            None,
+            "source bundle identity is retained alongside exact IR"
+        );
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, "; changed IR", abi),
+            None
+        );
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, ir, "clang=changed"),
+            None
         );
     }
 }
