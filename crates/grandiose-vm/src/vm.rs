@@ -882,17 +882,13 @@ impl Vm {
                 }
                 Instruction::ProjectCopy { dst, src, field } => {
                     let (dst, src, field) = (*dst, *src, *field);
-                    let value = get(frame, src)?;
-                    let aggregate = aggregate_place(&value, false)?;
-                    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
-                    let field_value = aggregate
-                        .borrow()
-                        .fields
-                        .get(field)
-                        .and_then(Option::as_ref)
-                        .ok_or(RuntimeError::TypeConfusion)?
-                        .clone();
-                    let value = copy_value(a, fun.register_types[dst as usize], &field_value)?;
+                    let value = copy_project_register(
+                        a,
+                        frame,
+                        src,
+                        field,
+                        fun.register_types[dst as usize],
+                    )?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
@@ -2464,6 +2460,43 @@ fn copy_register(
             .with_value(|value| copy_value(a, ty, value))
             .map_err(|_| RuntimeError::EmptyRegister(r))?,
         value => copy_value(a, ty, value),
+    }
+}
+
+fn copy_project_value(
+    a: &ExecutionImage,
+    value: &Value,
+    field: u32,
+    field_type: TypeId,
+) -> Result<Value, RuntimeError> {
+    let aggregate = aggregate_place(value, false)?;
+    let aggregate = aggregate.borrow();
+    let field = runtime_field_index(a, &aggregate, field)?;
+    let value = aggregate
+        .fields
+        .get(field)
+        .and_then(Option::as_ref)
+        .ok_or(RuntimeError::TypeConfusion)?;
+    copy_value(a, field_type, value)
+}
+
+/// Like `copy_register`, but borrows the projected source field directly so
+/// PROJECT_COPY materializes only its required typed destination copy.
+fn copy_project_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    field: u32,
+    field_type: TypeId,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| copy_project_value(a, value, field, field_type))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => copy_project_value(a, value, field, field_type),
     }
 }
 
