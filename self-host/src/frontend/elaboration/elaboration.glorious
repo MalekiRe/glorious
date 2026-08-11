@@ -10541,13 +10541,11 @@ elaborate_indirect_call(
     }}), @elaborate_indirect_call);
     let result = callable_signature_result_at(&*interfaces, signature);
     try(check_expected_type(result, expected, token), @elaborate_indirect_call);
+    let computation = push_indirect_call(
+        &mut value.core, result, callee_value, signature, &operands
+    );
     Result::Ok(finish_computation(
-        &mut value.core,
-        result,
-        push_indirect_call(
-            &mut value.core, result, callee_value, signature, &operands
-        ),
-        &lets
+        &mut value.core, result, computation, &lets
     ))
 }
 
@@ -13975,42 +13973,46 @@ elaborate_function_value(
                         usize_from_u32(interface_callable_parameter_count(
                             &*interfaces, callable
                         ))
-                    ), { ordinal => Vec::push(
-                        &mut parameters,
-                        instantiate_call_type(
-                            interfaces,
-                            interface_callable_parameter_at(
-                                &*interfaces, callable, ordinal
-                            ),
+                    ), { ordinal => {
+                        let parameter_type = interface_callable_parameter_at(
+                            &*interfaces, callable, ordinal
+                        );
+                        Vec::push(&mut parameters, instantiate_call_type(
+                            &mut *interfaces,
+                            parameter_type,
                             generic_owner,
                             &substitutions
-                        )
-                    ) });
+                        ))
+                    } });
                     let effects = Vec::new();
+                    let declared_result = interface_callable_result(
+                        &*interfaces, callable
+                    );
+                    let callable_result = instantiate_call_type(
+                        &mut *interfaces,
+                        declared_result,
+                        generic_owner,
+                        &substitutions
+                    );
                     let signature = intern_callable_signature(
-                        interfaces,
+                        &mut *interfaces,
                         &parameters,
-                        instantiate_call_type(
-                            interfaces,
-                            interface_callable_result(&*interfaces, callable),
-                            generic_owner,
-                            &substitutions
-                        ),
+                        callable_result,
                         &effects,
                         None
                     );
-                    let ty = intern_callable_type(interfaces, signature);
+                    let ty = intern_callable_type(&mut *interfaces, signature);
                     try(check_expected_type(ty, expected, token),
                         @elaborate_function_value);
                     let target = intern_callable_instance(
-                        interfaces, callable, &substitutions
+                        &mut *interfaces, callable, &substitutions
                     );
                     let captures = Vec::new();
                     let core = try(push_closure_value(
                         &mut value.core,
                         ty,
                         super::bodies::body_shell(body),
-                        u32_from_usize(expression),
+                        expression,
                         signature,
                         Option::Some(target),
                         &captures

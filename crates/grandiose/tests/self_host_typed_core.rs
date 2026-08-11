@@ -2219,7 +2219,10 @@ fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
         "closure_captures_are_ordered",
         "push_closure_value",
         "push_indirect_call",
+        "let computation = push_indirect_call(",
         "Result::Ok(finish_computation(",
+        "let callable_result = instantiate_call_type(",
+        "intern_callable_signature(\n                        &mut *interfaces,",
         "CoreValueView::Closure",
         "CoreComputationView::CallIndirect",
         "interface_callable_signature_effect_tail",
@@ -2236,6 +2239,33 @@ fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
     .unwrap();
     assert!(lowering.contains("CallableNotLowered(CoreValueId)"));
     assert!(lowering.contains("CoreComputationView::CallIndirect"));
+}
+
+#[test]
+fn self_hosted_recursive_effect_lowering_preserves_its_unique_session_owner() {
+    // The production self-host compiler recursively lowers effect operations
+    // while one argument lends `session` and a later argument reborrows it.
+    // Keep that real source shape paired with the MIR ownership rule that
+    // retains a control-loop outer as the backedge owner.
+    let root = repository_root();
+    let compiler = fs::read_to_string(root.join("self-host/src/compiler/compiler.glorious"))
+        .unwrap();
+    assert!(
+        compiler.contains(
+            "lower_effect_operations(\n                            session, map, types, type_names, protocol, ordinal + 1, output"
+        ),
+        "the recursive unique-session call is the production regression shape"
+    );
+    let bootstrap = fs::read_to_string(root.join("crates/grandiose/src/compiler.rs")).unwrap();
+    for required in [
+        "fn contains_reborrow_of_local(expression: &core::Expr, local: core::LocalId)",
+        "origin.unique && origin.root == *local && origin.path.is_empty()",
+        "Self::contains_reborrow_of_local(later, *local)",
+        "active_control_outer && unique_reference",
+        "mir::InstructionKind::Reborrow {",
+    ] {
+        assert!(bootstrap.contains(required), "missing unique loop-owner guard: {required}");
+    }
 }
 
 #[test]

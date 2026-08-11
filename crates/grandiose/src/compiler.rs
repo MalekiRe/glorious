@@ -31147,6 +31147,30 @@ impl<'a> CoreLowerer<'a> {
         self.substituted_source_type(result, &substitutions)
     }
 
+    /// A context-block callback can end in a direct helper call whose declared
+    /// result is ground even when specialization does not retain a standalone
+    /// callable signature for that block. Use only that local declaration;
+    /// never infer its type from the enclosing call result.
+    fn ground_direct_source_call_result(&mut self, expression: &Expr) -> Option<TypeId> {
+        let ExprKind::Call(callee, _) = &expression.kind else {
+            return None;
+        };
+        let ExprKind::Variable(path) = &callee.kind else {
+            return None;
+        };
+        let [name] = path.as_ref() else {
+            return None;
+        };
+        let result = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == name.as_ref())?
+            .return_type
+            .as_ref()?
+            .clone();
+        self.substituted_source_type(&result, &BTreeMap::new())
+    }
+
     fn planned_late_generic_type_substitutions(
         &mut self,
         expression: &Expr,
@@ -31416,12 +31440,14 @@ impl<'a> CoreLowerer<'a> {
                 ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
                     let tail = tail_expression(body);
                     self.static_local_expression_type(tail)
+                        .or_else(|| self.ground_direct_source_call_result(tail))
                         .or_else(|| self.provisional_handler_result(body.span))
                         .or_else(|| self.provisional_handler_result(tail.span))
                 }
                 ExprKind::Block(_) | ExprKind::ContextBlock(_) => {
                     let tail = tail_expression(argument);
                     self.static_local_expression_type(tail)
+                        .or_else(|| self.ground_direct_source_call_result(tail))
                         .or_else(|| self.provisional_handler_result(argument.span))
                         .or_else(|| self.provisional_handler_result(tail.span))
                 }
@@ -48794,6 +48820,87 @@ impl MirLowerer {
         })
     }
 
+    /// Whether `expression` contains an explicit reborrow of precisely this
+    /// Core local.  This is deliberately narrower than a generic capture/use
+    /// query: it gates argument reordering only for the read-after-unique-use
+    /// shape that requires the owning handle to be lowered last.
+    fn contains_reborrow_of_local(expression: &core::Expr, local: core::LocalId) -> bool {
+        use core::ExprKind as Kind;
+        let any = |values: &[core::Expr]| {
+            values
+                .iter()
+                .any(|value| Self::contains_reborrow_of_local(value, local))
+        };
+        match &expression.kind {
+            Kind::Reborrow { source, .. } => *source == local,
+            Kind::TemporaryProjectBorrow { source, .. }
+            | Kind::LabelDestination { body: source, .. }
+            | Kind::Leave { value: source, .. }
+            | Kind::PatternTest { subject: source, .. }
+            | Kind::Project { subject: source, .. }
+            | Kind::Cancel { resumption: source } => Self::contains_reborrow_of_local(source, local),
+            Kind::Call { args, .. }
+            | Kind::TailCall { args, .. }
+            | Kind::CallSelf { args }
+            | Kind::TailCallSelf { args }
+            | Kind::ControlContinue { args, .. }
+            | Kind::MakeCallable { captures: args, .. }
+            | Kind::Primitive { args, .. }
+            | Kind::HostCall { args, .. }
+            | Kind::Perform { payloads: args, .. } => any(args),
+            Kind::CallKnownReceiver { receiver, args, .. }
+            | Kind::TailCallKnownReceiver { receiver, args, .. } => {
+                Self::contains_reborrow_of_local(receiver, local) || any(args)
+            }
+            Kind::ControlLoop { initial_args, body, .. } => {
+                any(initial_args) || Self::contains_reborrow_of_local(body, local)
+            }
+            Kind::CallIndirect { callable, args, .. }
+            | Kind::TailCallIndirect { callable, args, .. } => {
+                Self::contains_reborrow_of_local(callable, local) || any(args)
+            }
+            Kind::RefinementBranch {
+                subject,
+                positive,
+                negative,
+                ..
+            } => {
+                Self::contains_reborrow_of_local(subject, local)
+                    || Self::contains_reborrow_of_local(positive, local)
+                    || Self::contains_reborrow_of_local(negative, local)
+            }
+            Kind::Construct { fields, .. } => fields
+                .iter()
+                .any(|field| Self::contains_reborrow_of_local(&field.value, local)),
+            Kind::Resume {
+                resumption, value, ..
+            }
+            | Kind::TailResume { resumption, value } => {
+                Self::contains_reborrow_of_local(resumption, local)
+                    || Self::contains_reborrow_of_local(value, local)
+            }
+            Kind::Handle {
+                clauses,
+                shared_clause_captures,
+                body_captures,
+                ..
+            } => {
+                clauses.iter().any(|(_, _, captures)| any(captures))
+                    || any(shared_clause_captures)
+                    || any(body_captures)
+            }
+            Kind::Block { statements, tail } => {
+                statements.iter().any(|statement| match statement {
+                    core::Stmt::Let { value, .. }
+                    | core::Stmt::Assign { value, .. }
+                    | core::Stmt::Expr(value) => Self::contains_reborrow_of_local(value, local),
+                    core::Stmt::Deconstruct { .. } | core::Stmt::EndBorrow { .. } => false,
+                }) || Self::contains_reborrow_of_local(tail, local)
+            }
+            _ => false,
+        }
+    }
+
     /// Make `value` the initialized value of `path`, then rebuild every parent
     /// for which all immediate children are available.  A parent may be a
     /// residual aggregate register (some fields still initialized) or may have
@@ -52548,6 +52655,17 @@ impl MirLowerer {
                     )
                 });
                 let dst = self.allocate(expression.ty);
+                let active_control_outer = self.active_control_loops.values().any(|context| {
+                    context
+                        .outer_locals
+                        .iter()
+                        .any(|(outer, _)| *outer == canonical)
+                });
+                let unique_reference = self
+                    .unique_reference_types
+                    .values()
+                    .any(|ty| *ty == expression.ty)
+                    || expression.reference.as_ref().is_some_and(|origin| origin.unique);
                 if *copy {
                     self.push(
                         expression.span,
@@ -52557,6 +52675,22 @@ impl MirLowerer {
                         },
                     );
                     self.copy_borrow_tracking(src, dst);
+                } else if active_control_outer && unique_reference {
+                    // A loop outer is carried across each backedge. Passing a
+                    // unique reference from that environment to a nested call
+                    // must therefore lend a fresh handle, rather than consume
+                    // the carried owner.  This also lets later call arguments
+                    // reborrow the same source during argument evaluation.
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::Reborrow {
+                            dst,
+                            src,
+                            unique: true,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    self.borrow_parents.insert(dst, src);
                 } else {
                     self.push(
                         expression.span,
@@ -53028,12 +53162,25 @@ impl MirLowerer {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, argument)| {
+                        let known_unique_handle = self
+                            .unique_reference_types
+                            .values()
+                            .any(|reference| *reference == argument.ty);
+                        let dependent_unique_reborrow = match &argument.kind {
+                            core::ExprKind::Local { local, copy: false } => argument
+                                .reference
+                                .as_ref()
+                                .is_some_and(|origin| {
+                                    origin.unique && origin.root == *local && origin.path.is_empty()
+                                })
+                                && args[index + 1..].iter().any(|later| {
+                                    Self::contains_reborrow_of_local(later, *local)
+                                }),
+                            _ => false,
+                        };
                         (matches!(argument.kind, core::ExprKind::Local { copy: false, .. })
-                            && self
-                                .unique_reference_types
-                                .values()
-                                .any(|reference| *reference == argument.ty))
-                        .then_some(index)
+                            && (known_unique_handle || dependent_unique_reborrow))
+                            .then_some(index)
                     })
                     .collect::<BTreeSet<_>>();
                 let mut lowered_args = vec![None; args.len()];
