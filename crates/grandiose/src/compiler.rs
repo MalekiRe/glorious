@@ -50010,6 +50010,27 @@ impl MirLowerer {
                             .then_some((local, parameter.local))
                     })
                     .collect::<Vec<_>>();
+                // A copied initial argument can also be an independently
+                // preserved lexical capture.  It needs its own outer-header
+                // slot: aliasing it to the loop parameter loses the capture
+                // as soon as the iteration consumes that parameter.  A
+                // move-only argument cannot have two owners, so it retains
+                // the ordinary source-to-parameter alias below.
+                let copied_initial_outer_locals = initial_args
+                    .iter()
+                    .filter_map(|argument| match &argument.kind {
+                        core::ExprKind::Local { local, copy: true }
+                            if preserved_outer_locals.contains(&local) =>
+                        {
+                            Some(*local)
+                        }
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                let initial_outer_aliases = initial_outer_aliases
+                    .into_iter()
+                    .filter(|(local, _)| !copied_initial_outer_locals.contains(local))
+                    .collect::<Vec<_>>();
                 let aliased_outer_locals = initial_outer_aliases
                     .iter()
                     .map(|(outer, _)| *outer)
@@ -50028,7 +50049,8 @@ impl MirLowerer {
                             && !parameter_locals.contains(local)
                             && !aliased_outer_locals.contains(local)
                             && self.owned.contains(register)
-                            && !incoming_set.contains(register))
+                            && (!incoming_set.contains(register)
+                                || copied_initial_outer_locals.contains(local)))
                         {
                             return None;
                         }

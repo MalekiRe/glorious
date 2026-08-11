@@ -124,6 +124,77 @@ fn user_named_label_control_helper_forms_a_cached_structural_loop() {
 }
 
 #[test]
+fn copied_initial_argument_retained_by_static_callback_gets_outer_header_slot() {
+    let source = r#"
+        custom_walk<L, F>(
+            index: usize,
+            limit: usize,
+            shared: &usize,
+            exit: L,
+            body: F
+        )
+        where L: Label<usize>,
+        F: Fn<(usize, L), Output = ()> {
+            handle index == limit {
+                true => (),
+                false => {
+                    body(index, exit);
+                    custom_walk(index + 1, limit, shared, exit, body)
+                }
+            }
+        }
+
+        answer() -> usize {
+            let limit = wrapping_convert_to_usize(4);
+            let shared = &limit;
+            @done: usize {
+                custom_walk(0, limit, shared, @done, { index, done => {
+                    shared;
+                    if(index + 1 == limit) { done(limit) } else { () }
+                }});
+                0
+            }
+        }
+
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("copied-loop-outer-capture.glorious", source)
+        .expect("copied initial capture must survive every fused-loop backedge");
+    let answer = phases
+        .core
+        .functions
+        .iter()
+        .find(|function| function.name == "answer")
+        .expect("answer Core function");
+    assert!(
+        format!("{:#?}", answer.body).contains("kind: ControlLoop {"),
+        "the helper should remain a fused control loop"
+    );
+    let mir_answer = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "answer")
+        .expect("answer MIR function");
+    assert!(
+        mir_answer.blocks.iter().any(|block| block.params.len() == 4),
+        "the three loop-state parameters need a dedicated copied outer-capture slot"
+    );
+    let function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .expect("answer bytecode function") as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact).expect("MIR must retain the copied outer capture"))
+            .run(function, vec![])
+            .expect("answer runs"),
+        Value::U64(4)
+    );
+}
+
+#[test]
 fn function_label_resolves_lexically_named_ground_generic_payload() {
     let source = r#"
         enum Failure { Rejected }
