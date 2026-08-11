@@ -488,6 +488,10 @@ lower_body<'a>(
         &session.interfaces,
         callable
     );
+    // Do not capture `session` in the resumptive `map_err` handler below:
+    // body elaboration may suspend while reporting a diagnostic.  The flag is
+    // copyable request state, so snapshot it before entering that boundary.
+    let enum_payload_expected_trace = session.enum_payload_expected_trace;
     let typed = try(
         Result::map_err(
             elaboration::elaborate_function_instance_body(
@@ -498,7 +502,7 @@ lower_body<'a>(
                 &syntax,
                 &resolution,
                 instance,
-                session.enum_payload_expected_trace
+                enum_payload_expected_trace
             ),
             { found => CompileError::BodyElaboration(shell, found) }
         ),
