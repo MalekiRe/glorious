@@ -979,6 +979,134 @@ enum FrozenHostImport {
     DiagnosticWrite,
 }
 
+/// A lexical, one-shot host-effect route prepared for artifact AOT lowering.
+///
+/// This is deliberately more precise than an import declaration: `Perform`
+/// may only use one of these routes while its matching [`ClosedHostHandlerFrame`]
+/// is active.  Keeping the protocol operation result distinct from the import
+/// result matters for `ProcessArgs`, whose generated handler wraps the host
+/// array before resuming the source continuation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedHostContinuation {
+    protocol: u32,
+    operation: u32,
+    import: u32,
+    operation_result: TypeId,
+    import_result: TypeId,
+    resumption_type: TypeId,
+}
+
+/// The static part of a lexical `Handle` frame for the frozen self-host host
+/// protocols.  Future instruction lowering must pair this with the dynamic
+/// `MakeHandler`/`Handle` registers and consume its continuations exactly once;
+/// it must never turn an arbitrary `Perform` into a process-global host call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedHostHandlerFrame {
+    handler_def: u32,
+    continuations: Vec<ClosedHostContinuation>,
+}
+
+impl ClosedHostHandlerFrame {
+    /// Recognize the exact four-protocol, one-shot handler shape emitted by
+    /// the production self-host manifest.  Any partial handler, extra clause,
+    /// lookalike protocol, or non-one-shot continuation remains outside this
+    /// AOT foundation.
+    fn build(artifact: &Artifact, handler_def: u32) -> Option<Self> {
+        let definition = artifact.handler_defs.get(handler_def as usize)?;
+        if definition.partial || definition.clauses.len() != 4 {
+            return None;
+        }
+        let mut continuations = Vec::with_capacity(4);
+        for clause in &definition.clauses {
+            let protocol = artifact.protocols.get(clause.protocol as usize)?;
+            let operation = protocol.operations.get(clause.operation as usize)?;
+            let role = frozen_host_protocol_role(protocol.display_name.as_str(), operation.name.as_str())?;
+            if operation.terminal
+                || operation.resumption_lower != 1
+                || operation.resumption_upper != Some(1)
+            {
+                return None;
+            }
+            let resumption_type = clause.resumption_type?;
+            let Type::Resumption {
+                input_type,
+                output_type,
+                lower_uses,
+                upper_uses,
+                ..
+            } = artifact.types.get(resumption_type as usize)?.representation()
+            else {
+                return None;
+            };
+            // A resumed operation returns to the `Handle` expression, whose
+            // result type is the handler definition's result.  The input is
+            // exactly the operation's result value.
+            if *input_type != operation.result_type
+                || *output_type != definition.result_type
+                || *lower_uses != 1
+                || *upper_uses != Some(1)
+            {
+                return None;
+            }
+            let import = unique_frozen_import(artifact, role)?;
+            if operation.payload_signature.params != artifact.imports[import as usize].signature.params {
+                return None;
+            }
+            continuations.push(ClosedHostContinuation {
+                protocol: clause.protocol,
+                operation: clause.operation,
+                import,
+                operation_result: operation.result_type,
+                import_result: artifact.imports[import as usize].signature.result,
+                resumption_type,
+            });
+        }
+        continuations.sort_by_key(|continuation| (continuation.protocol, continuation.operation));
+        if continuations
+            .windows(2)
+            .any(|routes| routes[0].protocol == routes[1].protocol && routes[0].operation == routes[1].operation)
+        {
+            return None;
+        }
+        // The set, rather than only the cardinality, is part of the frozen
+        // ABI. A handler for four arbitrary protocols must not be admitted.
+        if continuations
+            .iter()
+            .filter_map(|continuation| frozen_host_import(artifact, &artifact.imports[continuation.import as usize]))
+            .collect::<BTreeSet<_>>()
+            != BTreeSet::from([
+                FrozenHostImport::ProcessArgsGet,
+                FrozenHostImport::FsRead,
+                FrozenHostImport::FsWrite,
+                FrozenHostImport::DiagnosticWrite,
+            ])
+        {
+            return None;
+        }
+        Some(Self { handler_def, continuations })
+    }
+}
+
+fn frozen_host_protocol_role(protocol: &str, operation: &str) -> Option<FrozenHostImport> {
+    match (protocol, operation) {
+        ("ProcessArgs", "get") => Some(FrozenHostImport::ProcessArgsGet),
+        ("FileRead", "read") => Some(FrozenHostImport::FsRead),
+        ("FileWrite", "write") => Some(FrozenHostImport::FsWrite),
+        ("Diagnostic", "write") => Some(FrozenHostImport::DiagnosticWrite),
+        _ => None,
+    }
+}
+
+fn unique_frozen_import(artifact: &Artifact, role: FrozenHostImport) -> Option<u32> {
+    let mut imports = artifact
+        .imports
+        .iter()
+        .enumerate()
+        .filter_map(|(index, import)| (frozen_host_import(artifact, import) == Some(role)).then_some(index as u32));
+    let import = imports.next()?;
+    imports.next().is_none().then_some(import)
+}
+
 /// Recognize exactly the four G1 imports emitted by the self-host production
 /// manifest.  The artifact's spelling, full signature, and trap bit are all
 /// part of this ABI; a lookalike import is never given a native symbol.
@@ -1202,7 +1330,9 @@ fn instruction_name(instruction: &Instruction) -> &'static str {
 mod tests {
     use std::{fs, process::Command};
 
-    use grandiose_vm::bytecode::{EnumVariant, Field, Import, Signature};
+    use grandiose_vm::bytecode::{
+        EnumVariant, Field, HandlerClause, HandlerDef, Import, Operation, Protocol, Signature,
+    };
     use grandiose_vm::{
         verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction, Primitive,
         Type, BYTES, I64, TEXT, U32, UNIT,
@@ -1786,6 +1916,63 @@ mod tests {
         let object = directory.path().join("host-imports.o");
         fs::write(&source, ir).unwrap();
         assert!(Command::new("clang").args(["-x", "ir", "-c"]).arg(&source).arg("-o").arg(&object).status().unwrap().success());
+    }
+
+    #[test]
+    fn closed_host_handler_frame_records_exact_one_shot_frozen_routes() {
+        let array_text = 19;
+        let mut artifact = Artifact {
+            required_features: 1 | (1 << 5),
+            imports: vec![
+                Import { capability: "diagnostic".into(), symbol: "write".into(), signature: Signature { params: vec![TEXT], result: UNIT, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "fs.read".into(), symbol: "read".into(), signature: Signature { params: vec![TEXT], result: BYTES, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "fs.write".into(), symbol: "write".into(), signature: Signature { params: vec![TEXT, BYTES], result: UNIT, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "process.args".into(), symbol: "get".into(), signature: Signature { params: vec![], result: array_text, outward_protocols: vec![] }, may_trap: true },
+            ],
+            protocols: vec![
+                Protocol { display_name: "Diagnostic".into(), type_arguments: vec![], operations: vec![Operation { name: "write".into(), payload_signature: Signature { params: vec![TEXT], result: UNIT, outward_protocols: vec![] }, result_type: UNIT, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+                Protocol { display_name: "FileRead".into(), type_arguments: vec![], operations: vec![Operation { name: "read".into(), payload_signature: Signature { params: vec![TEXT], result: UNIT, outward_protocols: vec![] }, result_type: BYTES, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+                Protocol { display_name: "FileWrite".into(), type_arguments: vec![], operations: vec![Operation { name: "write".into(), payload_signature: Signature { params: vec![TEXT, BYTES], result: UNIT, outward_protocols: vec![] }, result_type: UNIT, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+                Protocol { display_name: "ProcessArgs".into(), type_arguments: vec![], operations: vec![Operation { name: "get".into(), payload_signature: Signature { params: vec![], result: UNIT, outward_protocols: vec![] }, result_type: array_text, resumption_lower: 1, resumption_upper: Some(1), terminal: false }] },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(artifact.types.len(), array_text as usize);
+        artifact.types.push(Type::Array { element: TEXT });
+        for (protocol, input_type) in [(0, UNIT), (1, BYTES), (2, UNIT), (3, array_text)] {
+            artifact.types.push(Type::Resumption {
+                input_type,
+                output_type: UNIT,
+                effect_signature: Signature { params: vec![], result: UNIT, outward_protocols: vec![] },
+                lower_uses: 1,
+                upper_uses: Some(1),
+                identity_name: format!("frozen-{protocol}"),
+                copy: false,
+            });
+        }
+        artifact.handler_defs.push(HandlerDef {
+            result_type: UNIT,
+            partial: false,
+            clauses: (0..4)
+                .map(|protocol| HandlerClause {
+                    protocol,
+                    operation: 0,
+                    callable_signature: Signature { params: vec![], result: UNIT, outward_protocols: vec![] },
+                    resumption_type: Some(array_text + 1 + protocol),
+                })
+                .collect(),
+        });
+        let frame = ClosedHostHandlerFrame::build(&artifact, 0).expect("frozen handler frame");
+        assert_eq!(frame.handler_def, 0);
+        assert_eq!(frame.continuations.len(), 4);
+        assert_eq!(
+            frame.continuations.iter().map(|continuation| continuation.import).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert!(frame.continuations.iter().all(|continuation| continuation.resumption_type >= 20));
+
+        artifact.protocols[0].operations[0].resumption_upper = Some(2);
+        assert!(ClosedHostHandlerFrame::build(&artifact, 0).is_none());
     }
 
     #[test]
