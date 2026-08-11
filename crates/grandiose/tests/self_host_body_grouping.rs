@@ -6,7 +6,7 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel,
     ast::{
         BinaryOp, Expr, ExprKind, FixityKind, Pattern, PatternKind, Program, Stmt, TypeSyntax,
         TypeSyntaxKind, UnaryOp,
@@ -14,6 +14,9 @@ use grandiose::{
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
+
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -170,7 +173,20 @@ fn encode_statement(
             output.push(2);
             encode_expression(output, program, source, expression)
         }
-        Stmt::Deconstruct { .. } | Stmt::Assign { .. } => Err(()),
+        Stmt::Assign {
+            destination,
+            value,
+            ..
+        } => match &destination.kind {
+            grandiose::ast::AssignmentPlaceKind::Local { name, fields }
+                if fields.is_empty() => {
+                    output.push(3);
+                    push_string(output, name);
+                    encode_expression(output, program, source, value)
+                }
+            _ => Err(()),
+        },
+        Stmt::Deconstruct { .. } => Err(()),
     }
 }
 
@@ -780,20 +796,11 @@ fn self_host_body_parser_arbitrary_sources_terminate() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM arbitrary body corpus diverged");
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-body-arbitrary.ll");
-            let executable = directory.path().join("self-host-body-arbitrary");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "self-host-body-arbitrary",
+            );
             let native_path = directory.path().join("native.bin");
             let native = Command::new(&executable)
                 .arg(&native_path)
@@ -1045,6 +1052,16 @@ fn self_host_body_direct_perform_handlers_match_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_body_direct_local_assignment_matches_bootstrap_ast() {
+    // This is intentionally the narrow, address-free assignment slice. Field
+    // and dereference destinations require the later place/loan frontend.
+    let source = "answer() -> i64 { let value = 1; value = 7; value } main() { () }";
+    let mut expected = Vec::new();
+    encode_rust_grouping(&mut expected, source);
+    assert_eq!(self_host_body_output(&[source]), expected);
+}
+
+#[test]
 fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
     // The component probe carries the complete scalar-pattern wire contract.
     // Keep VM and native outputs byte-for-byte identical.
@@ -1084,23 +1101,10 @@ fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&vm_path).unwrap(), expected);
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("scalar-patterns.ll");
-            let executable = directory.path().join("scalar-patterns");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "scalar-patterns",
             );
             let native = Command::new(&executable)
                 .arg(&directory.path().join("native.bin"))
@@ -1317,23 +1321,10 @@ fn self_host_body_contextual_blocks_match_bootstrap_ast() {
             expected_one.extend(&expected);
             assert_eq!(fs::read(&vm_output).unwrap(), expected_one);
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("contextual-blocks.ll");
-            let executable = directory.path().join("contextual-blocks");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "contextual-blocks",
             );
             let native = Command::new(&executable)
                 .arg(&native_output)
@@ -1486,45 +1477,10 @@ fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_
                 "VM body grouping diverged"
             );
 
-            let asan = std::env::var_os("G1_SELF_HOST_BODY_GROUPING_ASAN").is_some();
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let debug_directory = repository_root().join("target/self-host-body-grouping-debug");
-            if asan {
-                fs::create_dir_all(&debug_directory).unwrap();
-                let functions = phases
-                    .mir
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, function)| format!("{index}\t{}\n", function.name))
-                    .collect::<String>();
-                fs::write(debug_directory.join("functions.txt"), functions).unwrap();
-            }
-            let llvm = if asan {
-                debug_directory.join("self-host-body-grouping.ll")
-            } else {
-                directory.path().join("self-host-body-grouping.ll")
-            };
-            let executable = if asan {
-                debug_directory.join("self-host-body-grouping")
-            } else {
-                directory.path().join("self-host-body-grouping")
-            };
-            fs::write(&llvm, module.ir).unwrap();
-            let mut clang_command = Command::new("clang");
-            clang_command
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0");
-            if asan {
-                clang_command.args(["-fsanitize=address", "-fno-omit-frame-pointer", "-g"]);
-            }
-            let clang = clang_command.arg("-o").arg(&executable).output().unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "self-host-body-grouping",
             );
 
             let native_all_path = directory.path().join("native-all.bin");
@@ -1721,20 +1677,11 @@ fn self_host_body_labels_match_bootstrap_ast() {
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&output_path).unwrap(), expected);
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("labels.ll");
-            let executable = directory.path().join("labels");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "labels",
+            );
             let native_output = directory.path().join("native.bin");
             let native = Command::new(&executable)
                 .arg(&native_output)
@@ -1913,20 +1860,11 @@ fn self_host_body_is_patterns_match_bootstrap_ast() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&output).unwrap(), expected, "VM body AST diverged");
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("probe.ll");
-            let executable = directory.path().join("probe");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "probe",
+            );
             let native_output = directory.path().join("native.bin");
             let native = Command::new(&executable)
                 .arg(&native_output)
