@@ -11,9 +11,9 @@ use std::{collections::BTreeSet, error::Error, fmt};
 
 use grandiose_vm::{
     load_verified, verify::VerifiedArtifact, Artifact, Constant, Function, Instruction, Primitive,
-    Type, TypeId, TEXT, UNIT,
+    Type, TypeId, BYTES, TEXT, UNIT,
 };
-use grandiose_vm::bytecode::Signature;
+use grandiose_vm::bytecode::{Import, Signature};
 
 use crate::{
     llvm_backend::default_target_triple,
@@ -94,16 +94,7 @@ pub fn emit_verified_artifact_llvm_ir(
     let mut output =
         String::from("; Grandiose verified .grbc AOT\nsource_filename = \"grandiose.grbc\"\n");
     output.push_str(&runtime_fault_declaration(pointer_width));
-    // These are declarations only. `emit_host_call` below remains the single
-    // authorization point and validates every import against the frozen G1
-    // manifest identity before emitting either call.
-    if artifact
-        .code
-        .iter()
-        .any(|instruction| matches!(instruction, Instruction::HostCall { .. }))
-    {
-        output.push_str("\ndeclare void @g1_host_fault(i32) cold noreturn\ndeclare i32 @g1_host_diagnostic_write(ptr)\n");
-    }
+    emit_host_import_declarations(&mut output, artifact);
     emit_runtime_literals(&mut output, artifact, pointer_width);
     output.push_str("\n\n");
     // An artifact can retain helper functions which are unreachable from its
@@ -136,7 +127,15 @@ pub fn emit_verified_artifact_llvm_ir(
         })
         .collect::<Result<Vec<_>, ArtifactLlvmError>>()?
         .join(", ");
-    output.push_str("define i32 @main() {\nentry:\n");
+    if artifact
+        .imports
+        .iter()
+        .any(|import| matches!(frozen_host_import(artifact, import), Some(FrozenHostImport::ProcessArgsGet)))
+    {
+        output.push_str("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n  call void @g1_host_process_init(i32 %argc, ptr %argv)\n");
+    } else {
+        output.push_str("define i32 @main() {\nentry:\n");
+    }
     if llvm_type(artifact, entry, entry_function.return_type)? == "void" {
         output.push_str(&format!("  call void @grbc_fn_{entry}({arguments})\n"));
     } else {
@@ -817,7 +816,8 @@ fn llvm_type(artifact: &Artifact, function: u32, ty: TypeId) -> Result<String, A
         // host diagnostic ABI.  It is exactly the `G1Bytes *` representation
         // in native_host_runtime.c; Bytes and dynamic Text still have no
         // artifact AOT allocation/ownership ABI and remain rejected.
-        Some(Type::Text) => Ok("ptr".into()),
+        Some(Type::Text | Type::Bytes) => Ok("ptr".into()),
+        Some(Type::Array { element }) if *element == TEXT => Ok("ptr".into()),
         Some(Type::Tuple { fields, .. }) => llvm_aggregate_type(artifact, function, fields),
         Some(Type::Struct { fields, .. }) => llvm_aggregate_type(
             artifact,
@@ -971,6 +971,76 @@ fn emit_runtime_literals(output: &mut String, artifact: &Artifact, pointer_width
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FrozenHostImport {
+    ProcessArgsGet,
+    FsRead,
+    FsWrite,
+    DiagnosticWrite,
+}
+
+/// Recognize exactly the four G1 imports emitted by the self-host production
+/// manifest.  The artifact's spelling, full signature, and trap bit are all
+/// part of this ABI; a lookalike import is never given a native symbol.
+fn frozen_host_import(artifact: &Artifact, import: &Import) -> Option<FrozenHostImport> {
+    let plain = |params, result| {
+        import.signature
+            == Signature { params, result, outward_protocols: vec![] }
+            && import.may_trap
+    };
+    if import.capability == "process.args"
+        && import.symbol == "get"
+        && plain(vec![], import.signature.result)
+        && matches!(
+            artifact.types.get(import.signature.result as usize).map(Type::representation),
+            Some(Type::Array { element }) if *element == TEXT
+        )
+    {
+        Some(FrozenHostImport::ProcessArgsGet)
+    } else if import.capability == "fs.read"
+        && import.symbol == "read"
+        && plain(vec![TEXT], BYTES)
+    {
+        Some(FrozenHostImport::FsRead)
+    } else if import.capability == "fs.write"
+        && import.symbol == "write"
+        && plain(vec![TEXT, BYTES], UNIT)
+    {
+        Some(FrozenHostImport::FsWrite)
+    } else if import.capability == "diagnostic"
+        && import.symbol == "write"
+        && plain(vec![TEXT], UNIT)
+    {
+        Some(FrozenHostImport::DiagnosticWrite)
+    } else {
+        None
+    }
+}
+
+fn emit_host_import_declarations(output: &mut String, artifact: &Artifact) {
+    let imports = artifact
+        .imports
+        .iter()
+        .filter_map(|import| frozen_host_import(artifact, import))
+        .collect::<BTreeSet<_>>();
+    if imports.is_empty() {
+        return;
+    }
+    output.push_str("\ndeclare void @g1_host_fault(i32) cold noreturn\n");
+    for import in imports {
+        match import {
+            FrozenHostImport::ProcessArgsGet => output.push_str(
+                "declare void @g1_host_process_init(i32, ptr)\ndeclare ptr @g1_host_process_args_get()\n",
+            ),
+            FrozenHostImport::FsRead => output.push_str("declare ptr @g1_host_fs_read(ptr)\n"),
+            FrozenHostImport::FsWrite => output.push_str("declare i32 @g1_host_fs_write(ptr, ptr)\n"),
+            FrozenHostImport::DiagnosticWrite => {
+                output.push_str("declare i32 @g1_host_diagnostic_write(ptr)\n")
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_host_call(
     output: &mut String,
@@ -988,69 +1058,114 @@ fn emit_host_call(
         .imports
         .get(import as usize)
         .ok_or_else(|| unsupported(function_id, instruction_id, "invalid host import"))?;
-    // The names and complete signature are the frozen artifact identities
-    // produced by the trusted runtime manifest.  Do not lower a merely
-    // lookalike import: that would silently invent a native host ABI.
-    let diagnostic_write = import.capability == "diagnostic"
-        && import.symbol == "write"
-        && import.signature
-            == Signature {
-                params: vec![TEXT],
-                result: UNIT,
-                outward_protocols: vec![],
-            }
-        && import.may_trap;
-    if !diagnostic_write {
-        return Err(unsupported(function_id, instruction_id, "unsupported host import"));
-    }
-    if args.len() != 1 {
-        return Err(unsupported(function_id, instruction_id, "diagnostic.write arity"));
-    }
-    if let Some(dst) = dst {
-        let destination_ty = function
+    let role = frozen_host_import(artifact, import)
+        .ok_or_else(|| unsupported(function_id, instruction_id, "unsupported host import"))?;
+    let mut argument = |index: usize, expected: TypeId, label: &'static str| {
+        let register = *args
+            .get(index)
+            .ok_or_else(|| unsupported(function_id, instruction_id, label))?;
+        let ty = *function
             .register_types
-            .get(dst as usize)
+            .get(register as usize)
             .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
-        if *destination_ty != UNIT {
-            return Err(unsupported(
-                function_id,
-                instruction_id,
-                "diagnostic.write destination type",
-            ));
+        if ty != expected {
+            return Err(unsupported(function_id, instruction_id, label));
+        }
+        emit_load(output, register_types, function_id, instruction_id, register, temporary)
+    };
+    let destination = |expected: TypeId, label: &'static str| {
+        let register = dst.ok_or_else(|| unsupported(function_id, instruction_id, label))?;
+        let ty = *function
+            .register_types
+            .get(register as usize)
+            .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+        (ty == expected)
+            .then_some(register)
+            .ok_or_else(|| unsupported(function_id, instruction_id, label))
+    };
+    let unit_destination = |label: &'static str| -> Result<(), ArtifactLlvmError> {
+        if let Some(register) = dst {
+            let ty = *function
+                .register_types
+                .get(register as usize)
+                .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
+            if ty != UNIT {
+                return Err(unsupported(function_id, instruction_id, label));
+            }
+        }
+        Ok(())
+    };
+    match role {
+        FrozenHostImport::ProcessArgsGet => {
+            if !args.is_empty() {
+                return Err(unsupported(function_id, instruction_id, "process.args arity"));
+            }
+            let destination = destination(import.signature.result, "process.args result")?;
+            let value = format!("%v{temporary}");
+            *temporary += 1;
+            output.push_str(&format!("  {value} = call ptr @g1_host_process_args_get()\n"));
+            emit_host_fault_if_null(output, function_id, instruction_id, temporary, &value, 1);
+            emit_store(output, register_types, function_id, instruction_id, destination, &value)
+        }
+        FrozenHostImport::FsRead => {
+            if args.len() != 1 {
+                return Err(unsupported(function_id, instruction_id, "fs.read arity"));
+            }
+            let path = argument(0, TEXT, "fs.read path type")?;
+            let destination = destination(BYTES, "fs.read result")?;
+            let value = format!("%v{temporary}");
+            *temporary += 1;
+            output.push_str(&format!("  {value} = call ptr @g1_host_fs_read(ptr {path})\n"));
+            emit_host_fault_if_null(output, function_id, instruction_id, temporary, &value, 2);
+            emit_store(output, register_types, function_id, instruction_id, destination, &value)
+        }
+        FrozenHostImport::FsWrite => {
+            if args.len() != 2 {
+                return Err(unsupported(function_id, instruction_id, "fs.write arity"));
+            }
+            let path = argument(0, TEXT, "fs.write path type")?;
+            let bytes = argument(1, BYTES, "fs.write bytes type")?;
+            unit_destination("fs.write destination type")?;
+            emit_host_status_call(output, function_id, instruction_id, temporary,
+                &format!("call i32 @g1_host_fs_write(ptr {path}, ptr {bytes})"), 3);
+            Ok(())
+        }
+        FrozenHostImport::DiagnosticWrite => {
+            if args.len() != 1 {
+                return Err(unsupported(function_id, instruction_id, "diagnostic.write arity"));
+            }
+            let text = argument(0, TEXT, "diagnostic.write text type")?;
+            unit_destination("diagnostic.write destination type")?;
+            emit_host_status_call(output, function_id, instruction_id, temporary,
+                &format!("call i32 @g1_host_diagnostic_write(ptr {text})"), 4);
+            Ok(())
         }
     }
-    let argument = args[0];
-    let argument_ty = function
-        .register_types
-        .get(argument as usize)
-        .ok_or_else(|| unsupported(function_id, instruction_id, "invalid register"))?;
-    if *argument_ty != TEXT {
-        return Err(unsupported(
-            function_id,
-            instruction_id,
-            "diagnostic.write argument type",
-        ));
-    }
-    let value = emit_load(
-        output,
-        register_types,
-        function_id,
-        instruction_id,
-        argument,
-        temporary,
-    )?;
+}
+
+fn emit_host_fault_if_null(output: &mut String, function: u32, instruction: u32, temporary: &mut u32, value: &str, fault_code: u32) {
+    let failed = format!("%v{temporary}");
+    *temporary += 1;
+    output.push_str(&format!("  {failed} = icmp eq ptr {value}, null\n"));
+    emit_host_fault_branch(output, function, instruction, &failed, fault_code);
+}
+
+fn emit_host_status_call(output: &mut String, function: u32, instruction: u32, temporary: &mut u32, call: &str, fault_code: u32) {
     let status = format!("%v{temporary}");
     *temporary += 1;
-    output.push_str(&format!("  {status} = call i32 @g1_host_diagnostic_write(ptr {value})\n"));
+    output.push_str(&format!("  {status} = {call}\n"));
     let failed = format!("%v{temporary}");
     *temporary += 1;
     output.push_str(&format!("  {failed} = icmp ne i32 {status}, 0\n"));
-    let fault = format!("host.fault.{function_id}.{instruction_id}");
-    let continuation = format!("host.cont.{function_id}.{instruction_id}");
+    emit_host_fault_branch(output, function, instruction, &failed, fault_code);
+}
+
+fn emit_host_fault_branch(output: &mut String, function: u32, instruction: u32, failed: &str, fault_code: u32) {
+    let fault = format!("host.fault.{function}.{instruction}");
+    let continuation = format!("host.cont.{function}.{instruction}");
     output.push_str(&format!(
-        "  br i1 {failed}, label %{fault}, label %{continuation}\n{fault}:\n  call void @g1_host_fault(i32 4)\n  unreachable\n{continuation}:\n"
+        "  br i1 {failed}, label %{fault}, label %{continuation}\n{fault}:\n  call void @g1_host_fault(i32 {fault_code})\n  unreachable\n{continuation}:\n"
     ));
-    Ok(())
 }
 
 fn scalar_primitive(op: Primitive, ty: &str, args: &[String]) -> Option<String> {
@@ -1090,7 +1205,7 @@ mod tests {
     use grandiose_vm::bytecode::{EnumVariant, Field, Import, Signature};
     use grandiose_vm::{
         verify::with_generated_cleanup_plans, Artifact, Constant, Function, Instruction, Primitive,
-        Type, I64, TEXT, U32, UNIT,
+        Type, BYTES, I64, TEXT, U32, UNIT,
     };
 
     use super::*;
@@ -1634,6 +1749,43 @@ mod tests {
         let output = Command::new(&executable).output().unwrap();
         assert!(output.status.success());
         assert_eq!(output.stderr, b"artifact host ABI\\n");
+    }
+
+    #[test]
+    fn verified_process_and_filesystem_host_imports_emit_the_frozen_native_abi() {
+        let array_text = 19;
+        let mut artifact = Artifact {
+            entry_function: Some(0), required_features: 1 | (1 << 5),
+            constants: vec![Constant::Text("/dev/null".into())],
+            imports: vec![
+                Import { capability: "fs.read".into(), symbol: "read".into(), signature: Signature { params: vec![TEXT], result: BYTES, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "fs.write".into(), symbol: "write".into(), signature: Signature { params: vec![TEXT, BYTES], result: UNIT, outward_protocols: vec![] }, may_trap: true },
+                Import { capability: "process.args".into(), symbol: "get".into(), signature: Signature { params: vec![], result: array_text, outward_protocols: vec![] }, may_trap: true },
+            ],
+            functions: vec![Function { name: "main".into(), flags: 0, params: vec![], return_type: UNIT, outward_protocols: vec![], receiver_mode: None, register_types: vec![UNIT, TEXT, BYTES, UNIT, TEXT], code_start: 0, code_len: 6, label_slot_count: 0 }],
+            code: vec![
+                Instruction::Const { dst: 1, constant: 0 },
+                Instruction::Copy { dst: 4, src: 1 },
+                Instruction::HostCall { dst: Some(2), import: 0, args: vec![1] },
+                Instruction::HostCall { dst: Some(3), import: 1, args: vec![4, 2] },
+                Instruction::Drop { register: 2 }, Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(artifact.types.len(), array_text as usize);
+        artifact.types.push(Type::Array { element: TEXT });
+        let artifact = with_generated_cleanup_plans(artifact).unwrap();
+        let ir = emit_artifact_llvm_ir(&artifact.encode()).unwrap();
+        assert!(ir.contains("define i32 @main(i32 %argc, ptr %argv)"));
+        assert!(ir.contains("call void @g1_host_process_init(i32 %argc, ptr %argv)"));
+        assert!(ir.contains("declare ptr @g1_host_process_args_get()"));
+        assert!(ir.contains("call ptr @g1_host_fs_read(ptr"));
+        assert!(ir.contains("call i32 @g1_host_fs_write(ptr"));
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("host-imports.ll");
+        let object = directory.path().join("host-imports.o");
+        fs::write(&source, ir).unwrap();
+        assert!(Command::new("clang").args(["-x", "ir", "-c"]).arg(&source).arg("-o").arg(&object).status().unwrap().success());
     }
 
     #[test]
