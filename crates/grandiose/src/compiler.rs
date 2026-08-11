@@ -55644,6 +55644,7 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 | Instruction::TailCallKnownReceiver { .. }
                 | Instruction::TailCallIndirect { .. }
                 | Instruction::TailResume { .. }
+                | Instruction::Perform { dst: None, .. }
                 | Instruction::Leave { .. }
                 | Instruction::Return { .. }
                 | Instruction::Abort { .. }
