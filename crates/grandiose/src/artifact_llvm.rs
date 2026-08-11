@@ -1541,6 +1541,39 @@ fn closed_frame_resume_transfer(
         })
 }
 
+/// Emit the one-shot state transition for an already validated closed-frame
+/// resume transfer.  This does not resume anything: it only establishes the
+/// deterministic consume-or-fail CFG that a later continuation ABI must use.
+fn emit_closed_frame_consume_one_shot(
+    output: &mut String,
+    frame: &str,
+    field_count: u32,
+    transfer: ClosedFrameResumeTransfer,
+    function_id: u32,
+    instruction_id: u32,
+) -> Result<(), ArtifactLlvmError> {
+    if transfer.one_shot_field == 0 || transfer.one_shot_field >= field_count {
+        return Err(unsupported(
+            function_id,
+            instruction_id,
+            "closed frame resumption field",
+        ));
+    }
+    let suffix = format!("{instruction_id}_{}", transfer.one_shot_field);
+    let field = format!("%closed_frame_resume_field_{suffix}");
+    let used = format!("%closed_frame_resume_used_{suffix}");
+    let reused = format!("closed_frame_resume_reused_{suffix}");
+    let consume = format!("closed_frame_resume_consume_{suffix}");
+    output.push_str(&format!(
+        "  {field} = getelementptr inbounds [{field_count} x i1], ptr {frame}, i64 0, i64 {}\n",
+        transfer.one_shot_field,
+    ));
+    output.push_str(&format!(
+        "  {used} = load i1, ptr {field}\n  br i1 {used}, label %{reused}, label %{consume}\n{reused}:\n  unreachable\n{consume}:\n  store i1 false, ptr {field}\n"
+    ));
+    Ok(())
+}
+
 fn closed_handle_sites(artifact: &Artifact, owner_function: u32) -> BTreeMap<u32, u32> {
     closed_host_handler_continuation_abis(artifact)
         .into_iter()
@@ -3149,6 +3182,26 @@ mod tests {
         assert!(closed_frame_resume_transfer(&artifact, &route, 20, 19, UNIT).is_none());
         assert!(closed_frame_resume_transfer(&artifact, &route, route.resumption_type, UNIT, UNIT).is_none());
         assert!(closed_frame_resume_transfer(&artifact, &route, route.resumption_type, 19, BYTES).is_none());
+        let mut consume_ir = String::new();
+        emit_closed_frame_consume_one_shot(
+            &mut consume_ir,
+            "%frame",
+            plans[&1].frame.native_field_count(),
+            resume,
+            4,
+            17,
+        )
+        .unwrap();
+        assert!(consume_ir.contains("getelementptr inbounds [5 x i1], ptr %frame, i64 0, i64 4"), "{consume_ir}");
+        assert!(consume_ir.contains("br i1 %closed_frame_resume_used_17_4, label %closed_frame_resume_reused_17_4, label %closed_frame_resume_consume_17_4"), "{consume_ir}");
+        assert!(consume_ir.contains("closed_frame_resume_reused_17_4:\n  unreachable"), "{consume_ir}");
+        assert!(consume_ir.contains("closed_frame_resume_consume_17_4:\n  store i1 false, ptr %closed_frame_resume_field_17_4"), "{consume_ir}");
+        let mut invalid_consume = resume;
+        invalid_consume.one_shot_field = 0;
+        assert!(matches!(
+            emit_closed_frame_consume_one_shot(&mut String::new(), "%frame", 5, invalid_consume, 4, 17),
+            Err(ArtifactLlvmError::UnsupportedInstruction { opcode: "closed frame resumption field", .. })
+        ));
         assert!(plans[&1].perform_route(3, 1).is_none());
         assert!(plans[&1].perform_route(9, 0).is_none());
 
