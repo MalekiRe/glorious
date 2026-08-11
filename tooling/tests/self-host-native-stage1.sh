@@ -6,7 +6,7 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 mkdir -p "$repo_root/target"
 scratch=$(mktemp -d "$repo_root/target/self-host-native-stage1-test.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
-mkdir -p "$scratch/repo/tooling" "$scratch/bin"
+mkdir -p "$scratch/repo/tooling" "$scratch/repo/target/release" "$scratch/bin"
 cp "$repo_root/tooling/self-host-native-stage1.sh" "$scratch/repo/tooling/"
 printf 'clean binding fixture\n' > "$scratch/repo/binding"
 git -C "$scratch/repo" init -q
@@ -21,6 +21,14 @@ cat > "$scratch/native" <<'EOF'
 printf 'stage-two-bytes' > "$1"
 EOF
 chmod +x "$scratch/native"
+cat > "$scratch/repo/target/release/grvm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == native-preflight && "$2" == "$NATIVE_STAGE1_TEST_STAGE2" ]]
+printf '%s\n' "$*" > "$NATIVE_STAGE1_TEST_VERIFY_LOG"
+[[ "${NATIVE_STAGE1_TEST_VERIFY_FAIL:-0}" != 1 ]]
+EOF
+chmod +x "$scratch/repo/target/release/grvm"
 cat > "$scratch/repo/tooling/self-host-native.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -45,7 +53,8 @@ printf 'Wild linker marker\n'
 EOF
 chmod +x "$scratch/bin/readelf"
 
-NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
+NATIVE_STAGE1_TEST_NATIVE="$scratch/native" NATIVE_STAGE1_TEST_STAGE2="$scratch/run/stage2.grbc" \
+  NATIVE_STAGE1_TEST_VERIFY_LOG="$scratch/verify.log" PATH="$scratch/bin:$PATH" \
   "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/run" > "$scratch/out"
 rg -q '^STAGE1_EMITTED' "$scratch/out"
 [[ "$(cat "$scratch/run/stage2.grbc")" == stage-two-bytes ]]
@@ -53,6 +62,18 @@ rg -q $'^result\temitted$' "$scratch/run/metadata.tsv"
 rg -q $'^repository-head\t[0-9a-f]{40}$' "$scratch/run/metadata.tsv"
 [[ -s "$scratch/run/canonical-source.glorious" && -s "$scratch/run/stage1-provenance.tsv" ]]
 for log in canonical-source provenance build stage1; do [[ -f "$scratch/run/$log.log" ]]; done
+[[ -f "$scratch/run/verify-stage2.log" ]]
+[[ "$(cat "$scratch/verify.log")" == "native-preflight $scratch/run/stage2.grbc" ]]
+
+if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" NATIVE_STAGE1_TEST_STAGE2="$scratch/invalid-run/stage2.grbc" \
+  NATIVE_STAGE1_TEST_VERIFY_LOG="$scratch/invalid-verify.log" NATIVE_STAGE1_TEST_VERIFY_FAIL=1 PATH="$scratch/bin:$PATH" \
+  "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/invalid-run" > /dev/null 2> "$scratch/invalid.err"; then
+  echo 'expected an unverifiable stage-two artifact to be rejected' >&2
+  exit 1
+fi
+rg -q 'verify-stage2 failed' "$scratch/invalid.err"
+rg -q $'^phase\tverify-stage2$' "$scratch/invalid-run/metadata.tsv"
+rg -q $'^result\tfailed$' "$scratch/invalid-run/metadata.tsv"
 
 if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
   "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/run" > /dev/null 2> "$scratch/reuse.err"; then

@@ -22,6 +22,7 @@ USAGE
 readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly repo_root="$(cd -- "$script_dir/.." && pwd -P)"
 readonly native_tool="$repo_root/tooling/self-host-native.sh"
+readonly grvm="$repo_root/target/release/grvm"
 
 command=${1:-}
 [[ "$command" == run ]] || usage
@@ -154,6 +155,15 @@ if [[ ! -s "$stage2" ]]; then
     echo "native-stage1: compiler emitted no stage2 artifact; retained evidence: $output_dir" >&2
     exit 1
 fi
+if [[ ! -x "$grvm" ]]; then
+    run_logged verify-build "$repo_root/tooling/ram-gate.sh" \
+        cargo build --release -p grandiose --bin grvm
+fi
+[[ -x "$grvm" ]] || record_failure verify-build 1
+# A nonempty file is not stage-two evidence.  Decode and verify the exact
+# emitted bytes before recording the run as usable bootstrap input.  This is a
+# verifier-only preflight: it must never execute the bytecode in the VM.
+run_logged verify-stage2 "$grvm" native-preflight "$stage2"
 printf 'stage2-sha256\t%s\nstage2-bytes\t%s\nresult\temitted\n' \
     "$(sha256sum "$stage2" | awk '{print $1}')" "$(wc -c < "$stage2")" >> "$metadata"
 printf 'STAGE1_EMITTED\tstage2=%s\tartifacts=%s\n' \
