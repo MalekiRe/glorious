@@ -13350,6 +13350,44 @@ fn run_fixed_point(
     Ok(())
 }
 
+/// Run a whole-program transform to the same bounded fixed point as local
+/// passes. Direct-call specialization discovers candidates across function
+/// bodies, so it must use the whole-program dispatcher rather than the local
+/// pass entry point.
+fn run_whole_program_fixed_point(
+    passes: &mut Vec<PassReport>,
+    program: &mut Program,
+    pass: PassId,
+    tables: WholeProgramPassTables<'_>,
+    level: OptimizationLevel,
+    types: &[Type],
+    global_remaining: &mut u64,
+    inline_policy: &mut InlinePolicyState,
+) -> Result<(), ValidationError> {
+    for _ in 0..FIXED_POINT_ROUNDS {
+        if *global_remaining == 0 {
+            break;
+        }
+        let report = run_transactional_whole_program_pass(
+            program,
+            pass,
+            tables,
+            level,
+            global_remaining,
+            inline_policy,
+        );
+        let stop = matches!(
+            report.outcome,
+            PassOutcome::Unchanged | PassOutcome::BudgetExhausted,
+        );
+        push_checked(passes, report, program, types)?;
+        if stop {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Complete the post-inline cleanup cycle. Sparse simplification performs
 /// propagation and local DCE; CFG normalization then deletes the newly dead
 /// arms and trivial joins. Either rewrite can expose work for the other, so
@@ -13598,6 +13636,33 @@ pub(crate) fn optimize_program_with_control_tables(
             types,
             &mut global_remaining,
         )?;
+        if level.at_least(OptimizationLevel::O2) {
+            // The first direct-call pass can turn an ordinary wrapper into a
+            // forwarding function only after its call continuation has been
+            // normalized away. Inlining can expose the same shape in a caller.
+            // Revisit direct-call specialization after that cleanup so callers do
+            // not retain a dynamic VM call merely because their target became
+            // trivial during this optimization run. The bounded pass fixed point
+            // also handles short chains of such newly-forwarding wrappers.
+            run_whole_program_fixed_point(
+                &mut passes,
+                program,
+                PassId::SpecializeDirectCalls,
+                whole_program_tables,
+                level,
+                types,
+                &mut global_remaining,
+                &mut inline_policy,
+            )?;
+            // Re-specialization produces Gotos and can expose another trivial
+            // join, so give its result the same checked CFG/local cleanup cycle.
+            run_post_inline_cleanup_fixed_point(
+                &mut passes,
+                program,
+                types,
+                &mut global_remaining,
+            )?;
+        }
     }
 
     // Proof-only references are a mandatory representation lowering at every
@@ -20387,6 +20452,7 @@ mod tests {
             SpecializeDirectCalls,
         ];
         let post_simplify = [NormalizeCfg, SparseSimplify];
+        let post_specialization = [SpecializeDirectCalls];
         let o2 = [
             GlobalSimplify,
             ScalarizeCallables,
@@ -20437,6 +20503,8 @@ mod tests {
                 .chain(o1)
                 .chain(o2)
                 .chain(post_simplify)
+                .chain(post_specialization)
+                .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(tail)
                 .chain(bytecode_input)
@@ -20449,6 +20517,8 @@ mod tests {
                 .chain(o1)
                 .chain(o2)
                 .chain(o3_second)
+                .chain(post_simplify)
+                .chain(post_specialization)
                 .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(tail)

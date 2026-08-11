@@ -989,3 +989,50 @@ fn o2_scalarizes_an_immediate_owned_closure_call_observationally() {
     }));
     verify(o2.artifact).unwrap();
 }
+
+#[test]
+fn o2_respecializes_callers_of_newly_forwarding_wrappers() {
+    // `relay` is not a forwarding function in the first direct-call
+    // specialization round: it still has a direct call and continuation. The
+    // identity fold plus CFG cleanup expose that it forwards its only
+    // argument. Re-specializing its callers must then erase `answer`'s second
+    // dynamic call as well.
+    let source = r#"
+        post_spec_identity(value: i64) -> i64 { value }
+        post_spec_relay(value: i64) -> i64 { post_spec_identity(value) }
+        post_spec_answer() -> i64 { post_spec_relay(42) }
+        main() -> { () }
+    "#;
+    let o0 = compile_at(
+        "optimizer-respecialize-forwarding-o0.glorious",
+        source,
+        OptimizationLevel::O0,
+    );
+    let o2 = compile_at(
+        "optimizer-respecialize-forwarding-o2.glorious",
+        source,
+        OptimizationLevel::O2,
+    );
+
+    assert_eq!(run(o0.clone(), "post_spec_answer").unwrap(), Value::I64(42));
+    assert_eq!(run(o2.clone(), "post_spec_answer").unwrap(), Value::I64(42));
+    assert!(
+        instruction_count(&o0, "post_spec_answer", |instruction| {
+            matches!(instruction, Instruction::Call { .. } | Instruction::TailCall { .. })
+        })
+            > 0,
+        "unoptimized artifact should retain the direct relay call"
+    );
+    assert_eq!(
+        instruction_count(&o2, "post_spec_answer", |instruction| {
+            matches!(instruction, Instruction::Call { .. } | Instruction::TailCall { .. })
+        }),
+        0,
+        "post-cleanup direct-call specialization must erase the newly trivial relay call"
+    );
+    assert!(o2.optimization_report.passes.iter().filter(|pass| {
+        pass.pass == OptimizationPass::SpecializeDirectCalls
+            && pass.outcome == OptimizationPassOutcome::Changed
+    }).count() >= 2);
+    verify(o2.artifact).unwrap();
+}
