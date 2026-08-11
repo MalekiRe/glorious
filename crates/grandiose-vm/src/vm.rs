@@ -1383,18 +1383,24 @@ impl Vm {
                     payloads,
                 } => {
                     let (protocol, operation) = (*protocol, *operation);
-                    let values = payloads
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let selected = select_handler_clause(a, &mut stack, protocol, operation)?;
                     let delimiter = selected.delimiter;
                     let return_dst = stack[delimiter].return_dst;
-                    let deferred_frames = stack.split_off(delimiter);
                     let (function, receiver) =
                         owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
-                    let mut clause =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    // A non-resuming operation passes its payloads directly
+                    // to the selected clause. Once selection determines that
+                    // clause's register layout, relocate the payloads there
+                    // instead of staging them in a short-lived Vec.
+                    let mut clause = {
+                        let caller = stack
+                            .last_mut()
+                            .expect("perform executes with a current frame");
+                        make_verified_frame_from_arguments(
+                            a, function, caller, payloads, receiver, return_dst,
+                        )?
+                    };
+                    let deferred_frames = stack.split_off(delimiter);
                     clause.guards.push(selected.handler_guard);
                     clause.deferred_frames = deferred_frames;
                     stack.push(clause);
