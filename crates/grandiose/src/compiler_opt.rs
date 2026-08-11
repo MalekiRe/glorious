@@ -3761,6 +3761,24 @@ fn fold_primitive(
             .then(|| char::from_u32(*value).map(Constant::Char))
             .flatten();
     }
+    match (primitive, result_type, arg_types, args) {
+        (TextByteLen, USIZE, [TEXT], [Constant::Text(value)]) => {
+            return Some(Constant::Usize(value.len() as u64));
+        }
+        (TextEq, U32, [TEXT, TEXT], [Constant::Text(left), Constant::Text(right)]) => {
+            return Some(Constant::U32(u32::from(left == right)));
+        }
+        (BytesLen, USIZE, [BYTES], [Constant::Bytes(value)]) => {
+            return Some(Constant::Usize(value.len() as u64));
+        }
+        (BytesUtf8ValidUpTo, USIZE, [BYTES], [Constant::Bytes(value)]) => {
+            return Some(Constant::Usize(
+                std::str::from_utf8(value)
+                    .map_or_else(|error| error.valid_up_to(), |_| value.len()) as u64,
+            ));
+        }
+        _ => {}
+    }
     if matches!(
         primitive,
         FloatAdd
@@ -15782,6 +15800,48 @@ mod tests {
         assert_eq!(
             fold_primitive(I64, FloatToIntChecked, &[F64], &[Constant::F64(1.0)],),
             None,
+        );
+    }
+
+    #[test]
+    fn sparse_folds_allocation_free_text_and_byte_literals() {
+        use Primitive::*;
+
+        assert_eq!(
+            fold_primitive(
+                USIZE,
+                TextByteLen,
+                &[TEXT],
+                &[Constant::Text("grandiose".into())],
+            ),
+            Some(Constant::Usize(9)),
+        );
+        assert_eq!(
+            fold_primitive(
+                U32,
+                TextEq,
+                &[TEXT, TEXT],
+                &[Constant::Text("same".into()), Constant::Text("same".into())],
+            ),
+            Some(Constant::U32(1)),
+        );
+        assert_eq!(
+            fold_primitive(
+                USIZE,
+                BytesLen,
+                &[BYTES],
+                &[Constant::Bytes(vec![0, 1, 2])],
+            ),
+            Some(Constant::Usize(3)),
+        );
+        assert_eq!(
+            fold_primitive(
+                USIZE,
+                BytesUtf8ValidUpTo,
+                &[BYTES],
+                &[Constant::Bytes(b"a\xc2".to_vec())],
+            ),
+            Some(Constant::Usize(1)),
         );
     }
 
