@@ -53,6 +53,60 @@ fn body_only_change_rebuilds_the_changed_leaf_not_its_direct_caller() {
 }
 
 #[test]
+fn callee_abi_change_invalidates_only_direct_native_callers() {
+    let initial = phases(
+        r#"
+            leaf() -> i64 { 1 }
+            caller() -> i64 { leaf() }
+            outer() -> i64 { caller() }
+            main() -> () { outer(); () }
+        "#,
+    );
+    let options = LlvmOptions::default();
+    let previous = llvm_incremental_manifest(&initial, &options);
+    let mut current = previous.clone();
+    let declarations = declarations(&initial);
+    let leaf = declarations["leaf"];
+    let caller = declarations["caller"];
+    let outer = declarations["outer"];
+    let main = declarations["main"];
+
+    // Model an ABI edit without changing a caller's own ABI. This is the
+    // boundary separate object compilation needs: the direct call site must
+    // rebuild, whereas its callers keep the same exported symbol/ABI and are
+    // relinked unchanged.
+    let leaf_entry = current
+        .functions
+        .iter_mut()
+        .find(|function| function.declaration == leaf)
+        .unwrap();
+    leaf_entry.interface_fingerprint ^= 1;
+    leaf_entry.fragment_fingerprint ^= 1;
+    let caller_entry = current
+        .functions
+        .iter_mut()
+        .find(|function| function.declaration == caller)
+        .unwrap();
+    caller_entry
+        .callee_interfaces
+        .iter_mut()
+        .find(|callee| callee.declaration == leaf)
+        .unwrap()
+        .interface_fingerprint ^= 1;
+
+    let invalidated = current.invalidated_functions(&previous);
+    assert!(invalidated.contains(&leaf));
+    assert!(
+        invalidated.contains(&caller),
+        "direct caller must rebuild for its callee ABI"
+    );
+    assert!(
+        !invalidated.contains(&outer) && !invalidated.contains(&main),
+        "an unchanged caller ABI permits relinking outer objects unchanged: {invalidated:?}"
+    );
+}
+
+#[test]
 fn target_option_change_invalidates_every_fragment() {
     let phases = phases(
         r#"

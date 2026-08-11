@@ -39,7 +39,7 @@ pub const DEFAULT_NATIVE_ALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Bump this whenever LLVM fragment generation changes independently of MIR.
 /// Cached fragments with another schema are never reusable.
-pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 2;
+pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 3;
 
 /// The ABI-facing identity of a direct callee used by one emitted fragment.
 /// A callee body change alone deliberately does not invalidate its callers.
@@ -133,18 +133,49 @@ impl LlvmIncrementalManifest {
                 .map(|function| function.declaration)
                 .collect();
         }
-        let previous = previous
+        let previous_functions = previous
             .functions
             .iter()
-            .map(|function| (function.declaration, function.fragment_fingerprint))
+            .map(|function| (function.declaration, function))
             .collect::<BTreeMap<_, _>>();
-        self.functions
+        let changed_interfaces = self
+            .functions
             .iter()
             .filter_map(|function| {
-                (previous.get(&function.declaration) != Some(&function.fragment_fingerprint))
+                (previous_functions
+                    .get(&function.declaration)
+                    .map(|previous| previous.interface_fingerprint)
+                    != Some(function.interface_fingerprint))
+                .then_some(function.declaration)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut invalidated = self
+            .functions
+            .iter()
+            .filter_map(|function| {
+                (previous_functions
+                    .get(&function.declaration)
+                    .map(|previous| previous.fragment_fingerprint)
+                    != Some(function.fragment_fingerprint))
                     .then_some(function.declaration)
             })
-            .collect()
+            .collect::<BTreeSet<_>>();
+        // An independently emitted fragment calls its direct callee by the
+        // callee's ABI.  Keep that edge explicit instead of relying solely on
+        // the aggregate fragment fingerprint above: it documents the only
+        // caller propagation needed for separate native objects and remains
+        // fail-closed if the fingerprint representation evolves. A body-only
+        // callee edit intentionally does not enter `changed_interfaces`, so
+        // callers can retain their objects and participate in the final Wild
+        // relink unchanged.
+        invalidated.extend(self.functions.iter().filter_map(|function| {
+            function
+                .callee_interfaces
+                .iter()
+                .any(|callee| changed_interfaces.contains(&callee.declaration))
+                .then_some(function.declaration)
+        }));
+        invalidated
     }
 }
 
