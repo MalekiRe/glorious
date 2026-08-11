@@ -2644,11 +2644,11 @@ mod tests {
 
         let mut ir = String::new();
         assert_eq!(
-            emit_function(&mut ir, &artifact, 5, &entry),
+            emit_function(&mut ir, &artifact, 5, &entry, false),
             Err(ArtifactLlvmError::UnsupportedInstruction {
                 function: 5,
                 instruction: 1,
-                opcode: "Handle",
+                opcode: "closed effect-free handle",
             })
         );
         assert!(ir.contains("closed-host-handler-plan r1"), "{ir}");
