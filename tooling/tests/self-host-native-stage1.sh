@@ -8,6 +8,13 @@ scratch=$(mktemp -d "$repo_root/target/self-host-native-stage1-test.XXXXXX")
 trap 'rm -rf -- "$scratch"' EXIT
 mkdir -p "$scratch/repo/tooling" "$scratch/bin"
 cp "$repo_root/tooling/self-host-native-stage1.sh" "$scratch/repo/tooling/"
+printf 'clean binding fixture\n' > "$scratch/repo/binding"
+git -C "$scratch/repo" init -q
+git -C "$scratch/repo" config user.email native-stage1-test@example.invalid
+git -C "$scratch/repo" config user.name native-stage1-test
+git -C "$scratch/repo" add tooling/self-host-native-stage1.sh
+git -C "$scratch/repo" add binding
+git -C "$scratch/repo" commit -qm 'stage1 runner fixture'
 
 cat > "$scratch/native" <<'EOF'
 #!/usr/bin/env bash
@@ -43,6 +50,7 @@ NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
 rg -q '^STAGE1_EMITTED' "$scratch/out"
 [[ "$(cat "$scratch/run/stage2.grbc")" == stage-two-bytes ]]
 rg -q $'^result\temitted$' "$scratch/run/metadata.tsv"
+rg -q $'^repository-head\t[0-9a-f]{40}$' "$scratch/run/metadata.tsv"
 [[ -s "$scratch/run/canonical-source.glorious" && -s "$scratch/run/stage1-provenance.tsv" ]]
 for log in canonical-source provenance build stage1; do [[ -f "$scratch/run/$log.log" ]]; done
 
@@ -52,3 +60,13 @@ if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
   exit 1
 fi
 rg -q 'refusing to overwrite retained evidence' "$scratch/reuse.err"
+
+# A retained claim must not bind a native executable to merely the last commit
+# while tracked source state has since changed.
+printf 'dirty binding fixture\n' > "$scratch/repo/binding"
+if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
+  "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/dirty-run" > /dev/null 2> "$scratch/dirty.err"; then
+  echo 'expected dirty tracked checkout to be rejected' >&2
+  exit 1
+fi
+rg -q 'refuses a checkout with unstaged tracked edits' "$scratch/dirty.err"

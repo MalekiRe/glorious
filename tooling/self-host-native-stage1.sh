@@ -53,6 +53,32 @@ readonly metadata="$output_dir/metadata.tsv"
 
 printf 'artifacts\t%s\n' "$output_dir" >&2
 
+clean_head() {
+    local phase=$1 head status
+    head=$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null) || {
+        echo "native-stage1: $phase requires a Git checkout with HEAD" >&2
+        return 1
+    }
+    # Byte hashes bind the source and native executable themselves.  Requiring
+    # a clean tracked tree in addition prevents this retained run from claiming
+    # a committed source/executable relationship while either was produced
+    # from uncommitted tracked edits.  Deliberately ignore untracked evidence
+    # files below target/.
+    git -C "$repo_root" diff --quiet --ignore-submodules -- || {
+        status=$?
+        [[ $status -eq 1 ]] || return "$status"
+        echo "native-stage1: $phase refuses a checkout with unstaged tracked edits" >&2
+        return 1
+    }
+    git -C "$repo_root" diff --cached --quiet --ignore-submodules -- || {
+        status=$?
+        [[ $status -eq 1 ]] || return "$status"
+        echo "native-stage1: $phase refuses a checkout with staged tracked edits" >&2
+        return 1
+    }
+    printf '%s\n' "$head"
+}
+
 manifest_value() {
     local manifest=$1 key=$2 value
     value=$(awk -F '\t' -v key="$key" '$1 == key { if (++found > 1) exit 2; print $2 } END { exit(found == 1 ? 0 : 1) }' "$manifest") || return 1
@@ -78,10 +104,13 @@ run_logged() {
     [[ $status -eq 0 ]] || record_failure "$phase" "$status"
 }
 
+run_head=$(clean_head preflight) || record_failure preflight 1
 run_logged canonical-source "$native_tool" canonical-source "$source"
 [[ -s "$source" ]] || record_failure canonical-source 1
+[[ "$(clean_head canonical-source)" == "$run_head" ]] || record_failure canonical-source 1
 run_logged provenance "$native_tool" provenance "$source" "$provenance"
 [[ -s "$provenance" ]] || record_failure provenance 1
+[[ "$(clean_head provenance)" == "$run_head" ]] || record_failure provenance 1
 
 # `build` is called after provenance solely to obtain the exact cached native
 # path.  The hash check below proves it is the executable the immutable
@@ -89,6 +118,7 @@ run_logged provenance "$native_tool" provenance "$source" "$provenance"
 run_logged build "$native_tool" build
 native=$(tail -n 1 "$output_dir/build.log")
 [[ -x "$native" ]] || record_failure build 1
+[[ "$(clean_head build)" == "$run_head" ]] || record_failure build 1
 schema=$(manifest_value "$provenance" schema) || record_failure provenance 1
 stage=$(manifest_value "$provenance" stage) || record_failure provenance 1
 optimization=$(manifest_value "$provenance" optimization) || record_failure provenance 1
@@ -99,6 +129,7 @@ recorded_source=$(manifest_value "$provenance" source-sha256) || record_failure 
 [[ "$recorded_native" == "$(sha256sum "$native" | awk '{print $1}')" ]] || record_failure provenance 1
 [[ "$recorded_source" == "$(sha256sum "$source" | awk '{print $1}')" ]] || record_failure provenance 1
 readelf -p .comment "$native" 2>/dev/null | grep -Eqi 'wild' || record_failure provenance 1
+[[ "$(clean_head stage1)" == "$run_head" ]] || record_failure stage1 1
 
 set +e
 LC_ALL=C TZ=UTC "$native" "$stage2" "$source" >"$output_dir/stage1.log" 2>&1
@@ -110,6 +141,7 @@ set -e
     printf 'stage1-native-sha256\t%s\n' "$recorded_native"
     printf 'stage1-provenance\t%s\n' "$provenance"
     printf 'source-sha256\t%s\n' "$recorded_source"
+    printf 'repository-head\t%s\n' "$run_head"
     printf 'stage1-exit\t%s\n' "$stage1_status"
 } > "$metadata"
 if [[ $stage1_status -ne 0 ]]; then
