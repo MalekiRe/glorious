@@ -7330,12 +7330,18 @@ fn global_simplify_exact_callables(
     }
 }
 
-/// Resolve direct calls to a receiverless function whose entire body forwards
-/// one parameter (or returns unit).  This is intentionally narrower than
-/// inlining: it does not clone statements, consume the inline budget, or need
-/// fresh registers.  The original moved argument becomes the continuation's
-/// implicit call-result edge argument, preserving the callee's ownership
-/// transfer exactly.
+#[derive(Clone)]
+enum DirectCallSpecialization {
+    Unit,
+    Forward(u32),
+    Constant(Constant),
+}
+
+/// Resolve direct calls to tiny receiverless functions which either forward a
+/// parameter, return unit, or return one literal constant. This is narrower
+/// than inlining: it does not clone a body or consume its budget. A forwarding
+/// argument (or a fresh caller-side constant) becomes the continuation's
+/// implicit call-result edge argument, preserving ownership transfer exactly.
 fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (PassOutcome, u64) {
     let scan_work = operation_count(program);
     if scan_work > budget {
@@ -7348,30 +7354,50 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
             let entry = function.blocks.iter().find(|block| block.id == function.entry)?;
             if function.receiver_mode.is_some()
                 || function.blocks.len() != 1
-                || !entry.statements.is_empty()
                 || !function.return_cleanup.is_empty()
                 || !function.outward_protocols.is_empty()
                 || function.no_return
             {
                 return None;
             }
-            let parameter = match entry.terminator {
-                Terminator::Return { value: None } if function.result == UNIT => None,
-                Terminator::Return {
-                    value:
-                        Some(Operand {
-                            register,
-                            mode: UseMode::Move,
-                        }),
-                } => register.checked_sub(1).filter(|index| {
-                    function
-                        .params
-                        .get(*index as usize)
-                        .is_some_and(|ty| *ty == function.result)
-                }),
+            let specialization = match (&entry.statements[..], &entry.terminator) {
+                ([], Terminator::Return { value: None }) if function.result == UNIT => {
+                    DirectCallSpecialization::Unit
+                }
+                (
+                    [],
+                    Terminator::Return {
+                        value:
+                            Some(Operand {
+                                register,
+                                mode: UseMode::Move,
+                            }),
+                    },
+                ) => register
+                    .checked_sub(1)
+                    .filter(|index| {
+                        function
+                            .params
+                            .get(*index as usize)
+                            .is_some_and(|ty| *ty == function.result)
+                    })
+                    .map(DirectCallSpecialization::Forward)?,
+                (
+                    [Instruction {
+                        kind: InstructionKind::Const { dst, value },
+                        ..
+                    }],
+                    Terminator::Return {
+                        value:
+                            Some(Operand {
+                                register,
+                                mode: UseMode::Move,
+                            }),
+                    },
+                ) if dst == register => DirectCallSpecialization::Constant(value.clone()),
                 _ => return None,
             };
-            Some((function.declaration, parameter))
+            Some((function.declaration, specialization))
         })
         .collect::<BTreeMap<_, _>>();
     if forwarding.is_empty() {
@@ -7381,22 +7407,22 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
     let mut changed = false;
     for caller in &mut program.functions {
         let mut caller_changed = false;
-        for block in &mut caller.blocks {
+        for block_index in 0..caller.blocks.len() {
             let Terminator::Call {
                 result,
                 function,
                 args,
                 normal,
-            } = block.terminator.clone()
+            } = caller.blocks[block_index].terminator.clone()
             else {
                 continue;
             };
-            let Some(parameter) = forwarding.get(&function) else {
+            let Some(specialization) = forwarding.get(&function) else {
                 continue;
             };
-            let replacement = match (parameter, result) {
-                (None, None) => normal,
-                (Some(index), Some(_)) => {
+            let replacement = match (specialization, result) {
+                (DirectCallSpecialization::Unit, None) => normal,
+                (DirectCallSpecialization::Forward(index), Some(_)) => {
                     let Some(value) = args.get(*index as usize).copied() else {
                         continue;
                     };
@@ -7408,9 +7434,38 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                         args: edge_args,
                     }
                 }
+                (DirectCallSpecialization::Constant(value), Some(result)) => {
+                    let Some(result_type) = caller.register_types.get(result as usize).copied() else {
+                        continue;
+                    };
+                    let constant_register = caller.register_types.len() as Register;
+                    caller.register_types.push(result_type);
+                    let span = caller.blocks[block_index]
+                        .statements
+                        .last()
+                        .map(|statement| statement.span)
+                        .unwrap_or_default();
+                    caller.blocks[block_index].statements.push(Instruction {
+                        span,
+                        kind: InstructionKind::Const {
+                            dst: constant_register,
+                            value: value.clone(),
+                        },
+                    });
+                    let mut edge_args = Vec::with_capacity(normal.args.len() + 1);
+                    edge_args.push(Operand {
+                        register: constant_register,
+                        mode: UseMode::Move,
+                    });
+                    edge_args.extend(normal.args);
+                    Edge {
+                        target: normal.target,
+                        args: edge_args,
+                    }
+                }
                 _ => continue,
             };
-            block.terminator = Terminator::Goto(replacement);
+            caller.blocks[block_index].terminator = Terminator::Goto(replacement);
             caller_changed = true;
         }
         if caller_changed {
@@ -18260,6 +18315,45 @@ mod tests {
             candidate.functions[0].blocks[0].terminator,
             Terminator::Goto(_)
         ));
+        assert!(report.passes.iter().any(|pass| {
+            pass.pass == PassId::SpecializeDirectCalls && pass.outcome == PassOutcome::Changed
+        }));
+    }
+
+    #[test]
+    fn o1_specializes_constant_returning_direct_calls() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.params.clear();
+        callee.register_types = vec![UNIT, I64];
+        callee.blocks[0].statements = vec![instruction(InstructionKind::Const {
+            dst: 1,
+            value: Constant::I64(42),
+        })];
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+        let Terminator::Call { args, .. } = &mut candidate.functions[0].blocks[0].terminator else {
+            unreachable!()
+        };
+        args.clear();
+
+        let report = optimize_program(&mut candidate, &types, OptimizationLevel::O1).unwrap();
+        let caller = &candidate.functions[0];
+        assert!(matches!(
+            caller.blocks[0].statements.last().map(|statement| &statement.kind),
+            Some(InstructionKind::Const {
+                dst: 6,
+                value: Constant::I64(42),
+            })
+        ));
+        assert_eq!(
+            caller.blocks[0].terminator,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![move_operand(6), move_operand(4)],
+            })
+        );
         assert!(report.passes.iter().any(|pass| {
             pass.pass == PassId::SpecializeDirectCalls && pass.outcome == PassOutcome::Changed
         }));
