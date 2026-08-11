@@ -2123,6 +2123,43 @@ fn self_hosted_compiler_executes_protected_labels_and_nested_leave_in_release_vm
                         }
                     }
                 }
+                bool_dispatch_to_outer(value: Bool) -> i64 {
+                    @outer: i64 {
+                        @inner: i64 {
+                            match(value) {
+                                true => @outer(11),
+                                false => @outer(22)
+                            }
+                        }
+                    }
+                }
+                integer_dispatch_to_outer(value: u64) -> i64 {
+                    @outer: i64 {
+                        @inner: i64 {
+                            match(value) {
+                                0 => @outer(33),
+                                _ => @outer(44)
+                            }
+                        }
+                    }
+                }
+                bool_dispatch_returns(value: Bool) -> i64 {
+                    match(value) { true => 55, false => 66 }
+                }
+                // Construct Bool values in source: the production prelude
+                // represents Bool as a nominal Result alias, not a VM scalar.
+                bool_dispatch_to_outer_true() -> i64 {
+                    bool_dispatch_to_outer(true)
+                }
+                bool_dispatch_to_outer_false() -> i64 {
+                    bool_dispatch_to_outer(false)
+                }
+                bool_dispatch_returns_false() -> i64 {
+                    bool_dispatch_returns(false)
+                }
+                integer_dispatch_returns(value: u64) -> i64 {
+                    match(value) { 0 => 77, _ => 88 }
+                }
                 main() { () }
             "#;
             let directory = tempfile::tempdir().unwrap();
@@ -2190,10 +2227,64 @@ fn self_hosted_compiler_executes_protected_labels_and_nested_leave_in_release_vm
                 Value::I64(7)
             );
             assert_eq!(
-                Vm::new(verified)
+                Vm::new(verified.clone())
                     .run(function_id(&artifact, "nested_leave"), vec![])
                     .unwrap(),
                 Value::I64(42)
+            );
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_to_outer_true"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(11)
+            );
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_to_outer_false"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(22)
+            );
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_to_outer"),
+                        vec![Value::U64(0)]
+                    )
+                    .unwrap(),
+                Value::I64(33)
+            );
+            assert_eq!(
+                Vm::new(verified)
+                    .run(
+                        function_id(&artifact, "integer_dispatch_to_outer"),
+                        vec![Value::U64(9)]
+                    )
+                    .unwrap(),
+                Value::I64(44)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_returns_false"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(66)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_returns"),
+                        vec![Value::U64(0)]
+                    )
+                    .unwrap(),
+                Value::I64(77)
             );
         })
         .unwrap()

@@ -3332,7 +3332,7 @@ lower_match_arms<'a>(
     blocks: &Vec<MirBlockId>,
     subject: RegisterId,
     tag: RegisterId,
-    result: Option<RegisterId>,
+    result: &mut Option<RegisterId>,
     join: MirBlockId,
     baseline_locals: &Vec<Option<RegisterId>>,
     baseline_live: &Vec<RegisterId>,
@@ -3419,12 +3419,6 @@ lower_match_arms<'a>(
                 index + 1
             ),
             Result::Ok(branch_result) => {
-                let result_register = handle result {
-                    None => @lower_match_arms(Result::Err(
-                        LoweringError::MissingMatchResult(arm_computation)
-                    )),
-                    Option::Some(found) => found
-                };
                 drop_match_locals_reverse(
                     value,
                     bindings,
@@ -3436,6 +3430,19 @@ lower_match_arms<'a>(
                     match_live_out,
                     0
                 );
+                // A well-typed arm can still lower to `None` when it exits
+                // through an enclosing label.  Allocate the shared result
+                // only after the first arm that actually falls through with
+                // a value, avoiding untyped dead registers for an
+                // all-terminal dispatch.
+                let result_register = handle *result {
+                    None => {
+                        let found = alloc_register(value);
+                        *result = Option::Some(found);
+                        found
+                    },
+                    Option::Some(found) => found
+                };
                 emit_move(value, result_register, branch_result);
                 emit_jump(value, join);
                 if(*canonical_set) {
@@ -3511,29 +3518,6 @@ lower_match_arms<'a>(
     } else { Result::Ok(()) }
 }
 
-match_has_returning_arm<'a>(
-    body: &super::super::frontend::elaboration::TypedBody,
-    arms: Slice<'a, CoreMatchArm>,
-    index: usize
-) -> Bool {
-    if(index < Slice::len(arms)) {
-        let arm = handle Slice::get(arms, index) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
-        let computation = super::super::frontend::elaboration::
-            core_match_arm_body(arm);
-        if(Id::to_u32(
-            super::super::frontend::elaboration::
-                typed_body_computation_type(body, computation)
-        ) == 1) {
-            match_has_returning_arm(body, arms, index + 1)
-        } else {
-            true
-        }
-    } else { false }
-}
-
 lower_match<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
@@ -3570,11 +3554,7 @@ lower_match<'a>(
             } else {
                 let tag = alloc_register(value);
                 emit_enum_tag(value, tag, subject_register);
-                let result = if(match_has_returning_arm(body, arms, 0)) {
-                    Option::Some(alloc_register(value))
-                } else {
-                    None
-                };
+                let result = None;
                 let blocks = Vec::new();
                 alloc_match_blocks(
                     value,
@@ -3611,7 +3591,7 @@ lower_match<'a>(
                     &blocks,
                     subject_register,
                     tag,
-                    result,
+                    &mut result,
                     join,
                     &baseline_locals,
                     &baseline_live,
@@ -3643,25 +3623,6 @@ lower_match<'a>(
             }
         }
     }
-}
-
-integer_dispatch_has_returning_arm<'a>(
-    body: &super::super::frontend::elaboration::TypedBody,
-    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
-    index: usize
-) -> Bool {
-    if(index < Slice::len(arms)) {
-        let arm = handle Slice::get(arms, index) {
-            Result::Err(_) => unreachable(), Result::Ok(found) => found
-        };
-        if(Id::to_u32(super::super::frontend::elaboration::
-            typed_body_computation_type(
-                body,
-                super::super::frontend::elaboration::core_integer_arm_body(arm)
-            )) == 1) {
-            integer_dispatch_has_returning_arm(body, arms, index + 1)
-        } else { true }
-    } else { false }
 }
 
 build_integer_switch_cases<'a>(
@@ -3719,7 +3680,7 @@ lower_integer_arms<'a>(
     arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
     blocks: &Vec<MirBlockId>,
     subject: RegisterId,
-    result: Option<RegisterId>,
+    result: &mut Option<RegisterId>,
     join: MirBlockId,
     baseline_locals: &Vec<Option<RegisterId>>,
     baseline_live: &Vec<RegisterId>,
@@ -3751,15 +3712,20 @@ lower_integer_arms<'a>(
                 canonical_locals, canonical_live, canonical_set, index + 1
             ),
             Option::Some(branch_result) => {
-                let result_register = handle result {
-                    None => @lower_integer_arms(Result::Err(
-                        LoweringError::MissingMatchResult(computation)
-                    )),
-                    Option::Some(found) => found
-                };
                 retire_dead_match_locals(
                     value, baseline_locals, dispatch_live_out, 0
                 );
+                // See variant dispatch: only a branch that actually reaches
+                // the join needs a shared result register.  Typed terminal
+                // arms may lower through an enclosing label instead.
+                let result_register = handle *result {
+                    None => {
+                        let found = alloc_register(value);
+                        *result = Option::Some(found);
+                        found
+                    },
+                    Option::Some(found) => found
+                };
                 emit_move(value, result_register, branch_result);
                 emit_jump(value, join);
                 if(*canonical_set) {
@@ -3834,9 +3800,7 @@ lower_integer_dispatch<'a>(
         )),
         Option::Some(found) => found
     };
-    let result = if(integer_dispatch_has_returning_arm(body, arms, 0)) {
-        Option::Some(alloc_register(value))
-    } else { None };
+    let result = None;
     let blocks = Vec::new();
     alloc_match_blocks(value, Slice::len(arms), 0, &mut blocks);
     let cases = Vec::new();
@@ -3857,7 +3821,7 @@ lower_integer_dispatch<'a>(
     let canonical_set = false;
     let join = alloc_block(value);
     handle lower_integer_arms(
-        interfaces, body, value, arms, &blocks, subject_register, result, join,
+        interfaces, body, value, arms, &blocks, subject_register, &mut result, join,
         &baseline_locals, &baseline_live, &dispatch_live,
         &mut canonical_locals, &mut canonical_live, &mut canonical_set, 0
     ) {
