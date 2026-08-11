@@ -90,6 +90,9 @@ fn iter_value(
     };
     let array = ArenaObject::new(ArrayValue {
         element_type: grandiose_vm::I64,
+        // This fixture models i64 storage, so it must use the ordinary slot
+        // representation rather than the VM's Array<u8>-only packed backing.
+        packed_bytes: None,
         slots: [10, 20, 30, 40]
             .into_iter()
             .map(|value| Some(Value::I64(value)))
