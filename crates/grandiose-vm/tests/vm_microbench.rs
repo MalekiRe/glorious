@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use grandiose_vm::{Artifact, Constant, Function, I64, Instruction, UNIT, Value, Vm, verify, verify::with_generated_cleanup_plans};
 
-const ITERS: usize = 20_000;
+const ITERS: usize = 1_000_000;
 
 fn function(name: &str, params: Vec<u32>, result: u32, registers: Vec<u32>, start: u32, len: u32) -> Function {
     Function { name: name.into(), flags: 0, params, return_type: result, outward_protocols: vec![], receiver_mode: None, register_types: registers, code_start: start, code_len: len, label_slot_count: 0 }

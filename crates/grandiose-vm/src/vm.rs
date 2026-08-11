@@ -1047,17 +1047,14 @@ impl Vm {
                     args,
                 } => {
                     let (dst, function) = (*dst, *function);
-                    let callee = if args.is_empty() {
-                        make_verified_zero_argument_frame(a, function, dst)?
-                    } else {
-                        make_verified_frame_from_arguments(
-                            a,
-                            function,
-                            frame,
-                            args,
-                            Value::Unit,
-                            dst,
-                        )?
+                    let callee = match args.as_slice() {
+                        [] => make_verified_zero_argument_frame(a, function, dst)?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a, function, frame, argument, Value::Unit, dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
+                            a, function, frame, args, Value::Unit, dst,
+                        )?,
                     };
                     frame.pc += 1;
                     stack.push(callee);
@@ -1065,14 +1062,20 @@ impl Vm {
                 Instruction::TailCall { function, args } => {
                     let function = *function;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_verified_frame_from_arguments(
-                        a,
-                        function,
-                        frame,
-                        args,
-                        Value::Unit,
-                        return_dst,
-                    )?;
+                    let mut replacement = match args.as_slice() {
+                        [] => make_verified_zero_argument_frame(a, function, return_dst)?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a,
+                            function,
+                            frame,
+                            argument,
+                            Value::Unit,
+                            return_dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
+                            a, function, frame, args, Value::Unit, return_dst,
+                        )?,
+                    };
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -1965,6 +1968,43 @@ fn make_verified_zero_argument_frame(
     // the already optimized entry-frame path.
     let mut registers = Vec::with_capacity(f.register_types.len());
     registers.push(Some(Value::Unit));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Construct the common one-argument direct-call frame without setting up a
+/// slice iterator or first materializing an all-empty register file.
+#[inline]
+fn make_verified_one_argument_frame(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    argument: u32,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if f.params.len() != 1 {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 1,
+        });
+    }
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    registers.push(Some(take(caller, argument)?));
     registers.resize_with(f.register_types.len(), || None);
     Ok(Frame {
         function,
