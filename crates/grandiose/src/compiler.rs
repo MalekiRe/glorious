@@ -4758,6 +4758,7 @@ pub struct CompileOptions {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TestOptimizerSuppression {
     TerminalHandlerFusion,
+    DirectResumptiveHandlerFusion,
 }
 
 impl TestOptimizerSuppression {
@@ -4765,6 +4766,11 @@ impl TestOptimizerSuppression {
         match self {
             Self::TerminalHandlerFusion => mir::optimizer::OptimizationPlan {
                 terminal_handler_fusion: false,
+                ..mir::optimizer::OptimizationPlan::default()
+            },
+            Self::DirectResumptiveHandlerFusion => mir::optimizer::OptimizationPlan {
+                direct_resumptive_handler_fusion: false,
+                ..mir::optimizer::OptimizationPlan::default()
             },
         }
     }

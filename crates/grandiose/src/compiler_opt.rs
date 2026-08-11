@@ -155,12 +155,14 @@ pub enum PassId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OptimizationPlan {
     pub(crate) terminal_handler_fusion: bool,
+    pub(crate) direct_resumptive_handler_fusion: bool,
 }
 
 impl Default for OptimizationPlan {
     fn default() -> Self {
         Self {
             terminal_handler_fusion: true,
+            direct_resumptive_handler_fusion: true,
         }
     }
 }
@@ -10042,6 +10044,7 @@ fn specialize_static_handlers(
     handler_defs: &[HandlerDef],
     budget: u64,
     terminal_handler_fusion: bool,
+    direct_resumptive_handler_fusion: bool,
 ) -> (PassOutcome, u64) {
     let mut scratch = program.clone();
     let (terminal, terminal_work) = if terminal_handler_fusion {
@@ -10053,13 +10056,17 @@ fn specialize_static_handlers(
         return (terminal, terminal_work);
     }
     let remaining = budget.saturating_sub(terminal_work);
-    let (resumptive, resumptive_work) = specialize_direct_resumptive_handlers(
-        &mut scratch,
-        types,
-        protocols,
-        handler_defs,
-        remaining,
-    );
+    let (resumptive, resumptive_work) = if direct_resumptive_handler_fusion {
+        specialize_direct_resumptive_handlers(
+            &mut scratch,
+            types,
+            protocols,
+            handler_defs,
+            remaining,
+        )
+    } else {
+        (PassOutcome::Unchanged, 0)
+    };
     let work = terminal_work.saturating_add(resumptive_work);
     if resumptive == PassOutcome::BudgetExhausted {
         return (resumptive, work);
@@ -11450,6 +11457,7 @@ fn run_transactional_whole_program_pass(
             tables.handler_defs,
             *global_remaining,
             plan.terminal_handler_fusion,
+            plan.direct_resumptive_handler_fusion,
         ),
         PassId::InlineByCost => inline_by_cost_with_policy(
             program,
