@@ -8475,19 +8475,24 @@ fn mir_owns_final_use_transfer_and_explicit_operand_modes() {
         .iter()
         .find(|function| function.name == "shadow")
         .unwrap();
-    assert!(
-        function.return_cleanup.is_empty(),
-        "every scalar owner is discharged by its inferred final transfer"
-    );
-    assert!(function.blocks.iter().any(|block| matches!(
-        block.terminator,
+    // `return_cleanup` is now the ordered ownership snapshot for the scalar
+    // owners left behind by the final transfer. The returned scalar itself is
+    // discharged by the Return operand and must not be cleaned up again.
+    let returned = function.blocks.iter().find_map(|block| match block.terminator {
         grandiose::compiler_mir::Terminator::Return {
-            value: Some(grandiose::compiler_mir::Operand {
-                mode: grandiose::compiler_mir::UseMode::Move,
-                ..
-            })
-        }
-    )));
+            value:
+                Some(grandiose::compiler_mir::Operand {
+                    register,
+                    mode: grandiose::compiler_mir::UseMode::Move,
+                }),
+        } => Some(register),
+        _ => None,
+    });
+    let returned = returned.expect("scalar result has an inferred final transfer");
+    assert!(!function.return_cleanup.contains(&returned));
+    assert!(function.return_cleanup.iter().all(|register| {
+        function.register_types[*register as usize] == grandiose_vm::I64
+    }));
 }
 
 #[test]
