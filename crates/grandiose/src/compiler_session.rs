@@ -39,6 +39,10 @@ pub struct IncrementalCompilationStats {
     /// Individual LLVM functions restored from manifest-valid cached fragments
     /// while the current module prelude/runtime/wrapper were regenerated.
     pub reused_llvm_fragments: usize,
+    /// LLVM-reachable functions freshly emitted after the latest
+    /// function-fragment cache lookup. This is paired with
+    /// `reused_llvm_fragments` for the JSON-line incremental-native report.
+    pub emitted_llvm_fragments: usize,
     /// Exact native object artifacts restored from the persistent backend
     /// cache. Object bytes are keyed by the complete generated IR and native
     /// compiler ABI/options; executable links are never eligible.
@@ -217,6 +221,7 @@ impl CompilationDriver {
         self.llvm_cache.truncate(LLVM_CACHE_CAPACITY);
         self.stats.reused_llvm_ir = 0;
         self.stats.reused_llvm_fragments = self.llvm_fragment_cache.reused_fragments();
+        self.stats.emitted_llvm_fragments = self.llvm_fragment_cache.emitted_fragments();
         Ok(module)
     }
 
@@ -320,6 +325,7 @@ impl CompilationDriver {
                 reused_historical_phase_artifacts: usize::from(historical),
                 reused_llvm_ir: 0,
                 reused_llvm_fragments: 0,
+                emitted_llvm_fragments: 0,
                 reused_native_objects: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
@@ -427,6 +433,7 @@ impl CompilationDriver {
             reused_historical_phase_artifacts: 0,
             reused_llvm_ir: 0,
             reused_llvm_fragments: 0,
+            emitted_llvm_fragments: 0,
             reused_native_objects: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,

@@ -102,6 +102,7 @@ pub struct LlvmFragmentCache {
     manifest: Option<LlvmIncrementalManifest>,
     fragments: BTreeMap<u32, LlvmFunctionFragment>,
     reused_fragments: usize,
+    emitted_fragments: usize,
 }
 
 impl LlvmFragmentCache {
@@ -109,10 +110,17 @@ impl LlvmFragmentCache {
         self.reused_fragments
     }
 
+    /// Number of LLVM-reachable function fragments emitted rather than reused
+    /// by the most recent cache-backed module emission.
+    pub fn emitted_fragments(&self) -> usize {
+        self.emitted_fragments
+    }
+
     pub fn clear(&mut self) {
         self.manifest = None;
         self.fragments.clear();
         self.reused_fragments = 0;
+        self.emitted_fragments = 0;
     }
 }
 
@@ -482,6 +490,7 @@ impl<'a> Emitter<'a> {
     ) -> Result<LlvmModule, Vec<Diagnostic>> {
         if let Some(cache) = cache.as_deref_mut() {
             cache.reused_fragments = 0;
+            cache.emitted_fragments = 0;
         }
         let reachable = self.reachable_functions()?;
         self.llvm_reachable_functions = reachable.iter().copied().collect();
@@ -584,6 +593,7 @@ impl<'a> Emitter<'a> {
             self.snapshot_capture_fix_types
                 .extend(snapshot_capture_fix_types.iter().copied());
             if let (Some(cache), Some(fingerprint)) = (cache.as_deref_mut(), fingerprint) {
+                cache.emitted_fragments = cache.emitted_fragments.saturating_add(1);
                 cache.fragments.insert(
                     declaration,
                     LlvmFunctionFragment {

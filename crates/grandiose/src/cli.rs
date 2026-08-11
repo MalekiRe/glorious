@@ -1130,6 +1130,11 @@ struct SessionResponse<'a> {
     /// link afresh through Wild and therefore never report this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     native_object_cache: Option<&'a str>,
+    /// Truthful, request-scoped evidence for the native incremental route.
+    /// It is deliberately only exposed from `--serve`: no on-disk cache is
+    /// implied or retained across compiler processes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_incremental: Option<NativeIncrementalReport>,
     /// Deterministic cache evidence for persistent compile requests.  This is
     /// intentionally counts rather than elapsed time: it makes release-mode
     /// warm-iteration measurements reproducible across machines.
@@ -1145,6 +1150,7 @@ struct SessionCacheStats {
     mir_bodies_lowered: usize,
     llvm_ir_reused: usize,
     llvm_fragments_reused: usize,
+    llvm_fragments_emitted: usize,
     native_objects_reused: usize,
 }
 
@@ -1157,9 +1163,27 @@ impl From<grandiose::compiler_session::IncrementalCompilationStats> for SessionC
             mir_bodies_lowered: stats.lowered_mir_bodies,
             llvm_ir_reused: stats.reused_llvm_ir,
             llvm_fragments_reused: stats.reused_llvm_fragments,
+            llvm_fragments_emitted: stats.emitted_llvm_fragments,
             native_objects_reused: stats.reused_native_objects,
         }
     }
+}
+
+/// Stable JSON-line evidence for a native incremental request.
+///
+/// The units are LLVM-reachable function fragments for IR and native object
+/// units for code generation. At present an ordinary `llvm-object` request
+/// has one object unit; the fields intentionally avoid promising a persistent
+/// filesystem cache or an executable cache. Executables always use a fresh
+/// Wild final link, even when all earlier work was reusable.
+#[derive(Clone, Copy, Serialize)]
+struct NativeIncrementalReport {
+    cache_scope: &'static str,
+    llvm_fragments_reused: usize,
+    llvm_fragments_emitted: usize,
+    native_objects_reused: usize,
+    native_objects_emitted: usize,
+    wild_relink: bool,
 }
 
 struct SessionSnapshot {
@@ -1406,6 +1430,7 @@ fn session_protocol_error(
                 .map(|snapshot| snapshot.source_fingerprint.as_str()),
             llvm_ir_cache: None,
             native_object_cache: None,
+            native_incremental: None,
             cache_stats: None,
         },
     )
@@ -1479,6 +1504,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                     .map(|snapshot| snapshot.source_fingerprint.as_str()),
                 llvm_ir_cache: None,
                 native_object_cache: None,
+                native_incremental: None,
                 cache_stats: None,
             };
             return if write_session_response(output, &response).is_ok() {
@@ -1553,6 +1579,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                         .map(|last| last.source_fingerprint.as_str()),
                     llvm_ir_cache: None,
                     native_object_cache: None,
+                    native_incremental: None,
                     cache_stats: None,
                 };
                 if write_session_response(output, &response).is_err() {
@@ -1566,6 +1593,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             Some(EmitKind::LlvmIr | EmitKind::LlvmObject | EmitKind::Executable)
         );
         let native_object_emission = command.emit == Some(EmitKind::LlvmObject);
+        let native_executable_emission = command.emit == Some(EmitKind::Executable);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = compile_loaded(
@@ -1616,6 +1644,26 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             }
         });
         let cache_stats = (status == 0).then(|| state.compiler.stats().into());
+        let native_incremental = (status == 0 && llvm_emission).then(|| {
+            let stats = state.compiler.stats();
+            NativeIncrementalReport {
+                // This is specifically a property of this `grc --serve`
+                // process. A new process starts cold and a client must not
+                // treat these counters as a persistent artifact cache.
+                cache_scope: "serve-process",
+                llvm_fragments_reused: stats.reused_llvm_fragments,
+                llvm_fragments_emitted: stats.emitted_llvm_fragments,
+                native_objects_reused: stats.reused_native_objects,
+                // The current object cache is deliberately exact-IR only;
+                // executable paths never reuse a linked binary and always
+                // invoke Clang/Wild for the final link.
+                native_objects_emitted: usize::from(
+                    (native_object_emission || native_executable_emission)
+                        && stats.reused_native_objects == 0,
+                ),
+                wild_relink: native_executable_emission,
+            }
+        });
         let response = SessionResponse {
             protocol: SESSION_PROTOCOL,
             id: Some(request.id),
@@ -1627,6 +1675,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             source_fingerprint,
             llvm_ir_cache,
             native_object_cache,
+            native_incremental,
             cache_stats,
         };
         if write_session_response(output, &response).is_err() {

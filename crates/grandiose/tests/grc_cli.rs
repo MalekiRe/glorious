@@ -207,6 +207,57 @@ fn release_warm_llvm_serve_iteration_records_cache_evidence() {
 }
 
 #[test]
+fn persistent_serve_reports_process_local_function_incremental_evidence() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("incremental.glorious");
+    let output = directory.path().join("incremental.ll");
+    let arguments = || {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-ir",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    write(
+        &input,
+        "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let mut session = Session::start();
+    let cold = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["cache_scope"], "serve-process");
+    assert_eq!(cold["native_incremental"]["llvm_fragments_reused"], 0);
+    assert_eq!(cold["native_incremental"]["llvm_fragments_emitted"], 3);
+    assert_eq!(cold["native_incremental"]["native_objects_reused"], 0);
+    assert_eq!(cold["native_incremental"]["native_objects_emitted"], 0);
+    assert_eq!(cold["native_incremental"]["wild_relink"], false);
+
+    write(
+        &input,
+        "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(edited["native_incremental"]["cache_scope"], "serve-process");
+    assert_eq!(edited["native_incremental"]["llvm_fragments_reused"], 2);
+    assert_eq!(edited["native_incremental"]["llvm_fragments_emitted"], 1);
+    assert_eq!(edited["native_incremental"]["wild_relink"], false);
+}
+
+#[test]
 fn persistent_serve_reuses_exact_llvm_object_bytes_at_the_current_output_path() {
     let directory = tempdir().unwrap();
     let input = directory.path().join("cache.glorious");
