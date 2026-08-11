@@ -93,6 +93,47 @@ fn arithmetic_register_program() -> Artifact {
     }
 }
 
+/// Sustained signed comparison. This is deliberately separate from branch
+/// dispatch: it measures the scalar primitive path that compiler comparison
+/// helpers use before their result becomes a control-flow condition.
+fn signed_comparison_program() -> Artifact {
+    let mut code = Vec::with_capacity(INNER_OPS * 3 + 1);
+    for index in 0..INNER_OPS {
+        code.extend([
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 2,
+                constant: 1,
+            },
+            Instruction::Primitive {
+                dst: 3,
+                op: Primitive::IntLt,
+                args: vec![1, 2],
+            },
+        ]);
+        if index + 1 != INNER_OPS {
+            code.push(Instruction::Drop { register: 3 });
+        }
+    }
+    code.push(Instruction::Return { src: Some(3) });
+    Artifact {
+        constants: vec![Constant::I64(-1), Constant::I64(1)],
+        functions: vec![function(
+            "main",
+            vec![],
+            grandiose_vm::U32,
+            vec![UNIT, I64, I64, grandiose_vm::U32],
+            0,
+            code.len() as u32,
+        )],
+        code,
+        ..Artifact::default()
+    }
+}
+
 /// Each jump is taken and skips a bytecode slot; the target is computed while
 /// building the artifact so the measurement contains no source compiler work.
 fn branch_jump_program() -> Artifact {
@@ -215,6 +256,7 @@ fn vm_execution_microbenchmarks() {
         arithmetic_register_program(),
         Value::I64(INNER_OPS as i64),
     );
+    measure("signed_comparison", signed_comparison_program(), Value::U64(1));
     measure("branch_jump", branch_jump_program(), Value::I64(7));
     measure("direct_call", direct_call_program(), Value::I64(1));
     measure(

@@ -1057,6 +1057,68 @@ impl Vm {
                                     .ok_or(RuntimeError::ArithmeticOverflow)?,
                             )
                         }
+                        [first, second]
+                            if first_arg_type == Some(I64)
+                                && matches!(
+                                    op,
+                                    Primitive::IntCheckedSub
+                                        | Primitive::IntCheckedMul
+                                        | Primitive::IntWrappingAdd
+                                        | Primitive::IntWrappingSub
+                                        | Primitive::IntWrappingMul
+                                        | Primitive::IntBitAnd
+                                        | Primitive::IntBitOr
+                                        | Primitive::IntBitXor
+                                )
+                                && result_type == I64 =>
+                        {
+                            let (Value::I64(first), Value::I64(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            let value = match op {
+                                Primitive::IntCheckedSub => first.checked_sub(second),
+                                Primitive::IntCheckedMul => first.checked_mul(second),
+                                Primitive::IntWrappingAdd => Some(first.wrapping_add(second)),
+                                Primitive::IntWrappingSub => Some(first.wrapping_sub(second)),
+                                Primitive::IntWrappingMul => Some(first.wrapping_mul(second)),
+                                Primitive::IntBitAnd => Some(first & second),
+                                Primitive::IntBitOr => Some(first | second),
+                                Primitive::IntBitXor => Some(first ^ second),
+                                _ => unreachable!("guarded I64 primitive"),
+                            };
+                            Value::I64(value.ok_or(RuntimeError::ArithmeticOverflow)?)
+                        }
+                        [first, second]
+                            if first_arg_type == Some(I64)
+                                && matches!(
+                                    op,
+                                    Primitive::IntEq
+                                        | Primitive::IntNe
+                                        | Primitive::IntLt
+                                        | Primitive::IntLe
+                                        | Primitive::IntGt
+                                        | Primitive::IntGe
+                                )
+                                && result_type == U32 =>
+                        {
+                            let (Value::I64(first), Value::I64(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            let value = match op {
+                                Primitive::IntEq => first == second,
+                                Primitive::IntNe => first != second,
+                                Primitive::IntLt => first < second,
+                                Primitive::IntLe => first <= second,
+                                Primitive::IntGt => first > second,
+                                Primitive::IntGe => first >= second,
+                                _ => unreachable!("guarded I64 comparison"),
+                            };
+                            Value::U64(u64::from(value))
+                        }
                         [] => primitive_typed_first_type(a, result_type, op, first_arg_type, &[])?,
                         [first] => {
                             let first = take(frame, *first)?;
@@ -6142,6 +6204,46 @@ mod tests {
         assert_eq!(
             Vm::from_artifact(a).unwrap().run(0, vec![]).unwrap(),
             Value::I64(42)
+        );
+    }
+
+    #[test]
+    fn executes_specialized_i64_scalar_primitives() {
+        let artifact = Artifact {
+            constants: vec![Constant::I64(-5), Constant::I64(2)],
+            functions: vec![Function {
+                flags: 0,
+                name: "main".into(),
+                params: vec![],
+                return_type: U32,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, I64, I64, I64, U32],
+                code_start: 0,
+                code_len: 6,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Const { dst: 1, constant: 0 },
+                Instruction::Const { dst: 2, constant: 1 },
+                Instruction::Primitive {
+                    dst: 3,
+                    op: Primitive::IntCheckedSub,
+                    args: vec![1, 2],
+                },
+                Instruction::Const { dst: 1, constant: 0 },
+                Instruction::Primitive {
+                    dst: 4,
+                    op: Primitive::IntLt,
+                    args: vec![3, 1],
+                },
+                Instruction::Return { src: Some(4) },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(
+            Vm::from_artifact(artifact).unwrap().run(0, vec![]),
+            Ok(Value::U64(1))
         );
     }
 
