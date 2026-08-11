@@ -7340,7 +7340,8 @@ struct CallableScalarization {
     captures: Vec<Operand>,
     args: Vec<Operand>,
     result: Option<Register>,
-    normal: Edge,
+    normal: Option<Edge>,
+    tail: bool,
 }
 
 fn remap_register(register: Register, registers: &[Option<Register>]) -> Option<Register> {
@@ -8289,30 +8290,36 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
                 }
                 final_callable = alias;
             }
-            let Terminator::CallIndirect {
-                result,
-                callable,
-                known_function: Some(known_target),
-                receiver_mode: 2,
-                cleanup_callable: false,
-                args,
-                normal,
-            } = &block.terminator
-            else {
-                continue;
+            let (result, callable, known_target, args, normal, tail) = match &block.terminator {
+                Terminator::CallIndirect {
+                    result,
+                    callable,
+                    known_function: Some(known_target),
+                    receiver_mode: 2,
+                    cleanup_callable: false,
+                    args,
+                    normal,
+                } => (*result, callable, *known_target, args, Some(normal.clone()), false),
+                Terminator::TailCallIndirect {
+                    callable,
+                    known_function: Some(known_target),
+                    receiver_mode: 2,
+                    args,
+                } => (None, callable, *known_target, args, None, true),
+                _ => continue,
             };
             if !alias_chain_safe
                 || callable.register != final_callable
                 || callable.mode != UseMode::Move
                 || captures.iter().any(|capture| capture.mode != UseMode::Move)
-                || made_target != known_target
+                || *made_target != known_target
             {
                 continue;
             }
             let Some(target_index) = program
                 .functions
                 .iter()
-                .position(|function| function.declaration == *known_target)
+                .position(|function| function.declaration == known_target)
             else {
                 continue;
             };
@@ -8350,8 +8357,9 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
                 target: target_index,
                 captures: captures.clone(),
                 args: args.clone(),
-                result: *result,
-                normal: normal.clone(),
+                result,
+                normal,
+                tail,
             });
         }
     }
@@ -8405,11 +8413,18 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
         block.statements.truncate(candidate.statement_start);
         let mut direct_args = candidate.captures;
         direct_args.extend(candidate.args);
-        block.terminator = Terminator::Call {
-            result: candidate.result,
-            function: declaration,
-            args: direct_args,
-            normal: candidate.normal,
+        block.terminator = if candidate.tail {
+            Terminator::TailCall {
+                function: declaration,
+                args: direct_args,
+            }
+        } else {
+            Terminator::Call {
+                result: candidate.result,
+                function: declaration,
+                args: direct_args,
+                normal: candidate.normal.expect("non-tail call has a normal edge"),
+            }
         };
     }
     for clone in &mut clones {
@@ -19013,6 +19028,37 @@ mod tests {
             }));
             validate_program(&o2, &types, MirPhase::Optimized).unwrap();
         }
+    }
+
+    #[test]
+    fn scalarizes_immediate_owned_callable_tail_call() {
+        let (mut program, types) = owned_callable_scalarization_fixture(true);
+        let caller = &mut program.functions[0];
+        caller.blocks.truncate(1);
+        caller.blocks[0].terminator = Terminator::TailCallIndirect {
+            callable: move_operand(4),
+            known_function: Some(1),
+            receiver_mode: 2,
+            args: vec![move_operand(2)],
+        };
+
+        assert_eq!(
+            scalarize_callables(&mut program, &types, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        let caller = &program.functions[0];
+        assert!(caller.blocks[0].statements.iter().all(|statement| !matches!(
+            statement.kind,
+            InstructionKind::MakeCallable { .. } | InstructionKind::Move { dst: 4, .. }
+        )));
+        assert!(matches!(
+            caller.blocks[0].terminator,
+            Terminator::TailCall {
+                function: 2,
+                ref args,
+            } if args == &vec![move_operand(1), move_operand(2)]
+        ));
+        validate_program(&program, &types, MirPhase::Raw).unwrap();
     }
 
     #[test]
