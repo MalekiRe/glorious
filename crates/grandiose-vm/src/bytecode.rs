@@ -1043,10 +1043,17 @@ impl PackedCode {
             .collect::<BTreeMap<_, _>>();
         let mut words = Vec::new();
         let mut operands = Vec::new();
+        let mut operand_lists = BTreeMap::new();
         let mut offsets = Vec::with_capacity(instructions.len() + 1);
         for instruction in instructions {
             offsets.push(words.len() as u32);
-            encode_instruction(instruction, &names, &mut words, &mut operands);
+            encode_instruction_with_operand_lists(
+                instruction,
+                &names,
+                &mut words,
+                &mut operands,
+                &mut operand_lists,
+            );
         }
         offsets.push(words.len() as u32);
         Self {
@@ -1317,6 +1324,7 @@ impl Artifact {
         let exports = encode_exports(&self.exports, &self.functions, &name_id, &signature_values)?;
         validate_function_metadata(&self.functions, &self.exports, &self.drop_glue)?;
         let mut operands = Vec::new();
+        let mut operand_lists = BTreeMap::new();
         let mut code = Vec::new();
         let mut spans = Vec::new();
         for f in &self.functions {
@@ -1326,12 +1334,23 @@ impl Artifact {
                 .get(f.code_start as usize..(f.code_start + f.code_len) as usize)
                 .ok_or(DecodeError::InvalidTable("function"))?;
             for i in range {
-                encode_instruction(i, &name_id, &mut code, &mut operands);
+                encode_instruction_with_operand_lists(
+                    i,
+                    &name_id,
+                    &mut code,
+                    &mut operands,
+                    &mut operand_lists,
+                );
             }
             spans.push((start, code.len() as u32 - start, range.len() as u32));
         }
         let (cleanups, cleanup_spans) =
-            encode_cleanups(&self.cleanups, &self.functions, &mut operands)?;
+            encode_cleanups(
+                &self.cleanups,
+                &self.functions,
+                &mut operands,
+                &mut operand_lists,
+            )?;
         let functions = encode_functions(
             &self.functions,
             &self.types,
@@ -3698,6 +3717,7 @@ fn encode_cleanups(
     plans: &[CleanupPlan],
     functions: &[Function],
     operands: &mut Vec<u32>,
+    operand_lists: &mut BTreeMap<Vec<u32>, u32>,
 ) -> Result<(Vec<u8>, CleanupSpans), DecodeError> {
     let mut w = Vec::new();
     let mut spans = Vec::with_capacity(functions.len());
@@ -3725,13 +3745,13 @@ fn encode_cleanups(
             {
                 return Err(DecodeError::InvalidTable("cleanup"));
             }
-            let operand_start = operands.len() as u32;
-            operands.extend(&plan.registers);
+            let (operand_start, operand_count) =
+                intern_operand_list(&plan.registers, operands, operand_lists);
             put_u32(&mut w, plan.function);
             put_u32(&mut w, plan.first_instruction);
             put_u32(&mut w, plan.end_instruction);
             put_u32(&mut w, operand_start);
-            put_u32(&mut w, plan.registers.len() as u32);
+            put_u32(&mut w, operand_count);
             put_u32(&mut w, 0);
             next = plan.end_instruction;
             at += 1;
@@ -3746,16 +3766,39 @@ fn encode_cleanups(
     }
     Ok((w, spans))
 }
+fn intern_operand_list(
+    values: &[u32],
+    operands: &mut Vec<u32>,
+    operand_lists: &mut BTreeMap<Vec<u32>, u32>,
+) -> (u32, u32) {
+    if let Some(start) = operand_lists.get(values) {
+        return (*start, values.len() as u32);
+    }
+    let start = operands.len() as u32;
+    operands.extend(values);
+    operand_lists.insert(values.to_vec(), start);
+    (start, values.len() as u32)
+}
+
 fn encode_instruction(
     i: &Instruction,
     names: &BTreeMap<String, u32>,
     code: &mut Vec<u32>,
     ops: &mut Vec<u32>,
 ) {
-    let list = |xs: &[u32], ops: &mut Vec<u32>| {
-        let at = ops.len() as u32;
-        ops.extend(xs);
-        (at, xs.len() as u32)
+    let mut operand_lists = BTreeMap::new();
+    encode_instruction_with_operand_lists(i, names, code, ops, &mut operand_lists);
+}
+
+fn encode_instruction_with_operand_lists(
+    i: &Instruction,
+    names: &BTreeMap<String, u32>,
+    code: &mut Vec<u32>,
+    ops: &mut Vec<u32>,
+    operand_lists: &mut BTreeMap<Vec<u32>, u32>,
+) {
+    let list = |xs: &[u32], ops: &mut Vec<u32>, operand_lists: &mut BTreeMap<Vec<u32>, u32>| {
+        intern_operand_list(xs, ops, operand_lists)
     };
     let (op, w): (u16, Vec<u32>) = match i {
         Instruction::Nop => (0x000, vec![]),
@@ -3773,7 +3816,7 @@ fn encode_instruction(
             variant,
             fields,
         } => {
-            let (s, n) = list(fields, ops);
+            let (s, n) = list(fields, ops, operand_lists);
             (0x009, vec![*dst, *ty, variant.unwrap_or(NONE32), s, n])
         }
         Instruction::ProjectMove { dst, src, field } => (0x00a, vec![*dst, *src, *field]),
@@ -3789,7 +3832,7 @@ fn encode_instruction(
         Instruction::Drop { register } => (0x011, vec![*register]),
         Instruction::Deconstruct { src } => (0x013, vec![*src]),
         Instruction::Primitive { dst, op, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x045, vec![*dst, *op as u32, s, n])
         }
         Instruction::Jump { target } => (0x020, vec![*target]),
@@ -3802,7 +3845,7 @@ fn encode_instruction(
             for &(c, t) in cases {
                 pairs.extend([c, t])
             }
-            let (s, _) = list(&pairs, ops);
+            let (s, _) = list(&pairs, ops, operand_lists);
             (0x021, vec![*discr, s, cases.len() as u32, *otherwise])
         }
         Instruction::Call {
@@ -3810,19 +3853,19 @@ fn encode_instruction(
             function,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x022, vec![dst.unwrap_or(NONE32), *function, s, n])
         }
         Instruction::TailCall { function, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x024, vec![*function, s, n])
         }
         Instruction::CallSelf { dst, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x02b, vec![dst.unwrap_or(NONE32), s, n])
         }
         Instruction::TailCallSelf { args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x02c, vec![s, n])
         }
         Instruction::CallKnownReceiver {
@@ -3831,7 +3874,7 @@ fn encode_instruction(
             receiver,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (
                 0x02d,
                 vec![dst.unwrap_or(NONE32), *function, *receiver, s, n],
@@ -3842,7 +3885,7 @@ fn encode_instruction(
             receiver,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x02e, vec![*function, *receiver, s, n])
         }
         Instruction::MakeCallable {
@@ -3851,7 +3894,7 @@ fn encode_instruction(
             function,
             captures,
         } => {
-            let (s, n) = list(captures, ops);
+            let (s, n) = list(captures, ops, operand_lists);
             (0x00f, vec![*dst, *callable_type, *function, s, n])
         }
         Instruction::MakeHandler {
@@ -3859,7 +3902,7 @@ fn encode_instruction(
             handler_def,
             clauses,
         } => {
-            let (s, n) = list(clauses, ops);
+            let (s, n) = list(clauses, ops, operand_lists);
             (0x010, vec![*dst, *handler_def, s, n])
         }
         Instruction::MakeHandlerShared {
@@ -3868,8 +3911,8 @@ fn encode_instruction(
             functions,
             captures,
         } => {
-            let (fs, fn_) = list(functions, ops);
-            let (cs, cn) = list(captures, ops);
+            let (fs, fn_) = list(functions, ops, operand_lists);
+            let (cs, cn) = list(captures, ops, operand_lists);
             (0x047, vec![*dst, *handler_def, fs, fn_, cs, cn])
         }
         Instruction::MakeBindingPack {
@@ -3877,7 +3920,7 @@ fn encode_instruction(
             binding_type,
             payloads,
         } => {
-            let (s, n) = list(payloads, ops);
+            let (s, n) = list(payloads, ops, operand_lists);
             (0x012, vec![*dst, *binding_type, s, n])
         }
         Instruction::CallIndirect {
@@ -3886,7 +3929,7 @@ fn encode_instruction(
             receiver_mode,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (
                 0x023,
                 vec![dst.unwrap_or(NONE32), *callable, *receiver_mode, s, n],
@@ -3897,7 +3940,7 @@ fn encode_instruction(
             receiver_mode,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x025, vec![*callable, *receiver_mode, s, n])
         }
         Instruction::Handle {
@@ -3906,7 +3949,7 @@ fn encode_instruction(
             body,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x040, vec![*dst, *handler, *body, s, n])
         }
         Instruction::Perform {
@@ -3915,7 +3958,7 @@ fn encode_instruction(
             operation,
             payloads,
         } => {
-            let (s, n) = list(payloads, ops);
+            let (s, n) = list(payloads, ops, operand_lists);
             (
                 0x041,
                 vec![dst.unwrap_or(NONE32), *protocol, *operation, s, n],
@@ -3934,7 +3977,7 @@ fn encode_instruction(
         } => (0x048, vec![*resumption, *receiver_mode, *value]),
         Instruction::Cancel { dst, resumption } => (0x043, vec![*dst, *resumption]),
         Instruction::HostCall { dst, import, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x044, vec![dst.unwrap_or(NONE32), *import, s, n])
         }
         Instruction::Abort { message } => (
@@ -6304,6 +6347,12 @@ mod tests {
                 variant: None,
                 fields: (0..1024).collect(),
             },
+            Instruction::Construct {
+                dst: 1,
+                ty: 19,
+                variant: None,
+                fields: (0..1024).collect(),
+            },
             Instruction::Abort {
                 message: Some("packed abort".into()),
             },
@@ -6324,7 +6373,60 @@ mod tests {
         let packed = PackedCode::from_instructions(&instructions);
 
         assert_eq!(packed.materialize(), instructions);
+        assert_eq!(packed.operands.len(), 1024);
         assert!(packed.storage_bytes() < public_bytes);
+    }
+
+    #[test]
+    fn operand_table_interns_instruction_and_cleanup_register_lists() {
+        let instruction = Instruction::Construct {
+            dst: 3,
+            ty: 19,
+            variant: None,
+            fields: vec![1, 2],
+        };
+        let function = Function {
+            name: "intern_operands".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 1,
+            label_slot_count: 0,
+        };
+        let plans = vec![CleanupPlan {
+            function: 0,
+            first_instruction: 0,
+            end_instruction: 1,
+            registers: vec![1, 2],
+        }];
+        let mut code = Vec::new();
+        let mut operands = Vec::new();
+        let mut operand_lists = BTreeMap::new();
+        encode_instruction_with_operand_lists(
+            &instruction,
+            &BTreeMap::new(),
+            &mut code,
+            &mut operands,
+            &mut operand_lists,
+        );
+        let (cleanups, spans) = encode_cleanups(
+            &plans,
+            std::slice::from_ref(&function),
+            &mut operands,
+            &mut operand_lists,
+        )
+        .unwrap();
+
+        assert_eq!(operands, vec![1, 2]);
+        assert_eq!(decode_instructions(&code, &operands, &[]).unwrap(), [instruction]);
+        assert_eq!(
+            decode_cleanups(&cleanups, 1, &operands, &[function], &spans).unwrap(),
+            plans
+        );
     }
 
     #[test]
