@@ -45,6 +45,10 @@ PATH="$scratch/bin:$PATH" "$repo_root/tooling/publish-native-selfhost-baseline.s
 [[ "$(<"$scratch/published")" == "$baseline" ]]
 [[ ! -w "$baseline/grandiose-self-host-native" ]]
 [[ ! -w "$baseline/build.fingerprint" ]]
+# The baseline contract includes both members of every durable object entry;
+# a seed must never receive an object without the manifest that validates it.
+grep -Fq $'file\tobjects/fixture.o\t' "$baseline/manifest.tsv"
+grep -Fq $'file\tobjects/fixture.manifest\t' "$baseline/manifest.tsv"
 
 "$repo_root/tooling/seed-native-selfhost-cache.sh" --worktree "$consumer" --baseline "$baseline" > "$scratch/seeded"
 consumer_cache="$consumer/target/self-host-native-cache"

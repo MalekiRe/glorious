@@ -15,8 +15,8 @@ runtime or to the byte-identical stage-1 → stage-3 requirement.
 Each native self-host baseline consists of:
 
 - the Wild-linked self-host executable;
-- generated LLVM IR and native object intermediates needed for fast local
-  rebuilds;
+- any checksummed partitioned native object intermediates present in the
+  producer's private cache;
 - a read-only TSV manifest of every artifact and its SHA-256 digest;
 - compatibility metadata: self-host source fingerprint, bootstrap/compiler
   revision, LLVM cache schema, target/options, runtime ABI, Clang version, and
@@ -89,6 +89,12 @@ order:
 
 Body-only changes may reuse unaffected function fragments. Interface, target,
 runtime ABI, toolchain, or linker changes invalidate conservatively.
+
+The durable one-shot executable route uses the same partitioning through
+`--native-incremental-cache`. Its cache scope is the private worktree cache,
+not the `grc --serve` process: a seed may contain verified object and manifest
+pairs, and an invocation reuses only entries whose complete IR and native ABI
+key still match. It always performs a fresh Wild link.
 
 ## Test and development routing
 
