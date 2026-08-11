@@ -128,6 +128,84 @@ fn persistent_serve_reuses_llvm_ir_and_invalidates_after_a_body_edit() {
     );
 }
 
+/// A deterministic release-mode measurement harness for the real JSON-line
+/// server. Run with:
+/// `tooling/ram-gate.sh cargo test --release -p grandiose --test grc_cli \
+/// release_warm_llvm_serve_iteration_records_cache_evidence -- --ignored --exact`
+///
+/// It records cache work rather than imposing unstable wall-clock budgets.
+#[test]
+#[ignore = "release-only warm iteration measurement harness"]
+fn release_warm_llvm_serve_iteration_records_cache_evidence() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("warm.glorious");
+    let output = directory.path().join("warm.ll");
+    let arguments = || {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-ir",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let request = |session: &mut Session, id, arguments: serde_json::Value| {
+        session.request(serde_json::json!({
+            "protocol": 1,
+            "id": id,
+            "method": "compile",
+            "arguments": arguments,
+        }))
+    };
+    let mut session = Session::start();
+
+    write(
+        &input,
+        "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let cold = request(&mut session, 1, arguments());
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["llvm_ir_cache"], "miss", "{cold}");
+    assert_eq!(cold["cache_stats"]["llvm_ir_reused"], 0, "{cold}");
+    assert_eq!(cold["cache_stats"]["llvm_fragments_reused"], 0, "{cold}");
+    let cold_ir = fs::read(&output).unwrap();
+
+    let warm = request(&mut session, 2, arguments());
+    assert_eq!(warm["status"], 0, "{warm}");
+    assert_eq!(warm["llvm_ir_cache"], "hit", "{warm}");
+    assert_eq!(warm["cache_stats"]["llvm_ir_reused"], 1, "{warm}");
+    assert_eq!(warm["cache_stats"]["llvm_fragments_reused"], 0, "{warm}");
+    assert_eq!(fs::read(&output).unwrap(), cold_ir);
+
+    write(
+        &input,
+        "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let body_only = request(&mut session, 3, arguments());
+    assert_eq!(body_only["status"], 0, "{body_only}");
+    assert_eq!(body_only["llvm_ir_cache"], "miss", "{body_only}");
+    assert_eq!(body_only["cache_stats"]["llvm_ir_reused"], 0, "{body_only}");
+    assert_eq!(
+        body_only["cache_stats"]["llvm_fragments_reused"], 2,
+        "a leaf implementation edit must retain caller and entry fragments: {body_only}"
+    );
+    assert_ne!(fs::read(&output).unwrap(), cold_ir);
+
+    write(
+        &input,
+        "leaf(argument: ()) -> i64 { 2 } caller() -> i64 { leaf(()) } main() -> () { caller(); () }",
+    );
+    let interface_changed = request(&mut session, 4, arguments());
+    assert_eq!(interface_changed["status"], 0, "{interface_changed}");
+    assert_eq!(interface_changed["llvm_ir_cache"], "miss", "{interface_changed}");
+    assert_eq!(interface_changed["cache_stats"]["llvm_ir_reused"], 0);
+    assert_eq!(
+        interface_changed["cache_stats"]["llvm_fragments_reused"], 0,
+        "the current runtime-ABI guard conservatively invalidates every fragment after a leaf ABI edit: {interface_changed}"
+    );
+}
+
 #[test]
 fn persistent_serve_reuses_exact_llvm_object_bytes_at_the_current_output_path() {
     let directory = tempdir().unwrap();

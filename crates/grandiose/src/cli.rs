@@ -1052,6 +1052,36 @@ struct SessionResponse<'a> {
     /// link afresh through Wild and therefore never report this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     native_object_cache: Option<&'a str>,
+    /// Deterministic cache evidence for persistent compile requests.  This is
+    /// intentionally counts rather than elapsed time: it makes release-mode
+    /// warm-iteration measurements reproducible across machines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_stats: Option<SessionCacheStats>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct SessionCacheStats {
+    phase_artifacts_reused: usize,
+    bodies_reused: usize,
+    mir_bodies_reused: usize,
+    mir_bodies_lowered: usize,
+    llvm_ir_reused: usize,
+    llvm_fragments_reused: usize,
+    native_objects_reused: usize,
+}
+
+impl From<grandiose::compiler_session::IncrementalCompilationStats> for SessionCacheStats {
+    fn from(stats: grandiose::compiler_session::IncrementalCompilationStats) -> Self {
+        Self {
+            phase_artifacts_reused: stats.reused_phase_artifacts,
+            bodies_reused: stats.reused_bodies,
+            mir_bodies_reused: stats.reused_mir_bodies,
+            mir_bodies_lowered: stats.lowered_mir_bodies,
+            llvm_ir_reused: stats.reused_llvm_ir,
+            llvm_fragments_reused: stats.reused_llvm_fragments,
+            native_objects_reused: stats.reused_native_objects,
+        }
+    }
 }
 
 struct SessionSnapshot {
@@ -1298,6 +1328,7 @@ fn session_protocol_error(
                 .map(|snapshot| snapshot.source_fingerprint.as_str()),
             llvm_ir_cache: None,
             native_object_cache: None,
+            cache_stats: None,
         },
     )
 }
@@ -1370,6 +1401,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                     .map(|snapshot| snapshot.source_fingerprint.as_str()),
                 llvm_ir_cache: None,
                 native_object_cache: None,
+                cache_stats: None,
             };
             return if write_session_response(output, &response).is_ok() {
                 0
@@ -1443,6 +1475,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                         .map(|last| last.source_fingerprint.as_str()),
                     llvm_ir_cache: None,
                     native_object_cache: None,
+                    cache_stats: None,
                 };
                 if write_session_response(output, &response).is_err() {
                     return 1;
@@ -1504,6 +1537,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 "miss"
             }
         });
+        let cache_stats = (status == 0).then(|| state.compiler.stats().into());
         let response = SessionResponse {
             protocol: SESSION_PROTOCOL,
             id: Some(request.id),
@@ -1515,6 +1549,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             source_fingerprint,
             llvm_ir_cache,
             native_object_cache,
+            cache_stats,
         };
         if write_session_response(output, &response).is_err() {
             return 1;
