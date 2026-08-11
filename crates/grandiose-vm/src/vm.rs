@@ -1412,14 +1412,23 @@ impl Vm {
                     payloads,
                 } => {
                     let (protocol, operation) = (*protocol, *operation);
-                    let mut values = payloads
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    frame.pc += 1;
                     let selected = select_handler_clause(a, &mut stack, protocol, operation)?;
                     let delimiter = selected.delimiter;
                     let return_dst = stack[delimiter].return_dst;
+                    let Value::Callable(callable) = &selected.callable else {
+                        return Err(RuntimeError::TypeConfusion);
+                    };
+                    let function = callable.function();
+                    let mut clause = {
+                        let caller = stack
+                            .last_mut()
+                            .expect("perform executes with a current frame");
+                        let clause = prepare_verified_frame_from_arguments(
+                            a, function, caller, payloads, return_dst, 1,
+                        )?;
+                        caller.pc += 1;
+                        clause
+                    };
                     let mut frames = stack.split_off(delimiter);
                     let resumption_type = selected
                         .resumption_type
@@ -1451,16 +1460,17 @@ impl Vm {
                             )?;
                         }
                     }
-                    values.push(Value::Resumption(ControlHandle::new(Some(
-                        ResumptionValue {
+                    let (_function, receiver) =
+                        owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
+                    put(&mut clause, 0, receiver)?;
+                    put(
+                        &mut clause,
+                        payloads.len() as u32 + 1,
+                        Value::Resumption(ControlHandle::new(Some(ResumptionValue {
                             resumption_type,
                             frames,
-                        },
-                    ))));
-                    let (function, receiver) =
-                        owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
-                    let mut clause =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                        }))),
+                    )?;
                     clause.guards.push(selected.handler_guard);
                     stack.push(clause);
                 }
@@ -1950,34 +1960,6 @@ fn make_frame(
     ))
 }
 
-/// Construct a frame from values already produced by verified bytecode.
-///
-/// Public VM entry and host results are checked at their trust boundaries.
-/// Re-walking complete arrays and aggregates at every internal call would
-/// redundantly re-prove the verifier's call signature and can turn recursive
-/// accumulation into quadratic execution.
-fn make_verified_frame(
-    a: &ExecutionImage,
-    function: u32,
-    args: Vec<Value>,
-    receiver: Value,
-    return_dst: Option<u32>,
-) -> Result<Frame, RuntimeError> {
-    let f = a
-        .functions
-        .get(function as usize)
-        .ok_or(RuntimeError::InvalidFunction(function))?;
-    if args.len() != f.params.len() {
-        return Err(RuntimeError::WrongArgumentCount {
-            expected: f.params.len(),
-            actual: args.len(),
-        });
-    }
-    Ok(frame_from_verified_values(
-        f, function, args, receiver, return_dst,
-    ))
-}
-
 /// Construct a verified callee frame while relocating arguments straight from
 /// its caller. Direct calls are abundant in the self-host compiler and do not
 /// need the temporary `Vec<Value>` otherwise used by the more general call
@@ -2048,6 +2030,48 @@ fn make_verified_self_frame_from_arguments(
     } else {
         get(caller, 0)?
     });
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Prepare a verified callee frame by relocating the leading argument prefix,
+/// while leaving its receiver and trailing synthetic parameters uninitialized.
+/// Resuming operations use this to place payloads directly before their
+/// continuation frame has been captured into the final resumption argument.
+fn prepare_verified_frame_from_arguments(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    args: &[u32],
+    return_dst: Option<u32>,
+    trailing_parameters: usize,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if args
+        .len()
+        .checked_add(trailing_parameters)
+        .is_none_or(|count| count != f.params.len())
+    {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len().saturating_sub(trailing_parameters),
+            actual: args.len(),
+        });
+    }
+    let mut registers = vec![None; f.register_types.len()];
+    for (index, argument) in args.iter().copied().enumerate() {
+        registers[index + 1] = Some(take(caller, argument)?);
+    }
     Ok(Frame {
         function,
         pc: 0,
