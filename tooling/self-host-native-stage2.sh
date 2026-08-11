@@ -62,6 +62,7 @@ readonly output_dir
 readonly source="$stage1_dir/canonical-source.glorious"
 readonly stage1_metadata="$stage1_dir/metadata.tsv"
 readonly stage1_provenance="$stage1_dir/stage1-provenance.tsv"
+readonly stage1_native="$stage1_dir/stage1-native"
 readonly stage2_artifact="$stage1_dir/stage2.grbc"
 readonly native="$output_dir/stage2-native"
 readonly provenance="$output_dir/stage2-provenance.tsv"
@@ -93,14 +94,16 @@ run_logged() {
     [[ $status -eq 0 ]] || record_failure "$phase" "$status"
 }
 
-[[ -s "$source" && -s "$stage1_metadata" && -s "$stage1_provenance" && -s "$stage2_artifact" ]] || record_failure input 1
+[[ -s "$source" && -s "$stage1_metadata" && -s "$stage1_provenance" && -x "$stage1_native" && -s "$stage2_artifact" ]] || record_failure input 1
 schema=$(manifest_value "$stage1_metadata" schema) || record_failure input 1
 stage1_exit=$(manifest_value "$stage1_metadata" stage1-exit) || record_failure input 1
 result=$(manifest_value "$stage1_metadata" result) || record_failure input 1
 recorded_source=$(manifest_value "$stage1_metadata" source-sha256) || record_failure input 1
+recorded_stage1_native=$(manifest_value "$stage1_metadata" stage1-native-sha256) || record_failure input 1
 recorded_stage2=$(manifest_value "$stage1_metadata" stage2-sha256) || record_failure input 1
 [[ "$schema" == 1 && "$stage1_exit" == 0 && "$result" == emitted ]] || record_failure input 1
 [[ "$recorded_source" == "$(sha256sum "$source" | awk '{print $1}')" ]] || record_failure input 1
+[[ "$recorded_stage1_native" == "$(sha256sum "$stage1_native" | awk '{print $1}')" ]] || record_failure input 1
 [[ "$recorded_stage2" == "$(sha256sum "$stage2_artifact" | awk '{print $1}')" ]] || record_failure input 1
 
 # Recheck the stage-1 manifest before using it as the provenance root.  The
@@ -110,9 +113,12 @@ provenance_schema=$(manifest_value "$stage1_provenance" schema) || record_failur
 provenance_stage=$(manifest_value "$stage1_provenance" stage) || record_failure input 1
 provenance_optimization=$(manifest_value "$stage1_provenance" optimization) || record_failure input 1
 provenance_linker=$(manifest_value "$stage1_provenance" linker) || record_failure input 1
+provenance_native=$(manifest_value "$stage1_provenance" native-sha256) || record_failure input 1
 provenance_source=$(manifest_value "$stage1_provenance" source-sha256) || record_failure input 1
 [[ "$provenance_schema" == 1 && "$provenance_stage" == 1 && "$provenance_optimization" == O3 && "$provenance_linker" == wild ]] || record_failure input 1
+[[ "$provenance_native" == "$recorded_stage1_native" ]] || record_failure input 1
 [[ "$provenance_source" == "$recorded_source" ]] || record_failure input 1
+readelf -p .comment "$stage1_native" 2>/dev/null | grep -Eqi 'wild' || record_failure input 1
 
 # grbc-native.sh is the only .grbc -> native boundary.  It uses native-preflight
 # (not VM execution), lowers via release grc, and invokes clang at O3/Wild.
