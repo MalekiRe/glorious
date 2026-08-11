@@ -49,6 +49,17 @@ cmp "$baseline/grandiose-self-host-native" "$consumer_cache/grandiose-self-host-
 cmp "$baseline/build.fingerprint" "$consumer_cache/build.fingerprint"
 [[ -f "$consumer_cache/manifest.tsv" ]]
 
+# A seed is deliberately a real private copy, never a hard-link or a shared
+# writable cache.  A consumer must be free to replace its local artifact on a
+# later O3 rebuild without changing what a concurrently-created worktree sees.
+[[ "$(stat -c '%d:%i' "$baseline/grandiose-self-host-native")" != \
+   "$(stat -c '%d:%i' "$consumer_cache/grandiose-self-host-native")" ]]
+baseline_binary_sum=$(sha256sum "$baseline/grandiose-self-host-native" | awk '{print $1}')
+chmod u+w "$consumer_cache/grandiose-self-host-native"
+printf 'consumer-private rebuild\n' >> "$consumer_cache/grandiose-self-host-native"
+[[ "$(sha256sum "$baseline/grandiose-self-host-native" | awk '{print $1}')" == "$baseline_binary_sum" ]]
+! cmp -s "$baseline/grandiose-self-host-native" "$consumer_cache/grandiose-self-host-native"
+
 if "$repo_root/tooling/seed-native-selfhost-cache.sh" --worktree "$consumer" --baseline "$baseline" > /dev/null 2> "$scratch/reseed.err"; then
   echo 'expected seeder to reject an existing private cache' >&2
   exit 1
