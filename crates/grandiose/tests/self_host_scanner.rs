@@ -7,7 +7,7 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel,
     lexer::{Kw, Token, TokenKind},
     parser,
     source_bundle::{Segment, SourceBundle},
@@ -65,6 +65,53 @@ fn self_host_bundle_with_entry(entry: &str) -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
+}
+
+/// Materialize the same distributed source segments used by the VM probe so
+/// the release CLI observes the identical module graph. The standard library
+/// is intentionally omitted: `grc` installs its trusted distributed standard
+/// library itself, while every user segment is passed explicitly.
+fn materialize_native_bundle(bundle: &SourceBundle, directory: &Path) -> Vec<PathBuf> {
+    let source_root = repository_root().join("self-host/src");
+    bundle
+        .segments()
+        .iter()
+        .skip(1)
+        .map(|segment| {
+            let relative = Path::new(segment.name())
+                .strip_prefix(&source_root)
+                .expect("self-host probe segment must live beneath self-host/src");
+            let path = directory.join("native-source").join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, segment.source()).unwrap();
+            path
+        })
+        .collect()
+}
+
+/// Native scanner parity goes through the production release CLI, including a
+/// private durable object store. Keep this separate from the test binary's
+/// target directory so parallel worktrees never overwrite each other's
+/// incremental state.
+fn compile_native_probe(bundle: &SourceBundle, directory: &Path, name: &str) -> PathBuf {
+    let executable = directory.join(name);
+    let cache = directory.join("native-incremental-cache");
+    let sources = materialize_native_bundle(bundle, directory);
+    let compiled = Command::new(env!("CARGO_BIN_EXE_grc"))
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .arg("-o")
+        .arg(&executable)
+        .args(&sources)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "release grc native probe build failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(executable.is_file(), "release grc did not emit {name}");
+    executable
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
@@ -570,8 +617,9 @@ fn self_hosted_scanner_matches_rust_in_vm_and_native_execution() {
             }
             fs::write(&expected_path, &expected).unwrap();
 
+            let bundle = self_host_bundle();
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &bundle,
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -603,46 +651,7 @@ fn self_hosted_scanner_matches_rust_in_vm_and_native_execution() {
                 );
             }
 
-            let asan = std::env::var_os("G1_SELF_HOST_SCANNER_ASAN").is_some();
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let debug_directory = repository_root().join("target/self-host-scanner-debug");
-            if asan {
-                fs::create_dir_all(&debug_directory).unwrap();
-                let functions = phases
-                    .mir
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, function)| format!("{index}\t{}\n", function.name))
-                    .collect::<String>();
-                fs::write(debug_directory.join("functions.txt"), functions).unwrap();
-            }
-            let llvm = if asan {
-                debug_directory.join("self-host-scanner.ll")
-            } else {
-                directory.path().join("self-host-scanner.ll")
-            };
-            let executable = if asan {
-                debug_directory.join("self-host-scanner")
-            } else {
-                directory.path().join("self-host-scanner")
-            };
-            fs::write(&llvm, module.ir).unwrap();
-            let mut clang_command = Command::new("clang");
-            clang_command
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0");
-            if asan {
-                clang_command.args(["-fsanitize=address", "-fno-omit-frame-pointer", "-g"]);
-            }
-            let clang = clang_command.arg("-o").arg(&executable).output().unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
-            );
+            let executable = compile_native_probe(&bundle, directory.path(), "self-host-scanner");
             let native_all_path = directory.path().join("native-all.bin");
             let native_all = Command::new(&executable)
                 .arg(&native_all_path)
@@ -968,8 +977,9 @@ fn self_host_scanner_recovery_matches_bootstrap() {
             push_u32(&mut expected, 18);
             fs::write(&output, &expected).unwrap();
 
+            let bundle = self_host_recovery_bundle();
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_recovery_bundle(),
+                &bundle,
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -986,20 +996,7 @@ fn self_host_scanner_recovery_matches_bootstrap() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&vm_output).unwrap(), expected, "VM recovery diverged");
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = expected_path.path().join("recovery.ll");
-            let executable = expected_path.path().join("recovery");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let executable = compile_native_probe(&bundle, expected_path.path(), "recovery");
             let native = Command::new(&executable)
                 .arg(&native_output)
                 .arg(&input)
