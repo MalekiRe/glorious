@@ -639,7 +639,7 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
 fn compile_loaded(
     command: CompileCommand,
     mut segments: Vec<Segment>,
-    incremental: Option<&mut CompilationDriver>,
+    mut incremental: Option<&mut CompilationDriver>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
@@ -740,7 +740,7 @@ fn compile_loaded(
     let options = CompileOptions {
         optimization_level: command.optimization_level,
     };
-    let compiled = match incremental {
+    let compiled = match incremental.as_deref_mut() {
         Some(session) => session.compile_bundle(&bundle, options),
         None => compile_bundle_to_phases_with_options(&bundle, options),
     };
@@ -769,7 +769,11 @@ fn compile_loaded(
         .output
         .unwrap_or_else(|| default_output(&command.inputs[0], kind));
     if matches!(kind, EmitKind::LlvmObject | EmitKind::Executable) {
-        let module = match emit_llvm_ir(&phases, &LlvmOptions::default()) {
+        let llvm_options = LlvmOptions::default();
+        let module = match incremental.as_deref_mut().map_or_else(
+            || emit_llvm_ir(&phases, &llvm_options),
+            |driver| driver.emit_llvm_ir(&bundle, options, &phases, &llvm_options),
+        ) {
             Ok(module) => module,
             Err(diagnostics) => {
                 return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
@@ -848,7 +852,13 @@ fn compile_loaded(
     }
     let bytes = match kind {
         EmitKind::Bytecode => phases.artifact.encode(),
-        EmitKind::LlvmIr => match emit_llvm_ir(&phases, &LlvmOptions::default()) {
+        EmitKind::LlvmIr => match {
+            let llvm_options = LlvmOptions::default();
+            incremental.as_deref_mut().map_or_else(
+                || emit_llvm_ir(&phases, &llvm_options),
+                |driver| driver.emit_llvm_ir(&bundle, options, &phases, &llvm_options),
+            )
+        } {
             Ok(module) => module.ir.into_bytes(),
             Err(diagnostics) => {
                 return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);

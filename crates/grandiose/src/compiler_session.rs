@@ -15,7 +15,10 @@ use grandiose_vm::{Type, TypeId};
 use crate::compiler_typeck::{DeclarationKey, IncrementalTypeCache};
 use crate::diagnostic::Diagnostic;
 use crate::source_bundle::SourceBundle;
-use crate::{CompileOptions, CompiledPhases};
+use crate::{
+    CompileOptions, CompiledPhases,
+    llvm_backend::{LlvmModule, LlvmOptions},
+};
 use crate::{compiler_core as core, compiler_mir as mir};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -29,6 +32,10 @@ pub struct IncrementalCompilationStats {
     /// than the immediately preceding revision. This is the common editor
     /// undo/redo and branch-switch case.
     pub reused_historical_phase_artifacts: usize,
+    /// Exact LLVM backend emissions restored from the bounded persistent
+    /// backend cache. This is intentionally separate from phase reuse: LLVM
+    /// emission can be avoided even when callers only observe native output.
+    pub reused_llvm_ir: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
@@ -50,6 +57,7 @@ pub struct CompilationDriver {
     pub(crate) mir_cache: IncrementalMirCache,
     phase_cache: VecDeque<CachedPhases>,
     diagnostic_cache: VecDeque<CachedDiagnostics>,
+    llvm_cache: VecDeque<CachedLlvmIr>,
     request_revision: u64,
     stats: IncrementalCompilationStats,
     diagnostic_stats: DiagnosticCacheStats,
@@ -72,6 +80,22 @@ struct CachedDiagnostics {
     options: CompileOptions,
     include_interfaces: bool,
     diagnostics: Vec<Diagnostic>,
+    last_used_revision: u64,
+}
+
+/// Cache schema is independent of the bytecode artifact version.  Bumping it
+/// deliberately invalidates all retained LLVM text after backend changes.
+const LLVM_CACHE_SCHEMA: u32 = 1;
+const LLVM_CACHE_CAPACITY: usize = 4;
+
+#[derive(Clone)]
+struct CachedLlvmIr {
+    schema: u32,
+    bundle: SourceBundle,
+    source_fingerprint: [u8; 32],
+    options: CompileOptions,
+    target: LlvmOptions,
+    module: LlvmModule,
     last_used_revision: u64,
 }
 
@@ -121,6 +145,52 @@ impl CompilationDriver {
             })
     }
 
+    /// Emit LLVM IR with a bounded exact-input cache owned by this persistent
+    /// driver. The key contains both a collision-resistant source/dependency
+    /// fingerprint and the complete bundle/options values, so a digest can
+    /// never authorize reuse by itself. Target layout and entry-wrapper ABI
+    /// are included because either changes generated IR.
+    pub fn emit_llvm_ir(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+        phases: &CompiledPhases,
+        target: &LlvmOptions,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        let source_fingerprint = llvm_source_fingerprint(bundle);
+        if let Some(index) = self.llvm_cache.iter().position(|cached| {
+            cached.schema == LLVM_CACHE_SCHEMA
+                && cached.source_fingerprint == source_fingerprint
+                && cached.bundle == *bundle
+                && cached.options == options
+                && cached.target == *target
+        }) {
+            let mut cached = self
+                .llvm_cache
+                .remove(index)
+                .expect("LLVM cache index disappeared");
+            cached.last_used_revision = self.request_revision;
+            let module = cached.module.clone();
+            self.llvm_cache.push_front(cached);
+            self.stats.reused_llvm_ir = self.stats.reused_llvm_ir.saturating_add(1);
+            return Ok(module);
+        }
+
+        let module = crate::emit_llvm_ir(phases, target)?;
+        self.llvm_cache.push_front(CachedLlvmIr {
+            schema: LLVM_CACHE_SCHEMA,
+            bundle: bundle.clone(),
+            source_fingerprint,
+            options,
+            target: target.clone(),
+            module: module.clone(),
+            last_used_revision: self.request_revision,
+        });
+        self.llvm_cache.truncate(LLVM_CACHE_CAPACITY);
+        self.stats.reused_llvm_ir = 0;
+        Ok(module)
+    }
+
     fn compile_bundle_inner(
         &mut self,
         bundle: &SourceBundle,
@@ -152,6 +222,7 @@ impl CompilationDriver {
                 reused_bodies: cached.reusable_bodies,
                 reused_phase_artifacts: 1,
                 reused_historical_phase_artifacts: usize::from(historical),
+                reused_llvm_ir: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
@@ -256,11 +327,28 @@ impl CompilationDriver {
             reused_bodies: self.type_cache.stats.reused_bodies,
             reused_phase_artifacts: 0,
             reused_historical_phase_artifacts: 0,
+            reused_llvm_ir: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             frontend: self.frontend_cache.stats(),
         };
     }
+}
+
+fn llvm_source_fingerprint(bundle: &SourceBundle) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"grandiose:llvm-ir-cache:source-v1\0");
+    for segment in bundle.segments() {
+        for field in [
+            segment.name().as_bytes(),
+            segment.package_root().unwrap_or_default().as_bytes(),
+            segment.source().as_bytes(),
+        ] {
+            hasher.update(&(field.len() as u64).to_le_bytes());
+            hasher.update(field);
+        }
+    }
+    *hasher.finalize().as_bytes()
 }
 
 #[derive(Clone, Default)]
@@ -440,5 +528,65 @@ mod tests {
         assert!(driver.compile_bundle(&invalid, options).is_err());
         assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
         assert_eq!(driver.diagnostic_cache_stats().reused_historical_results, 1);
+    }
+
+    #[test]
+    fn llvm_ir_cache_hits_only_for_exact_bundle_and_target_options() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let first = invalid_bundle("main() -> { () }");
+        let second = invalid_bundle("main() -> { let marker = 2; () }");
+        let target = LlvmOptions::default();
+        let mut driver = CompilationDriver::new();
+
+        let first_phases = driver.compile_bundle(&first, options).unwrap();
+        let first_ir = driver
+            .emit_llvm_ir(&first, options, &first_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        let cached_ir = driver
+            .emit_llvm_ir(&first, options, &first_phases, &target)
+            .unwrap();
+        assert_eq!(cached_ir, first_ir);
+        assert_eq!(driver.stats().reused_llvm_ir, 1);
+
+        // A content change has a distinct fingerprint and exact bundle value;
+        // it must re-emit rather than returning stale IR for the first body.
+        let second_phases = driver.compile_bundle(&second, options).unwrap();
+        let second_ir = driver
+            .emit_llvm_ir(&second, options, &second_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        assert_eq!(
+            second_ir,
+            crate::emit_llvm_ir(&second_phases, &target).unwrap(),
+            "a cache miss must return the current phases' IR, never stale text"
+        );
+
+        let mut different_target = target.clone();
+        different_target.emit_entry_wrapper = false;
+        driver
+            .emit_llvm_ir(&second, options, &second_phases, &different_target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+
+        // Dependency segments participate in the same source fingerprint.
+        // Changing an otherwise inert dependency comment must still miss:
+        // package/module topology affects resolution and backend reachability.
+        let dependency_changed = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> { let marker = 2; () }"),
+            [Segment::new("dependency.glorious", "// changed dependency")],
+        );
+        let dependency_phases = driver.compile_bundle(&dependency_changed, options).unwrap();
+        let dependency_ir = driver
+            .emit_llvm_ir(&dependency_changed, options, &dependency_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        assert_eq!(
+            dependency_ir,
+            crate::emit_llvm_ir(&dependency_phases, &target).unwrap()
+        );
     }
 }
