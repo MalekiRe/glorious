@@ -32,10 +32,21 @@ chmod +x "$scratch/repo/target/release/grvm"
 cat > "$scratch/repo/tooling/self-host-native.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+route_root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 case "$1" in
   canonical-source) printf 'canonical self host\n' > "$2" ;;
   provenance)
     source=$2; output=$3
+    if [[ "${NATIVE_STAGE1_TEST_SALVAGE_FAIL:-0}" == 1 ]]; then
+      objects="$route_root/target/self-host-native-cache/objects"
+      mkdir -p "$objects"
+      key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      printf '\177ELF validated durable object\n' > "$objects/$key.o"
+      printf 'schema=1\ndigest=%s\nobject-blake3=%s\nabi=test\n' \
+        "$key" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$objects/$key.manifest"
+      printf 'partial object\n' > "$objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.o"
+      exit 28
+    fi
     {
       printf 'schema\t1\nstage\t1\noptimization\tO3\nlinker\twild\n'
       printf 'native-sha256\t%s\n' "$(sha256sum "$NATIVE_STAGE1_TEST_NATIVE" | awk '{print $1}')"
@@ -95,6 +106,22 @@ fi
 rg -q 'verify-stage2 failed' "$scratch/invalid.err"
 rg -q $'^phase\tverify-stage2$' "$scratch/invalid-run/metadata.tsv"
 rg -q $'^result\tfailed$' "$scratch/invalid-run/metadata.tsv"
+
+# Failure cleanup removes the disposable snapshot, but a complete durable
+# object/manifest pair is retained as a private retry seed. A partial object
+# never crosses that boundary.
+if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" NATIVE_STAGE1_TEST_SALVAGE_FAIL=1 PATH="$scratch/bin:$PATH" \
+  "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/salvage-run" > /dev/null 2> "$scratch/salvage.err"; then
+  echo 'expected failing provenance build to retain a retry seed' >&2
+  exit 1
+fi
+rg -q 'provenance failed' "$scratch/salvage.err"
+salvage_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+salvage_objects="$scratch/salvage-run/native-cache-retry-seed/objects"
+[[ -f "$salvage_objects/$salvage_key.o" ]]
+[[ -f "$salvage_objects/$salvage_key.manifest" ]]
+[[ ! -e "$salvage_objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.o" ]]
+rg -q $'^native-cache-retry-objects\t1$' "$scratch/salvage-run/metadata.tsv"
 
 if NATIVE_STAGE1_TEST_NATIVE="$scratch/native" PATH="$scratch/bin:$PATH" \
   "$scratch/repo/tooling/self-host-native-stage1.sh" run --output-dir "$scratch/run" > /dev/null 2> "$scratch/reuse.err"; then

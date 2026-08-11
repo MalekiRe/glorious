@@ -111,9 +111,71 @@ manifest_value() {
 record_failure() {
     local phase=$1 status=$2
     printf 'schema\t1\nphase\t%s\nexit\t%s\n' "$phase" "$status" > "$metadata"
+    salvage_snapshot_native_cache
     printf 'result\tfailed\n' >> "$metadata"
     echo "native-stage1: $phase failed; retained evidence: $output_dir" >&2
     exit "$status"
+}
+
+# A failed disposable snapshot may already contain durable Clang objects. Keep
+# only complete, self-describing cache pairs as retained retry input. The
+# snapshot cache is never modified, and this deliberately does not make the
+# retained directory a live/shared cache: a later retry must copy it into its
+# own private route before invoking `grc`, whose native cache revalidates the
+# BLAKE3 object digest before reuse.
+salvage_snapshot_native_cache() {
+    local source_objects retry_root retry_objects stage object manifest key
+    local schema digest object_blake abi copied count=0
+    [[ -n "${snapshot_dir:-}" ]] || return 0
+    source_objects="$snapshot_dir/target/self-host-native-cache/objects"
+    [[ -d "$source_objects" ]] || return 0
+    retry_root="$output_dir/native-cache-retry-seed"
+    retry_objects="$retry_root/objects"
+    [[ ! -e "$retry_root" ]] || return 0
+    stage=$(mktemp -d "$output_dir/.native-cache-salvage.XXXXXX") || return 0
+    mkdir -p "$stage/objects"
+    shopt -s nullglob
+    for object in "$source_objects"/*.o; do
+        key=${object##*/}
+        key=${key%.o}
+        manifest="$source_objects/$key.manifest"
+        [[ "$key" =~ ^[0-9a-f]{64}$ && -f "$manifest" ]] || continue
+        schema=$(sed -n '1p' "$manifest")
+        digest=$(sed -n '2p' "$manifest")
+        object_blake=$(sed -n '3p' "$manifest")
+        abi=$(sed -n '4p' "$manifest")
+        [[ "$schema" == schema=1 && "$digest" == "digest=$key" ]] || continue
+        [[ "$object_blake" =~ ^object-blake3=[0-9a-f]{64}$ && "$abi" == abi=* ]] || continue
+        # Durable cache consumers are the cryptographic authority; retain only
+        # an intact object/manifest pair here and copy it byte-for-byte. The
+        # retry receives a private seed, never a mutable alias of this cache.
+        cp -- "$object" "$stage/objects/$key.o" || continue
+        cp -- "$manifest" "$stage/objects/$key.manifest" || {
+            rm -f -- "$stage/objects/$key.o"
+            continue
+        }
+        copied=$(sha256sum "$stage/objects/$key.o" | awk '{print $1}')
+        [[ -n "$copied" ]] || continue
+        count=$((count + 1))
+    done
+    shopt -u nullglob
+    if ((count == 0)); then
+        rm -rf -- "$stage"
+        return 0
+    fi
+    mkdir -- "$retry_root" || {
+        rm -rf -- "$stage"
+        return 0
+    }
+    mv -- "$stage/objects" "$retry_objects" || {
+        rm -rf -- "$stage"
+        return 0
+    }
+    rmdir -- "$stage"
+    {
+        printf 'native-cache-retry-seed\t%s\n' "$retry_root"
+        printf 'native-cache-retry-objects\t%s\n' "$count"
+    } >> "$metadata"
 }
 
 run_logged() {
