@@ -500,6 +500,79 @@ fn disk_native_incremental_cache_reuses_sibling_object_across_processes() {
 }
 
 #[test]
+fn disk_native_incremental_cache_rebuilds_only_direct_callers_after_callee_abi_edit() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("disk-cache-abi.glorious");
+    let cache = directory.path().join("objects");
+    let first = directory.path().join("first-native");
+    let second = directory.path().join("second-native");
+    let object_count = |directory: &Path| {
+        fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "o")
+            })
+            .count()
+    };
+    write(
+        &input,
+        r#"
+            leaf() -> i64 { 1 }
+            caller() -> i64 { leaf() }
+            outer() -> i64 { caller() }
+            main() -> () { outer(); () }
+        "#,
+    );
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&first)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    let cold = object_count(&cache);
+    assert_eq!(cold, 5, "one shared object plus four function objects");
+
+    // The leaf and its direct caller change their call ABI. `outer` retains
+    // the caller's ABI, and `main` retains the outer ABI, so their function
+    // objects are valid across this independent compiler process. The shared
+    // declaration unit changes too, yielding exactly three new cache entries.
+    write(
+        &input,
+        r#"
+            leaf(unused: ()) -> i64 { 1 }
+            caller() -> i64 { leaf(()) }
+            outer() -> i64 { caller() }
+            main() -> () { outer(); () }
+        "#,
+    );
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&second)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        object_count(&cache),
+        cold + 3,
+        "the shared declaration unit, edited leaf, and direct caller must rebuild; outer callers remain reusable"
+    );
+    assert!(
+        Command::new(&second).status().unwrap().success(),
+        "the relinked executable must use both rebuilt and retained objects"
+    );
+}
+
+#[test]
 fn persistent_serve_separates_native_object_cache_entries_by_optimization_level() {
     let directory = tempdir().unwrap();
     let input = directory.path().join("cache.glorious");
