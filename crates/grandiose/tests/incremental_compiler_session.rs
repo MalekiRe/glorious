@@ -74,13 +74,33 @@ fn incremental_session_reuses_only_valid_unchanged_body_inference() {
     let shifted = session.stats();
     assert!(shifted.elaborated_bodies >= 2, "{shifted:?}");
 
-    // Signature/context changes invalidate every retained body inference.
+    // A signature/context change cannot reuse entries *under the new context*,
+    // but must retain the prior context rather than clearing every body.
     session
         .compile_bundle(&bundle("1", "u64"), options())
         .unwrap();
     let context_changed = session.stats();
     assert_eq!(context_changed.reused_bodies, 0, "{context_changed:?}");
     assert_eq!(context_changed.elaborated_bodies, first.elaborated_bodies);
+
+    // Returning to the original signature context with one body edit should
+    // reuse its unchanged siblings from the retained namespace. This guards
+    // against a context transition clearing the complete typed/MIR cache.
+    session
+        .compile_bundle(&bundle("3", "i64"), options())
+        .unwrap();
+    let returned_context = session.stats();
+    assert_eq!(returned_context.reused_phase_artifacts, 0, "{returned_context:?}");
+    assert!(
+        returned_context.elaborated_bodies < first.elaborated_bodies,
+        "a context return must not re-elaborate every body: {returned_context:?}"
+    );
+    assert!(returned_context.reused_bodies > 0, "{returned_context:?}");
+    assert!(
+        returned_context.lowered_mir_bodies < first.lowered_mir_bodies,
+        "a context return must not re-lower every body: {returned_context:?}"
+    );
+    assert!(returned_context.reused_mir_bodies > 0, "{returned_context:?}");
 }
 
 #[test]
