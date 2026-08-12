@@ -12595,8 +12595,25 @@ fn elaborate_cleanup(program: &mut Program, types: &[Type]) -> Result<PassReport
 /// fresh elaboration exactly, and require protected values to survive their
 /// own cleanup chains.
 fn validate_flow_and_cleanup(program: &Program, types: &[Type]) -> Result<(), ValidationError> {
+    validate_flow_and_cleanup_except(program, types, &BTreeSet::new())
+}
+
+/// Validate the fresh ownership/cleanup boundary of an incremental compile.
+/// Bodies named in `already_validated` were restored only after matching their
+/// exact raw-MIR cache entry and complete array-call dependency fingerprint.
+/// Re-solving them here would discard the value of the cleanup cache. Debug
+/// checkpoints and non-incremental compilation continue to use the complete
+/// validation path above.
+fn validate_flow_and_cleanup_except(
+    program: &Program,
+    types: &[Type],
+    already_validated: &BTreeSet<u32>,
+) -> Result<(), ValidationError> {
     let array_calls = regions::array_call_summaries(program, types);
     for function in &program.functions {
+        if already_validated.contains(&function.declaration) {
+            continue;
+        }
         let elaboration =
             derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
         validate_cleanup_elaboration(function, &elaboration)?;
@@ -13905,10 +13922,12 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
         initial_operations,
     );
     let cleanup_dependencies = regions::array_call_summaries(program, types);
+    let mut reused_cleanup_bodies = BTreeSet::new();
     if let Some(cache) = incremental_cleanup.as_mut() {
         for function in &mut program.functions {
             let fingerprint = cleanup_dependency_fingerprint(function, &cleanup_dependencies);
             if let Some(cleanup) = cache.reuse_cleanup(function, fingerprint) {
+                reused_cleanup_bodies.insert(function.declaration);
                 *function = cleanup;
             }
         }
@@ -13928,7 +13947,11 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     let cleanup = elaborate_cleanup(program, types)?;
     passes.push(cleanup);
     validate_program(program, types, MirPhase::Cleanup)?;
-    validate_flow_and_cleanup(program, types)?;
+    if cfg!(debug_assertions) || reused_cleanup_bodies.is_empty() {
+        validate_flow_and_cleanup(program, types)?;
+    } else {
+        validate_flow_and_cleanup_except(program, types, &reused_cleanup_bodies)?;
+    }
     if let Some(cache) = incremental_cleanup.as_mut() {
         for function in &program.functions {
             cache.cache_cleanup(
