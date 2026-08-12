@@ -167,7 +167,11 @@ impl IncrementalFrontendCache {
                 self.entries.push(cached);
             }
         }
-        self.entries.truncate(bundle.segments().len());
+        // Do not discard trailing entries merely because this revision has
+        // fewer segments. Editors commonly remove and restore a file or
+        // switch between dependency configurations; retaining its exact token
+        // stream costs no correctness because every reuse still compares the
+        // current segment source before rebasing spans.
         combined.push(Token {
             kind: TokenKind::Eof,
             span: Span::new(bundle.source().len(), bundle.source().len()),
