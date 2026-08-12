@@ -8,7 +8,10 @@
 //! downstream work for duplicate checks and editor undo/redo without reusing
 //! results across a semantic input change.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::{Path, PathBuf},
+};
 
 use grandiose_vm::{Type, TypeId};
 
@@ -59,6 +62,11 @@ pub struct IncrementalCompilationStats {
     /// boundary. This is deliberately separate from raw MIR lowering reuse:
     /// the entry is usable only when its consumed array-call summaries match.
     pub reused_cleanup_mir_bodies: usize,
+    /// Complete O3 MIR bodies restored from the dependency-validated durable
+    /// cache. These bodies bypass repeated local ownership analysis while
+    /// their changed direct-call closure continues through the normal O3
+    /// schedule.
+    pub reused_optimized_mir_bodies: usize,
     /// Exact local O3 transformation snapshots restored after a body edit.
     /// Snapshots are segregated by the complete MIR type/drop schema and are
     /// checked again against their precise MIR input before use.
@@ -326,6 +334,18 @@ impl CompilationDriver {
 
     pub fn persistent_mir_cache(&self) -> Result<Vec<u8>, bincode::Error> {
         self.mir_cache.encode_persistent()
+    }
+
+    /// Configure lazy per-function final O3 snapshots beside the durable MIR
+    /// cache. This does not hydrate the directory; bodies are read only after
+    /// their exact dependency key is known.
+    pub fn configure_persistent_optimized_mir_directory(&mut self, directory: PathBuf) {
+        self.mir_cache
+            .configure_persistent_optimized_directory(directory);
+    }
+
+    pub fn persist_persistent_optimized_mir_directory(&self) -> Result<(), String> {
+        self.mir_cache.persist_optimized_to_directory()
     }
 
     pub fn compile_bundle(
@@ -608,6 +628,7 @@ impl CompilationDriver {
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 reused_cleanup_mir_bodies: 0,
+                reused_optimized_mir_bodies: 0,
                 reused_optimizer_body_snapshots: 0,
                 reused_trait_databases: 0,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
@@ -724,6 +745,7 @@ impl CompilationDriver {
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             reused_cleanup_mir_bodies: self.mir_cache.reused_cleanup_bodies,
+            reused_optimized_mir_bodies: self.mir_cache.reused_optimized_bodies,
             reused_optimizer_body_snapshots: self.mir_cache.reused_optimizer_body_snapshots,
             reused_trait_databases: self.trait_db_cache.reused_databases,
             frontend: self.frontend_cache.stats(),
@@ -755,11 +777,14 @@ pub(crate) struct IncrementalMirCache {
         (u64, u32, crate::compiler_mir::optimizer::PassId),
         VecDeque<crate::compiler_mir::optimizer::TransactionalPassBodySnapshot>,
     >,
+    optimized: BTreeMap<OptimizedMirKey, OptimizedMirEntry>,
+    optimized_disk_directory: Option<PathBuf>,
     active_schema: Option<u64>,
     next_schema: u64,
     lowered_bodies: usize,
     reused_bodies: usize,
     reused_cleanup_bodies: usize,
+    reused_optimized_bodies: usize,
     reused_optimizer_body_snapshots: usize,
 }
 
@@ -801,11 +826,46 @@ struct PersistentMirBody {
     cleanup: Option<(u64, mir::Function)>,
 }
 
+/// A final O3 body is retained separately from the monolithic raw-MIR cache.
+/// Its key includes the exact pre-optimization body and the complete direct
+/// dependency closure, letting an unrelated source edit keep already
+/// specialized and inlined compiler functions intact.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct OptimizedMirKey {
+    schema: u64,
+    declaration: u32,
+    dependency_fingerprint: u64,
+    namespace_fingerprint: u64,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct OptimizedMirEntry {
+    input: mir::Function,
+    output: mir::Function,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentOptimizedMirEntry {
+    schema: u32,
+    key: OptimizedMirKey,
+    input: mir::Function,
+    output: mir::Function,
+}
+
+const PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA: u32 = 1;
+
+fn optimized_mir_entry_path(directory: &Path, key: &OptimizedMirKey) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode optimized MIR cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
 impl IncrementalMirCache {
     fn begin_revision(&mut self) {
         self.lowered_bodies = 0;
         self.reused_bodies = 0;
         self.reused_cleanup_bodies = 0;
+        self.reused_optimized_bodies = 0;
         self.reused_optimizer_body_snapshots = 0;
     }
 
@@ -834,6 +894,7 @@ impl IncrementalMirCache {
             self.entries.retain(|(schema, _), _| *schema != evicted.id);
             self.local_pass_snapshots
                 .retain(|(schema, _, _), _| *schema != evicted.id);
+            self.optimized.retain(|key, _| key.schema != evicted.id);
         }
     }
 
@@ -862,7 +923,11 @@ impl IncrementalMirCache {
         let dependency_fingerprint = dependency_fingerprint?;
         let cached = self.entries.get(&self.active_key(function.declaration)?)?;
         let (cached_fingerprint, cleanup) = cached.cleanup.as_ref()?;
-        if *cached_fingerprint != dependency_fingerprint {
+        // The dependency fingerprint protects interprocedural ownership
+        // summaries, but it is not a body identity. A body-only source edit
+        // must never recover the previous function's cleanup facts merely
+        // because its direct callees happened not to change.
+        if cached.lowered != *function || *cached_fingerprint != dependency_fingerprint {
             return None;
         }
         self.reused_cleanup_bodies += 1;
@@ -885,6 +950,151 @@ impl IncrementalMirCache {
             return;
         };
         cached.cleanup = Some((dependency_fingerprint, function.clone()));
+    }
+
+    /// Assign a worktree-local directory holding independently readable final
+    /// O3 bodies. Unlike the historical monolithic caches, configuring this
+    /// directory does not read or deserialize any body.
+    pub(crate) fn configure_persistent_optimized_directory(&mut self, directory: PathBuf) {
+        self.optimized_disk_directory = Some(directory);
+    }
+
+    fn optimized_key(
+        &self,
+        declaration: u32,
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<OptimizedMirKey> {
+        Some(OptimizedMirKey {
+            schema: self.active_schema?,
+            declaration,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        })
+    }
+
+    /// Recover an exact final O3 body. The caller supplies the current
+    /// cleanup-boundary body as well as its complete direct-call dependency
+    /// fingerprint; both values must match the entry before it becomes
+    /// eligible to bypass the optimizer.
+    pub(crate) fn reuse_optimized(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<mir::Function> {
+        let key = self.optimized_key(
+            input.declaration,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        )?;
+        if let Some(entry) = self.optimized.get(&key) {
+            if entry.input == *input && entry.output.phase == mir::MirPhase::Optimized {
+                self.reused_optimized_bodies = self.reused_optimized_bodies.saturating_add(1);
+                return Some(entry.output.clone());
+            }
+        }
+        let directory = self.optimized_disk_directory.as_ref()?;
+        let path = optimized_mir_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentOptimizedMirEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != *input
+            || entry.output.declaration != input.declaration
+            || entry.output.phase != mir::MirPhase::Optimized
+        {
+            return None;
+        }
+        let output = entry.output.clone();
+        self.optimized.insert(
+            key,
+            OptimizedMirEntry {
+                input: entry.input,
+                output: entry.output,
+            },
+        );
+        self.reused_optimized_bodies = self.reused_optimized_bodies.saturating_add(1);
+        Some(output)
+    }
+
+    /// Retain an output only when its source function has a current exact
+    /// cleanup cache entry. Pattern-generated bodies intentionally have no
+    /// durable Core identity and are left on the ordinary optimizer path.
+    pub(crate) fn cache_optimized(
+        &mut self,
+        output: &mir::Function,
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) {
+        let Some(key) = self.optimized_key(
+            output.declaration,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        ) else {
+            return;
+        };
+        let Some(active_key) = self.active_key(output.declaration) else {
+            return;
+        };
+        let Some(cached) = self.entries.get(&active_key) else {
+            return;
+        };
+        let Some((_, input)) = &cached.cleanup else {
+            return;
+        };
+        self.optimized.insert(
+            key,
+            OptimizedMirEntry {
+                input: input.clone(),
+                output: output.clone(),
+            },
+        );
+    }
+
+    /// Publish each newly produced final O3 body separately. Cache files are
+    /// addressed by every semantic input in `OptimizedMirKey`, so retaining a
+    /// previous source revision never invalidates unrelated entries.
+    pub(crate) fn persist_optimized_to_directory(&self) -> Result<(), String> {
+        let Some(directory) = &self.optimized_disk_directory else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "could not create optimized MIR directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        for (key, entry) in &self.optimized {
+            let path = optimized_mir_entry_path(directory, key)?;
+            if path.exists() {
+                continue;
+            }
+            let bytes = bincode::serialize(&PersistentOptimizedMirEntry {
+                schema: PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA,
+                key: key.clone(),
+                input: entry.input.clone(),
+                output: entry.output.clone(),
+            })
+            .map_err(|error| format!("could not encode optimized MIR body: {error}"))?;
+            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temporary, bytes).map_err(|error| {
+                format!(
+                    "could not write optimized MIR body {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                let _ = std::fs::remove_file(&temporary);
+                if !path.exists() {
+                    return Err(format!(
+                        "could not publish optimized MIR body {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn insert(&mut self, function: core::Function, lowered: mir::Function) {
@@ -976,11 +1186,14 @@ impl IncrementalMirCache {
                 })
                 .collect(),
             local_pass_snapshots: persisted.local_pass_snapshots,
+            optimized: BTreeMap::new(),
+            optimized_disk_directory: None,
             active_schema: None,
             next_schema,
             lowered_bodies: 0,
             reused_bodies: 0,
             reused_cleanup_bodies: 0,
+            reused_optimized_bodies: 0,
             reused_optimizer_body_snapshots: 0,
         })
     }
@@ -1449,6 +1662,31 @@ mod tests {
         assert!(
             restarted_driver.stats().reused_optimizer_body_snapshots > 0,
             "unchanged O3 local-pass slots should replay their exact snapshots"
+        );
+
+        let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+        assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    }
+
+    #[test]
+    fn optimized_mir_cache_reuses_unrelated_o3_body_after_callee_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } unrelated() -> i64 { 9 } main() -> () { caller(); unrelated(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } unrelated() -> i64 { 9 } main() -> () { caller(); unrelated(); () }",
+        );
+        let mut driver = CompilationDriver::new();
+        assert!(driver.compile_bundle(&before, options).is_ok());
+        let warm = driver.compile_bundle(&after, options).unwrap();
+        assert!(
+            driver.stats().reused_optimized_mir_bodies > 0,
+            "unrelated O3 bodies should bypass the optimizer: {:?}",
+            driver.stats()
         );
 
         let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();

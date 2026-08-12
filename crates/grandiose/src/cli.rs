@@ -48,6 +48,7 @@ const DISK_CACHE_LOCK_WAIT: Duration = Duration::from_secs(30);
 const PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA: u32 = 1;
 const PERSISTENT_COMPILER_LLVM_FRAGMENT_CACHE_SCHEMA: u32 = 2;
 const PERSISTENT_COMPILER_MIR_CACHE_SCHEMA: u32 = 1;
+const PERSISTENT_COMPILER_OPTIMIZED_MIR_CACHE_SCHEMA: u32 = 1;
 const MAX_PERSISTENT_COMPILER_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 static DISK_CACHE_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -738,6 +739,22 @@ struct DiskCompilerMirCache {
     lock: PathBuf,
 }
 
+/// Final O3 MIR is independently retained per source function, so a source
+/// edit never requires hydrating a monolithic optimized-program snapshot.
+struct DiskCompilerOptimizedMirCache {
+    directory: PathBuf,
+}
+
+impl DiskCompilerOptimizedMirCache {
+    fn new(cache_dir: &Path) -> Self {
+        Self {
+            directory: cache_dir.join(format!(
+                "compiler-optimized-mir-cache-v{PERSISTENT_COMPILER_OPTIMIZED_MIR_CACHE_SCHEMA}"
+            )),
+        }
+    }
+}
+
 impl DiskCompilerMirCache {
     fn new(cache_dir: &Path) -> Self {
         let stem = format!("compiler-mir-cache-v{PERSISTENT_COMPILER_MIR_CACHE_SCHEMA}");
@@ -776,6 +793,9 @@ fn restore_persistent_compiler_mir_cache(driver: &mut CompilationDriver, cache_d
     if let Some(bytes) = cache.read_valid() {
         let _ = driver.restore_persistent_mir_cache(&bytes);
     }
+    driver.configure_persistent_optimized_mir_directory(
+        DiskCompilerOptimizedMirCache::new(cache_dir).directory,
+    );
 }
 
 fn persist_compiler_mir_cache(
@@ -790,6 +810,9 @@ fn persist_compiler_mir_cache(
     })?;
     let cache = DiskCompilerMirCache::new(cache_dir);
     let _lock = DiskCacheLock::acquire(cache.lock.clone())?;
+    driver.configure_persistent_optimized_mir_directory(
+        DiskCompilerOptimizedMirCache::new(cache_dir).directory,
+    );
     let bytes = driver
         .persistent_mir_cache()
         .map_err(|error| format!("could not encode MIR cache: {error}"))?;
@@ -799,31 +822,30 @@ fn persist_compiler_mir_cache(
             bytes.len()
         ));
     }
-    if cache.read_valid().as_deref() == Some(bytes.as_slice()) {
-        return Ok(());
+    if cache.read_valid().as_deref() != Some(bytes.as_slice()) {
+        let directory = cache.bytes.parent().expect("MIR cache has parent");
+        let bytes_temporary = disk_cache_temporary(directory, "compiler-mir-cache", "mir.tmp")?;
+        if let Err(error) = std::fs::write(&bytes_temporary, &bytes) {
+            let _ = std::fs::remove_file(&bytes_temporary);
+            return Err(format!("could not write MIR cache: {error}"));
+        }
+        if let Err(error) = std::fs::rename(&bytes_temporary, &cache.bytes) {
+            let _ = std::fs::remove_file(&bytes_temporary);
+            return Err(format!("could not publish MIR cache: {error}"));
+        }
+        let manifest_temporary =
+            disk_cache_temporary(directory, "compiler-mir-cache", "mir-manifest.tmp")?;
+        let manifest = DiskCompilerMirCache::manifest_text(&bytes);
+        if let Err(error) = std::fs::write(&manifest_temporary, manifest) {
+            let _ = std::fs::remove_file(&manifest_temporary);
+            return Err(format!("could not write MIR cache manifest: {error}"));
+        }
+        if let Err(error) = std::fs::rename(&manifest_temporary, &cache.manifest) {
+            let _ = std::fs::remove_file(&manifest_temporary);
+            return Err(format!("could not publish MIR cache manifest: {error}"));
+        }
     }
-    let directory = cache.bytes.parent().expect("MIR cache has parent");
-    let bytes_temporary = disk_cache_temporary(directory, "compiler-mir-cache", "mir.tmp")?;
-    if let Err(error) = std::fs::write(&bytes_temporary, &bytes) {
-        let _ = std::fs::remove_file(&bytes_temporary);
-        return Err(format!("could not write MIR cache: {error}"));
-    }
-    if let Err(error) = std::fs::rename(&bytes_temporary, &cache.bytes) {
-        let _ = std::fs::remove_file(&bytes_temporary);
-        return Err(format!("could not publish MIR cache: {error}"));
-    }
-    let manifest_temporary =
-        disk_cache_temporary(directory, "compiler-mir-cache", "mir-manifest.tmp")?;
-    let manifest = DiskCompilerMirCache::manifest_text(&bytes);
-    if let Err(error) = std::fs::write(&manifest_temporary, manifest) {
-        let _ = std::fs::remove_file(&manifest_temporary);
-        return Err(format!("could not write MIR cache manifest: {error}"));
-    }
-    if let Err(error) = std::fs::rename(&manifest_temporary, &cache.manifest) {
-        let _ = std::fs::remove_file(&manifest_temporary);
-        return Err(format!("could not publish MIR cache manifest: {error}"));
-    }
-    Ok(())
+    driver.persist_persistent_optimized_mir_directory()
 }
 
 fn line_and_column(source: &str, offset: usize) -> (usize, usize) {
@@ -3114,10 +3136,10 @@ mod tests {
             optimization_level: OptimizationLevel::O3,
         };
         let before = compiler_cache_bundle(
-            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } unrelated() -> i64 { 9 } main() -> () { caller(); unrelated(); () }",
         );
         let after = compiler_cache_bundle(
-            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } unrelated() -> i64 { 9 } main() -> () { caller(); unrelated(); () }",
         );
         let mut writer = CompilationDriver::new();
         assert!(writer.compile_bundle(&before, options).is_ok());
@@ -3125,10 +3147,21 @@ mod tests {
 
         let key = DiskCompilerMirCache::new(&cache_dir);
         assert!(key.read_valid().is_some());
+        let optimized = DiskCompilerOptimizedMirCache::new(&cache_dir);
+        assert!(
+            optimized.directory.is_dir()
+                && std::fs::read_dir(&optimized.directory).unwrap().next().is_some(),
+            "eligible final O3 bodies should persist independently"
+        );
         let mut restarted = CompilationDriver::new();
         restore_persistent_compiler_mir_cache(&mut restarted, &cache_dir);
         assert!(restarted.compile_bundle(&after, options).is_ok());
-        assert_eq!(restarted.stats().reused_mir_bodies, 2);
+        assert_eq!(restarted.stats().reused_mir_bodies, 3);
+        assert!(
+            restarted.stats().reused_optimized_mir_bodies > 0,
+            "an unrelated final O3 body should survive a process restart: {:?}",
+            restarted.stats()
+        );
     }
 
     #[test]

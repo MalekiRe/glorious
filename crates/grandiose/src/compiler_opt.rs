@@ -7539,6 +7539,9 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
 
     let mut changed = false;
     for caller in &mut program.functions {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
         let mut caller_changed = false;
         for block_index in 0..caller.blocks.len() {
             if let Terminator::TailCall { function, args } =
@@ -8611,6 +8614,9 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
     }
     let mut candidates = Vec::new();
     for (caller_index, caller) in program.functions.iter().enumerate() {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
         if caller.features.contains(FeatureBits::LOANS)
             || caller.features.contains(FeatureBits::HANDLERS)
             || caller.features.contains(FeatureBits::RESUMPTIONS)
@@ -9120,6 +9126,9 @@ fn specialize_terminal_handlers(
     let mut candidates = Vec::new();
 
     for (caller_index, caller) in program.functions.iter().enumerate() {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
         let mut use_counts = BTreeMap::<Register, u32>::new();
         for block in &caller.blocks {
             for register in used_registers(block) {
@@ -9805,6 +9814,9 @@ fn specialize_direct_resumptive_handlers(
     let mut scan_work = 0_u64;
     let mut candidates = Vec::new();
     for (caller_index, caller) in program.functions.iter().enumerate() {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
         let mut use_counts = BTreeMap::<Register, u32>::new();
         for block in &caller.blocks {
             for register in used_registers(block) {
@@ -10956,6 +10968,9 @@ fn inline_by_cost_with_admission_caps(
             .collect::<BTreeMap<_, _>>();
         let mut candidates = Vec::new();
         for caller in &scratch.functions {
+            if caller.phase == MirPhase::Optimized {
+                continue;
+            }
             for block in &caller.blocks {
                 let Terminator::Call {
                     function: target,
@@ -11178,6 +11193,9 @@ fn inline_by_cost_with_admission_caps(
             .collect::<BTreeMap<_, _>>();
         let mut candidates = Vec::new();
         for caller in &scratch.functions {
+            if caller.phase == MirPhase::Optimized {
+                continue;
+            }
             for block in &caller.blocks {
                 let Terminator::Call {
                     function: target,
@@ -11482,6 +11500,9 @@ fn run_transactional_pass_with_body_cache(
     // safety depend on declaration order.
     let fair_per_function_budget = pass == PassId::FormTailCallsAndHoist;
     for function in &mut program.functions {
+        if function.phase == MirPhase::Optimized {
+            continue;
+        }
         let local_limit = (100_000_u64).max(32 * body_size(function));
         let limit = if fair_per_function_budget {
             local_limit
@@ -11751,6 +11772,9 @@ fn run_mandatory_normalize(program: &mut Program) -> PassReport {
     let mut outcome = PassOutcome::Unchanged;
     let mut work_units = 0_u64;
     for function in &mut program.functions {
+        if function.phase == MirPhase::Optimized {
+            continue;
+        }
         let (body_outcome, work) = normalize_cfg(function, u64::MAX);
         work_units += work;
         if body_outcome == PassOutcome::Changed {
@@ -11769,6 +11793,9 @@ fn run_mandatory_loan_erasure(program: &mut Program) -> PassReport {
     let mut outcome = PassOutcome::Unchanged;
     let mut work_units = 0_u64;
     for function in &mut program.functions {
+        if function.phase == MirPhase::Optimized {
+            continue;
+        }
         let (body_outcome, work) = erase_loan_proofs(function, u64::MAX);
         work_units = work_units.saturating_add(work);
         if body_outcome == PassOutcome::Changed {
@@ -14006,6 +14033,29 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
         initial_operations,
     );
 
+    // The durable final-O3 cache freezes only functions whose complete direct
+    // dependency closure is unchanged.  Those bodies have already survived
+    // the entire O3 schedule, including all caller re-optimization caused by
+    // prior specialization/inlining, so running the schedule over them again
+    // merely repeats ownership fixed-point work. Functions outside this set
+    // remain ordinary cleanup MIR and are optimized normally.
+    let optimized_namespace = optimized_mir_namespace_fingerprint(program);
+    let optimized_dependencies = optimized_mir_dependency_fingerprints(program);
+    if level == OptimizationLevel::O3 {
+        if let Some(cache) = incremental_cleanup.as_mut() {
+            for function in &mut program.functions {
+                let Some(dependency) = optimized_dependencies.get(&function.declaration) else {
+                    continue;
+                };
+                if let Some(output) =
+                    cache.reuse_optimized(function, *dependency, optimized_namespace)
+                {
+                    *function = output;
+                }
+            }
+        }
+    }
+
     let normalize = run_mandatory_normalize(program);
     push_checked(&mut passes, normalize, program, types)?;
     let mut global_remaining = 64_u64.saturating_mul(initial_operations);
@@ -14259,11 +14309,188 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     // mutates the program between the phase/feature update and that checkpoint,
     // so let the checkpoint be the single final validation traversal.
     passes.push(validate_bytecode_input_checkpoint(program, types)?);
+    if level == OptimizationLevel::O3 {
+        if let Some(cache) = incremental_cleanup.as_mut() {
+            let base_declarations = optimized_dependencies
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            for function in &program.functions {
+                let Some(dependency) = optimized_dependencies.get(&function.declaration) else {
+                    continue;
+                };
+                if optimized_mir_output_is_stable(function, &base_declarations) {
+                    cache.cache_optimized(function, *dependency, optimized_namespace);
+                }
+            }
+        }
+    }
     Ok(OptimizationReport {
         level,
         initial_operations,
         final_operations: operation_count(program),
         passes,
+    })
+}
+
+/// A lightweight, deterministic input hash for durable optimized-body keys.
+/// It is never used as the sole reuse authority: the cache also compares the
+/// complete input MIR body byte-for-byte through `PartialEq`.
+fn optimized_mir_hash(mut state: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x100_0000_01b3);
+    }
+    state
+}
+
+/// Namespace layout controls the function declaration IDs used by MIR. Body
+/// edits deliberately do not participate, while adding/removing/reordering a
+/// declaration makes every cached output conservative-cache-miss.
+fn optimized_mir_namespace_fingerprint(program: &Program) -> u64 {
+    let mut state = optimized_mir_hash(0xcbf2_9ce4_8422_2325, b"grandiose:o3-namespace-v1\0");
+    for function in &program.functions {
+        state = optimized_mir_hash(state, &function.declaration.to_le_bytes());
+        state = optimized_mir_hash(state, function.name.as_bytes());
+        state = optimized_mir_hash(
+            state,
+            format!(
+                "{:?}{:?}{:?}{:?}{:?}{:?}",
+                function.params,
+                function.result,
+                function.receiver_mode,
+                function.receiver_type,
+                function.no_return,
+                function.outward_protocols,
+            )
+            .as_bytes(),
+        );
+    }
+    state
+}
+
+/// Return direct targets only for the representation subset whose final O3
+/// output cannot be coupled to generated closure/handler declarations.
+/// Restricting reuse here is intentional: unknown calls and control lowering
+/// get the normal fresh optimizer rather than approximating their global
+/// dependency graph.
+fn optimized_mir_direct_dependencies(function: &Function) -> Option<BTreeSet<u32>> {
+    if function.features.contains(FeatureBits::HANDLERS)
+        || function.features.contains(FeatureBits::RESUMPTIONS)
+        || function.features.contains(FeatureBits::INDIRECT_CALLS)
+    {
+        return None;
+    }
+    let mut dependencies = BTreeSet::new();
+    for block in &function.blocks {
+        for statement in &block.statements {
+            if matches!(
+                statement.kind,
+                InstructionKind::MakeCallable { .. }
+                    | InstructionKind::MakeHandler { .. }
+                    | InstructionKind::MakeHandlerShared { .. }
+            ) {
+                return None;
+            }
+        }
+        match block.terminator {
+            Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                dependencies.insert(function);
+            }
+            Terminator::CallSelf { .. } | Terminator::TailCallSelf { .. } => {
+                dependencies.insert(function.declaration);
+            }
+            Terminator::Abort { .. }
+            | Terminator::Cancel { .. }
+            | Terminator::Goto(_)
+            | Terminator::HostCall { .. }
+            | Terminator::Leave { .. }
+            | Terminator::Return { .. }
+            | Terminator::Switch { .. }
+            | Terminator::Unreachable => {}
+            Terminator::CallIndirect { .. }
+            | Terminator::CallKnownReceiver { .. }
+            | Terminator::Handle { .. }
+            | Terminator::Perform { .. }
+            | Terminator::Resume { .. }
+            | Terminator::TailCallIndirect { .. }
+            | Terminator::TailCallKnownReceiver { .. }
+            | Terminator::TailResume { .. } => return None,
+        }
+    }
+    Some(dependencies)
+}
+
+/// Fingerprint the full transitive direct-call input of every cacheable body.
+/// A changed callee therefore forces its callers through O3 again, preserving
+/// the post-specialization/inlining re-optimization contract.
+fn optimized_mir_dependency_fingerprints(program: &Program) -> BTreeMap<u32, u64> {
+    let functions = program
+        .functions
+        .iter()
+        .map(|function| (function.declaration, function))
+        .collect::<BTreeMap<_, _>>();
+    fn visit(
+        declaration: u32,
+        functions: &BTreeMap<u32, &Function>,
+        memo: &mut BTreeMap<u32, Option<u64>>,
+        visiting: &mut BTreeSet<u32>,
+    ) -> Option<u64> {
+        if let Some(fingerprint) = memo.get(&declaration) {
+            return *fingerprint;
+        }
+        // A recursive SCC is correct to optimize, but an individual cached
+        // output cannot prove the fixed point without retaining the complete
+        // component. Keep such bodies on the ordinary schedule for now.
+        if !visiting.insert(declaration) {
+            return None;
+        }
+        let fingerprint = (|| {
+            let function = functions.get(&declaration)?;
+            let dependencies = optimized_mir_direct_dependencies(function)?;
+            let mut state =
+                optimized_mir_hash(0xcbf2_9ce4_8422_2325, b"grandiose:o3-direct-closure-v1\0");
+            state = optimized_mir_hash(state, format!("{function:?}").as_bytes());
+            for dependency in dependencies {
+                if dependency == declaration {
+                    return None;
+                }
+                let dependency_fingerprint = visit(dependency, functions, memo, visiting)?;
+                state = optimized_mir_hash(state, &dependency.to_le_bytes());
+                state = optimized_mir_hash(state, &dependency_fingerprint.to_le_bytes());
+            }
+            Some(state)
+        })();
+        visiting.remove(&declaration);
+        memo.insert(declaration, fingerprint);
+        fingerprint
+    }
+
+    let mut memo = BTreeMap::new();
+    for declaration in functions.keys().copied().collect::<Vec<_>>() {
+        let _ = visit(declaration, &functions, &mut memo, &mut BTreeSet::new());
+    }
+    memo.into_iter()
+        .filter_map(|(declaration, fingerprint)| {
+            fingerprint.map(|fingerprint| (declaration, fingerprint))
+        })
+        .collect()
+}
+
+/// Never recover an output that mentions a scalarized clone or fresh control
+/// declaration. Such IDs are assigned from whole-program candidate order;
+/// keeping only original declarations makes independent body reuse exact.
+fn optimized_mir_output_is_stable(function: &Function, base_declarations: &BTreeSet<u32>) -> bool {
+    if function.phase != MirPhase::Optimized
+        || !optimized_mir_direct_dependencies(function).is_some()
+    {
+        return false;
+    }
+    function.blocks.iter().all(|block| match block.terminator {
+        Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+            base_declarations.contains(&function)
+        }
+        _ => true,
     })
 }
 
