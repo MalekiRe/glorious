@@ -4,7 +4,10 @@
 //! core. Unsupported ownership-heavy operations are diagnosed instead of being
 //! assigned an accidental ABI.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use grandiose_vm::{Constant, Primitive, Type, TypeId};
 
@@ -157,6 +160,10 @@ pub struct LlvmFragmentCache {
     /// from schema 3 and are intentionally never persisted under a schema-4
     /// key.
     active_legacy_fragments: BTreeMap<LlvmFragmentKey, LlvmFunctionFragment>,
+    /// The durable CLI route assigns this private directory. Entries are
+    /// addressed by their complete serialized key and loaded only on demand;
+    /// no compiler request deserializes a monolithic fragment blob.
+    disk_directory: Option<PathBuf>,
     reused_fragments: usize,
     emitted_fragments: usize,
 }
@@ -178,7 +185,14 @@ struct PersistentLlvmFragment {
     snapshot_capture_fix_types: Vec<TypeId>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentLlvmFragmentEntry {
+    schema: u32,
+    fragment: PersistentLlvmFragment,
+}
+
 const PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA: u32 = 1;
+const PERSISTENT_LLVM_FRAGMENT_ENTRY_SCHEMA: u32 = 1;
 
 fn persistent_overflow_operation(operation: &str) -> Option<&'static str> {
     match operation {
@@ -192,7 +206,95 @@ fn persistent_overflow_operation(operation: &str) -> Option<&'static str> {
     }
 }
 
+fn persistent_fragment(
+    key: &LlvmFragmentKey,
+    fragment: &LlvmFunctionFragment,
+) -> PersistentLlvmFragment {
+    PersistentLlvmFragment {
+        key: key.clone(),
+        emitted_text: fragment.emitted_text.clone(),
+        overflow_widths: fragment
+            .overflow_widths
+            .iter()
+            .map(|(width, operation)| (*width, (*operation).to_owned()))
+            .collect(),
+        snapshot_capture_fix_types: fragment
+            .snapshot_capture_fix_types
+            .iter()
+            .copied()
+            .collect(),
+    }
+}
+
+fn live_fragment(fragment: PersistentLlvmFragment) -> Option<LlvmFunctionFragment> {
+    let overflow_widths = fragment
+        .overflow_widths
+        .into_iter()
+        .map(|(width, operation)| {
+            persistent_overflow_operation(&operation).map(|operation| (width, operation))
+        })
+        .collect::<Option<BTreeSet<_>>>()?;
+    Some(LlvmFunctionFragment {
+        fingerprint: fragment.key.fingerprint,
+        emitted_text: fragment.emitted_text,
+        overflow_widths,
+        snapshot_capture_fix_types: fragment.snapshot_capture_fix_types.into_iter().collect(),
+    })
+}
+
+fn disk_fragment_path(directory: &Path, key: &LlvmFragmentKey) -> Result<PathBuf, String> {
+    let key = bincode::serialize(key)
+        .map_err(|error| format!("could not encode LLVM fragment cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&key).to_hex())))
+}
+
 impl LlvmFragmentCache {
+    pub(crate) fn configure_persistent_directory(&mut self, directory: PathBuf) {
+        self.disk_directory = Some(directory);
+    }
+
+    /// Publish only individual fragments that this process has in memory.
+    /// Entries are content-addressed by their complete cache key, so a body
+    /// edit leaves every other on-disk entry intact.
+    pub(crate) fn persist_to_directory(&self) -> Result<(), String> {
+        let Some(directory) = &self.disk_directory else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "could not create LLVM fragment directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        for (key, fragment) in &self.fragments {
+            let path = disk_fragment_path(directory, key)?;
+            if path.exists() {
+                continue;
+            }
+            let bytes = bincode::serialize(&PersistentLlvmFragmentEntry {
+                schema: PERSISTENT_LLVM_FRAGMENT_ENTRY_SCHEMA,
+                fragment: persistent_fragment(key, fragment),
+            })
+            .map_err(|error| format!("could not encode LLVM fragment: {error}"))?;
+            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temporary, bytes).map_err(|error| {
+                format!(
+                    "could not write LLVM fragment {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                let _ = std::fs::remove_file(&temporary);
+                if !path.exists() {
+                    return Err(format!(
+                        "could not publish LLVM fragment {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn reused_fragments(&self) -> usize {
         self.reused_fragments
     }
@@ -289,6 +391,10 @@ impl LlvmFragmentCache {
         if let Some(fragment) = self.fragments.get(&current) {
             return Some(fragment.clone());
         }
+        if let Some(fragment) = self.load_disk_fragment(&current) {
+            self.fragments.insert(current.clone(), fragment.clone());
+            return Some(fragment);
+        }
         if let Some(fragment) = self.active_legacy_fragments.get(&current) {
             return Some(fragment.clone());
         }
@@ -297,6 +403,17 @@ impl LlvmFragmentCache {
         self.active_legacy_fragments
             .insert(current, fragment.clone());
         Some(fragment)
+    }
+
+    fn load_disk_fragment(&self, key: &LlvmFragmentKey) -> Option<LlvmFunctionFragment> {
+        let directory = self.disk_directory.as_ref()?;
+        let path = disk_fragment_path(directory, key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentLlvmFragmentEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_LLVM_FRAGMENT_ENTRY_SCHEMA || entry.fragment.key != *key {
+            return None;
+        }
+        live_fragment(entry.fragment)
     }
 
     fn fragment(
@@ -318,20 +435,7 @@ impl LlvmFragmentCache {
         let fragments = self
             .fragments
             .iter()
-            .map(|(key, fragment)| PersistentLlvmFragment {
-                key: key.clone(),
-                emitted_text: fragment.emitted_text.clone(),
-                overflow_widths: fragment
-                    .overflow_widths
-                    .iter()
-                    .map(|(width, operation)| (*width, (*operation).to_owned()))
-                    .collect(),
-                snapshot_capture_fix_types: fragment
-                    .snapshot_capture_fix_types
-                    .iter()
-                    .copied()
-                    .collect(),
-            })
+            .map(|(key, fragment)| persistent_fragment(key, fragment))
             .collect();
         bincode::serialize(&PersistentLlvmFragmentCache {
             schema: PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA,
@@ -346,25 +450,9 @@ impl LlvmFragmentCache {
         }
         let mut cache = Self::default();
         for fragment in persisted.fragments {
-            let overflow_widths = fragment
-                .overflow_widths
-                .into_iter()
-                .map(|(width, operation)| {
-                    persistent_overflow_operation(&operation).map(|operation| (width, operation))
-                })
-                .collect::<Option<BTreeSet<_>>>()?;
-            cache
-                .fragments
-                .entry(fragment.key.clone())
-                .or_insert(LlvmFunctionFragment {
-                    fingerprint: fragment.key.fingerprint,
-                    emitted_text: fragment.emitted_text,
-                    overflow_widths,
-                    snapshot_capture_fix_types: fragment
-                        .snapshot_capture_fix_types
-                        .into_iter()
-                        .collect(),
-                });
+            let key = fragment.key.clone();
+            let live = live_fragment(fragment)?;
+            cache.fragments.entry(key).or_insert(live);
         }
         Some(cache)
     }

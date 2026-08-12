@@ -11,21 +11,21 @@ use std::{
 };
 
 use grandiose::{
+    CompileOptions, OptimizationLevel,
     artifact_llvm::emit_artifact_llvm_ir,
     compile_bundle_to_phases_with_options,
     compiler_session::CompilationDriver,
     diagnostic::{Diagnostic, Severity},
     emit_llvm_ir, emit_llvm_native_object_units,
-    interface::{scan_interfaces, InterfaceSelection},
+    interface::{InterfaceSelection, scan_interfaces},
     lexer,
     llvm_backend::{
-        LlvmOptions, DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_NATIVE_OBJECT_PARTITION_SCHEMA,
+        DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_NATIVE_OBJECT_PARTITION_SCHEMA, LlvmOptions,
     },
     source_bundle::{Segment, SourceBundle},
-    CompileOptions, OptimizationLevel,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --diagnostic-timings     attach per-phase elapsed timings to a --serve response\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n\nnative executable builds retain a private on-disk incremental cache beside their output.\n";
 
@@ -46,7 +46,7 @@ const DISK_CACHE_LOCK_WAIT: Duration = Duration::from_secs(30);
 /// This covers the bincode layout and the exact semantic evidence carried by
 /// `IncrementalTypeCache`.  Change it whenever either stops being compatible.
 const PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA: u32 = 1;
-const PERSISTENT_COMPILER_LLVM_FRAGMENT_CACHE_SCHEMA: u32 = 1;
+const PERSISTENT_COMPILER_LLVM_FRAGMENT_CACHE_SCHEMA: u32 = 2;
 const PERSISTENT_COMPILER_MIR_CACHE_SCHEMA: u32 = 1;
 const MAX_PERSISTENT_COMPILER_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 static DISK_CACHE_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -580,9 +580,7 @@ struct DiskCompilerTypeCache {
 
 impl DiskCompilerTypeCache {
     fn new(cache_dir: &Path) -> Self {
-        let stem = format!(
-            "compiler-type-cache-v{PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA}"
-        );
+        let stem = format!("compiler-type-cache-v{PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA}");
         Self {
             bytes: cache_dir.join(format!("{stem}.bin")),
             manifest: cache_dir.join(format!("{stem}.manifest")),
@@ -616,10 +614,7 @@ impl DiskCompilerTypeCache {
     }
 }
 
-fn restore_persistent_compiler_type_cache(
-    driver: &mut CompilationDriver,
-    cache_dir: &Path,
-) {
+fn restore_persistent_compiler_type_cache(driver: &mut CompilationDriver, cache_dir: &Path) {
     let cache = DiskCompilerTypeCache::new(cache_dir);
     if let Some(bytes) = cache.read_valid() {
         let _ = driver.restore_persistent_type_cache(&bytes);
@@ -659,24 +654,21 @@ fn persist_compiler_type_cache(
     }
 
     let directory = cache.bytes.parent().expect("compiler cache has parent");
-    let bytes_temporary = disk_cache_temporary(
-        directory,
-        "compiler-type-cache",
-        "type-cache.tmp",
-    )?;
+    let bytes_temporary = disk_cache_temporary(directory, "compiler-type-cache", "type-cache.tmp")?;
     if let Err(error) = std::fs::write(&bytes_temporary, &bytes) {
         let _ = std::fs::remove_file(&bytes_temporary);
-        return Err(format!("could not write compiler incremental cache: {error}"));
+        return Err(format!(
+            "could not write compiler incremental cache: {error}"
+        ));
     }
     if let Err(error) = std::fs::rename(&bytes_temporary, &cache.bytes) {
         let _ = std::fs::remove_file(&bytes_temporary);
-        return Err(format!("could not publish compiler incremental cache: {error}"));
+        return Err(format!(
+            "could not publish compiler incremental cache: {error}"
+        ));
     }
-    let manifest_temporary = disk_cache_temporary(
-        directory,
-        "compiler-type-cache",
-        "type-cache-manifest.tmp",
-    )?;
+    let manifest_temporary =
+        disk_cache_temporary(directory, "compiler-type-cache", "type-cache-manifest.tmp")?;
     let manifest = DiskCompilerTypeCache::manifest_text(&bytes);
     if let Err(error) = std::fs::write(&manifest_temporary, manifest) {
         let _ = std::fs::remove_file(&manifest_temporary);
@@ -697,8 +689,7 @@ fn persist_compiler_type_cache(
 /// persisted separately from type evidence because a successful frontend
 /// phase should remain reusable even if backend emission later fails.
 struct DiskCompilerLlvmFragmentCache {
-    bytes: PathBuf,
-    manifest: PathBuf,
+    directory: PathBuf,
     lock: PathBuf,
 }
 
@@ -708,32 +699,9 @@ impl DiskCompilerLlvmFragmentCache {
             "compiler-llvm-fragment-cache-v{PERSISTENT_COMPILER_LLVM_FRAGMENT_CACHE_SCHEMA}"
         );
         Self {
-            bytes: cache_dir.join(format!("{stem}.bin")),
-            manifest: cache_dir.join(format!("{stem}.manifest")),
+            directory: cache_dir.join(&stem),
             lock: cache_dir.join(format!(".{stem}.lock")),
         }
-    }
-
-    fn manifest_text(bytes: &[u8]) -> String {
-        format!(
-            "schema={PERSISTENT_COMPILER_LLVM_FRAGMENT_CACHE_SCHEMA}\ncodec=bincode-1\nbytes={}\nblake3={}\n",
-            bytes.len(),
-            blake3::hash(bytes).to_hex(),
-        )
-    }
-
-    fn read_valid(&self) -> Option<Vec<u8>> {
-        let length = std::fs::metadata(&self.bytes).ok()?.len();
-        if length > MAX_PERSISTENT_COMPILER_CACHE_BYTES {
-            return None;
-        }
-        let (Ok(bytes), Ok(manifest)) = (
-            std::fs::read(&self.bytes),
-            std::fs::read_to_string(&self.manifest),
-        ) else {
-            return None;
-        };
-        (manifest == Self::manifest_text(&bytes)).then_some(bytes)
     }
 }
 
@@ -742,9 +710,7 @@ fn restore_persistent_compiler_llvm_fragment_cache(
     cache_dir: &Path,
 ) {
     let cache = DiskCompilerLlvmFragmentCache::new(cache_dir);
-    if let Some(bytes) = cache.read_valid() {
-        let _ = driver.restore_persistent_llvm_fragment_cache(&bytes);
-    }
+    driver.configure_persistent_llvm_fragment_directory(cache.directory);
 }
 
 fn persist_compiler_llvm_fragment_cache(
@@ -759,54 +725,8 @@ fn persist_compiler_llvm_fragment_cache(
     })?;
     let cache = DiskCompilerLlvmFragmentCache::new(cache_dir);
     let _lock = DiskCacheLock::acquire(cache.lock.clone())?;
-    let existing = cache.read_valid();
-    if let Some(bytes) = existing.as_deref() {
-        let _ = driver.merge_persistent_llvm_fragment_cache(bytes);
-    }
-    let bytes = driver
-        .persistent_llvm_fragment_cache()
-        .map_err(|error| format!("could not encode LLVM fragment cache: {error}"))?;
-    if bytes.len() as u64 > MAX_PERSISTENT_COMPILER_CACHE_BYTES {
-        return Err(format!(
-            "LLVM fragment cache snapshot is too large ({} bytes)",
-            bytes.len()
-        ));
-    }
-    if existing.as_deref() == Some(bytes.as_slice()) {
-        return Ok(());
-    }
-
-    let directory = cache.bytes.parent().expect("LLVM fragment cache has parent");
-    let bytes_temporary = disk_cache_temporary(
-        directory,
-        "compiler-llvm-fragment-cache",
-        "llvm-fragments.tmp",
-    )?;
-    if let Err(error) = std::fs::write(&bytes_temporary, &bytes) {
-        let _ = std::fs::remove_file(&bytes_temporary);
-        return Err(format!("could not write LLVM fragment cache: {error}"));
-    }
-    if let Err(error) = std::fs::rename(&bytes_temporary, &cache.bytes) {
-        let _ = std::fs::remove_file(&bytes_temporary);
-        return Err(format!("could not publish LLVM fragment cache: {error}"));
-    }
-    let manifest_temporary = disk_cache_temporary(
-        directory,
-        "compiler-llvm-fragment-cache",
-        "llvm-fragment-manifest.tmp",
-    )?;
-    let manifest = DiskCompilerLlvmFragmentCache::manifest_text(&bytes);
-    if let Err(error) = std::fs::write(&manifest_temporary, manifest) {
-        let _ = std::fs::remove_file(&manifest_temporary);
-        return Err(format!("could not write LLVM fragment cache manifest: {error}"));
-    }
-    if let Err(error) = std::fs::rename(&manifest_temporary, &cache.manifest) {
-        let _ = std::fs::remove_file(&manifest_temporary);
-        return Err(format!(
-            "could not publish LLVM fragment cache manifest: {error}"
-        ));
-    }
-    Ok(())
+    driver.configure_persistent_llvm_fragment_directory(cache.directory);
+    driver.persist_persistent_llvm_fragment_directory()
 }
 
 /// Per-function MIR and exact local O3 pass snapshots. This is separate from
@@ -863,7 +783,10 @@ fn persist_compiler_mir_cache(
     cache_dir: &Path,
 ) -> Result<(), String> {
     std::fs::create_dir_all(cache_dir).map_err(|error| {
-        format!("could not create MIR cache {}: {error}", cache_dir.display())
+        format!(
+            "could not create MIR cache {}: {error}",
+            cache_dir.display()
+        )
     })?;
     let cache = DiskCompilerMirCache::new(cache_dir);
     let _lock = DiskCacheLock::acquire(cache.lock.clone())?;
@@ -871,7 +794,10 @@ fn persist_compiler_mir_cache(
         .persistent_mir_cache()
         .map_err(|error| format!("could not encode MIR cache: {error}"))?;
     if bytes.len() as u64 > MAX_PERSISTENT_COMPILER_CACHE_BYTES {
-        return Err(format!("MIR cache snapshot is too large ({} bytes)", bytes.len()));
+        return Err(format!(
+            "MIR cache snapshot is too large ({} bytes)",
+            bytes.len()
+        ));
     }
     if cache.read_valid().as_deref() == Some(bytes.as_slice()) {
         return Ok(());
@@ -1164,9 +1090,8 @@ impl CompileTiming {
             native_objects_ms: Self::milliseconds(self.native_objects),
             native_link_ms: Self::milliseconds(self.native_link),
             total_ms: Self::milliseconds(total),
+        }
     }
-}
-
 }
 
 fn compile_loaded(
@@ -1290,10 +1215,9 @@ fn compile_loaded(
             return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
         }
     };
-    if let (Some(driver), Some(cache_dir)) = (
-        incremental.as_deref_mut(),
-        persistent_compiler_cache_dir,
-    ) {
+    if let (Some(driver), Some(cache_dir)) =
+        (incremental.as_deref_mut(), persistent_compiler_cache_dir)
+    {
         if let Err(error) = persist_compiler_type_cache(driver, cache_dir) {
             let _ = writeln!(
                 stderr,
@@ -1380,127 +1304,121 @@ fn compile_loaded(
         // output-local durable cache. No process lifetime or user option is
         // part of incremental correctness.
         if kind == EmitKind::Executable {
-                let cache_dir = durable_native_cache_dir(&output);
-                let partitions_started = Instant::now();
-                let units_result = incremental.as_deref_mut().map_or_else(
-                    || emit_llvm_native_object_units(&phases, &llvm_options),
-                    |driver| driver.emit_llvm_native_object_units(&phases, &llvm_options),
-                );
-                if let Some(timing) = timing.as_deref_mut() {
-                    timing.llvm_partitions += partitions_started.elapsed();
+            let cache_dir = durable_native_cache_dir(&output);
+            let partitions_started = Instant::now();
+            let units_result = incremental.as_deref_mut().map_or_else(
+                || emit_llvm_native_object_units(&phases, &llvm_options),
+                |driver| driver.emit_llvm_native_object_units(&phases, &llvm_options),
+            );
+            if let Some(timing) = timing.as_deref_mut() {
+                timing.llvm_partitions += partitions_started.elapsed();
+            }
+            let units = match units_result {
+                Ok(units) => units,
+                Err(diagnostics) => {
+                    return report_diagnostics(
+                        &bundle,
+                        diagnostics,
+                        command.json_diagnostics,
+                        stderr,
+                    );
                 }
-                let units = match units_result {
-                    Ok(units) => units,
-                    Err(diagnostics) => {
-                        return report_diagnostics(
-                            &bundle,
-                            diagnostics,
-                            command.json_diagnostics,
-                            stderr,
-                        );
-                    }
-                };
-                if let (Some(driver), Some(cache_dir)) = (
-                    incremental.as_deref_mut(),
-                    persistent_compiler_cache_dir,
-                ) {
-                    if let Err(error) = persist_compiler_llvm_fragment_cache(driver, cache_dir) {
+            };
+            if let (Some(driver), Some(cache_dir)) =
+                (incremental.as_deref_mut(), persistent_compiler_cache_dir)
+            {
+                if let Err(error) = persist_compiler_llvm_fragment_cache(driver, cache_dir) {
+                    let _ = writeln!(
+                        stderr,
+                        "grc: warning: could not update LLVM fragment cache: {error}"
+                    );
+                }
+            }
+            let toolchain_abi =
+                match native_object_toolchain_abi(&llvm_options, OptimizationLevel::O3) {
+                    Ok(abi) => abi,
+                    Err(error) => {
                         let _ = writeln!(
-                            stderr,
-                            "grc: warning: could not update LLVM fragment cache: {error}"
-                        );
-                    }
-                }
-                let toolchain_abi =
-                    match native_object_toolchain_abi(&llvm_options, OptimizationLevel::O3) {
-                        Ok(abi) => abi,
-                        Err(error) => {
-                            let _ = writeln!(
                             stderr,
                             "grc: error: could not identify native object toolchain ABI: {error}"
                         );
-                            return 1;
-                        }
-                    };
-                let mut jobs = Vec::with_capacity(units.functions.len() + 1);
-                let shared_abi = format!(
-                    "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=shared;shared={}",
-                    units.shared_fingerprint
+                        return 1;
+                    }
+                };
+            let mut jobs = Vec::with_capacity(units.functions.len() + 1);
+            let shared_abi = format!(
+                "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=shared;shared={}",
+                units.shared_fingerprint
+            );
+            jobs.push(DiskNativeObjectJob {
+                ordinal: 0,
+                role: "shared",
+                ir: units.shared.ir.clone(),
+                abi: shared_abi,
+            });
+            for (index, function) in units.functions.iter().enumerate() {
+                let abi = format!(
+                    "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;decl={};fragment={}",
+                    function.declaration, function.fragment_fingerprint
                 );
                 jobs.push(DiskNativeObjectJob {
-                    ordinal: 0,
-                    role: "shared",
-                    ir: units.shared.ir.clone(),
-                    abi: shared_abi,
+                    ordinal: index + 1,
+                    role: "function",
+                    ir: function.module.ir.clone(),
+                    abi,
                 });
-                for (index, function) in units.functions.iter().enumerate() {
-                    let abi = format!(
-                        "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;decl={};fragment={}",
-                        function.declaration,
-                        function.fragment_fingerprint
-                    );
-                    jobs.push(DiskNativeObjectJob {
-                        ordinal: index + 1,
-                        role: "function",
-                        ir: function.module.ir.clone(),
-                        abi,
-                    });
+            }
+            let workers = match durable_native_object_workers() {
+                Ok(workers) => workers,
+                Err(error) => {
+                    let _ = writeln!(stderr, "grc: error: {error}");
+                    return 1;
                 }
-                let workers = match durable_native_object_workers() {
-                    Ok(workers) => workers,
-                    Err(error) => {
-                        let _ = writeln!(stderr, "grc: error: {error}");
-                        return 1;
-                    }
-                };
-                let objects_started = Instant::now();
-                let objects_result = materialize_disk_partitioned_native_objects(
-                    &output,
-                    &cache_dir,
-                    workers,
-                    &jobs,
-                );
-                if let Some(timing) = timing.as_deref_mut() {
-                    timing.native_objects += objects_started.elapsed();
+            };
+            let objects_started = Instant::now();
+            let objects_result =
+                materialize_disk_partitioned_native_objects(&output, &cache_dir, workers, &jobs);
+            if let Some(timing) = timing.as_deref_mut() {
+                timing.native_objects += objects_started.elapsed();
+            }
+            let objects = match objects_result {
+                Ok(objects) => objects,
+                Err(error) => {
+                    let _ = writeln!(stderr, "grc: error: {error}");
+                    return 1;
                 }
-                let objects = match objects_result {
-                    Ok(objects) => objects,
-                    Err(error) => {
-                        let _ = writeln!(stderr, "grc: error: {error}");
-                        return 1;
-                    }
-                };
-                let link_inputs = match DiskNativeLinkInputs::new(&jobs, &objects) {
-                    Ok(inputs) => inputs,
-                    Err(error) => {
-                        let _ = writeln!(stderr, "grc: error: {error}");
-                        return 1;
-                    }
-                };
-                let host = native_host.as_ref().expect("executable native host");
-                let link_started = Instant::now();
-                let linked = materialize_disk_linked_native_executable(
-                    &output,
-                    host,
-                    &objects,
-                    &cache_dir,
-                    &link_inputs,
-                );
-                if let Some(timing) = timing.as_deref_mut() {
-                    timing.native_link += link_started.elapsed();
+            };
+            let link_inputs = match DiskNativeLinkInputs::new(&jobs, &objects) {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    let _ = writeln!(stderr, "grc: error: {error}");
+                    return 1;
                 }
-                match linked {
-                    Ok(wild_relinked) => {
-                        if let Some(observed) = native_wild_relink.as_deref_mut() {
-                            *observed = wild_relinked;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = writeln!(stderr, "grc: error: {error}");
-                        return 1;
+            };
+            let host = native_host.as_ref().expect("executable native host");
+            let link_started = Instant::now();
+            let linked = materialize_disk_linked_native_executable(
+                &output,
+                host,
+                &objects,
+                &cache_dir,
+                &link_inputs,
+            );
+            if let Some(timing) = timing.as_deref_mut() {
+                timing.native_link += link_started.elapsed();
+            }
+            match linked {
+                Ok(wild_relinked) => {
+                    if let Some(observed) = native_wild_relink.as_deref_mut() {
+                        *observed = wild_relinked;
                     }
                 }
-                return 0;
+                Err(error) => {
+                    let _ = writeln!(stderr, "grc: error: {error}");
+                    return 1;
+                }
+            }
+            return 0;
         }
         let module = module.expect("non-durable native emission needs a monolithic LLVM module");
         // A persistent session may reuse immutable object bytes only when the
@@ -3173,7 +3091,11 @@ mod tests {
         persist_compiler_llvm_fragment_cache(&mut writer, &cache_dir).unwrap();
 
         let key = DiskCompilerLlvmFragmentCache::new(&cache_dir);
-        assert!(key.read_valid().is_some());
+        assert!(key.directory.is_dir());
+        assert!(
+            std::fs::read_dir(&key.directory).unwrap().next().is_some(),
+            "at least one independently persisted LLVM fragment is required"
+        );
         let mut restarted = CompilationDriver::new();
         restore_persistent_compiler_llvm_fragment_cache(&mut restarted, &cache_dir);
         let after_phases = restarted.compile_bundle(&after, options).unwrap();
@@ -3439,8 +3361,13 @@ mod tests {
     fn native_incremental_options_are_not_public() {
         for option in ["--native-incremental", "--native-incremental-cache"] {
             assert!(
-                parse([option, "input.glorious"].into_iter().map(OsString::from).collect())
-                    .is_err(),
+                parse(
+                    [option, "input.glorious"]
+                        .into_iter()
+                        .map(OsString::from)
+                        .collect()
+                )
+                .is_err(),
                 "removed option {option} was accepted"
             );
         }
@@ -3456,39 +3383,45 @@ mod tests {
 
     #[test]
     fn native_allocation_limit_is_bounded_and_executable_only() {
-        assert!(parse(
-            ["--native-allocation-limit", "67108863", "input.glorious"]
+        assert!(
+            parse(
+                ["--native-allocation-limit", "67108863", "input.glorious"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "--emit",
+                    "executable",
+                    "--native-allocation-limit",
+                    "1073741825",
+                    "input.glorious",
+                ]
                 .into_iter()
                 .map(OsString::from)
                 .collect(),
-        )
-        .is_err());
-        assert!(parse(
-            [
-                "--emit",
-                "executable",
-                "--native-allocation-limit",
-                "1073741825",
-                "input.glorious",
-            ]
-            .into_iter()
-            .map(OsString::from)
-            .collect(),
-        )
-        .is_err());
-        assert!(parse(
-            [
-                "--emit",
-                "llvm-ir",
-                "--native-allocation-limit",
-                "134217728",
-                "input.glorious",
-            ]
-            .into_iter()
-            .map(OsString::from)
-            .collect(),
-        )
-        .is_err());
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "--emit",
+                    "llvm-ir",
+                    "--native-allocation-limit",
+                    "134217728",
+                    "input.glorious",
+                ]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3638,13 +3571,19 @@ mod tests {
             panic!("expected a compile command")
         };
         assert!(command.diagnostic_timings);
-        assert!(parse(
-            ["--diagnostic-timings", "--diagnostic-timings", "input.glorious"]
+        assert!(
+            parse(
+                [
+                    "--diagnostic-timings",
+                    "--diagnostic-timings",
+                    "input.glorious"
+                ]
                 .into_iter()
                 .map(OsString::from)
                 .collect(),
-        )
-        .is_err());
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3666,13 +3605,15 @@ mod tests {
             };
             assert_eq!(command.stop_phase, Some(expected));
         }
-        assert!(parse(
-            ["--phase", "lex", "--check", "input.glorious"]
-                .into_iter()
-                .map(OsString::from)
-                .collect()
-        )
-        .is_err());
+        assert!(
+            parse(
+                ["--phase", "lex", "--check", "input.glorious"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3681,11 +3622,13 @@ mod tests {
             parse(vec![OsString::from("--capabilities")]).unwrap(),
             Command::Capabilities
         ));
-        assert!(parse(vec![
-            OsString::from("--capabilities"),
-            OsString::from("input.glorious")
-        ])
-        .is_err());
+        assert!(
+            parse(vec![
+                OsString::from("--capabilities"),
+                OsString::from("input.glorious")
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -3694,11 +3637,13 @@ mod tests {
             parse(vec![OsString::from("--serve")]).unwrap(),
             Command::Serve
         ));
-        assert!(parse(vec![
-            OsString::from("--serve"),
-            OsString::from("input.glorious")
-        ])
-        .is_err());
+        assert!(
+            parse(vec![
+                OsString::from("--serve"),
+                OsString::from("input.glorious")
+            ])
+            .is_err()
+        );
     }
 
     #[test]

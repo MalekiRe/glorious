@@ -292,6 +292,18 @@ impl CompilationDriver {
         true
     }
 
+    /// Configure lazy, independently validated LLVM fragment files. Unlike
+    /// the historical blob cache, this does not deserialize unrelated
+    /// functions before a request can start compiling.
+    pub fn configure_persistent_llvm_fragment_directory(&mut self, directory: std::path::PathBuf) {
+        self.llvm_fragment_cache
+            .configure_persistent_directory(directory);
+    }
+
+    pub fn persist_persistent_llvm_fragment_directory(&self) -> Result<(), String> {
+        self.llvm_fragment_cache.persist_to_directory()
+    }
+
     pub fn persistent_llvm_fragment_cache(&self) -> Result<Vec<u8>, bincode::Error> {
         self.llvm_fragment_cache.encode_persistent()
     }
