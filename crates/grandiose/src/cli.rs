@@ -27,7 +27,7 @@ use grandiose::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-incremental-cache DIR  durable private partitioned objects (-O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n\nnative incremental environment:\n  G1_NATIVE_OBJECT_WORKERS requests 1..=4 concurrent durable native object workers; the compiler clamps it to available parallelism (default: the same safe bound).\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-incremental-cache DIR  durable private partitioned objects (-O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --diagnostic-timings     attach per-phase elapsed timings to a --serve response\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n\nnative incremental environment:\n  G1_NATIVE_OBJECT_WORKERS requests 1..=4 concurrent durable native object workers; the compiler clamps it to available parallelism (default: the same safe bound).\n";
 
 const MAX_NATIVE_ALLOCATION_LIMIT: u64 = 1024 * 1024 * 1024;
 const SESSION_PROTOCOL: u32 = 1;
@@ -214,6 +214,7 @@ struct CompileCommand {
     native_incremental_cache: Option<PathBuf>,
     native_allocation_limit: Option<u64>,
     json_diagnostics: bool,
+    diagnostic_timings: bool,
 }
 
 enum Command {
@@ -339,6 +340,7 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         native_incremental_cache: None,
         native_allocation_limit: None,
         json_diagnostics: false,
+        diagnostic_timings: false,
     };
     let mut positional_only = false;
     while let Some(argument) = args.next() {
@@ -380,6 +382,13 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
                         return Err("`--diagnostics` may be specified only once".to_string());
                     }
                     command.json_diagnostics = true;
+                    continue;
+                }
+                "--diagnostic-timings" => {
+                    if command.diagnostic_timings {
+                        return Err("`--diagnostic-timings` may be specified only once".to_string());
+                    }
+                    command.diagnostic_timings = true;
                     continue;
                 }
                 "--dependency" => {
@@ -804,7 +813,35 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
             return 1;
         }
     };
-    compile_loaded(command, segments, None, None, stdout, stderr)
+    compile_loaded(command, segments, None, None, None, stdout, stderr)
+}
+
+}
+
+#[derive(Default)]
+struct CompileTiming {
+    compile_phases: Duration,
+    llvm_module: Duration,
+    llvm_partitions: Duration,
+    native_objects: Duration,
+    native_link: Duration,
+}
+
+impl CompileTiming {
+    fn milliseconds(duration: Duration) -> u64 {
+        duration.as_millis().try_into().unwrap_or(u64::MAX)
+    }
+
+    fn report(&self, source_load: Duration, total: Duration) -> SessionTiming {
+        SessionTiming {
+            source_load_ms: Self::milliseconds(source_load),
+            compile_phases_ms: Self::milliseconds(self.compile_phases),
+            llvm_module_ms: Self::milliseconds(self.llvm_module),
+            llvm_partitions_ms: Self::milliseconds(self.llvm_partitions),
+            native_objects_ms: Self::milliseconds(self.native_objects),
+            native_link_ms: Self::milliseconds(self.native_link),
+            total_ms: Self::milliseconds(total),
+        }
 }
 
 fn compile_loaded(
@@ -812,6 +849,7 @@ fn compile_loaded(
     mut segments: Vec<Segment>,
     mut incremental: Option<&mut CompilationDriver>,
     mut native_wild_relink: Option<&mut bool>,
+    mut timing: Option<&mut CompileTiming>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
@@ -912,10 +950,14 @@ fn compile_loaded(
     let options = CompileOptions {
         optimization_level: command.optimization_level,
     };
+    let phase_started = Instant::now();
     let compiled = match incremental.as_deref_mut() {
         Some(session) => session.compile_bundle(&bundle, options),
         None => compile_bundle_to_phases_with_options(&bundle, options),
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.compile_phases += phase_started.elapsed();
+    }
     let phases = match compiled {
         Ok(phases) => phases,
         Err(diagnostics) => {
@@ -955,10 +997,15 @@ fn compile_loaded(
         let module = if durable_native_cache {
             None
         } else {
-            match incremental.as_deref_mut().map_or_else(
+            let llvm_started = Instant::now();
+            let result = incremental.as_deref_mut().map_or_else(
                 || emit_llvm_ir(&phases, &llvm_options),
                 |driver| driver.emit_llvm_ir(&bundle, options, &phases, &llvm_options),
-            ) {
+            );
+            if let Some(timing) = timing.as_deref_mut() {
+                timing.llvm_module += llvm_started.elapsed();
+            }
+            match result {
                 Ok(module) => Some(module),
                 Err(diagnostics) => {
                     return report_diagnostics(
@@ -994,10 +1041,15 @@ fn compile_loaded(
         // process-local requests still take a fresh Wild link.
         if kind == EmitKind::Executable && command.native_incremental {
             if let Some(cache_dir) = &command.native_incremental_cache {
-                let units = match incremental.as_deref_mut().map_or_else(
+                let partitions_started = Instant::now();
+                let units_result = incremental.as_deref_mut().map_or_else(
                     || emit_llvm_native_object_units(&phases, &llvm_options),
                     |driver| driver.emit_llvm_native_object_units(&phases, &llvm_options),
-                ) {
+                );
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.llvm_partitions += partitions_started.elapsed();
+                }
+                let units = match units_result {
                     Ok(units) => units,
                     Err(diagnostics) => {
                         return report_diagnostics(
@@ -1050,12 +1102,17 @@ fn compile_loaded(
                         return 1;
                     }
                 };
-                let objects = match materialize_disk_partitioned_native_objects(
+                let objects_started = Instant::now();
+                let objects_result = materialize_disk_partitioned_native_objects(
                     &output,
                     cache_dir,
                     workers,
                     &jobs,
-                ) {
+                );
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.native_objects += objects_started.elapsed();
+                }
+                let objects = match objects_result {
                     Ok(objects) => objects,
                     Err(error) => {
                         let _ = writeln!(stderr, "grc: error: {error}");
@@ -1070,13 +1127,18 @@ fn compile_loaded(
                     }
                 };
                 let host = native_host.as_ref().expect("executable native host");
-                match materialize_disk_linked_native_executable(
+                let link_started = Instant::now();
+                let linked = materialize_disk_linked_native_executable(
                     &output,
                     host,
                     &objects,
                     cache_dir,
                     &link_inputs,
-                ) {
+                );
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.native_link += link_started.elapsed();
+                }
+                match linked {
                     Ok(wild_relinked) => {
                         if let Some(observed) = native_wild_relink.as_deref_mut() {
                             *observed = wild_relinked;
@@ -1090,7 +1152,12 @@ fn compile_loaded(
                 return 0;
             }
             if let Some(driver) = incremental.as_deref_mut() {
-                let units = match driver.emit_llvm_native_object_units(&phases, &llvm_options) {
+                let partitions_started = Instant::now();
+                let units_result = driver.emit_llvm_native_object_units(&phases, &llvm_options);
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.llvm_partitions += partitions_started.elapsed();
+                }
+                let units = match units_result {
                     Ok(units) => units,
                     Err(diagnostics) => {
                         return report_diagnostics(
@@ -2034,6 +2101,22 @@ struct SessionResponse<'a> {
     /// warm-iteration measurements reproducible across machines.
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_stats: Option<SessionCacheStats>,
+    /// Opt-in wall-clock attribution for this request. Timings are useful for
+    /// finding a bottleneck on one machine, not for cross-machine comparisons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timings: Option<SessionTiming>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct SessionTiming {
+    source_load_ms: u64,
+    /// Parsing through optimized MIR construction, including O3 passes.
+    compile_phases_ms: u64,
+    llvm_module_ms: u64,
+    llvm_partitions_ms: u64,
+    native_objects_ms: u64,
+    native_link_ms: u64,
+    total_ms: u64,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -2349,6 +2432,7 @@ fn session_protocol_error(
             native_object_cache: None,
             native_incremental: None,
             cache_stats: None,
+            timings: None,
         },
     )
 }
@@ -2423,6 +2507,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 native_object_cache: None,
                 native_incremental: None,
                 cache_stats: None,
+                timings: None,
             };
             return if write_session_response(output, &response).is_ok() {
                 0
@@ -2478,6 +2563,9 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             }
             continue;
         };
+        let request_started = Instant::now();
+        let diagnostic_timings = command.diagnostic_timings;
+        let source_load_started = Instant::now();
         let (segments, snapshot) = match load_session_segments(&command, &request.arguments) {
             Ok(loaded) => loaded,
             Err(error) => {
@@ -2498,6 +2586,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                     native_object_cache: None,
                     native_incremental: None,
                     cache_stats: None,
+                    timings: None,
                 };
                 if write_session_response(output, &response).is_err() {
                     return 1;
@@ -2505,6 +2594,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 continue;
             }
         };
+        let source_load = source_load_started.elapsed();
         let llvm_emission = matches!(
             command.emit,
             Some(EmitKind::LlvmIr | EmitKind::LlvmObject | EmitKind::Executable)
@@ -2517,11 +2607,13 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
         // A process-local executable request always links; the durable route
         // below overwrites this with whether its exact link-manifest missed.
         let mut wild_relink = native_executable_emission;
+        let mut compile_timing = diagnostic_timings.then(CompileTiming::default);
         let status = compile_loaded(
             command,
             segments,
             Some(&mut state.compiler),
             Some(&mut wild_relink),
+            compile_timing.as_mut(),
             &mut stdout,
             &mut stderr,
         );
@@ -2566,6 +2658,9 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             }
         });
         let cache_stats = (status == 0).then(|| state.compiler.stats().into());
+        let timings = compile_timing
+            .as_ref()
+            .map(|timing| timing.report(source_load, request_started.elapsed()));
         let native_incremental = (status == 0 && llvm_emission).then(|| {
             let stats = state.compiler.stats();
             NativeIncrementalReport {
@@ -2601,6 +2696,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             native_object_cache,
             native_incremental,
             cache_stats,
+            timings,
         };
         if write_session_response(output, &response).is_err() {
             return 1;
@@ -3284,6 +3380,27 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.contains("cannot be combined"));
+    }
+
+    #[test]
+    fn parses_opt_in_diagnostic_timings() {
+        let Command::Compile(command) = parse(
+            ["--diagnostic-timings", "input.glorious"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap() else {
+            panic!("expected a compile command")
+        };
+        assert!(command.diagnostic_timings);
+        assert!(parse(
+            ["--diagnostic-timings", "--diagnostic-timings", "input.glorious"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .is_err());
     }
 
     #[test]
