@@ -124,7 +124,7 @@ impl DenseWorklist {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PassId {
     ValidateRawMir,
     ImportAndValidatePlaceFlow,
@@ -11396,7 +11396,7 @@ fn run_transactional_pass_with_body_cache(
     pass: PassId,
     types: &[Type],
     global_remaining: &mut u64,
-    mut body_cache: Option<&mut dyn TransactionalPassBodyCache>,
+    mut body_cache: Option<&mut (dyn TransactionalPassBodyCache + '_)>,
 ) -> PassReport {
     // Direct custom-hook identity is distinct from structural destruction,
     // but cleanup simplification must still see those hooks recursively when
@@ -13683,12 +13683,19 @@ fn run_fixed_point(
     pass: PassId,
     types: &[Type],
     global_remaining: &mut u64,
+    mut body_cache: Option<&mut (dyn TransactionalPassBodyCache + '_)>,
 ) -> Result<(), ValidationError> {
     for _ in 0..FIXED_POINT_ROUNDS {
         if *global_remaining == 0 {
             break;
         }
-        let report = run_transactional_pass(program, pass, types, global_remaining);
+        let report = run_transactional_pass_with_body_cache(
+            program,
+            pass,
+            types,
+            global_remaining,
+            body_cache.as_deref_mut(),
+        );
         let stop = matches!(
             report.outcome,
             PassOutcome::Unchanged | PassOutcome::BudgetExhausted
@@ -13750,16 +13757,18 @@ fn run_post_inline_cleanup_fixed_point(
     program: &mut Program,
     types: &[Type],
     global_remaining: &mut u64,
+    mut body_cache: Option<&mut (dyn TransactionalPassBodyCache + '_)>,
 ) -> Result<(), ValidationError> {
     for _ in 0..FIXED_POINT_ROUNDS {
         if *global_remaining == 0 {
             break;
         }
-        let normalize = run_transactional_pass(
+        let normalize = run_transactional_pass_with_body_cache(
             program,
             PassId::NormalizeCfg,
             types,
             global_remaining,
+            body_cache.as_deref_mut(),
         );
         let normalize_stop = matches!(normalize.outcome, PassOutcome::Unchanged);
         let normalize_exhausted = matches!(normalize.outcome, PassOutcome::BudgetExhausted);
@@ -13767,11 +13776,12 @@ fn run_post_inline_cleanup_fixed_point(
         if *global_remaining == 0 || normalize_exhausted {
             break;
         }
-        let sparse = run_transactional_pass(
+        let sparse = run_transactional_pass_with_body_cache(
             program,
             PassId::SparseSimplify,
             types,
             global_remaining,
+            body_cache.as_deref_mut(),
         );
         let sparse_stop = matches!(sparse.outcome, PassOutcome::Unchanged);
         let sparse_exhausted = matches!(sparse.outcome, PassOutcome::BudgetExhausted);
@@ -13911,22 +13921,25 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             PassId::SparseSimplify,
             types,
             &mut global_remaining,
+            incremental_cleanup.as_deref_mut().map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         )?;
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::ScalarizeLocals,
                 types,
                 &mut global_remaining,
+                incremental_cleanup.as_deref_mut().map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::SimplifyCleanup,
                 types,
                 &mut global_remaining,
+                incremental_cleanup.as_deref_mut().map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -14004,6 +14017,7 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             PassId::SparseSimplify,
             types,
             &mut global_remaining,
+            None,
         )?;
         // O3 repeats the devirtualization/control/inlining family, then gives
         // its newly exposed local facts a distinct bounded fixed point. This
@@ -14045,6 +14059,7 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
                 PassId::SparseSimplify,
                 types,
                 &mut global_remaining,
+                None,
             )?;
         }
     }
@@ -14059,6 +14074,7 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             program,
             types,
             &mut global_remaining,
+            None,
         )?;
         if level.at_least(OptimizationLevel::O2) {
             // The first direct-call pass can turn an ordinary wrapper into a
@@ -14086,6 +14102,7 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
                 program,
                 types,
                 &mut global_remaining,
+                None,
             )?;
         }
     }

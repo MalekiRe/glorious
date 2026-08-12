@@ -59,6 +59,10 @@ pub struct IncrementalCompilationStats {
     /// boundary. This is deliberately separate from raw MIR lowering reuse:
     /// the entry is usable only when its consumed array-call summaries match.
     pub reused_cleanup_mir_bodies: usize,
+    /// Exact local O3 transformation snapshots restored after a body edit.
+    /// Snapshots are segregated by the complete MIR type/drop schema and are
+    /// checked again against their precise MIR input before use.
+    pub reused_optimizer_body_snapshots: usize,
     /// Structural trait/nominal/impl database restored after a callable-body
     /// edit. Span-keyed source const arguments are refreshed before use.
     pub reused_trait_databases: usize,
@@ -531,6 +535,7 @@ impl CompilationDriver {
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 reused_cleanup_mir_bodies: 0,
+                reused_optimizer_body_snapshots: 0,
                 reused_trait_databases: 0,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
             };
@@ -646,6 +651,7 @@ impl CompilationDriver {
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             reused_cleanup_mir_bodies: self.mir_cache.reused_cleanup_bodies,
+            reused_optimizer_body_snapshots: self.mir_cache.reused_optimizer_body_snapshots,
             reused_trait_databases: self.trait_db_cache.reused_databases,
             frontend: self.frontend_cache.stats(),
         };
@@ -672,11 +678,16 @@ fn llvm_source_fingerprint(bundle: &SourceBundle) -> [u8; 32] {
 pub(crate) struct IncrementalMirCache {
     schemas: VecDeque<CachedMirSchema>,
     entries: BTreeMap<(u64, u32), CachedMirBody>,
+    local_pass_snapshots: BTreeMap<
+        (u64, u32, crate::compiler_mir::optimizer::PassId),
+        VecDeque<crate::compiler_mir::optimizer::TransactionalPassBodySnapshot>,
+    >,
     active_schema: Option<u64>,
     next_schema: u64,
     lowered_bodies: usize,
     reused_bodies: usize,
     reused_cleanup_bodies: usize,
+    reused_optimizer_body_snapshots: usize,
 }
 
 #[derive(Clone)]
@@ -702,6 +713,7 @@ impl IncrementalMirCache {
         self.lowered_bodies = 0;
         self.reused_bodies = 0;
         self.reused_cleanup_bodies = 0;
+        self.reused_optimizer_body_snapshots = 0;
     }
 
     pub(crate) fn prepare(&mut self, types: &[Type], custom_drop_types: &[TypeId]) {
@@ -725,6 +737,8 @@ impl IncrementalMirCache {
             let evicted = self.schemas.pop_back().expect("length was checked");
             self.entries
                 .retain(|(schema, _), _| *schema != evicted.id);
+            self.local_pass_snapshots
+                .retain(|(schema, _, _), _| *schema != evicted.id);
         }
     }
 
@@ -790,6 +804,48 @@ impl IncrementalMirCache {
                     cleanup: None,
                 },
             );
+    }
+}
+
+impl crate::compiler_mir::optimizer::TransactionalPassBodyCache for IncrementalMirCache {
+    fn restore(
+        &mut self,
+        pass: crate::compiler_mir::optimizer::PassId,
+        input: &mir::Function,
+        work_limit: u64,
+    ) -> Option<crate::compiler_mir::optimizer::TransactionalPassBodySnapshot> {
+        let (schema, declaration) = self.active_key(input.declaration)?;
+        let key = (schema, declaration, pass);
+        let snapshots = self.local_pass_snapshots.get_mut(&key)?;
+        let position = snapshots.iter().position(|snapshot| {
+            snapshot.input == *input
+                && snapshot.work_units <= work_limit
+                && snapshot.outcome
+                    != crate::compiler_mir::optimizer::PassOutcome::BudgetExhausted
+        })?;
+        let snapshot = snapshots.remove(position).expect("snapshot index was found");
+        snapshots.push_front(snapshot.clone());
+        self.reused_optimizer_body_snapshots += 1;
+        Some(snapshot)
+    }
+
+    fn record(
+        &mut self,
+        pass: crate::compiler_mir::optimizer::PassId,
+        snapshot: crate::compiler_mir::optimizer::TransactionalPassBodySnapshot,
+    ) {
+        let Some((schema, declaration)) = self.active_key(snapshot.input.declaration) else {
+            return;
+        };
+        let snapshots = self
+            .local_pass_snapshots
+            .entry((schema, declaration, pass))
+            .or_default();
+        if let Some(position) = snapshots.iter().position(|cached| cached.input == snapshot.input) {
+            snapshots.remove(position);
+        }
+        snapshots.push_front(snapshot);
+        snapshots.truncate(3);
     }
 }
 

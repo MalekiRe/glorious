@@ -165,6 +165,29 @@ fn failed_revision_rolls_back_incremental_inference_transaction() {
 }
 
 #[test]
+fn incremental_o1_reuses_exact_local_optimizer_snapshots() {
+    let o1 = CompileOptions {
+        optimization_level: OptimizationLevel::O1,
+    };
+    let mut session = IncrementalCompilerSession::new();
+    session.compile_bundle(&bundle("1", "i64"), o1).unwrap();
+
+    let warm = session.compile_bundle(&bundle("2", "i64"), o1).unwrap();
+    let stats = session.stats();
+    assert_eq!(stats.reused_phase_artifacts, 0, "{stats:?}");
+    assert!(
+        stats.reused_optimizer_body_snapshots > 0,
+        "unchanged O1 bodies should restore exact local snapshots: {stats:?}"
+    );
+
+    let mut ordinary = IncrementalCompilerSession::new();
+    let expected = ordinary.compile_bundle(&bundle("2", "i64"), o1).unwrap();
+    assert_eq!(warm.core_fingerprint(), expected.core_fingerprint());
+    assert_eq!(warm.mir_fingerprint(), expected.mir_fingerprint());
+    assert_eq!(warm.artifact, expected.artifact);
+}
+
+#[test]
 fn verified_phase_cache_is_exact_and_compile_option_sensitive() {
     let source = bundle("1", "i64");
     let mut session = IncrementalCompilerSession::new();
