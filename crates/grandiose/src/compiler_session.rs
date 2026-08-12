@@ -660,14 +660,23 @@ fn llvm_source_fingerprint(bundle: &SourceBundle) -> [u8; 32] {
 
 #[derive(Clone, Default)]
 pub(crate) struct IncrementalMirCache {
-    types: Vec<Type>,
-    custom_drop_types: Vec<TypeId>,
-    entries: BTreeMap<u32, CachedMirBody>,
-    initialized: bool,
+    schemas: VecDeque<CachedMirSchema>,
+    entries: BTreeMap<(u64, u32), CachedMirBody>,
+    active_schema: Option<u64>,
+    next_schema: u64,
     lowered_bodies: usize,
     reused_bodies: usize,
     reused_cleanup_bodies: usize,
 }
+
+#[derive(Clone)]
+struct CachedMirSchema {
+    id: u64,
+    types: Vec<Type>,
+    custom_drop_types: Vec<TypeId>,
+}
+
+const INCREMENTAL_MIR_SCHEMA_CAPACITY: usize = 4;
 
 #[derive(Clone)]
 struct CachedMirBody {
@@ -686,19 +695,35 @@ impl IncrementalMirCache {
     }
 
     pub(crate) fn prepare(&mut self, types: &[Type], custom_drop_types: &[TypeId]) {
-        if !self.initialized
-            || self.types != types
-            || self.custom_drop_types.as_slice() != custom_drop_types
-        {
-            self.types = types.to_vec();
-            self.custom_drop_types = custom_drop_types.to_vec();
-            self.entries.clear();
-            self.initialized = true;
+        if let Some(position) = self.schemas.iter().position(|schema| {
+            schema.types == types && schema.custom_drop_types.as_slice() == custom_drop_types
+        }) {
+            let schema = self.schemas.remove(position).expect("schema index was found");
+            self.active_schema = Some(schema.id);
+            self.schemas.push_front(schema);
+            return;
+        }
+        self.next_schema = self.next_schema.wrapping_add(1);
+        let schema = CachedMirSchema {
+            id: self.next_schema,
+            types: types.to_vec(),
+            custom_drop_types: custom_drop_types.to_vec(),
+        };
+        self.active_schema = Some(schema.id);
+        self.schemas.push_front(schema);
+        while self.schemas.len() > INCREMENTAL_MIR_SCHEMA_CAPACITY {
+            let evicted = self.schemas.pop_back().expect("length was checked");
+            self.entries
+                .retain(|(schema, _), _| *schema != evicted.id);
         }
     }
 
+    fn active_key(&self, declaration: u32) -> Option<(u64, u32)> {
+        self.active_schema.map(|schema| (schema, declaration))
+    }
+
     pub(crate) fn reuse(&mut self, function: &core::Function) -> Option<mir::Function> {
-        let cached = self.entries.get(&function.declaration)?;
+        let cached = self.entries.get(&self.active_key(function.declaration)?)?;
         if cached.core != *function {
             return None;
         }
@@ -714,7 +739,7 @@ impl IncrementalMirCache {
         dependency_fingerprint: Option<u64>,
     ) -> Option<mir::Function> {
         let dependency_fingerprint = dependency_fingerprint?;
-        let cached = self.entries.get(&function.declaration)?;
+        let cached = self.entries.get(&self.active_key(function.declaration)?)?;
         let (cached_fingerprint, cleanup) = cached.cleanup.as_ref()?;
         if *cached_fingerprint != dependency_fingerprint {
             return None;
@@ -731,7 +756,10 @@ impl IncrementalMirCache {
         let Some(dependency_fingerprint) = dependency_fingerprint else {
             return;
         };
-        let Some(cached) = self.entries.get_mut(&function.declaration) else {
+        let Some(key) = self.active_key(function.declaration) else {
+            return;
+        };
+        let Some(cached) = self.entries.get_mut(&key) else {
             // Pattern/synthesized bodies have no exact raw-Core authority.
             return;
         };
@@ -740,9 +768,12 @@ impl IncrementalMirCache {
 
     pub(crate) fn insert(&mut self, function: core::Function, lowered: mir::Function) {
         self.lowered_bodies += 1;
+        let Some(key) = self.active_key(function.declaration) else {
+            return;
+        };
         self.entries
             .insert(
-                function.declaration,
+                key,
                 CachedMirBody {
                     core: function,
                     lowered,
