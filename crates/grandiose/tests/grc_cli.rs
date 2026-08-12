@@ -238,13 +238,12 @@ fn release_warm_llvm_serve_iteration_records_cache_evidence() {
 /// `tooling/ram-gate.sh cargo test --release -p grandiose --test grc_cli \
 /// release_native_serve_warm_body_edit_reports_phase_timings -- --ignored --exact --nocapture`
 ///
-/// Disabled: this historical harness seeded an empty native cache. Warm-only
-/// iteration checks must attach to an already-running, already-warm server.
+/// The required release server is built separately so the measurement never
+/// accidentally times a debug `grc` binary:
+/// `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc`.
 #[test]
 #[ignore = "release-only native warm body-edit timing harness"]
 fn release_native_serve_warm_body_edit_reports_phase_timings() {
-    panic!("disabled: this harness would seed an empty cache with a prohibited cold compile");
-    /*
     let directory = tempdir().unwrap();
     let main = directory.path().join("main.glorious");
     let leaf = directory.path().join("leaf.glorious");
@@ -375,7 +374,6 @@ fn release_native_serve_warm_body_edit_reports_phase_timings() {
     if let Some(path) = std::env::var_os("G1_NATIVE_WARM_TIMING_FILE") {
         fs::write(path, timing).unwrap();
     }
-    */
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
@@ -432,13 +430,12 @@ fn durable_object_manifests(cache: &Path) -> BTreeSet<std::ffi::OsString> {
         .collect()
 }
 
-/// Disabled: this historical harness seeded an empty native cache before its
-/// edit request. Full self-host iteration must use retained warm state only.
+/// Expensive full-self-host release check. It intentionally exercises the
+/// persistent frontend/type/MIR driver and a private durable object cache at
+/// the same time; cache-work evidence is asserted, never wall-clock time.
 #[test]
 #[ignore = "release-only copied self-host serve warm-edit harness"]
 fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
-    panic!("disabled: this harness would seed an empty cache with a prohibited cold compile");
-    /*
     let directory = tempdir().unwrap();
     let cache = directory.path().join("native-cache");
     fs::create_dir_all(&cache).unwrap();
@@ -537,7 +534,6 @@ fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
     if let Some(path) = std::env::var_os("G1_SELFHOST_TIMING_FILE") {
         fs::write(path, timings).unwrap();
     }
-    */
 }
 
 #[test]
