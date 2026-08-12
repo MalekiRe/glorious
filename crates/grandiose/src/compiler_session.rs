@@ -93,9 +93,11 @@ pub struct CompilationDriver {
 
 #[derive(Clone, Default)]
 pub(crate) struct IncrementalTraitDbCache {
-    entry: Option<CachedTraitDb>,
+    entries: VecDeque<CachedTraitDb>,
     reused_databases: usize,
 }
+
+const INCREMENTAL_TRAIT_DB_CONTEXT_CAPACITY: usize = 4;
 
 #[derive(Clone)]
 struct CachedTraitDb {
@@ -117,23 +119,31 @@ impl IncrementalTraitDbCache {
         manifest: &TrustedTraitManifest,
         context: &[u8],
     ) -> Result<TraitDb, Vec<Diagnostic>> {
-        if let Some(cached) = self
-            .entry
-            .as_ref()
-            .filter(|cached| cached.context == context && cached.manifest == *manifest)
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|cached| cached.context == context && cached.manifest == *manifest)
         {
+            let cached = self.entries.remove(index).expect("trait-db index was found");
             self.reused_databases = self.reused_databases.saturating_add(1);
-            return Ok(cached
+            let database = cached
                 .database
                 .clone()
-                .with_current_type_const_arguments(program));
+                .with_current_type_const_arguments(program);
+            self.entries.push_front(cached);
+            return Ok(database);
         }
         let database = TraitDb::build_with_manifest(program, manifest)?;
-        self.entry = Some(CachedTraitDb {
+        self.entries.retain(|cached| {
+            cached.context != context || cached.manifest != *manifest
+        });
+        self.entries.push_front(CachedTraitDb {
             context: context.to_vec(),
             manifest: manifest.clone(),
             database: database.clone(),
         });
+        self.entries
+            .truncate(INCREMENTAL_TRAIT_DB_CONTEXT_CAPACITY);
         Ok(database)
     }
 }
