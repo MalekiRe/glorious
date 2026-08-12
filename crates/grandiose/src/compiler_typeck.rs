@@ -4,7 +4,7 @@
 //! runtime descriptor allocation.  Its keys and types are suitable for discovering
 //! requirements before numeric bytecode identifiers exist.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
@@ -813,9 +813,31 @@ struct CachedTypedBody {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IncrementalTypeCache {
+    /// The currently compiling context is diagnostic state only. Cached
+    /// bodies are keyed by their own exact context so a structural edit never
+    /// destroys entries belonging to unaffected prior revisions.
     context_fingerprint: Option<u64>,
-    bodies: BTreeMap<DeclarationKey, CachedTypedBody>,
+    /// Bounded revision retention avoids letting unusual header-edit sessions
+    /// grow forever, while eviction removes only one old context at a time.
+    context_lru: VecDeque<u64>,
+    bodies: BTreeMap<(u64, DeclarationKey), CachedTypedBody>,
     pub(crate) stats: IncrementalTypeStats,
+}
+
+const INCREMENTAL_TYPE_CONTEXT_CAPACITY: usize = 4;
+
+impl IncrementalTypeCache {
+    fn select_context(&mut self, context: u64) {
+        self.context_fingerprint = Some(context);
+        if let Some(position) = self.context_lru.iter().position(|known| *known == context) {
+            self.context_lru.remove(position);
+        }
+        self.context_lru.push_front(context);
+        while self.context_lru.len() > INCREMENTAL_TYPE_CONTEXT_CAPACITY {
+            let evicted = self.context_lru.pop_back().expect("length was checked");
+            self.bodies.retain(|(cached_context, _), _| *cached_context != evicted);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1954,10 +1976,7 @@ pub(crate) fn type_program_incremental(
     let mut incremental = incremental;
     if let Some((cache, context_fingerprint, _)) = incremental.as_mut() {
         cache.stats = IncrementalTypeStats::default();
-        if cache.context_fingerprint != Some(*context_fingerprint) {
-            cache.context_fingerprint = Some(*context_fingerprint);
-            cache.bodies.clear();
-        }
+        cache.select_context(*context_fingerprint);
     }
     let mut tables = tables.clone();
     let mut bodies = BTreeMap::new();
@@ -2043,9 +2062,11 @@ pub(crate) fn type_program_incremental(
             .as_ref()
             .and_then(|(_, _, fingerprints)| fingerprints.get(&shape.declaration))
             .copied();
-        if let Some((cache, _, _)) = incremental.as_mut()
+        if let Some((cache, context_fingerprint, _)) = incremental.as_mut()
             && let Some(fingerprint) = fingerprint
-            && let Some(cached) = cache.bodies.get(&shape.declaration)
+            && let Some(cached) = cache
+                .bodies
+                .get(&(*context_fingerprint, shape.declaration.clone()))
             && cached.fingerprint == fingerprint
         {
             apply_label_results(&mut labels, &shape.declaration, &cached.label_results);
@@ -2074,11 +2095,11 @@ pub(crate) fn type_program_incremental(
         assignment_reference_requirements.extend(body_requirements.iter().cloned());
         refinements.insert(shape.declaration.clone(), body_refinements.clone());
         bodies.insert(shape.declaration.clone(), body.clone());
-        if let Some((cache, _, _)) = incremental.as_mut()
+        if let Some((cache, context_fingerprint, _)) = incremental.as_mut()
             && let Some(fingerprint) = fingerprint
         {
             cache.bodies.insert(
-                shape.declaration.clone(),
+                (*context_fingerprint, shape.declaration.clone()),
                 CachedTypedBody {
                     fingerprint,
                     body,
