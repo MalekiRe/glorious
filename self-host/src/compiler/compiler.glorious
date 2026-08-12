@@ -86,13 +86,13 @@ checked_u32(value: usize) -> u32 {
 }
 
 usize_from_u32(value: u32) -> usize {
-    wrapping_convert_to_usize(value)
+    if(value == 0) { 0 } else { wrapping_convert_to_usize(value) }
 }
 
 compile_error_message(value: &CompileError) -> String {
     handle *value {
         CompileError::Lex(_) =>
-            "self-host compiler: lexical analysis failed",
+            "self-host compiler: lexical analysis fault!",
         CompileError::Scan(_) =>
             "self-host compiler: declaration scanning failed",
         CompileError::Headers(_) =>
