@@ -804,13 +804,14 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
             return 1;
         }
     };
-    compile_loaded(command, segments, None, stdout, stderr)
+    compile_loaded(command, segments, None, None, stdout, stderr)
 }
 
 fn compile_loaded(
     command: CompileCommand,
     mut segments: Vec<Segment>,
     mut incremental: Option<&mut CompilationDriver>,
+    mut native_wild_relink: Option<&mut bool>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
@@ -1069,15 +1070,22 @@ fn compile_loaded(
                     }
                 };
                 let host = native_host.as_ref().expect("executable native host");
-                if let Err(error) = materialize_disk_linked_native_executable(
+                match materialize_disk_linked_native_executable(
                     &output,
                     host,
                     &objects,
                     cache_dir,
                     &link_inputs,
                 ) {
-                    let _ = writeln!(stderr, "grc: error: {error}");
-                    return 1;
+                    Ok(wild_relinked) => {
+                        if let Some(observed) = native_wild_relink.as_deref_mut() {
+                            *observed = wild_relinked;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = writeln!(stderr, "grc: error: {error}");
+                        return 1;
+                    }
                 }
                 return 0;
             }
@@ -1909,21 +1917,22 @@ fn native_link_toolchain_abi() -> Result<String, String> {
 
 /// Reuse a durable linked executable only when its manifest binds the exact
 /// ordered object bytes, bundled host runtime, and current Clang/Wild ABI.
-/// A miss always follows the ordinary required Wild link path.
+/// A miss always follows the ordinary required Wild link path. The returned
+/// flag is true only when this invocation actually performed that link.
 fn materialize_disk_linked_native_executable(
     output: &Path,
     host: &TemporaryNativeHost,
     objects: &[TemporaryNativeObject],
     cache_dir: &Path,
     inputs: &DiskNativeLinkInputs,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let link_abi = native_link_toolchain_abi()?;
     let key = DiskLinkCacheKey::new(cache_dir, inputs, &link_abi);
     std::fs::create_dir_all(key.executable.parent().expect("link cache parent"))
         .map_err(|error| format!("could not create native link cache: {error}"))?;
     let _lock = DiskCacheLock::acquire(key.lock.clone())?;
-    let _bytes = if let Some(bytes) = key.read_valid(inputs, &link_abi) {
-        bytes
+    let wild_relinked = if key.read_valid(inputs, &link_abi).is_some() {
+        false
     } else {
         let temporary = disk_cache_temporary(
             key.executable.parent().expect("link cache parent"),
@@ -1966,7 +1975,7 @@ fn materialize_disk_linked_native_executable(
                 "could not publish native link cache manifest: {error}"
             ));
         }
-        bytes
+        true
     };
     std::fs::copy(&key.executable, output).map_err(|error| {
         format!(
@@ -1982,7 +1991,8 @@ fn materialize_disk_linked_native_executable(
             "could not preserve cached native executable permissions {}: {error}",
             output.display()
         )
-    })
+    })?;
+    Ok(wild_relinked)
 }
 
 #[derive(Deserialize)]
@@ -2076,9 +2086,9 @@ impl From<grandiose::compiler_session::IncrementalCompilationStats> for SessionC
 /// Stable JSON-line evidence for a native incremental request.
 ///
 /// The units are LLVM-reachable function fragments for IR and native object
-/// units for code generation. Executable units are retained only inside the
-/// serve process; the fields intentionally avoid promising a filesystem cache
-/// or an executable cache. Every executable request takes a fresh Wild link.
+/// units for code generation. `wild_relink` distinguishes a process-local
+/// executable request (always true) from a durable-cache request whose exact
+/// object and toolchain manifest can reuse an already-linked executable.
 #[derive(Clone, Copy, Serialize)]
 struct NativeIncrementalReport {
     cache_scope: &'static str,
@@ -2504,10 +2514,14 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
         let native_incremental_emission = command.native_incremental;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // A process-local executable request always links; the durable route
+        // below overwrites this with whether its exact link-manifest missed.
+        let mut wild_relink = native_executable_emission;
         let status = compile_loaded(
             command,
             segments,
             Some(&mut state.compiler),
+            Some(&mut wild_relink),
             &mut stdout,
             &mut stderr,
         );
@@ -2571,7 +2585,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 function_objects_reused: stats.reused_native_function_objects,
                 function_objects_compiled: stats.emitted_native_function_objects,
                 shared_objects_compiled: stats.emitted_native_shared_objects,
-                wild_relink: native_executable_emission,
+                wild_relink,
             }
         });
         let response = SessionResponse {

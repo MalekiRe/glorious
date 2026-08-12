@@ -586,6 +586,50 @@ fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relin
 }
 
 #[test]
+fn persistent_serve_reports_durable_exact_link_cache_hit() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("durable-link-cache.glorious");
+    let cache = directory.path().join("native-cache");
+    let first = directory.path().join("first-native");
+    let second = directory.path().join("second-native");
+    write(&input, "main() -> () { () }");
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O3",
+            "--emit",
+            "executable",
+            "--native-incremental-cache",
+            cache.display().to_string(),
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+    let cold = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(&first),
+    }));
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["wild_relink"], true, "{cold}");
+
+    let warm = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(&second),
+    }));
+    assert_eq!(warm["status"], 0, "{warm}");
+    assert_eq!(
+        warm["native_incremental"]["wild_relink"], false,
+        "an exact durable object/link manifest must reuse its executable without a Wild relink: {warm}"
+    );
+    assert_eq!(fs::read(&second).unwrap(), fs::read(&first).unwrap());
+}
+
+#[test]
 fn disk_native_incremental_cache_reuses_sibling_object_across_processes() {
     let directory = tempdir().unwrap();
     let input = directory.path().join("disk-cache.glorious");
