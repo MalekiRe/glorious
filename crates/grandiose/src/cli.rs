@@ -816,8 +816,6 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
     compile_loaded(command, segments, None, None, None, stdout, stderr)
 }
 
-}
-
 #[derive(Default)]
 struct CompileTiming {
     compile_phases: Duration,
@@ -841,7 +839,9 @@ impl CompileTiming {
             native_objects_ms: Self::milliseconds(self.native_objects),
             native_link_ms: Self::milliseconds(self.native_link),
             total_ms: Self::milliseconds(total),
-        }
+    }
+}
+
 }
 
 fn compile_loaded(
