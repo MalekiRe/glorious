@@ -9925,15 +9925,16 @@ fn compile_program_with_phases(
             ]
         })?;
     timings.mark("lower-mir");
-    let optimization_result = mir::optimizer::optimize_program_with_control_tables_and_plan_incremental(
-        &mut mir_program,
-        &artifact.types,
-        &artifact.protocols,
-        &artifact.handler_defs,
-        options.optimization_level,
-        optimizer_plan,
-        incremental_mir,
-    );
+    let optimization_result =
+        mir::optimizer::optimize_program_with_control_tables_and_plan_incremental(
+            &mut mir_program,
+            &artifact.types,
+            &artifact.protocols,
+            &artifact.handler_defs,
+            options.optimization_level,
+            optimizer_plan,
+            incremental_mir.as_deref_mut(),
+        );
     let mut optimization_report = optimization_result.map_err(|error| {
         vec![
             Diagnostic::plain(format!(
@@ -9943,6 +9944,28 @@ fn compile_program_with_phases(
         ]
     })?;
     timings.mark("optimize-mir");
+    let emission_prepared = incremental_mir
+        .as_deref_mut()
+        .map(|cache| {
+            mir::optimizer::restore_emission_prepared_bodies(
+                &mut mir_program,
+                &artifact.types,
+                cache,
+            )
+        })
+        .unwrap_or_default();
+    // Keep the exact pre-edge bodies that this request newly prepared. The
+    // durable cache only becomes reusable after the final bytecode verifier
+    // succeeds below; later register-layout lowering intentionally changes
+    // the live MIR body, so this pre-layout identity is the publication key.
+    let emission_prepared_inputs = incremental_mir.as_ref().map(|_| {
+        mir_program
+            .functions
+            .iter()
+            .filter(|function| !emission_prepared.contains(&function.declaration))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     let lowering_work = mir_program
         .functions
         .iter()
@@ -9955,18 +9978,21 @@ fn compile_program_with_phases(
                     .sum::<u64>()
         })
         .sum();
-    let edge_copies_canonicalized = mir::optimizer::canonicalize_dead_edge_copies_for_emission(
-        &mut mir_program,
-        &artifact.types,
-    )
-    .map_err(|error| {
-        vec![
-            Diagnostic::plain(format!(
-                "MIR edge-copy canonicalization rejected its input or output: {error}"
-            ))
-            .with_code("G1OPT999"),
-        ]
-    })?;
+    let edge_copies_canonicalized =
+        mir::optimizer::canonicalize_dead_edge_copies_for_emission_incremental(
+            &mut mir_program,
+            &artifact.types,
+            incremental_mir.as_deref_mut(),
+            &emission_prepared,
+        )
+        .map_err(|error| {
+            vec![
+                Diagnostic::plain(format!(
+                    "MIR edge-copy canonicalization rejected its input or output: {error}"
+                ))
+                .with_code("G1OPT999"),
+            ]
+        })?;
     let _registers_compacted =
         mir::optimizer::compact_live_registers_for_emission(&mut mir_program, &artifact.types)
             .map_err(|error| {
@@ -10255,7 +10281,13 @@ fn compile_program_with_phases(
     // Validate MIR-derived cleanup identities before the final dense rename:
     // the latter is a representation-only bijection and intentionally has no
     // source-level register identity to compare against.
-    cross_validate_cleanup_maps(&artifact, &mir_program, &peephole_pc_maps).map_err(|error| {
+    cross_validate_cleanup_maps(
+        &artifact,
+        &mir_program,
+        &peephole_pc_maps,
+        &emission_prepared,
+    )
+    .map_err(|error| {
         vec![
             Diagnostic::plain(format!(
                 "bytecode cleanup maps disagree with the MIR ownership facts: {error}"
@@ -10525,6 +10557,11 @@ fn compile_program_with_phases(
             ]
     })?;
     timings.mark("verify-artifact");
+    if let Some(cache) = incremental_mir.as_deref_mut() {
+        for input in emission_prepared_inputs.as_deref().unwrap_or_default() {
+            cache.verify_emission_prepared(input);
+        }
+    }
     optimization_report
         .passes
         .push(mir::OptimizationPassReport {
@@ -57115,16 +57152,22 @@ fn cross_validate_cleanup_maps(
     artifact: &Artifact,
     mir_program: &mir::Program,
     pc_maps: &[Option<PeepholePcMap>],
+    already_prepared: &BTreeSet<u32>,
 ) -> Result<(), String> {
     // Bytecode structurally verifies every encoded switch successor, including
     // arms the semantic enum-refinement solver can prove impossible. Compare
     // serialization against that same physical CFG solution; the refined
     // ownership solution has already passed its independent MIR validation.
-    let cleanup_lists =
-        mir::optimizer::derive_program_serialization_cleanup_lists(mir_program, &artifact.types)
-            .map_err(|error| error.to_string())?;
+    let cleanup_lists = mir::optimizer::derive_program_serialization_cleanup_lists_except(
+        mir_program,
+        &artifact.types,
+        already_prepared,
+    )
+    .map_err(|error| error.to_string())?;
     for (fid, function) in mir_program.functions.iter().enumerate() {
-        let lists = &cleanup_lists[fid];
+        let Some(lists) = &cleanup_lists[fid] else {
+            continue;
+        };
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
             .map_err(|error| error.to_string())?;
         let mut label_anchor_registers = BTreeMap::<u32, Vec<u32>>::new();

@@ -12770,10 +12770,57 @@ pub(crate) fn derive_cleanup_lists(
 /// leaves an extra initialized source register that is absent from the
 /// destination's cleanup state. Canonicalizing before emission makes the MIR
 /// ownership facts and the verifier-visible transfer agree.
+///
+/// Restore representation-prepared bodies before the edge pass. Each entry is
+/// checked against the exact O3 MIR body and current interprocedural ownership
+/// summaries, so this remains a per-function cache boundary.
+pub(crate) fn restore_emission_prepared_bodies(
+    program: &mut Program,
+    types: &[Type],
+    cache: &mut crate::compiler_session::IncrementalMirCache,
+) -> BTreeSet<u32> {
+    let summaries = regions::array_call_summaries(program, types);
+    let mut restored = BTreeSet::new();
+    for function in &mut program.functions {
+        let Some(dependency) = cleanup_dependency_fingerprint(function, &summaries) else {
+            continue;
+        };
+        if let Some(output) = cache.reuse_emission_prepared(function, dependency) {
+            restored.insert(function.declaration);
+            *function = output;
+        }
+    }
+    restored
+}
+
+#[cfg(test)]
 pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     program: &mut Program,
     types: &[Type],
 ) -> Result<u64, ValidationError> {
+    canonicalize_dead_edge_copies_for_emission_incremental(program, types, None, &BTreeSet::new())
+}
+
+/// Incremental variant of edge-copy canonicalization. Bodies restored by
+/// `restore_emission_prepared_bodies` have already completed this exact
+/// representation lowering and are excluded from both cleanup-solver rounds.
+pub(crate) fn canonicalize_dead_edge_copies_for_emission_incremental(
+    program: &mut Program,
+    types: &[Type],
+    cache: Option<&mut crate::compiler_session::IncrementalMirCache>,
+    already_prepared: &BTreeSet<u32>,
+) -> Result<u64, ValidationError> {
+    let cache_inputs = cache.as_ref().map(|_| {
+        program
+            .functions
+            .iter()
+            .filter(|function| !already_prepared.contains(&function.declaration))
+            .map(|function| (function.declaration, function.clone()))
+            .collect::<BTreeMap<_, _>>()
+    });
+    let cache_dependencies = cache
+        .as_ref()
+        .map(|_| regions::array_call_summaries(program, types));
     let mir_snapshot_path = std::env::var_os("G1_PRE_EDGE_MIR");
     if let Some(path) = &mir_snapshot_path {
         std::fs::write(&path, program.canonical_text()).map_err(|write_error| ValidationError {
@@ -12787,6 +12834,9 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     }
     let mut changed = 0_u64;
     for function in &mut program.functions {
+        if already_prepared.contains(&function.declaration) {
+            continue;
+        }
         let changed_before = changed;
         let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
             .is_some_and(|filter| function.name.contains(&filter.to_string_lossy().as_ref()));
@@ -12863,8 +12913,12 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     // an edge.
     // Keeping this as an ordinary MIR cleanup block means every later phase,
     // including move-path and loan verification, observes the retirement.
-    let cleanup_lists = derive_program_serialization_cleanup_lists(program, types)?;
+    let cleanup_lists =
+        derive_program_serialization_cleanup_lists_except(program, types, already_prepared)?;
     for (function, lists) in program.functions.iter_mut().zip(cleanup_lists) {
+        let Some(lists) = lists else {
+            continue;
+        };
         let function_name = function.name.clone();
         let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
             .is_some_and(|filter| function_name.contains(filter.to_string_lossy().as_ref()));
@@ -13243,7 +13297,20 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     refresh_invalidated_flow(program, types)?;
     // No emission-only assumption bypasses the ordinary ownership, loan, or
     // physical-switch checks.
-    derive_program_serialization_cleanup_lists(program, types)?;
+    derive_program_serialization_cleanup_lists_except(program, types, already_prepared)?;
+    if let (Some(cache), Some(inputs), Some(dependencies)) =
+        (cache, cache_inputs, cache_dependencies)
+    {
+        for function in &program.functions {
+            let Some(input) = inputs.get(&function.declaration) else {
+                continue;
+            };
+            let Some(dependency) = cleanup_dependency_fingerprint(input, &dependencies) else {
+                continue;
+            };
+            cache.cache_emission_prepared(input, function, dependency);
+        }
+    }
     if let Some(path) = mir_snapshot_path {
         let mut post_path = path;
         post_path.push(".post");
@@ -13269,11 +13336,29 @@ pub(crate) fn derive_program_serialization_cleanup_lists(
     program: &Program,
     types: &[Type],
 ) -> Result<Vec<BTreeMap<u32, Vec<Vec<Register>>>>, ValidationError> {
+    derive_program_serialization_cleanup_lists_except(program, types, &BTreeSet::new()).map(
+        |lists| {
+            lists
+                .into_iter()
+                .map(|lists| lists.expect("an empty exclusion set returns every cleanup list"))
+                .collect()
+        },
+    )
+}
+
+pub(crate) fn derive_program_serialization_cleanup_lists_except(
+    program: &Program,
+    types: &[Type],
+    already_prepared: &BTreeSet<u32>,
+) -> Result<Vec<Option<BTreeMap<u32, Vec<Vec<Register>>>>>, ValidationError> {
     let array_calls = regions::array_call_summaries(program, types);
     program
         .functions
         .iter()
         .map(|function| {
+            if already_prepared.contains(&function.declaration) {
+                return Ok(None);
+            }
             let locals = bridged_locals(function, types);
             let context = regions::FlowContext {
                 function,
@@ -13284,9 +13369,11 @@ pub(crate) fn derive_program_serialization_cleanup_lists(
                 strict: strict_flow(function),
                 refine_enum_switches: false,
             };
-            Ok(regions::solve(&context)
-                .map_err(|error| flow_to_validation(function, error))?
-                .cleanup_lists)
+            Ok(Some(
+                regions::solve(&context)
+                    .map_err(|error| flow_to_validation(function, error))?
+                    .cleanup_lists,
+            ))
         })
         .collect()
 }

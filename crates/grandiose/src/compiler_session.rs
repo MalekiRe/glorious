@@ -786,6 +786,8 @@ pub(crate) struct IncrementalMirCache {
     optimized_disk_directory: Option<PathBuf>,
     recursive_optimized: BTreeMap<RecursiveOptimizedMirKey, RecursiveOptimizedMirEntry>,
     recursive_optimized_disk_directory: Option<PathBuf>,
+    emission_prepared: BTreeMap<EmissionPreparedMirKey, EmissionPreparedMirEntry>,
+    emission_prepared_disk_directory: Option<PathBuf>,
     final_validation: BTreeMap<FinalValidationKey, FinalValidationEntry>,
     final_validation_disk_directory: Option<PathBuf>,
     active_schema: Option<u64>,
@@ -891,6 +893,35 @@ struct PersistentRecursiveOptimizedMirEntry {
 
 const PERSISTENT_RECURSIVE_OPTIMIZED_MIR_ENTRY_SCHEMA: u32 = 1;
 
+/// Post-O3 edge-copy/cleanup normalization is a representation-only
+/// per-function lowering. Retaining it separately lets a warm native build
+/// avoid re-solving ownership for every unchanged O3 body before bytecode
+/// emission.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct EmissionPreparedMirKey {
+    schema: u64,
+    declaration: u32,
+    dependency_fingerprint: u64,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct EmissionPreparedMirEntry {
+    input: mir::Function,
+    output: mir::Function,
+    verified: bool,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentEmissionPreparedMirEntry {
+    schema: u32,
+    key: EmissionPreparedMirKey,
+    input: mir::Function,
+    output: mir::Function,
+    verified: bool,
+}
+
+const PERSISTENT_EMISSION_PREPARED_MIR_ENTRY_SCHEMA: u32 = 1;
+
 /// A completed final ownership/cleanup proof is reusable independently of O3
 /// output reuse. This intentionally accepts generated and handler bodies: the
 /// exact post-O3 MIR input, its active type schema, and the summaries it can
@@ -929,6 +960,15 @@ fn recursive_optimized_mir_entry_path(
 ) -> Result<PathBuf, String> {
     let bytes = bincode::serialize(key)
         .map_err(|error| format!("could not encode recursive optimized MIR cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn emission_prepared_mir_entry_path(
+    directory: &Path,
+    key: &EmissionPreparedMirKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode emission-prepared MIR cache key: {error}"))?;
     Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
 }
 
@@ -1004,6 +1044,8 @@ impl IncrementalMirCache {
             self.optimized.retain(|key, _| key.schema != evicted.id);
             self.recursive_optimized
                 .retain(|key, _| key.schema != evicted.id);
+            self.emission_prepared
+                .retain(|key, _| key.schema != evicted.id);
             self.final_validation
                 .retain(|key, _| key.schema != evicted.id);
         }
@@ -1074,6 +1116,7 @@ impl IncrementalMirCache {
     pub(crate) fn configure_persistent_optimized_directory(&mut self, directory: PathBuf) {
         self.final_validation_disk_directory = Some(directory.join("final-validation-v1"));
         self.recursive_optimized_disk_directory = Some(directory.join("recursive-scc-v1"));
+        self.emission_prepared_disk_directory = Some(directory.join("emission-prepared-v1"));
         self.optimized_disk_directory = Some(directory);
     }
 
@@ -1201,6 +1244,99 @@ impl IncrementalMirCache {
         );
         self.reused_optimized_bodies = self.reused_optimized_bodies.saturating_add(output.len());
         Some(output)
+    }
+
+    fn emission_prepared_key(
+        &self,
+        declaration: u32,
+        dependency_fingerprint: u64,
+    ) -> Option<EmissionPreparedMirKey> {
+        Some(EmissionPreparedMirKey {
+            schema: self.active_schema?,
+            declaration,
+            dependency_fingerprint,
+        })
+    }
+
+    /// Restore the exact representation-prepared body for an unchanged O3
+    /// input. The cached output has passed edge-copy ownership reconciliation
+    /// but deliberately has not undergone physical register compaction yet.
+    pub(crate) fn reuse_emission_prepared(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+    ) -> Option<mir::Function> {
+        let key = self.emission_prepared_key(input.declaration, dependency_fingerprint)?;
+        if let Some(entry) = self.emission_prepared.get(&key) {
+            if entry.verified
+                && entry.input == *input
+                && entry.output.phase == mir::MirPhase::Optimized
+            {
+                return Some(entry.output.clone());
+            }
+        }
+        let directory = self.emission_prepared_disk_directory.as_ref()?;
+        let path = emission_prepared_mir_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentEmissionPreparedMirEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_EMISSION_PREPARED_MIR_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != *input
+            || entry.output.declaration != input.declaration
+            || entry.output.phase != mir::MirPhase::Optimized
+            || !entry.verified
+        {
+            return None;
+        }
+        let output = entry.output.clone();
+        self.emission_prepared.insert(
+            key,
+            EmissionPreparedMirEntry {
+                input: entry.input,
+                output: entry.output,
+                verified: entry.verified,
+            },
+        );
+        Some(output)
+    }
+
+    /// Retain a post-O3 representation-prepared body after the edge-copy
+    /// cleanup pass has proved it against the current array-call summaries.
+    pub(crate) fn cache_emission_prepared(
+        &mut self,
+        input: &mir::Function,
+        output: &mir::Function,
+        dependency_fingerprint: u64,
+    ) {
+        if input.declaration != output.declaration
+            || input.phase != mir::MirPhase::Optimized
+            || output.phase != mir::MirPhase::Optimized
+        {
+            return;
+        }
+        let Some(key) = self.emission_prepared_key(input.declaration, dependency_fingerprint)
+        else {
+            return;
+        };
+        self.emission_prepared.insert(
+            key,
+            EmissionPreparedMirEntry {
+                input: input.clone(),
+                output: output.clone(),
+                verified: false,
+            },
+        );
+    }
+
+    /// Mark an emission-prepared output reusable only after the complete
+    /// bytecode artifact, including its cleanup-map cross-check and VM
+    /// verifier pass, has accepted the containing compilation.
+    pub(crate) fn verify_emission_prepared(&mut self, input: &mir::Function) {
+        for entry in self.emission_prepared.values_mut() {
+            if entry.input == *input {
+                entry.verified = true;
+            }
+        }
     }
 
     /// Retain an output only when its source function has a current exact
@@ -1423,6 +1559,47 @@ impl IncrementalMirCache {
                 }
             }
         }
+        if let Some(directory) = &self.emission_prepared_disk_directory {
+            std::fs::create_dir_all(directory).map_err(|error| {
+                format!(
+                    "could not create emission-prepared MIR directory {}: {error}",
+                    directory.display()
+                )
+            })?;
+            for (key, entry) in &self.emission_prepared {
+                if !entry.verified {
+                    continue;
+                }
+                let path = emission_prepared_mir_entry_path(directory, key)?;
+                if path.exists() {
+                    continue;
+                }
+                let bytes = bincode::serialize(&PersistentEmissionPreparedMirEntry {
+                    schema: PERSISTENT_EMISSION_PREPARED_MIR_ENTRY_SCHEMA,
+                    key: key.clone(),
+                    input: entry.input.clone(),
+                    output: entry.output.clone(),
+                    verified: entry.verified,
+                })
+                .map_err(|error| format!("could not encode emission-prepared MIR body: {error}"))?;
+                let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+                std::fs::write(&temporary, bytes).map_err(|error| {
+                    format!(
+                        "could not write emission-prepared MIR body {}: {error}",
+                        temporary.display()
+                    )
+                })?;
+                if let Err(error) = std::fs::rename(&temporary, &path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    if !path.exists() {
+                        return Err(format!(
+                            "could not publish emission-prepared MIR body {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
         let Some(directory) = &self.final_validation_disk_directory else {
             return Ok(());
         };
@@ -1568,6 +1745,8 @@ impl IncrementalMirCache {
             optimized_disk_directory: None,
             recursive_optimized: BTreeMap::new(),
             recursive_optimized_disk_directory: None,
+            emission_prepared: BTreeMap::new(),
+            emission_prepared_disk_directory: None,
             final_validation: BTreeMap::new(),
             final_validation_disk_directory: None,
             active_schema: None,
@@ -2129,6 +2308,46 @@ mod tests {
                 .mir_cache
                 .reuse_recursive_optimized(&inputs, 73, 91),
             Some(outputs)
+        );
+    }
+
+    #[test]
+    fn emission_prepared_mir_bodies_persist_and_restore_exactly() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle("leaf() -> i64 { 1 } main() -> () { leaf(); () }");
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut writer = CompilationDriver::new();
+        assert!(writer.compile_bundle(&bundle, options).is_ok());
+        let schema = writer.mir_cache.active_schema.unwrap();
+        let mut input = writer
+            .mir_cache
+            .entries
+            .iter()
+            .find(|((entry_schema, _), entry)| *entry_schema == schema && entry.cleanup.is_some())
+            .and_then(|(_, entry)| entry.cleanup.as_ref().map(|(_, body)| body.clone()))
+            .unwrap();
+        input.phase = mir::MirPhase::Optimized;
+        let output = input.clone();
+        writer.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        writer
+            .mir_cache
+            .cache_emission_prepared(&input, &output, 73);
+        writer.mir_cache.verify_emission_prepared(&input);
+        writer.persist_persistent_optimized_mir_directory().unwrap();
+        let persisted = writer.persistent_mir_cache().unwrap();
+
+        let mut restarted = CompilationDriver::new();
+        assert!(restarted.restore_persistent_mir_cache(&persisted));
+        restarted.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        let active = restarted.mir_cache.schemas.front().unwrap().clone();
+        restarted
+            .mir_cache
+            .prepare(&active.types, &active.custom_drop_types);
+        assert_eq!(
+            restarted.mir_cache.reuse_emission_prepared(&input, 73),
+            Some(output)
         );
     }
 
