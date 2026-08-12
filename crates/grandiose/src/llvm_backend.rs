@@ -155,12 +155,6 @@ impl LlvmFragmentCache {
         self.emitted_fragments
     }
 
-    pub fn clear(&mut self) {
-        self.fragments.clear();
-        self.reused_fragments = 0;
-        self.emitted_fragments = 0;
-    }
-
     fn key(
         manifest: &LlvmIncrementalManifest,
         declaration: u32,
