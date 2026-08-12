@@ -13542,11 +13542,28 @@ pub(crate) fn derive_leave_cleanup_anchors(
 fn validate_bytecode_input_checkpoint(
     program: &Program,
     types: &[Type],
+    mut final_validation_cache: Option<&mut crate::compiler_session::IncrementalMirCache>,
 ) -> Result<PassReport, ValidationError> {
     validate_program(program, types, MirPhase::Optimized)?;
     let array_calls = regions::array_call_summaries(program, types);
     let mut work = 0_u64;
     for function in &program.functions {
+        // The final checkpoint is the dominant warm-build ownership cost. A
+        // prior successful checkpoint is equally strong evidence when both
+        // its complete optimized body and the summaries it can consume still
+        // match. Keep debug builds exhaustive, but let release builds recover
+        // independently validated generated/handler bodies as well as normal
+        // source functions.
+        let dependency = cleanup_dependency_fingerprint(function, &array_calls);
+        let reused = !cfg!(debug_assertions)
+            && dependency.is_some_and(|fingerprint| {
+                final_validation_cache
+                    .as_deref_mut()
+                    .is_some_and(|cache| cache.reuse_final_validation(function, fingerprint))
+            });
+        if reused {
+            continue;
+        }
         let (elaboration, cleanup) =
             derive_cleanup_elaboration_and_state_with_array_calls(function, types, &array_calls)?;
         validate_cleanup_elaboration(function, &elaboration)?;
@@ -13651,6 +13668,11 @@ fn validate_bytecode_input_checkpoint(
         }
         let boundaries = derive_leave_cleanup_boundaries(function, lists)?;
         work = work.saturating_add(boundaries.len() as u64);
+        if let Some(fingerprint) = dependency
+            && let Some(cache) = final_validation_cache.as_deref_mut()
+        {
+            cache.cache_final_validation(function, fingerprint);
+        }
     }
     Ok(PassReport {
         pass: PassId::ValidateBytecodeInput,
@@ -14308,7 +14330,11 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     // and cleanup validations before deriving representation facts. Nothing
     // mutates the program between the phase/feature update and that checkpoint,
     // so let the checkpoint be the single final validation traversal.
-    passes.push(validate_bytecode_input_checkpoint(program, types)?);
+    passes.push(validate_bytecode_input_checkpoint(
+        program,
+        types,
+        incremental_cleanup.as_deref_mut(),
+    )?);
     if level == OptimizationLevel::O3 {
         if let Some(cache) = incremental_cleanup.as_mut() {
             let base_declarations = optimized_dependencies
@@ -14495,9 +14521,10 @@ fn optimized_mir_output_is_stable(function: &Function, base_declarations: &BTree
 }
 
 /// Fingerprint precisely the summary values a body could have consumed during
-/// ownership import and cleanup elaboration. Unknown call shapes, or direct
-/// targets without a summary, leave dependency tracking incomplete and disable
-/// reuse rather than risking stale ownership facts.
+/// ownership import and cleanup elaboration. Receiver and indirect calls do
+/// not consult `array_calls`; for ordinary direct calls, an absent summary is
+/// recorded explicitly so a later inferred summary invalidates just that
+/// caller instead of disabling caching for the whole body up front.
 pub(crate) fn cleanup_dependency_fingerprint(
     function: &Function,
     summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
@@ -14516,35 +14543,20 @@ pub(crate) fn cleanup_dependency_fingerprint(
             Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
                 Some(*function)
             }
-            Terminator::CallIndirect {
-                known_function: Some(function),
-                ..
-            }
-            | Terminator::TailCallIndirect {
-                known_function: Some(function),
-                ..
-            } => Some(*function),
-            Terminator::CallIndirect {
-                known_function: None,
-                ..
-            }
-            | Terminator::TailCallIndirect {
-                known_function: None,
-                ..
-            }
-            | Terminator::CallSelf { .. }
-            | Terminator::TailCallSelf { .. }
-            | Terminator::CallKnownReceiver { .. }
-            | Terminator::TailCallKnownReceiver { .. } => return None,
             _ => None,
         };
         let Some(target) = target else { continue };
-        let summary = summaries.get(&target)?;
         write(&target.to_le_bytes());
-        // Array summaries contain only ordered vectors and scalar fields; the
-        // derived Debug text is deterministic and avoids a second hand-rolled
-        // serialization schema for this conservative cache guard.
-        write(format!("{summary:?}").as_bytes());
+        match summaries.get(&target) {
+            Some(summary) => {
+                // Array summaries contain only ordered vectors and scalar
+                // fields; the derived Debug text is deterministic and avoids
+                // a second hand-rolled serialization schema for this
+                // conservative cache guard.
+                write(format!("{summary:?}").as_bytes());
+            }
+            None => write(&[0]),
+        }
     }
     Some(state)
 }

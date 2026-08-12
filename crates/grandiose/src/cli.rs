@@ -3162,6 +3162,11 @@ mod tests {
             "an unrelated final O3 body should survive a process restart: {:?}",
             restarted.stats()
         );
+        assert!(
+            restarted.stats().reused_final_validation_bodies > 0,
+            "an unchanged final ownership proof should survive a process restart: {:?}",
+            restarted.stats()
+        );
     }
 
     #[test]

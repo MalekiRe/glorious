@@ -67,6 +67,9 @@ pub struct IncrementalCompilationStats {
     /// their changed direct-call closure continues through the normal O3
     /// schedule.
     pub reused_optimized_mir_bodies: usize,
+    /// Final optimized bodies whose exact ownership/cleanup proof was restored
+    /// from the durable per-body validation cache.
+    pub reused_final_validation_bodies: usize,
     /// Exact local O3 transformation snapshots restored after a body edit.
     /// Snapshots are segregated by the complete MIR type/drop schema and are
     /// checked again against their precise MIR input before use.
@@ -629,6 +632,7 @@ impl CompilationDriver {
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 reused_cleanup_mir_bodies: 0,
                 reused_optimized_mir_bodies: 0,
+                reused_final_validation_bodies: 0,
                 reused_optimizer_body_snapshots: 0,
                 reused_trait_databases: 0,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
@@ -746,6 +750,7 @@ impl CompilationDriver {
             reused_mir_bodies: self.mir_cache.reused_bodies,
             reused_cleanup_mir_bodies: self.mir_cache.reused_cleanup_bodies,
             reused_optimized_mir_bodies: self.mir_cache.reused_optimized_bodies,
+            reused_final_validation_bodies: self.mir_cache.reused_final_validation_bodies,
             reused_optimizer_body_snapshots: self.mir_cache.reused_optimizer_body_snapshots,
             reused_trait_databases: self.trait_db_cache.reused_databases,
             frontend: self.frontend_cache.stats(),
@@ -779,12 +784,15 @@ pub(crate) struct IncrementalMirCache {
     >,
     optimized: BTreeMap<OptimizedMirKey, OptimizedMirEntry>,
     optimized_disk_directory: Option<PathBuf>,
+    final_validation: BTreeMap<FinalValidationKey, FinalValidationEntry>,
+    final_validation_disk_directory: Option<PathBuf>,
     active_schema: Option<u64>,
     next_schema: u64,
     lowered_bodies: usize,
     reused_bodies: usize,
     reused_cleanup_bodies: usize,
     reused_optimized_bodies: usize,
+    reused_final_validation_bodies: usize,
     reused_optimizer_body_snapshots: usize,
 }
 
@@ -854,9 +862,58 @@ struct PersistentOptimizedMirEntry {
 
 const PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA: u32 = 1;
 
+/// A completed final ownership/cleanup proof is reusable independently of O3
+/// output reuse. This intentionally accepts generated and handler bodies: the
+/// exact post-O3 MIR input, its active type schema, and the summaries it can
+/// consume are all checked again before a proof is trusted.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct FinalValidationKey {
+    schema: u64,
+    declaration: u32,
+    dependency_fingerprint: u64,
+    body_fingerprint: [u8; 32],
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct FinalValidationEntry {
+    input: mir::Function,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentFinalValidationEntry {
+    schema: u32,
+    key: FinalValidationKey,
+    input: mir::Function,
+}
+
+const PERSISTENT_FINAL_VALIDATION_ENTRY_SCHEMA: u32 = 1;
+
 fn optimized_mir_entry_path(directory: &Path, key: &OptimizedMirKey) -> Result<PathBuf, String> {
     let bytes = bincode::serialize(key)
         .map_err(|error| format!("could not encode optimized MIR cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn final_validation_key(
+    schema: u64,
+    input: &mir::Function,
+    dependency_fingerprint: u64,
+) -> Option<FinalValidationKey> {
+    let body = bincode::serialize(input).ok()?;
+    Some(FinalValidationKey {
+        schema,
+        declaration: input.declaration,
+        dependency_fingerprint,
+        body_fingerprint: *blake3::hash(&body).as_bytes(),
+    })
+}
+
+fn final_validation_entry_path(
+    directory: &Path,
+    key: &FinalValidationKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode final validation cache key: {error}"))?;
     Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
 }
 
@@ -866,6 +923,7 @@ impl IncrementalMirCache {
         self.reused_bodies = 0;
         self.reused_cleanup_bodies = 0;
         self.reused_optimized_bodies = 0;
+        self.reused_final_validation_bodies = 0;
         self.reused_optimizer_body_snapshots = 0;
     }
 
@@ -895,6 +953,7 @@ impl IncrementalMirCache {
             self.local_pass_snapshots
                 .retain(|(schema, _, _), _| *schema != evicted.id);
             self.optimized.retain(|key, _| key.schema != evicted.id);
+            self.final_validation.retain(|key, _| key.schema != evicted.id);
         }
     }
 
@@ -956,6 +1015,7 @@ impl IncrementalMirCache {
     /// O3 bodies. Unlike the historical monolithic caches, configuring this
     /// directory does not read or deserialize any body.
     pub(crate) fn configure_persistent_optimized_directory(&mut self, directory: PathBuf) {
+        self.final_validation_disk_directory = Some(directory.join("final-validation-v1"));
         self.optimized_disk_directory = Some(directory);
     }
 
@@ -1052,6 +1112,75 @@ impl IncrementalMirCache {
         );
     }
 
+    /// Reuse a completed final optimized-MIR ownership/cleanup proof. The
+    /// body comparison is deliberately exact after the BLAKE3-addressed disk
+    /// lookup, so a hash collision can only turn into a cache miss.
+    pub(crate) fn reuse_final_validation(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+    ) -> bool {
+        let Some(schema) = self.active_schema else {
+            return false;
+        };
+        let Some(key) = final_validation_key(schema, input, dependency_fingerprint) else {
+            return false;
+        };
+        if let Some(entry) = self.final_validation.get(&key) {
+            if entry.input == *input {
+                self.reused_final_validation_bodies =
+                    self.reused_final_validation_bodies.saturating_add(1);
+                return true;
+            }
+        }
+        let Some(directory) = self.final_validation_disk_directory.as_ref() else {
+            return false;
+        };
+        let Ok(path) = final_validation_entry_path(directory, &key) else {
+            return false;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let Ok(entry) = bincode::deserialize::<PersistentFinalValidationEntry>(&bytes) else {
+            return false;
+        };
+        if entry.schema != PERSISTENT_FINAL_VALIDATION_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != *input
+            || entry.input.phase != mir::MirPhase::Optimized
+        {
+            return false;
+        }
+        self.final_validation
+            .insert(key, FinalValidationEntry { input: entry.input });
+        self.reused_final_validation_bodies =
+            self.reused_final_validation_bodies.saturating_add(1);
+        true
+    }
+
+    /// Record one exact final checkpoint input after its ownership/cleanup
+    /// proof succeeds. Unlike the O3 output cache, this includes generated
+    /// declarations because the body itself anchors their current IDs.
+    pub(crate) fn cache_final_validation(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+    ) {
+        let Some(schema) = self.active_schema else {
+            return;
+        };
+        let Some(key) = final_validation_key(schema, input, dependency_fingerprint) else {
+            return;
+        };
+        self.final_validation.insert(
+            key,
+            FinalValidationEntry {
+                input: input.clone(),
+            },
+        );
+    }
+
     /// Publish each newly produced final O3 body separately. Cache files are
     /// addressed by every semantic input in `OptimizedMirKey`, so retaining a
     /// previous source revision never invalidates unrelated entries.
@@ -1089,6 +1218,43 @@ impl IncrementalMirCache {
                 if !path.exists() {
                     return Err(format!(
                         "could not publish optimized MIR body {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        let Some(directory) = &self.final_validation_disk_directory else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "could not create final validation cache directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        for (key, entry) in &self.final_validation {
+            let path = final_validation_entry_path(directory, key)?;
+            if path.exists() {
+                continue;
+            }
+            let bytes = bincode::serialize(&PersistentFinalValidationEntry {
+                schema: PERSISTENT_FINAL_VALIDATION_ENTRY_SCHEMA,
+                key: key.clone(),
+                input: entry.input.clone(),
+            })
+            .map_err(|error| format!("could not encode final validation body: {error}"))?;
+            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temporary, bytes).map_err(|error| {
+                format!(
+                    "could not write final validation body {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                let _ = std::fs::remove_file(&temporary);
+                if !path.exists() {
+                    return Err(format!(
+                        "could not publish final validation body {}: {error}",
                         path.display()
                     ));
                 }
@@ -1188,12 +1354,15 @@ impl IncrementalMirCache {
             local_pass_snapshots: persisted.local_pass_snapshots,
             optimized: BTreeMap::new(),
             optimized_disk_directory: None,
+            final_validation: BTreeMap::new(),
+            final_validation_disk_directory: None,
             active_schema: None,
             next_schema,
             lowered_bodies: 0,
             reused_bodies: 0,
             reused_cleanup_bodies: 0,
             reused_optimized_bodies: 0,
+            reused_final_validation_bodies: 0,
             reused_optimizer_body_snapshots: 0,
         })
     }
@@ -1688,6 +1857,13 @@ mod tests {
             "unrelated O3 bodies should bypass the optimizer: {:?}",
             driver.stats()
         );
+        if !cfg!(debug_assertions) {
+            assert!(
+                driver.stats().reused_final_validation_bodies > 0,
+                "unchanged optimized bodies should bypass the repeated final ownership proof: {:?}",
+                driver.stats()
+            );
+        }
 
         let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
         assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
