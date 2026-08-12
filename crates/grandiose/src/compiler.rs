@@ -5238,7 +5238,11 @@ fn compile_stream_phases_with_manifest_and_domains(
             trusted_standard_library_domain,
             options,
             optimizer_plan,
-            Some((&mut session.type_cache, fingerprints)),
+            Some((
+                &mut session.type_cache,
+                fingerprints,
+                &mut session.trait_db_cache,
+            )),
             Some(&mut session.mir_cache),
         ),
         _ => compile_program_with_phases(
@@ -6795,9 +6799,10 @@ fn compile_program_with_phases(
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
     optimizer_plan: mir::optimizer::OptimizationPlan,
-    incremental: Option<(
+    mut incremental: Option<(
         &mut typeck::IncrementalTypeCache,
         &crate::compiler_session::IncrementalFingerprints,
+        &mut crate::compiler_session::IncrementalTraitDbCache,
     )>,
     mut incremental_mir: Option<&mut crate::compiler_session::IncrementalMirCache>,
 ) -> Result<CompiledProgramOutput, Vec<Diagnostic>> {
@@ -6833,7 +6838,14 @@ fn compile_program_with_phases(
     // methods, then normalize once more so projections preserved inside the
     // newly generated ordinary callable are solved by the same symbolic
     // function machinery. This avoids a second method-specific trait solver.
-    let initial_trait_db = TraitDb::build_with_manifest(&lifetime_erased_program, manifest)?;
+    let initial_trait_db = match incremental.as_mut() {
+        Some((_, fingerprints, cache)) => cache.build_or_reuse(
+            &lifetime_erased_program,
+            manifest,
+            &fingerprints.trait_db_context,
+        )?,
+        None => TraitDb::build_with_manifest(&lifetime_erased_program, manifest)?,
+    };
     timings.mark("initial-trait-db");
     let source_projection_normalized_program =
         normalize_ground_projections(&lifetime_erased_program, &initial_trait_db)?;
@@ -7258,7 +7270,7 @@ fn compile_program_with_phases(
         .collect();
     timings.mark("resolve-type-tables");
     let provisional = match incremental {
-        Some((cache, fingerprints)) => typeck::type_program_incremental(
+        Some((cache, fingerprints, _)) => typeck::type_program_incremental(
             program,
             &provisional_tables,
             &construction_types,

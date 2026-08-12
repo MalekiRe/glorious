@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use grandiose_vm::{Type, TypeId};
 
+use crate::compiler_traits::{TraitDb, TrustedTraitManifest};
 use crate::compiler_typeck::{DeclarationKey, IncrementalTypeCache};
 use crate::diagnostic::Diagnostic;
 use crate::source_bundle::SourceBundle;
@@ -58,6 +59,9 @@ pub struct IncrementalCompilationStats {
     /// boundary. This is deliberately separate from raw MIR lowering reuse:
     /// the entry is usable only when its consumed array-call summaries match.
     pub reused_cleanup_mir_bodies: usize,
+    /// Structural trait/nominal/impl database restored after a callable-body
+    /// edit. Span-keyed source const arguments are refreshed before use.
+    pub reused_trait_databases: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
 }
 
@@ -74,6 +78,7 @@ pub struct DiagnosticCacheStats {
 pub struct CompilationDriver {
     pub(crate) frontend_cache: crate::frontend_cache::IncrementalFrontendCache,
     pub(crate) type_cache: IncrementalTypeCache,
+    pub(crate) trait_db_cache: IncrementalTraitDbCache,
     pub(crate) mir_cache: IncrementalMirCache,
     phase_cache: VecDeque<CachedPhases>,
     diagnostic_cache: VecDeque<CachedDiagnostics>,
@@ -84,6 +89,53 @@ pub struct CompilationDriver {
     request_revision: u64,
     stats: IncrementalCompilationStats,
     diagnostic_stats: DiagnosticCacheStats,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct IncrementalTraitDbCache {
+    entry: Option<CachedTraitDb>,
+    reused_databases: usize,
+}
+
+#[derive(Clone)]
+struct CachedTraitDb {
+    /// Exact source with callable bodies masked byte-for-byte. Masking retains
+    /// body lengths, so all declaration spans remain part of the key.
+    context: Vec<u8>,
+    manifest: TrustedTraitManifest,
+    database: TraitDb,
+}
+
+impl IncrementalTraitDbCache {
+    fn begin_revision(&mut self) {
+        self.reused_databases = 0;
+    }
+
+    pub(crate) fn build_or_reuse(
+        &mut self,
+        program: &crate::ast::Program,
+        manifest: &TrustedTraitManifest,
+        context: &[u8],
+    ) -> Result<TraitDb, Vec<Diagnostic>> {
+        if let Some(cached) = self
+            .entry
+            .as_ref()
+            .filter(|cached| cached.context == context && cached.manifest == *manifest)
+        {
+            self.reused_databases = self.reused_databases.saturating_add(1);
+            return Ok(cached
+                .database
+                .clone()
+                .with_current_type_const_arguments(program));
+        }
+        let database = TraitDb::build_with_manifest(program, manifest)?;
+        self.entry = Some(CachedTraitDb {
+            context: context.to_vec(),
+            manifest: manifest.clone(),
+            database: database.clone(),
+        });
+        Ok(database)
+    }
 }
 
 #[derive(Clone)]
@@ -469,6 +521,7 @@ impl CompilationDriver {
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 reused_cleanup_mir_bodies: 0,
+                reused_trait_databases: 0,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
             };
             self.diagnostic_stats = DiagnosticCacheStats::default();
@@ -501,6 +554,7 @@ impl CompilationDriver {
         let checkpoint = self.type_cache.clone();
         let mir_checkpoint = self.mir_cache.clone();
         self.mir_cache.begin_revision();
+        self.trait_db_cache.begin_revision();
         self.stats = IncrementalCompilationStats::default();
         self.diagnostic_stats = DiagnosticCacheStats::default();
         let result = if include_interfaces {
@@ -582,6 +636,7 @@ impl CompilationDriver {
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             reused_cleanup_mir_bodies: self.mir_cache.reused_cleanup_bodies,
+            reused_trait_databases: self.trait_db_cache.reused_databases,
             frontend: self.frontend_cache.stats(),
         };
     }
@@ -699,6 +754,10 @@ impl IncrementalMirCache {
 
 pub(crate) struct IncrementalFingerprints {
     pub(crate) context: u64,
+    /// Exact source context for structural trait-db reuse. Callable-body bytes
+    /// are masked but their byte positions are retained, so edits that shift a
+    /// later declaration cannot accidentally reuse stale span-keyed facts.
+    pub(crate) trait_db_context: Vec<u8>,
     pub(crate) bodies: BTreeMap<DeclarationKey, u64>,
 }
 
@@ -728,8 +787,28 @@ pub(crate) fn fingerprints(
         cursor = end;
     }
     context.write(&source[cursor..]);
+    let mut trait_db_context = source.to_vec();
+    let mut callable_ranges = program
+        .functions
+        .iter()
+        .map(|function| function.body.span)
+        .chain(
+            program
+                .impls
+                .iter()
+                .flat_map(|implementation| &implementation.methods)
+                .filter_map(|method| method.body.as_ref().map(|body| body.span)),
+        )
+        .collect::<Vec<_>>();
+    callable_ranges.sort_by_key(|span| (span.start, span.end));
+    for span in callable_ranges {
+        let start = span.start.min(trait_db_context.len());
+        let end = span.end.min(trait_db_context.len()).max(start);
+        trait_db_context[start..end].fill(0);
+    }
     IncrementalFingerprints {
         context: context.finish(),
+        trait_db_context,
         bodies,
     }
 }
@@ -940,7 +1019,41 @@ mod tests {
             crate::llvm_backend::emit_llvm_native_object_units(&after_phases, &target).unwrap(),
             "cache-backed native partitions must remain byte-for-byte canonical"
         );
-        assert_ne!(cold, warm, "the changed leaf must produce fresh native units");
+        assert_ne!(
+            cold, warm,
+            "the changed leaf must produce fresh native units"
+        );
+    }
+
+    #[test]
+    fn structural_trait_db_reuses_after_body_edit_and_invalidates_on_impl_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let before = invalid_bundle(
+            "struct Ticket { value: i64 } impl Use<[0,1]> for Ticket {} leaf() -> i64 { 1 } main() -> () { leaf(); () }",
+        );
+        let body_edit = invalid_bundle(
+            "struct Ticket { value: i64 } impl Use<[0,1]> for Ticket {} leaf() -> i64 { 2 } main() -> () { leaf(); () }",
+        );
+        let impl_edit = invalid_bundle(
+            "struct Ticket { value: i64 } impl Use<[1,1]> for Ticket {} leaf() -> i64 { 2 } main() -> () { leaf(); () }",
+        );
+        let mut driver = CompilationDriver::new();
+
+        assert!(driver.compile_bundle(&before, options).is_ok());
+        let cached = driver.compile_bundle(&body_edit, options).unwrap();
+        assert_eq!(driver.stats().reused_trait_databases, 1);
+        let fresh = crate::compile_bundle_to_phases_with_options(&body_edit, options).unwrap();
+        assert_eq!(
+            cached.provisional_fingerprint(),
+            fresh.provisional_fingerprint()
+        );
+        assert_eq!(cached.core_fingerprint(), fresh.core_fingerprint());
+        assert_eq!(cached.mir_fingerprint(), fresh.mir_fingerprint());
+
+        assert!(driver.compile_bundle(&impl_edit, options).is_ok());
+        assert_eq!(driver.stats().reused_trait_databases, 0);
     }
 
     #[test]
