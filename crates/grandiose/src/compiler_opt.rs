@@ -10108,6 +10108,24 @@ fn specialize_static_handlers(
         return (resumptive, work);
     }
     let outcome = if terminal == PassOutcome::Changed || resumptive == PassOutcome::Changed {
+        // The scratch transaction may touch a small number of caller bodies,
+        // but its old implementation forced every function through the
+        // ownership fixed point afterward. Preserve the transactional update
+        // while publishing the precise summary-dependency closure instead.
+        let changed = program
+            .functions
+            .iter()
+            .zip(&scratch.functions)
+            .filter_map(|(before, after)| (before != after).then_some(after.declaration))
+            .collect::<BTreeSet<_>>();
+        debug_assert!(!changed.is_empty());
+        let mut affected = ownership_dependents(program, &changed);
+        affected.extend(ownership_dependents(&scratch, &changed));
+        for function in &mut scratch.functions {
+            if affected.contains(&function.declaration) {
+                function.invalid_analyses |= analysis::ALL;
+            }
+        }
         *program = scratch;
         PassOutcome::Changed
     } else {
@@ -11558,22 +11576,12 @@ fn run_transactional_pass_with_body_cache(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InvalidationScope {
-    ChangedBodies,
-    WholeProgram,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PassContract {
     invalidates: u8,
-    scope: InvalidationScope,
 }
 
 fn pass_contract(pass: PassId) -> PassContract {
-    let changed = |invalidates| PassContract {
-        invalidates,
-        scope: InvalidationScope::ChangedBodies,
-    };
+    let changed = |invalidates| PassContract { invalidates };
     match pass {
         PassId::NormalizeCfg
         | PassId::SparseSimplify
@@ -11588,14 +11596,12 @@ fn pass_contract(pass: PassId) -> PassContract {
             analysis::USES | analysis::FLOW | analysis::EFFECTS | analysis::VALUES | analysis::COST,
         ),
         // Callable scalarization and inlining mark each rewritten/new body as
-        // they commit it. Handler specialization currently rewrites through a
-        // whole-program scratch transaction, so it retains the conservative
-        // program-wide checkpoint contract.
+        // they commit it. Handler specialization also commits through a
+        // scratch program, but records its rewritten bodies and their direct
+        // callers before publishing. Those are the only cleanup summaries
+        // whose ownership facts can observe the new control body.
         PassId::ScalarizeCallables | PassId::InlineByCost => changed(analysis::ALL),
-        PassId::SpecializeControl => PassContract {
-            invalidates: analysis::ALL,
-            scope: InvalidationScope::WholeProgram,
-        },
+        PassId::SpecializeControl => changed(analysis::ALL),
         PassId::ValidateRawMir
         | PassId::ImportAndValidatePlaceFlow
         | PassId::ElaborateCleanup
@@ -11612,6 +11618,49 @@ struct WholeProgramPassTables<'a> {
     types: &'a [Type],
     protocols: &'a [Protocol],
     handler_defs: &'a [HandlerDef],
+}
+
+/// Direct callers whose ownership cleanup may depend on a changed callee's
+/// summary.  The closure deliberately matches the direct-call shapes consumed
+/// by `cleanup_dependency_fingerprint`: unresolved indirect and receiver
+/// calls carry no reusable summary and therefore cannot authorize a narrow
+/// invalidation boundary.
+fn ownership_dependents(program: &Program, roots: &BTreeSet<u32>) -> BTreeSet<u32> {
+    let mut callers = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for function in &program.functions {
+        for block in &function.blocks {
+            let target = match &block.terminator {
+                Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                    Some(*function)
+                }
+                Terminator::CallIndirect {
+                    known_function: Some(function),
+                    ..
+                }
+                | Terminator::TailCallIndirect {
+                    known_function: Some(function),
+                    ..
+                } => Some(*function),
+                _ => None,
+            };
+            if let Some(target) = target {
+                callers
+                    .entry(target)
+                    .or_default()
+                    .insert(function.declaration);
+            }
+        }
+    }
+    let mut affected = roots.clone();
+    let mut pending = roots.iter().copied().collect::<VecDeque<_>>();
+    while let Some(callee) = pending.pop_front() {
+        for caller in callers.get(&callee).into_iter().flatten() {
+            if affected.insert(*caller) {
+                pending.push_back(*caller);
+            }
+        }
+    }
+    affected
 }
 
 fn run_transactional_whole_program_pass(
@@ -11648,22 +11697,13 @@ fn run_transactional_whole_program_pass(
     };
     if outcome == PassOutcome::Changed {
         let contract = pass_contract(pass);
-        match contract.scope {
-            InvalidationScope::WholeProgram => {
-                for function in &mut program.functions {
-                    function.invalid_analyses |= contract.invalidates;
-                }
-            }
-            InvalidationScope::ChangedBodies => {
-                debug_assert!(
-                    program
-                        .functions
-                        .iter()
-                        .any(|function| function.invalid_analyses & contract.invalidates != 0),
-                    "{pass:?} changed MIR without publishing its body invalidation"
-                );
-            }
-        }
+        debug_assert!(
+            program
+                .functions
+                .iter()
+                .any(|function| function.invalid_analyses & contract.invalidates != 0),
+            "{pass:?} changed MIR without publishing its body invalidation"
+        );
     }
     *global_remaining = global_remaining.saturating_sub(work_units.min(*global_remaining));
     PassReport {
@@ -11691,7 +11731,6 @@ fn run_transactional_o3_followup_inline_pass(
     );
     if outcome == PassOutcome::Changed {
         let contract = pass_contract(PassId::InlineByCost);
-        debug_assert_eq!(contract.scope, InvalidationScope::ChangedBodies);
         debug_assert!(
             program
                 .functions
@@ -19304,15 +19343,27 @@ mod tests {
             PassId::EraseLoanProofsAndScalarizedReferences,
         ] {
             assert_eq!(pass_contract(pass).invalidates, body_only);
-            assert_eq!(pass_contract(pass).scope, InvalidationScope::ChangedBodies);
         }
         assert_eq!(
-            pass_contract(PassId::InlineByCost).scope,
-            InvalidationScope::ChangedBodies
+            pass_contract(PassId::InlineByCost).invalidates,
+            analysis::ALL
         );
         assert_eq!(
-            pass_contract(PassId::SpecializeControl).scope,
-            InvalidationScope::WholeProgram
+            pass_contract(PassId::SpecializeControl).invalidates,
+            analysis::ALL
+        );
+    }
+
+    #[test]
+    fn ownership_dependents_follow_the_reverse_direct_call_closure() {
+        let (program, _) = inline_leaf_fixture();
+        assert_eq!(
+            ownership_dependents(&program, &BTreeSet::from([1])),
+            BTreeSet::from([0, 1])
+        );
+        assert_eq!(
+            ownership_dependents(&program, &BTreeSet::from([0])),
+            BTreeSet::from([0])
         );
     }
 
