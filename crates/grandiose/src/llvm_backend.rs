@@ -99,14 +99,47 @@ pub struct LlvmFunctionFragment {
     snapshot_capture_fix_types: BTreeSet<TypeId>,
 }
 
+/// Global module properties that a function fragment cannot outlive. Keeping
+/// these in the cache key creates a new exact namespace when the runtime ABI
+/// or target changes instead of overwriting every fragment from the previous
+/// namespace.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct LlvmFragmentEnvironment {
+    schema: u32,
+    target_triple: String,
+    target_data_layout: Option<String>,
+    emit_entry_wrapper: bool,
+    native_allocation_limit: u64,
+    runtime_abi_fingerprint: u64,
+}
+
+impl From<&LlvmIncrementalManifest> for LlvmFragmentEnvironment {
+    fn from(manifest: &LlvmIncrementalManifest) -> Self {
+        Self {
+            schema: manifest.schema,
+            target_triple: manifest.target_triple.clone(),
+            target_data_layout: manifest.target_data_layout.clone(),
+            emit_entry_wrapper: manifest.emit_entry_wrapper,
+            native_allocation_limit: manifest.native_allocation_limit,
+            runtime_abi_fingerprint: manifest.runtime_abi_fingerprint,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct LlvmFragmentKey {
+    environment: LlvmFragmentEnvironment,
+    declaration: u32,
+    fingerprint: u64,
+}
+
 /// Bounded-by-owner cache for independently emitted LLVM functions.  The
 /// owner chooses its lifetime (the persistent compilation driver retains one
 /// across `--serve` requests); this type deliberately owns no filesystem
 /// state and never serializes unchecked IR.
 #[derive(Clone, Debug, Default)]
 pub struct LlvmFragmentCache {
-    manifest: Option<LlvmIncrementalManifest>,
-    fragments: BTreeMap<u32, LlvmFunctionFragment>,
+    fragments: BTreeMap<LlvmFragmentKey, LlvmFunctionFragment>,
     reused_fragments: usize,
     emitted_fragments: usize,
 }
@@ -123,10 +156,34 @@ impl LlvmFragmentCache {
     }
 
     pub fn clear(&mut self) {
-        self.manifest = None;
         self.fragments.clear();
         self.reused_fragments = 0;
         self.emitted_fragments = 0;
+    }
+
+    fn key(
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+        fingerprint: u64,
+    ) -> LlvmFragmentKey {
+        LlvmFragmentKey {
+            environment: LlvmFragmentEnvironment::from(manifest),
+            declaration,
+            fingerprint,
+        }
+    }
+
+    fn fragment(
+        &self,
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+    ) -> Option<&LlvmFunctionFragment> {
+        let fingerprint = manifest
+            .functions
+            .iter()
+            .find(|function| function.declaration == declaration)?
+            .fragment_fingerprint;
+        self.fragments.get(&Self::key(manifest, declaration, fingerprint))
     }
 }
 
@@ -499,26 +556,20 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
         target_triple,
     } = emit_llvm_ir_with_fragment_cache(phases, options, fragments)?;
     let manifest = llvm_incremental_manifest(phases, options);
-    let fingerprints = manifest
-        .functions
-        .iter()
-        .map(|function| (function.declaration, function.fragment_fingerprint))
-        .collect::<BTreeMap<_, _>>();
     // Fragment text remains owned by the cache until its corresponding final
     // unit is materialized below.  Avoiding this intermediate clone prevents
     // a transient extra copy of every source body.
-    let source_functions = fragments
-        .fragments
-        .keys()
-        .filter_map(|declaration| {
-            fingerprints
-                .get(declaration)
-                .copied()
-                .map(|fingerprint| (*declaration, fingerprint))
-        })
+    let source_functions = manifest
+        .functions
+        .iter()
+        .filter(|function| fragments.fragment(&manifest, function.declaration).is_some())
+        .map(|function| (function.declaration, function.fragment_fingerprint))
         .collect::<Vec<_>>();
     for (declaration, _) in &source_functions {
-        let text = &fragments.fragments[declaration].emitted_text;
+        let text = &fragments
+            .fragment(&manifest, *declaration)
+            .expect("current canonical emission produced every function fragment")
+            .emitted_text;
         // Fragment text came from this exact canonical module emission. A
         // missing replacement would make a supposedly independent unit retain
         // another function body, so fail closed rather than returning it.
@@ -540,7 +591,10 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
             (
                 *declaration,
                 llvm_fragment_source_declaration(
-                    &fragments.fragments[declaration].emitted_text,
+                    &fragments
+                        .fragment(&manifest, *declaration)
+                        .expect("current canonical emission produced every function fragment")
+                        .emitted_text,
                     *declaration,
                 )
                 .expect("source fragment must define its source-function symbol"),
@@ -563,7 +617,10 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
     let functions = source_functions
         .into_iter()
         .map(|(declaration, fragment_fingerprint)| {
-            let text = &fragments.fragments[&declaration].emitted_text;
+            let text = &fragments
+                .fragment(&manifest, declaration)
+                .expect("current canonical emission produced every function fragment")
+                .emitted_text;
             // LLVM permits recursive and forward references inside a
             // definition, so only direct external source calls need their
             // prototypes restored to this unit's runtime prelude.
@@ -816,15 +873,6 @@ impl<'a> Emitter<'a> {
         let manifest = cache
             .as_ref()
             .map(|_| llvm_incremental_manifest(self.phases, self.options));
-        let invalidated = match (cache.as_ref(), manifest.as_ref()) {
-            (Some(cache), Some(manifest)) => cache
-                .manifest
-                .as_ref()
-                .map_or_else(BTreeSet::new, |previous| {
-                    manifest.invalidated_functions(previous)
-                }),
-            _ => BTreeSet::new(),
-        };
         self.line("; Grandiose LLVM backend");
         self.line(&format!(
             "target triple = \"{}\"",
@@ -885,13 +933,13 @@ impl<'a> Emitter<'a> {
                     .find(|entry| entry.declaration == declaration)
                     .map(|entry| entry.fragment_fingerprint)
             });
-            let cached = cache.as_deref_mut().and_then(|cache| {
-                (!invalidated.contains(&declaration))
-                    .then(|| cache.fragments.get(&declaration))
-                    .flatten()
-                    .filter(|fragment| Some(fragment.fingerprint) == fingerprint)
-                    .cloned()
-            });
+            let cached = match (cache.as_deref_mut(), manifest.as_ref(), fingerprint) {
+                (Some(cache), Some(manifest), Some(fingerprint)) => cache
+                    .fragments
+                    .get(&LlvmFragmentCache::key(manifest, declaration, fingerprint))
+                    .cloned(),
+                _ => None,
+            };
             if let Some(fragment) = cached {
                 self.output.push_str(&fragment.emitted_text);
                 self.overflow_widths.extend(fragment.overflow_widths);
@@ -922,10 +970,12 @@ impl<'a> Emitter<'a> {
             self.overflow_widths.extend(overflow_widths.iter().copied());
             self.snapshot_capture_fix_types
                 .extend(snapshot_capture_fix_types.iter().copied());
-            if let (Some(cache), Some(fingerprint)) = (cache.as_deref_mut(), fingerprint) {
+            if let (Some(cache), Some(manifest), Some(fingerprint)) =
+                (cache.as_deref_mut(), manifest.as_ref(), fingerprint)
+            {
                 cache.emitted_fragments = cache.emitted_fragments.saturating_add(1);
                 cache.fragments.insert(
-                    declaration,
+                    LlvmFragmentCache::key(manifest, declaration, fingerprint),
                     LlvmFunctionFragment {
                         fingerprint,
                         emitted_text,
@@ -955,16 +1005,6 @@ impl<'a> Emitter<'a> {
         if !declarations.is_empty() {
             self.output.push_str(&declarations);
             self.output.push('\n');
-        }
-        if let (Some(cache), Some(manifest)) = (cache, manifest) {
-            cache.manifest = Some(manifest);
-            cache.fragments.retain(|declaration, _| {
-                self.phases
-                    .mir
-                    .functions
-                    .iter()
-                    .any(|function| function.declaration == *declaration)
-            });
         }
         Ok(LlvmModule {
             ir: self.output,
