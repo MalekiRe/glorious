@@ -177,7 +177,7 @@ build_native() {
     # The compiler itself legitimately needs larger compiler-internal tables
     # than the 64 MiB ceiling retained for ordinary native programs. Keep the
     # override explicit, bounded, and confined to this private self-host route.
-    "$route_grc" -O3 --emit executable --native-incremental-cache "$route_objects" --native-allocation-limit 536870912 -o "$route_binary" "${inputs[@]}"
+    "$route_grc" -O3 --emit executable --native-allocation-limit 536870912 -o "$route_binary" "${inputs[@]}"
     [[ -x "$route_binary" ]] || { echo "self-host-native: native compiler was not emitted" >&2; exit 1; }
     printf '%s\n' "$fingerprint" > "$route_fingerprint"
     printf '%s\n' "$route_binary"

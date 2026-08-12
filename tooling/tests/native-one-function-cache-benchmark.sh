@@ -53,7 +53,7 @@ trap cleanup EXIT
 copied_source="$scratch/src"
 cache="$scratch/private-cache"
 # The CLI writes durable object and manifest entries directly into the
-# directory passed to --native-incremental-cache.
+# directory derived automatically from each native executable output.
 objects="$cache"
 mkdir -p "$cache"
 cp -a -- "$source_root/." "$copied_source/"
@@ -81,7 +81,7 @@ build() {
     local label=$1 output="$scratch/$1-native" log="$scratch/$1.log" timing="$scratch/$1.time"
     G1_NATIVE_OBJECT_WORKERS="${G1_NATIVE_OBJECT_WORKERS:-1}" \
         "$time_bin" -o "$timing" -f '%e real-seconds %M max-rss-kib' \
-        "$grc" -O3 --emit executable --native-incremental-cache "$cache" \
+        "$grc" -O3 --emit executable \
         --native-allocation-limit 536870912 -o "$output" "${inputs[@]}" \
         >"$log" 2>&1
     [[ -x "$output" ]] || {

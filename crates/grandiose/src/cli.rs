@@ -27,7 +27,7 @@ use grandiose::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-incremental     select process-local partitioned native objects (serve, -O3 executable only)\n  --native-incremental-cache DIR  durable private partitioned objects (-O3 executable only)\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --diagnostic-timings     attach per-phase elapsed timings to a --serve response\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n\nnative incremental environment:\n  G1_NATIVE_OBJECT_WORKERS requests 1..=4 concurrent durable native object workers; the compiler clamps it to available parallelism (default: the same safe bound).\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --inspect-token <source.glorious> <index> [index ...]\n  grc --inspect-bundle-token <primary.glorious> [additional.glorious ...] -- <index> [index ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional/control-plan, monolithic source, or interfaces JSON\n  --native-allocation-limit BYTES  bounded per-allocation native-runtime ceiling (executable only)\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --diagnostic-timings     attach per-phase elapsed timings to a --serve response\n  --inspect-token          show lexer details for indexed tokens in an assembled distributed source bundle\n  --inspect-bundle-token   map token indices in an assembled distributed source bundle\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n\nnative executable builds retain a private on-disk incremental cache beside their output.\n";
 
 const MAX_NATIVE_ALLOCATION_LIMIT: u64 = 1024 * 1024 * 1024;
 const SESSION_PROTOCOL: u32 = 1;
@@ -207,11 +207,6 @@ struct CompileCommand {
     stop_phase: Option<StopPhase>,
     output: Option<PathBuf>,
     emit: Option<EmitKind>,
-    /// Explicit opt-in to process-local independently compiled LLVM function
-    /// objects. The persistent server owns the cache; a one-shot invocation
-    /// is rejected before it could accidentally use the monolithic route.
-    native_incremental: bool,
-    native_incremental_cache: Option<PathBuf>,
     native_allocation_limit: Option<u64>,
     json_diagnostics: bool,
     diagnostic_timings: bool,
@@ -336,8 +331,6 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         stop_phase: None,
         output: None,
         emit: None,
-        native_incremental: false,
-        native_incremental_cache: None,
         native_allocation_limit: None,
         json_diagnostics: false,
         diagnostic_timings: false,
@@ -422,29 +415,6 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     if command.emit.replace(kind).is_some() {
                         return Err("`--emit` may be specified only once".to_string());
                     }
-                    continue;
-                }
-                "--native-incremental" => {
-                    if command.native_incremental {
-                        return Err("`--native-incremental` may be specified only once".to_string());
-                    }
-                    command.native_incremental = true;
-                    continue;
-                }
-                "--native-incremental-cache" => {
-                    let path = args.next().ok_or_else(|| {
-                        "`--native-incremental-cache` requires a directory".to_string()
-                    })?;
-                    if command
-                        .native_incremental_cache
-                        .replace(PathBuf::from(path))
-                        .is_some()
-                    {
-                        return Err(
-                            "`--native-incremental-cache` may be specified only once".to_string()
-                        );
-                    }
-                    command.native_incremental = true;
                     continue;
                 }
                 "--native-allocation-limit" => {
@@ -534,12 +504,6 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
             "`--native-allocation-limit` is supported only with `--emit executable`".to_string(),
         );
     }
-    if command.native_incremental && command.emit != Some(EmitKind::Executable) {
-        return Err("`--native-incremental` requires `--emit executable`".to_string());
-    }
-    if command.native_incremental && command.optimization_level != OptimizationLevel::O3 {
-        return Err("`--native-incremental` requires `-O3`".to_string());
-    }
     Ok(Command::Compile(command))
 }
 
@@ -587,6 +551,16 @@ fn read_segment(path: &Path) -> Result<Segment, String> {
 
 fn default_output(input: &Path, kind: EmitKind) -> PathBuf {
     input.with_extension(kind.extension())
+}
+
+/// Native executable artifacts own a sibling cache directory. Source and ABI
+/// fingerprints in the entries, rather than an opt-in mode flag, decide what
+/// may be reused across separate compiler processes.
+fn durable_native_cache_dir(output: &Path) -> PathBuf {
+    output
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".grandiose-native-cache")
 }
 
 fn line_and_column(source: &str, offset: usize) -> (usize, usize) {
@@ -799,13 +773,6 @@ fn declared_external_module_paths(file: &Path, source: &str) -> Vec<PathBuf> {
 }
 
 fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
-    if command.native_incremental && command.native_incremental_cache.is_none() {
-        let _ = writeln!(
-            stderr,
-            "grc: error: `--native-incremental` requires a persistent `grc --serve` request"
-        );
-        return 1;
-    }
     let segments = match load_segments(&command) {
         Ok(segments) => segments,
         Err(error) => {
@@ -991,9 +958,7 @@ fn compile_loaded(
         // units below.  Do not first emit a complete monolithic module: it is
         // unused on that route and made every cache lookup pay for a second
         // whole-program LLVM emission.
-        let durable_native_cache = kind == EmitKind::Executable
-            && command.native_incremental
-            && command.native_incremental_cache.is_some();
+        let durable_native_cache = kind == EmitKind::Executable;
         let module = if durable_native_cache {
             None
         } else {
@@ -1035,12 +1000,11 @@ fn compile_loaded(
         } else {
             None
         };
-        // A long-lived compiler service can retain independently compiled O3
-        // function objects across a body-only edit. The durable route below
-        // additionally retains a final link only behind an exact manifest;
-        // process-local requests still take a fresh Wild link.
-        if kind == EmitKind::Executable && command.native_incremental {
-            if let Some(cache_dir) = &command.native_incremental_cache {
+        // Native executables are always partitioned and retained in an
+        // output-local durable cache. No process lifetime or user option is
+        // part of incremental correctness.
+        if kind == EmitKind::Executable {
+                let cache_dir = durable_native_cache_dir(&output);
                 let partitions_started = Instant::now();
                 let units_result = incremental.as_deref_mut().map_or_else(
                     || emit_llvm_native_object_units(&phases, &llvm_options),
@@ -1105,7 +1069,7 @@ fn compile_loaded(
                 let objects_started = Instant::now();
                 let objects_result = materialize_disk_partitioned_native_objects(
                     &output,
-                    cache_dir,
+                    &cache_dir,
                     workers,
                     &jobs,
                 );
@@ -1132,7 +1096,7 @@ fn compile_loaded(
                     &output,
                     host,
                     &objects,
-                    cache_dir,
+                    &cache_dir,
                     &link_inputs,
                 );
                 if let Some(timing) = timing.as_deref_mut() {
@@ -1150,86 +1114,6 @@ fn compile_loaded(
                     }
                 }
                 return 0;
-            }
-            if let Some(driver) = incremental.as_deref_mut() {
-                let partitions_started = Instant::now();
-                let units_result = driver.emit_llvm_native_object_units(&phases, &llvm_options);
-                if let Some(timing) = timing.as_deref_mut() {
-                    timing.llvm_partitions += partitions_started.elapsed();
-                }
-                let units = match units_result {
-                    Ok(units) => units,
-                    Err(diagnostics) => {
-                        return report_diagnostics(
-                            &bundle,
-                            diagnostics,
-                            command.json_diagnostics,
-                            stderr,
-                        );
-                    }
-                };
-                let toolchain_abi =
-                    match native_object_toolchain_abi(&llvm_options, OptimizationLevel::O3) {
-                        Ok(abi) => abi,
-                        Err(error) => {
-                            let _ = writeln!(
-                            stderr,
-                            "grc: error: could not identify native object toolchain ABI: {error}"
-                        );
-                            return 1;
-                        }
-                    };
-                let mut objects = Vec::with_capacity(units.functions.len() + 1);
-                let shared_abi = format!(
-                    "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=shared;shared-fingerprint={}",
-                    units.shared_fingerprint,
-                );
-                match materialize_partitioned_native_object(
-                    driver,
-                    &output,
-                    0,
-                    "shared",
-                    &llvm_options,
-                    &units.shared.ir,
-                    &shared_abi,
-                    false,
-                ) {
-                    Ok(object) => objects.push(object),
-                    Err(error) => {
-                        let _ = writeln!(stderr, "grc: error: {error}");
-                        return 1;
-                    }
-                }
-                for (index, function) in units.functions.iter().enumerate() {
-                    let abi = format!(
-                        "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};partition-role=function;declaration={};fragment={}",
-                        function.declaration,
-                        function.fragment_fingerprint
-                    );
-                    match materialize_partitioned_native_object(
-                        driver,
-                        &output,
-                        index + 1,
-                        "function",
-                        &llvm_options,
-                        &function.module.ir,
-                        &abi,
-                        true,
-                    ) {
-                        Ok(object) => objects.push(object),
-                        Err(error) => {
-                            let _ = writeln!(stderr, "grc: error: {error}");
-                            return 1;
-                        }
-                    }
-                }
-                let host = native_host.as_ref().expect("executable native host");
-                if let Err(error) = link_partitioned_native_executable(&output, host, &objects) {
-                    let _ = writeln!(stderr, "grc: error: {error}");
-                    return 1;
-                }
-                return 0;
-            }
         }
         let module = module.expect("non-durable native emission needs a monolithic LLVM module");
         // A persistent session may reuse immutable object bytes only when the
@@ -1457,73 +1341,6 @@ fn require_wild_linker() -> Result<(), String> {
 /// `-fuse-ld=wild`.
 fn configure_wild_linking(clang: &mut ProcessCommand) {
     clang.arg("--ld-path=wild");
-}
-
-/// Compile or materialize one partitioned LLVM unit at the fixed native O3
-/// level. The driver owns only immutable object bytes; this request owns the
-/// pathname passed to Wild.
-fn materialize_partitioned_native_object(
-    driver: &mut CompilationDriver,
-    output: &Path,
-    ordinal: usize,
-    role: &str,
-    llvm_options: &LlvmOptions,
-    ir: &str,
-    toolchain_abi: &str,
-    source_function: bool,
-) -> Result<TemporaryNativeObject, String> {
-    let object = TemporaryNativeObject::create(output, role, ordinal)
-        .map_err(|error| format!("could not reserve native object path: {error}"))?;
-    if let Some(bytes) =
-        driver.cached_native_partitioned_object(llvm_options, ir, toolchain_abi, source_function)
-    {
-        std::fs::write(&object.path, bytes).map_err(|error| {
-            format!(
-                "could not materialize cached native object {}: {error}",
-                object.path.display()
-            )
-        })?;
-        return Ok(object);
-    }
-    let result = ProcessCommand::new("clang")
-        .arg("-x")
-        .arg("ir")
-        .arg("-O3")
-        .arg("-c")
-        .arg("-")
-        .arg("-o")
-        .arg(&object.path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not start `clang` for native unit: {error}"))
-        .and_then(|mut child| {
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| "could not open `clang` stdin for native unit".to_owned())?
-                .write_all(ir.as_bytes())
-                .map_err(|error| format!("could not stream LLVM unit to `clang`: {error}"))?;
-            child
-                .wait_with_output()
-                .map_err(|error| format!("`clang` native unit failed: {error}"))
-        })?;
-    if !result.status.success() {
-        return Err(format!(
-            "native LLVM unit emission failed:\n{}",
-            String::from_utf8_lossy(&result.stderr)
-        ));
-    }
-    let bytes = std::fs::read(&object.path).map_err(|error| {
-        format!(
-            "could not read emitted native object {}: {error}",
-            object.path.display()
-        )
-    })?;
-    driver.cache_native_partitioned_object(llvm_options, ir, toolchain_abi.to_owned(), bytes);
-    driver.record_native_partitioned_object_emitted(source_function);
-    Ok(object)
 }
 
 fn native_object_bytes_are_plausible(bytes: &[u8]) -> bool {
@@ -2601,7 +2418,6 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
         );
         let native_object_emission = command.emit == Some(EmitKind::LlvmObject);
         let native_executable_emission = command.emit == Some(EmitKind::Executable);
-        let native_incremental_emission = command.native_incremental;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         // A process-local executable request always links; the durable route
@@ -2668,7 +2484,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
                 // process. A new process starts cold and a client must not
                 // treat these counters as a persistent artifact cache.
                 cache_scope: "serve-process",
-                strategy: if native_incremental_emission {
+                strategy: if native_executable_emission {
                     "partitioned-function-objects"
                 } else {
                     "monolithic"
@@ -3139,75 +2955,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_partitioned_native_selector_only_for_o3_executables() {
-        let Command::Compile(command) = parse(
-            [
-                "-O3",
-                "--emit",
-                "executable",
-                "--native-incremental",
-                "input.glorious",
-            ]
-            .into_iter()
-            .map(OsString::from)
-            .collect(),
-        )
-        .unwrap() else {
-            panic!("expected a compile command")
-        };
-        assert!(command.native_incremental);
-        assert_eq!(command.optimization_level, OptimizationLevel::O3);
-        assert_eq!(command.emit, Some(EmitKind::Executable));
-
-        for arguments in [
-            vec!["--native-incremental", "input.glorious"],
-            vec![
-                "-O2",
-                "--emit",
-                "executable",
-                "--native-incremental",
-                "input.glorious",
-            ],
-            vec!["-O3", "--native-incremental", "input.glorious"],
-            vec![
-                "-O3",
-                "--emit",
-                "llvm-object",
-                "--native-incremental",
-                "input.glorious",
-            ],
-        ] {
+    fn native_incremental_options_are_not_public() {
+        for option in ["--native-incremental", "--native-incremental-cache"] {
             assert!(
-                parse(arguments.into_iter().map(OsString::from).collect()).is_err(),
-                "invalid native-incremental invocation was accepted"
+                parse([option, "input.glorious"].into_iter().map(OsString::from).collect())
+                    .is_err(),
+                "removed option {option} was accepted"
             );
         }
     }
 
     #[test]
-    fn partitioned_native_selector_rejects_one_shot_compilation() {
-        let Command::Compile(command) = parse(
-            [
-                "-O3",
-                "--emit",
-                "executable",
-                "--native-incremental",
-                "input.glorious",
-            ]
-            .into_iter()
-            .map(OsString::from)
-            .collect(),
-        )
-        .unwrap() else {
-            panic!("expected a compile command")
-        };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        assert_eq!(compile(command, &mut stdout, &mut stderr), 1);
-        assert!(stdout.is_empty());
-        assert!(String::from_utf8(stderr)
-            .unwrap()
-            .contains("requires a persistent `grc --serve` request"));
+    fn native_executable_cache_is_output_local() {
+        assert_eq!(
+            durable_native_cache_dir(Path::new("target/compiler")),
+            PathBuf::from("target/.grandiose-native-cache")
+        );
     }
 
     #[test]

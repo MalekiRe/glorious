@@ -129,7 +129,7 @@ if [[ $rebuild -eq 1 || ! -x $executable || ! -f $manifest || $(<"$manifest") !=
     rm -f -- "$temporary"
     printf 'native self-host: compiling release LLVM executable with Wild...\n' >&2
     set +e
-    "$grc" -O3 --emit executable --native-incremental-cache "$objects" \
+    "$grc" -O3 --emit executable \
         -o "$temporary" "$self_host_main" "${self_host_modules[@]}"
     status=$?
     set -e
