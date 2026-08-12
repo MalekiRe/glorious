@@ -892,7 +892,7 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
         .iter()
         .map(|(declaration, _)| {
             (
-                *declaration,
+                format!("@g1_f{declaration}"),
                 llvm_fragment_source_declaration(
                     &fragments
                         .fragment(&manifest, *declaration)
@@ -988,11 +988,13 @@ fn llvm_fragment_source_dependency_prelude(
     runtime_prelude: &str,
     body: &str,
     self_declaration: u32,
-    source_declarations: &BTreeMap<u32, String>,
+    source_declarations: &BTreeMap<String, String>,
     helper_declarations: &BTreeMap<String, String>,
     literal_definitions: &BTreeMap<String, String>,
 ) -> String {
     let own_symbols = llvm_fragment_defined_symbols(body);
+    let referenced_symbols = llvm_fragment_referenced_symbols(body);
+    let self_symbol = format!("@g1_f{self_declaration}");
     let mut prelude = String::with_capacity(runtime_prelude.len());
     for line in runtime_prelude.lines() {
         if llvm_declaration_symbol(line).is_some_and(|symbol| own_symbols.contains(symbol)) {
@@ -1001,34 +1003,25 @@ fn llvm_fragment_source_dependency_prelude(
         prelude.push_str(line);
         prelude.push('\n');
     }
-    for (declaration, prototype) in source_declarations {
-        if *declaration == self_declaration {
-            continue;
-        }
-        let Some(symbol_start) = prototype.find('@') else {
-            continue;
-        };
-        let Some(symbol_end) = prototype[symbol_start..].find('(') else {
-            continue;
-        };
-        let symbol = &prototype[symbol_start..symbol_start + symbol_end];
-        if body.contains(symbol) {
-            prelude.push_str(prototype);
-        }
-    }
-    // Do not scan every available helper for every source body: the
-    // self-host compiler has thousands.  Instead, derive the exact `@symbol`
-    // references in this fragment and import only sibling helpers it uses.
-    for symbol in llvm_fragment_referenced_symbols(body) {
+    // A self-hosted build has thousands of source declarations and literals.
+    // Walking either table and calling `body.contains(symbol)` turns native
+    // partition preparation quadratic in the emitted LLVM text.  Scan the
+    // body once, then resolve each exact reference through its symbol map.
+    for symbol in referenced_symbols {
         if own_symbols.contains(symbol.as_str()) {
             continue;
         }
+        if symbol != self_symbol {
+            if let Some(prototype) = source_declarations.get(&symbol) {
+                prelude.push_str(prototype);
+                continue;
+            }
+        }
         if let Some(prototype) = helper_declarations.get(&symbol) {
             prelude.push_str(prototype);
+            continue;
         }
-    }
-    for (symbol, definition) in literal_definitions {
-        if body.contains(symbol) {
+        if let Some(definition) = literal_definitions.get(&symbol) {
             prelude.push_str(definition);
         }
     }
@@ -13977,5 +13970,46 @@ mod tests {
         );
         assert!(prelude.contains("declare void @g1_effect_guard_drop_f2(ptr)"));
         assert!(!prelude.contains("declare void @g1_effect_guard_drop_f1(ptr)"));
+    }
+
+    #[test]
+    fn partition_prelude_looks_up_referenced_source_and_literals_by_symbol() {
+        let body = concat!(
+            "define void @g1_f1() {\n",
+            "  call void @g1_f2()\n",
+            "  %value = load i8, ptr @g1.bytes.used\n",
+            "  ret void\n",
+            "}\n",
+        );
+        let source_declarations = BTreeMap::from([
+            ("@g1_f1".to_owned(), "declare void @g1_f1()\n".to_owned()),
+            ("@g1_f2".to_owned(), "declare void @g1_f2()\n".to_owned()),
+            ("@g1_f3".to_owned(), "declare void @g1_f3()\n".to_owned()),
+        ]);
+        let literals = BTreeMap::from([
+            (
+                "@g1.bytes.used".to_owned(),
+                "@g1.bytes.used = private constant [1 x i8] c\"x\"\n".to_owned(),
+            ),
+            (
+                "@g1.bytes.unused".to_owned(),
+                "@g1.bytes.unused = private constant [1 x i8] c\"y\"\n".to_owned(),
+            ),
+        ]);
+
+        let prelude = llvm_fragment_source_dependency_prelude(
+            "",
+            body,
+            1,
+            &source_declarations,
+            &BTreeMap::new(),
+            &literals,
+        );
+
+        assert!(prelude.contains("declare void @g1_f2()"));
+        assert!(!prelude.contains("declare void @g1_f1()"));
+        assert!(!prelude.contains("declare void @g1_f3()"));
+        assert!(prelude.contains("@g1.bytes.used"));
+        assert!(!prelude.contains("@g1.bytes.unused"));
     }
 }
