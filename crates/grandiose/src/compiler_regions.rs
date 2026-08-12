@@ -4660,12 +4660,17 @@ fn join_states(
         });
     }
     if existing.agrees_with(incoming) {
-        let mut joined = existing.clone();
-        joined.labels = joined_labels;
-        let mut changed = false;
-        for register in 0..joined.regs.len() {
-            if joined.active_variants[register] != incoming.active_variants[register] {
-                if context.strict && matches!(joined.regs[register], RegState::Partial(_)) {
+        // Most back-edges and multi-predecessor joins re-present a state the
+        // fixed point already covers.  Do the small scalar meet first: an
+        // `OwnState` contains several potentially large vectors and maps, so
+        // cloning it merely to discover that none of those fields changes is
+        // a dominant cost for the self-host compiler's ownership analysis.
+        // The checks below deliberately retain every validation performed by
+        // the materializing path; only an exact no-op avoids the clone.
+        let mut changed = existing.labels != joined_labels;
+        for register in 0..existing.regs.len() {
+            if existing.active_variants[register] != incoming.active_variants[register] {
+                if context.strict && matches!(existing.regs[register], RegState::Partial(_)) {
                     return Err(flow_error(
                         block,
                         format!(
@@ -4673,35 +4678,47 @@ fn join_states(
                         ),
                     ));
                 }
+                changed |= existing.active_variants[register].is_some();
+            }
+            if existing.enum_tag_sources[register] != incoming.enum_tag_sources[register] {
+                changed |= existing.enum_tag_sources[register].is_some();
+            }
+        }
+        for (current, incoming_uses) in existing.uses.iter().zip(&incoming.uses) {
+            changed |= current.hull(*incoming_uses) != *current;
+        }
+        for (current, incoming_uses) in existing.quantity_uses.iter().zip(&incoming.quantity_uses) {
+            changed |= current.hull(*incoming_uses) != *current;
+        }
+        for (current, incoming_age) in existing.shell_ages.iter().zip(&incoming.shell_ages) {
+            changed |= current.is_some() && current != incoming_age;
+        }
+        if !changed {
+            return Ok(None);
+        }
+
+        let mut joined = existing.clone();
+        joined.labels = joined_labels;
+        for register in 0..joined.regs.len() {
+            if joined.active_variants[register] != incoming.active_variants[register] {
                 joined.active_variants[register] = None;
-                changed = true;
             }
             if joined.enum_tag_sources[register] != incoming.enum_tag_sources[register] {
                 joined.enum_tag_sources[register] = None;
-                changed = true;
             }
         }
         for (slot, incoming_uses) in joined.uses.iter_mut().zip(&incoming.uses) {
-            let hull = slot.hull(*incoming_uses);
-            if hull != *slot {
-                *slot = hull;
-                changed = true;
-            }
+            *slot = slot.hull(*incoming_uses);
         }
         for (slot, incoming_uses) in joined.quantity_uses.iter_mut().zip(&incoming.quantity_uses) {
-            let hull = slot.hull(*incoming_uses);
-            if hull != *slot {
-                *slot = hull;
-                changed = true;
-            }
+            *slot = slot.hull(*incoming_uses);
         }
         for (slot, incoming_age) in joined.shell_ages.iter_mut().zip(&incoming.shell_ages) {
             if slot.is_some() && slot != incoming_age {
                 *slot = None;
-                changed = true;
             }
         }
-        return Ok(changed.then_some(joined));
+        return Ok(Some(joined));
     }
     // Initialization conflict: allowed only through drop flags in strict
     // mode; the synthesized-fact bridge merges deterministically instead.
