@@ -14010,11 +14010,31 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
         initial_operations,
     );
     let cleanup_dependencies = regions::array_call_summaries(program, types);
+    // Cleanup elaboration mutates a body's control flow.  Its cache key must
+    // therefore be taken at the raw-MIR boundary, where reuse is checked,
+    // rather than recomputed from the transformed cleanup body below.
+    let cleanup_input_fingerprints = program
+        .functions
+        .iter()
+        .map(|function| {
+            (
+                function.declaration,
+                cleanup_raw_dependency_fingerprint(function, &cleanup_dependencies),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut reused_cleanup_bodies = BTreeSet::new();
     if let Some(cache) = incremental_cleanup.as_mut() {
         for function in &mut program.functions {
-            let fingerprint = cleanup_dependency_fingerprint(function, &cleanup_dependencies);
-            if let Some(cleanup) = cache.reuse_cleanup(function, fingerprint) {
+            let fingerprint = cleanup_input_fingerprints
+                .get(&function.declaration)
+                .copied()
+                .flatten();
+            if let Some(cleanup) = cache.reuse_cleanup(function, fingerprint, |cached| {
+                cleanup_dependency_fingerprint_v1(function, &cleanup_dependencies) == cached
+                    || cleanup_dependency_fingerprint_v1_strict(function, &cleanup_dependencies)
+                        == Some(cached)
+            }) {
                 reused_cleanup_bodies.insert(function.declaration);
                 *function = cleanup;
             }
@@ -14044,7 +14064,10 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
         for function in &program.functions {
             cache.cache_cleanup(
                 function,
-                cleanup_dependency_fingerprint(function, &cleanup_dependencies),
+                cleanup_input_fingerprints
+                    .get(&function.declaration)
+                    .copied()
+                    .flatten(),
             );
         }
     }
@@ -14078,7 +14101,6 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             }
         }
     }
-
     let normalize = run_mandatory_normalize(program);
     push_checked(&mut passes, normalize, program, types)?;
     let mut global_remaining = 64_u64.saturating_mul(initial_operations);
@@ -14448,22 +14470,22 @@ fn optimized_mir_direct_dependencies(function: &Function) -> Option<BTreeSet<u32
             | Terminator::Cancel { .. }
             | Terminator::Goto(_)
             | Terminator::HostCall { .. }
+            | Terminator::Handle { .. }
             | Terminator::Leave { .. }
+            | Terminator::Perform { .. }
             | Terminator::Return { .. }
+            | Terminator::Resume { .. }
             | Terminator::Switch { .. }
+            | Terminator::TailResume { .. }
             | Terminator::Unreachable => {}
             Terminator::CallIndirect {
                 known_function: None,
                 ..
             }
-            | Terminator::Handle { .. }
-            | Terminator::Perform { .. }
-            | Terminator::Resume { .. }
             | Terminator::TailCallIndirect {
                 known_function: None,
                 ..
-            }
-            | Terminator::TailResume { .. } => return None,
+            } => return None,
         }
     }
     Some(dependencies)
@@ -14561,14 +14583,48 @@ fn optimized_mir_output_is_stable(function: &Function, base_declarations: &BTree
     })
 }
 
-/// Fingerprint precisely the summary values a body could have consumed during
-/// ownership import and cleanup elaboration. Receiver and indirect calls do
-/// not consult `array_calls`; for ordinary direct calls, an absent summary is
-/// recorded explicitly so a later inferred summary invalidates just that
-/// caller instead of disabling caching for the whole body up front.
+/// Fingerprint the interprocedural ownership facts consumed by an optimized
+/// body. This v1 representation is a durable final-validation key; it must
+/// stay stable so existing independently proven O3 bodies remain reusable.
 pub(crate) fn cleanup_dependency_fingerprint(
     function: &Function,
     summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Option<u64> {
+    cleanup_dependency_fingerprint_with_header(
+        function,
+        summaries,
+        b"grandiose:cleanup-array-summary-v1\0",
+    )
+}
+
+/// Fingerprint raw MIR at the cleanup-cache boundary. Cleanup elaboration
+/// changes the body it produces, so this deliberately uses a separate key
+/// namespace from the final-validation fingerprint above.
+fn cleanup_raw_dependency_fingerprint(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Option<u64> {
+    cleanup_dependency_fingerprint_with_header(
+        function,
+        summaries,
+        b"grandiose:cleanup-array-summary-v2-raw-mir\0",
+    )
+}
+
+/// Retain the v1 raw-boundary calculation solely to migrate validated entries
+/// already on disk. New cleanup entries use the raw-MIR v2 key above.
+fn cleanup_dependency_fingerprint_v1(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> u64 {
+    cleanup_dependency_fingerprint(function, summaries)
+        .expect("the v1 direct-call fingerprint is total")
+}
+
+fn cleanup_dependency_fingerprint_with_header(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+    header: &[u8],
 ) -> Option<u64> {
     let mut state = 0xcbf2_9ce4_8422_2325_u64;
     let mut write = |bytes: &[u8]| {
@@ -14577,7 +14633,7 @@ pub(crate) fn cleanup_dependency_fingerprint(
             state = state.wrapping_mul(0x100_0000_01b3);
         }
     };
-    write(b"grandiose:cleanup-array-summary-v1\0");
+    write(header);
     write(&function.declaration.to_le_bytes());
     for block in &function.blocks {
         let target = match &block.terminator {
@@ -14598,6 +14654,58 @@ pub(crate) fn cleanup_dependency_fingerprint(
             }
             None => write(&[0]),
         }
+    }
+    Some(state)
+}
+
+/// The first durable cleanup-cache implementation treated known indirect
+/// calls as direct summary dependencies and declined to cache unresolved
+/// calls.  This conservative v1 form is accepted only while upgrading an
+/// existing exact raw-body entry to v2.
+fn cleanup_dependency_fingerprint_v1_strict(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Option<u64> {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    let mut write = |bytes: &[u8]| {
+        for byte in bytes {
+            state ^= u64::from(*byte);
+            state = state.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    write(b"grandiose:cleanup-array-summary-v1\0");
+    write(&function.declaration.to_le_bytes());
+    for block in &function.blocks {
+        let target = match &block.terminator {
+            Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                Some(*function)
+            }
+            Terminator::CallIndirect {
+                known_function: Some(function),
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: Some(function),
+                ..
+            } => Some(*function),
+            Terminator::CallIndirect {
+                known_function: None,
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: None,
+                ..
+            }
+            | Terminator::CallSelf { .. }
+            | Terminator::TailCallSelf { .. }
+            | Terminator::CallKnownReceiver { .. }
+            | Terminator::TailCallKnownReceiver { .. } => return None,
+            _ => None,
+        };
+        let Some(target) = target else { continue };
+        let summary = summaries.get(&target)?;
+        write(&target.to_le_bytes());
+        write(format!("{summary:?}").as_bytes());
     }
     Some(state)
 }
@@ -14680,6 +14788,34 @@ mod tests {
         assert_eq!(
             terminator_register_use_count(&body.blocks[0].terminator, 1),
             1
+        );
+    }
+
+    #[test]
+    fn o3_dependency_tracking_keeps_control_terms_independently_cacheable() {
+        let body = function(
+            vec![block(
+                0,
+                Terminator::Perform {
+                    result: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads: vec![],
+                    capture: ContinuationCapture {
+                        captured_owners: vec![],
+                        captured_references: vec![],
+                        captured_residuals: vec![],
+                        cancellation_safe: true,
+                    },
+                    resume: None,
+                },
+            )],
+            vec![UNIT],
+        );
+
+        assert_eq!(
+            optimized_mir_direct_dependencies(&body),
+            Some(std::collections::BTreeSet::new())
         );
     }
 

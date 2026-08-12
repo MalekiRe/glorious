@@ -978,15 +978,18 @@ impl IncrementalMirCache {
         &mut self,
         function: &mir::Function,
         dependency_fingerprint: Option<u64>,
+        legacy_fingerprint_matches: impl FnOnce(u64) -> bool,
     ) -> Option<mir::Function> {
-        let dependency_fingerprint = dependency_fingerprint?;
         let cached = self.entries.get(&self.active_key(function.declaration)?)?;
         let (cached_fingerprint, cleanup) = cached.cleanup.as_ref()?;
         // The dependency fingerprint protects interprocedural ownership
         // summaries, but it is not a body identity. A body-only source edit
         // must never recover the previous function's cleanup facts merely
         // because its direct callees happened not to change.
-        if cached.lowered != *function || *cached_fingerprint != dependency_fingerprint {
+        if cached.lowered != *function
+            || (dependency_fingerprint != Some(*cached_fingerprint)
+                && !legacy_fingerprint_matches(*cached_fingerprint))
+        {
             return None;
         }
         self.reused_cleanup_bodies += 1;
@@ -1828,6 +1831,11 @@ mod tests {
         assert!(restarted_driver.restore_persistent_mir_cache(&persisted));
         let warm = restarted_driver.compile_bundle(&after, options).unwrap();
         assert_eq!(restarted_driver.stats().reused_mir_bodies, 2);
+        assert!(
+            restarted_driver.stats().reused_cleanup_mir_bodies > 0,
+            "unchanged bodies should reuse their validated cleanup MIR after restart: {:?}",
+            restarted_driver.stats()
+        );
         assert!(
             restarted_driver.stats().reused_optimizer_body_snapshots > 0,
             "unchanged O3 local-pass slots should replay their exact snapshots"
