@@ -12392,6 +12392,9 @@ fn import_and_validate_place_flow(
     let mut changed = false;
     let array_calls = regions::array_call_summaries(program, types);
     for function in &mut program.functions {
+        if function.phase == MirPhase::Cleanup {
+            continue;
+        }
         work = work.saturating_add(body_size(function));
         if strict_flow(function) {
             validate_exported_facts(function, types)?;
@@ -12460,6 +12463,9 @@ fn elaborate_cleanup(program: &mut Program, types: &[Type]) -> Result<PassReport
     let mut changed = false;
     let array_calls = regions::array_call_summaries(program, types);
     for function in &mut program.functions {
+        if function.phase == MirPhase::Cleanup {
+            continue;
+        }
         work = work.saturating_add(body_size(function));
         let elaboration =
             derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
@@ -13751,6 +13757,29 @@ pub(crate) fn optimize_program_with_control_tables_and_plan(
     level: OptimizationLevel,
     plan: OptimizationPlan,
 ) -> Result<OptimizationReport, ValidationError> {
+    optimize_program_with_control_tables_and_plan_incremental(
+        program,
+        types,
+        protocols,
+        handler_defs,
+        level,
+        plan,
+        None,
+    )
+}
+
+/// The incremental entry point may reuse bodies which have already crossed
+/// the raw-MIR ownership/cleanup boundary. All later optimization remains a
+/// fresh whole-program transaction.
+pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
+    program: &mut Program,
+    types: &[Type],
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+    level: OptimizationLevel,
+    plan: OptimizationPlan,
+    mut incremental_cleanup: Option<&mut crate::compiler_session::IncrementalMirCache>,
+) -> Result<OptimizationReport, ValidationError> {
     validate_program(program, types, MirPhase::Raw)?;
     let initial_operations = operation_count(program);
     let mut passes = Vec::new();
@@ -13760,13 +13789,39 @@ pub(crate) fn optimize_program_with_control_tables_and_plan(
         PassOutcome::Unchanged,
         initial_operations,
     );
+    let cleanup_dependencies = regions::array_call_summaries(program, types);
+    if let Some(cache) = incremental_cleanup.as_mut() {
+        for function in &mut program.functions {
+            let fingerprint = cleanup_dependency_fingerprint(function, &cleanup_dependencies);
+            if let Some(cleanup) = cache.reuse_cleanup(function, fingerprint) {
+                *function = cleanup;
+            }
+        }
+    }
     let import = import_and_validate_place_flow(program, types)?;
     passes.push(import);
-    validate_program(program, types, MirPhase::Owned)?;
+    // Reused bodies are already Cleanup while freshly lowered bodies are now
+    // Owned. Validate the latter under the complete declaration universe;
+    // this clone never mutates cached cleanup facts.
+    let mut owned_view = program.clone();
+    for function in &mut owned_view.functions {
+        if function.phase == MirPhase::Cleanup {
+            function.phase = MirPhase::Owned;
+        }
+    }
+    validate_program(&owned_view, types, MirPhase::Owned)?;
     let cleanup = elaborate_cleanup(program, types)?;
     passes.push(cleanup);
     validate_program(program, types, MirPhase::Cleanup)?;
     validate_flow_and_cleanup(program, types)?;
+    if let Some(cache) = incremental_cleanup.as_mut() {
+        for function in &program.functions {
+            cache.cache_cleanup(
+                function,
+                cleanup_dependency_fingerprint(function, &cleanup_dependencies),
+            );
+        }
+    }
     record(
         &mut passes,
         PassId::ValidateCleanupMir,
@@ -14000,6 +14055,61 @@ pub(crate) fn optimize_program_with_control_tables_and_plan(
         final_operations: operation_count(program),
         passes,
     })
+}
+
+/// Fingerprint precisely the summary values a body could have consumed during
+/// ownership import and cleanup elaboration. Unknown call shapes, or direct
+/// targets without a summary, leave dependency tracking incomplete and disable
+/// reuse rather than risking stale ownership facts.
+pub(crate) fn cleanup_dependency_fingerprint(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Option<u64> {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    let mut write = |bytes: &[u8]| {
+        for byte in bytes {
+            state ^= u64::from(*byte);
+            state = state.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    write(b"grandiose:cleanup-array-summary-v1\0");
+    write(&function.declaration.to_le_bytes());
+    for block in &function.blocks {
+        let target = match &block.terminator {
+            Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                Some(*function)
+            }
+            Terminator::CallIndirect {
+                known_function: Some(function),
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: Some(function),
+                ..
+            } => Some(*function),
+            Terminator::CallIndirect {
+                known_function: None,
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: None,
+                ..
+            }
+            | Terminator::CallSelf { .. }
+            | Terminator::TailCallSelf { .. }
+            | Terminator::CallKnownReceiver { .. }
+            | Terminator::TailCallKnownReceiver { .. } => return None,
+            _ => None,
+        };
+        let Some(target) = target else { continue };
+        let summary = summaries.get(&target)?;
+        write(&target.to_le_bytes());
+        // Array summaries contain only ordered vectors and scalar fields; the
+        // derived Debug text is deterministic and avoids a second hand-rolled
+        // serialization schema for this conservative cache guard.
+        write(format!("{summary:?}").as_bytes());
+    }
+    Some(state)
 }
 
 #[cfg(test)]

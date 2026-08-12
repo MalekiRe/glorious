@@ -54,6 +54,10 @@ pub struct IncrementalCompilationStats {
     pub emitted_native_shared_objects: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
+    /// Bodies restored after the ownership import and cleanup-elaboration
+    /// boundary. This is deliberately separate from raw MIR lowering reuse:
+    /// the entry is usable only when its consumed array-call summaries match.
+    pub reused_cleanup_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
 }
 
@@ -464,6 +468,7 @@ impl CompilationDriver {
                 emitted_native_shared_objects: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
+                reused_cleanup_mir_bodies: 0,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
             };
             self.diagnostic_stats = DiagnosticCacheStats::default();
@@ -576,6 +581,7 @@ impl CompilationDriver {
             emitted_native_shared_objects: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
+            reused_cleanup_mir_bodies: self.mir_cache.reused_cleanup_bodies,
             frontend: self.frontend_cache.stats(),
         };
     }
@@ -601,16 +607,27 @@ fn llvm_source_fingerprint(bundle: &SourceBundle) -> [u8; 32] {
 pub(crate) struct IncrementalMirCache {
     types: Vec<Type>,
     custom_drop_types: Vec<TypeId>,
-    entries: BTreeMap<u32, (core::Function, mir::Function)>,
+    entries: BTreeMap<u32, CachedMirBody>,
     initialized: bool,
     lowered_bodies: usize,
     reused_bodies: usize,
+    reused_cleanup_bodies: usize,
+}
+
+#[derive(Clone)]
+struct CachedMirBody {
+    core: core::Function,
+    lowered: mir::Function,
+    /// Cleanup MIR is only valid under the exact summary fingerprint for the
+    /// direct array-call facts consumed while ownership was imported.
+    cleanup: Option<(u64, mir::Function)>,
 }
 
 impl IncrementalMirCache {
     fn begin_revision(&mut self) {
         self.lowered_bodies = 0;
         self.reused_bodies = 0;
+        self.reused_cleanup_bodies = 0;
     }
 
     pub(crate) fn prepare(&mut self, types: &[Type], custom_drop_types: &[TypeId]) {
@@ -627,17 +644,56 @@ impl IncrementalMirCache {
 
     pub(crate) fn reuse(&mut self, function: &core::Function) -> Option<mir::Function> {
         let cached = self.entries.get(&function.declaration)?;
-        if cached.0 != *function {
+        if cached.core != *function {
             return None;
         }
         self.reused_bodies += 1;
-        Some(cached.1.clone())
+        Some(cached.lowered.clone())
+    }
+
+    /// Restore a post-cleanup body only after the caller has completely
+    /// accounted for every interprocedural array summary it consumes.
+    pub(crate) fn reuse_cleanup(
+        &mut self,
+        function: &mir::Function,
+        dependency_fingerprint: Option<u64>,
+    ) -> Option<mir::Function> {
+        let dependency_fingerprint = dependency_fingerprint?;
+        let cached = self.entries.get(&function.declaration)?;
+        let (cached_fingerprint, cleanup) = cached.cleanup.as_ref()?;
+        if *cached_fingerprint != dependency_fingerprint {
+            return None;
+        }
+        self.reused_cleanup_bodies += 1;
+        Some(cleanup.clone())
+    }
+
+    pub(crate) fn cache_cleanup(
+        &mut self,
+        function: &mir::Function,
+        dependency_fingerprint: Option<u64>,
+    ) {
+        let Some(dependency_fingerprint) = dependency_fingerprint else {
+            return;
+        };
+        let Some(cached) = self.entries.get_mut(&function.declaration) else {
+            // Pattern/synthesized bodies have no exact raw-Core authority.
+            return;
+        };
+        cached.cleanup = Some((dependency_fingerprint, function.clone()));
     }
 
     pub(crate) fn insert(&mut self, function: core::Function, lowered: mir::Function) {
         self.lowered_bodies += 1;
         self.entries
-            .insert(function.declaration, (function, lowered));
+            .insert(
+                function.declaration,
+                CachedMirBody {
+                    core: function,
+                    lowered,
+                    cleanup: None,
+                },
+            );
     }
 }
 

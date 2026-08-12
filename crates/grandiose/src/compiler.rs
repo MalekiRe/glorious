@@ -9913,13 +9913,14 @@ fn compile_program_with_phases(
             ]
         })?;
     timings.mark("lower-mir");
-    let optimization_result = mir::optimizer::optimize_program_with_control_tables_and_plan(
+    let optimization_result = mir::optimizer::optimize_program_with_control_tables_and_plan_incremental(
         &mut mir_program,
         &artifact.types,
         &artifact.protocols,
         &artifact.handler_defs,
         options.optimization_level,
         optimizer_plan,
+        incremental_mir,
     );
     let mut optimization_report = optimization_result.map_err(|error| {
         vec![

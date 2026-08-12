@@ -84,6 +84,30 @@ fn incremental_session_reuses_only_valid_unchanged_body_inference() {
 }
 
 #[test]
+fn incremental_session_reuses_cleanup_mir_only_after_exact_dependency_validation() {
+    let original = bundle("1", "i64");
+    let edited = bundle("2", "i64");
+    let mut incremental = IncrementalCompilerSession::new();
+
+    incremental.compile_bundle(&original, options()).unwrap();
+    let warm = incremental.compile_bundle(&edited, options()).unwrap();
+    let stats = incremental.stats();
+    assert!(
+        stats.reused_cleanup_mir_bodies > 0,
+        "a no-call unchanged body has no interprocedural summary dependencies: {stats:?}"
+    );
+
+    // The cache is an implementation detail at the Raw -> Cleanup boundary;
+    // it must be observationally identical to a cold import/elaboration.
+    let cold = IncrementalCompilerSession::new()
+        .compile_bundle(&edited, options())
+        .unwrap();
+    assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+    assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    assert_eq!(warm.artifact, cold.artifact);
+}
+
+#[test]
 fn failed_revision_rolls_back_incremental_inference_transaction() {
     let mut session = IncrementalCompilerSession::new();
     session
