@@ -12057,6 +12057,19 @@ fn derive_cleanup_elaboration_with_array_calls(
     types: &[Type],
     array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
 ) -> Result<CleanupElaboration, ValidationError> {
+    derive_cleanup_elaboration_and_state_with_array_calls(function, types, array_calls)
+        .map(|(elaboration, _)| elaboration)
+}
+
+/// Derive cleanup plans and the ownership lists consumed by bytecode-input
+/// validation from one ownership solve. The final optimized-MIR checkpoint
+/// needs both products; keeping them together avoids solving every function
+/// twice merely to rediscover the same fixed point.
+fn derive_cleanup_elaboration_and_state_with_array_calls(
+    function: &Function,
+    types: &[Type],
+    array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Result<(CleanupElaboration, CleanupStateAnalysis), ValidationError> {
     let locals = bridged_locals(function, types);
     let context = regions::FlowContext {
         function,
@@ -12331,7 +12344,12 @@ fn derive_cleanup_elaboration_with_array_calls(
             protected,
         });
     }
-    Ok(elaboration)
+    let reachable = solution.entries.keys().copied().collect();
+    let state = CleanupStateAnalysis {
+        lists: solution.cleanup_lists,
+        reachable,
+    };
+    Ok((elaboration, state))
 }
 
 /// Apply one elaboration to a body; true when anything changed.
@@ -12469,7 +12487,19 @@ fn validate_flow_and_cleanup(program: &Program, types: &[Type]) -> Result<(), Va
     for function in &program.functions {
         let elaboration =
             derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
-        if elaboration.plans != function.flow.cleanup_plans {
+        validate_cleanup_elaboration(function, &elaboration)?;
+    }
+    Ok(())
+}
+
+/// Check that the recorded cleanup metadata exactly matches a fresh ownership
+/// derivation. Kept separate so bytecode-input validation can share its solve
+/// with the structural cleanup-list checks.
+fn validate_cleanup_elaboration(
+    function: &Function,
+    elaboration: &CleanupElaboration,
+) -> Result<(), ValidationError> {
+    if elaboration.plans != function.flow.cleanup_plans {
             return Err(error(
                 function,
                 None,
@@ -12518,7 +12548,6 @@ fn validate_flow_and_cleanup(program: &Program, types: &[Type]) -> Result<(), Va
                 }
             }
         }
-    }
     Ok(())
 }
 
@@ -13088,22 +13117,8 @@ fn derive_cleanup_state_analysis_with_array_calls(
     types: &[Type],
     array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
 ) -> Result<CleanupStateAnalysis, ValidationError> {
-    let locals = bridged_locals(function, types);
-    let context = regions::FlowContext {
-        function,
-        types,
-        locals: &locals,
-        loans: regions::loan_table(function, types),
-        array_calls,
-        strict: strict_flow(function),
-        refine_enum_switches: true,
-    };
-    let solution = regions::solve(&context).map_err(|error| flow_to_validation(function, error))?;
-    let reachable = solution.entries.keys().copied().collect();
-    Ok(CleanupStateAnalysis {
-        lists: solution.cleanup_lists,
-        reachable,
-    })
+    derive_cleanup_elaboration_and_state_with_array_calls(function, types, array_calls)
+        .map(|(_, state)| state)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13334,12 +13349,12 @@ fn validate_bytecode_input_checkpoint(
     types: &[Type],
 ) -> Result<PassReport, ValidationError> {
     validate_program(program, types, MirPhase::Optimized)?;
-    validate_flow_and_cleanup(program, types)?;
     let array_calls = regions::array_call_summaries(program, types);
     let mut work = 0_u64;
     for function in &program.functions {
-        let cleanup =
-            derive_cleanup_state_analysis_with_array_calls(function, types, &array_calls)?;
+        let (elaboration, cleanup) =
+            derive_cleanup_elaboration_and_state_with_array_calls(function, types, &array_calls)?;
+        validate_cleanup_elaboration(function, &elaboration)?;
         let lists = &cleanup.lists;
         for block in &function.blocks {
             let Some(points) = lists.get(&block.id) else {
