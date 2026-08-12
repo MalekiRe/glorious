@@ -14061,7 +14061,8 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     // prior specialization/inlining, so running the schedule over them again
     // merely repeats ownership fixed-point work. Functions outside this set
     // remain ordinary cleanup MIR and are optimized normally.
-    let optimized_namespace = optimized_mir_namespace_fingerprint(program);
+    let optimized_namespace =
+        optimized_mir_namespace_fingerprint(program, protocols, handler_defs);
     let optimized_dependencies = optimized_mir_dependency_fingerprints(program);
     if level == OptimizationLevel::O3 {
         if let Some(cache) = incremental_cleanup.as_mut() {
@@ -14373,7 +14374,11 @@ fn optimized_mir_hash(mut state: u64, bytes: &[u8]) -> u64 {
 /// Namespace layout controls the function declaration IDs used by MIR. Body
 /// edits deliberately do not participate, while adding/removing/reordering a
 /// declaration makes every cached output conservative-cache-miss.
-fn optimized_mir_namespace_fingerprint(program: &Program) -> u64 {
+fn optimized_mir_namespace_fingerprint(
+    program: &Program,
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+) -> u64 {
     let mut state = optimized_mir_hash(0xcbf2_9ce4_8422_2325, b"grandiose:o3-namespace-v1\0");
     for function in &program.functions {
         state = optimized_mir_hash(state, &function.declaration.to_le_bytes());
@@ -14392,39 +14397,52 @@ fn optimized_mir_namespace_fingerprint(program: &Program) -> u64 {
             .as_bytes(),
         );
     }
+    // Handler/control specialization reads these definitions even when a
+    // body itself has no direct call edge. Retaining their structural form in
+    // the namespace makes per-body O3 reuse exact across an effect-surface
+    // change without coupling it to unrelated callable-body edits.
+    state = optimized_mir_hash(state, format!("{protocols:?}{handler_defs:?}").as_bytes());
     state
 }
 
-/// Return direct targets only for the representation subset whose final O3
-/// output cannot be coupled to generated closure/handler declarations.
-/// Restricting reuse here is intentional: unknown calls and control lowering
-/// get the normal fresh optimizer rather than approximating their global
-/// dependency graph.
+/// Return every statically named function which can influence this body's O3
+/// result. Dynamic handler/control operations have no body dependency of
+/// their own; their definitions are guarded by the namespace fingerprint.
+/// This keeps handler-heavy source bodies independently cacheable whenever
+/// their named targets remain in the stable source declaration namespace.
 fn optimized_mir_direct_dependencies(function: &Function) -> Option<BTreeSet<u32>> {
-    if function.features.contains(FeatureBits::HANDLERS)
-        || function.features.contains(FeatureBits::RESUMPTIONS)
-        || function.features.contains(FeatureBits::INDIRECT_CALLS)
-    {
-        return None;
-    }
     let mut dependencies = BTreeSet::new();
     for block in &function.blocks {
         for statement in &block.statements {
-            if matches!(
-                statement.kind,
-                InstructionKind::MakeCallable { .. }
-                    | InstructionKind::MakeHandler { .. }
-                    | InstructionKind::MakeHandlerShared { .. }
-            ) {
-                return None;
+            match &statement.kind {
+                InstructionKind::MakeCallable { function, .. } => {
+                    dependencies.insert(*function);
+                }
+                InstructionKind::MakeHandlerShared { functions, .. } => {
+                    dependencies.extend(functions.iter().copied());
+                }
+                InstructionKind::MakeHandler { .. } | _ => {}
             }
         }
         match block.terminator {
-            Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+            Terminator::Call { function, .. }
+            | Terminator::TailCall { function, .. }
+            | Terminator::CallKnownReceiver { function, .. }
+            | Terminator::TailCallKnownReceiver { function, .. } => {
                 dependencies.insert(function);
             }
             Terminator::CallSelf { .. } | Terminator::TailCallSelf { .. } => {
                 dependencies.insert(function.declaration);
+            }
+            Terminator::CallIndirect {
+                known_function: Some(function),
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: Some(function),
+                ..
+            } => {
+                dependencies.insert(function);
             }
             Terminator::Abort { .. }
             | Terminator::Cancel { .. }
@@ -14434,13 +14452,17 @@ fn optimized_mir_direct_dependencies(function: &Function) -> Option<BTreeSet<u32
             | Terminator::Return { .. }
             | Terminator::Switch { .. }
             | Terminator::Unreachable => {}
-            Terminator::CallIndirect { .. }
-            | Terminator::CallKnownReceiver { .. }
+            Terminator::CallIndirect {
+                known_function: None,
+                ..
+            }
             | Terminator::Handle { .. }
             | Terminator::Perform { .. }
             | Terminator::Resume { .. }
-            | Terminator::TailCallIndirect { .. }
-            | Terminator::TailCallKnownReceiver { .. }
+            | Terminator::TailCallIndirect {
+                known_function: None,
+                ..
+            }
             | Terminator::TailResume { .. } => return None,
         }
     }
@@ -14512,11 +14534,30 @@ fn optimized_mir_output_is_stable(function: &Function, base_declarations: &BTree
     {
         return false;
     }
-    function.blocks.iter().all(|block| match block.terminator {
-        Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
-            base_declarations.contains(&function)
+    function.blocks.iter().all(|block| {
+        block.statements.iter().all(|statement| match &statement.kind {
+            InstructionKind::MakeCallable { function, .. } => base_declarations.contains(function),
+            InstructionKind::MakeHandlerShared { functions, .. } => {
+                functions.iter().all(|function| base_declarations.contains(function))
+            }
+            _ => true,
+        }) && match block.terminator {
+            Terminator::Call { function, .. }
+            | Terminator::TailCall { function, .. }
+            | Terminator::CallKnownReceiver { function, .. }
+            | Terminator::TailCallKnownReceiver { function, .. } => {
+                base_declarations.contains(&function)
+            }
+            Terminator::CallIndirect {
+                known_function: Some(function),
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: Some(function),
+                ..
+            } => base_declarations.contains(&function),
+            _ => true,
         }
-        _ => true,
     })
 }
 
