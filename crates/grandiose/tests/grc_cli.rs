@@ -228,6 +228,154 @@ fn release_warm_llvm_serve_iteration_records_cache_evidence() {
     );
 }
 
+/// A small, repeatable release-mode measurement for the path a developer
+/// actually takes after editing one implementation.  It deliberately uses a
+/// two-input bundle: changing `leaf.glorious` leaves `main.glorious` available
+/// to the persistent frontend cache, while the native object route can retain
+/// the unrelated function and entry objects.
+///
+/// Run with:
+/// `tooling/ram-gate.sh cargo test --release -p grandiose --test grc_cli \
+/// release_native_serve_warm_body_edit_reports_phase_timings -- --ignored --exact --nocapture`
+///
+/// The required release server is built separately so the measurement never
+/// accidentally times a debug `grc` binary:
+/// `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc`.
+#[test]
+#[ignore = "release-only native warm body-edit timing harness"]
+fn release_native_serve_warm_body_edit_reports_phase_timings() {
+    let directory = tempdir().unwrap();
+    let main = directory.path().join("main.glorious");
+    let leaf = directory.path().join("leaf.glorious");
+    let cache = directory.path().join("native-cache");
+    let release_grc = repository_root().join("target/release/grc");
+    assert!(
+        release_grc.is_file(),
+        "release grc is required; run `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
+    );
+    write(
+        &main,
+        "caller() -> i64 { leaf() } unrelated_leaf() -> i64 { 10 } main() -> () { caller(); unrelated_leaf(); () }",
+    );
+    write(&leaf, "leaf() -> i64 { 1 }");
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O3",
+            "--emit",
+            "executable",
+            "--native-incremental-cache",
+            cache.display().to_string(),
+            "--diagnostic-timings",
+            "-o",
+            output.display().to_string(),
+            main.display().to_string(),
+            leaf.display().to_string(),
+        ])
+    };
+    let request = |session: &mut Session, id, arguments: serde_json::Value| {
+        session.request(serde_json::json!({
+            "protocol": 1,
+            "id": id,
+            "method": "compile",
+            "arguments": arguments,
+        }))
+    };
+    let mut session = Session::start_release(&release_grc);
+    let cold_started = Instant::now();
+    let cold = request(
+        &mut session,
+        1,
+        arguments(&directory.path().join("cold-native")),
+    );
+    let cold_elapsed = cold_started.elapsed();
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(
+        cold["native_incremental"]["strategy"],
+        "partitioned-function-objects"
+    );
+    assert!(
+        cold["timings"].is_object(),
+        "missing timing response: {cold}"
+    );
+    let before = durable_object_manifests(&cache);
+    assert!(
+        !before.is_empty(),
+        "cold native request wrote no durable object manifests"
+    );
+
+    write(&leaf, "leaf() -> i64 { 2 }");
+    let edit_started = Instant::now();
+    let edited = request(
+        &mut session,
+        2,
+        arguments(&directory.path().join("edited-native")),
+    );
+    let edit_elapsed = edit_started.elapsed();
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert!(
+        edited["timings"].is_object(),
+        "missing timing response: {edited}"
+    );
+    for phase in [
+        "source_load_ms",
+        "compile_phases_ms",
+        "llvm_module_ms",
+        "llvm_partitions_ms",
+        "native_objects_ms",
+        "native_link_ms",
+        "total_ms",
+    ] {
+        assert!(
+            edited["timings"][phase].is_u64(),
+            "missing `{phase}` from timing response: {edited}"
+        );
+    }
+    assert!(
+        edited["cache_stats"]["bodies_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the body edit did not reuse unchanged source bodies: {edited}"
+    );
+    assert!(
+        edited["cache_stats"]["frontend"]["segments_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the unchanged source segment was not reused: {edited}"
+    );
+    assert!(
+        edited["cache_stats"]["llvm_fragments_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the body edit did not reuse unchanged LLVM fragments: {edited}"
+    );
+    let after = durable_object_manifests(&cache);
+    let newly_written = after.difference(&before).collect::<Vec<_>>();
+    assert!(
+        newly_written.iter().any(|manifest| fs::read_to_string(cache.join(manifest))
+            .is_ok_and(|contents| contents.contains("role=function;"))),
+        "the body edit did not materialize a changed durable function object: {newly_written:?}"
+    );
+    assert!(directory.path().join("edited-native").is_file());
+
+    let timing = format!(
+        "native warm body-edit timings: cold_wall={cold_elapsed:.2?}, cold_total={}ms, body_edit_wall={edit_elapsed:.2?}, body_edit_total={}ms, body_edit_phases={}ms, partitions={}ms, objects={}ms, link={}ms, speedup={:.2}x",
+        cold["timings"]["total_ms"],
+        edited["timings"]["total_ms"],
+        edited["timings"]["compile_phases_ms"],
+        edited["timings"]["llvm_partitions_ms"],
+        edited["timings"]["native_objects_ms"],
+        edited["timings"]["native_link_ms"],
+        cold_elapsed.as_secs_f64() / edit_elapsed.as_secs_f64(),
+    );
+    eprintln!("{timing}");
+    if let Some(path) = std::env::var_os("G1_NATIVE_WARM_TIMING_FILE") {
+        fs::write(path, timing).unwrap();
+    }
+}
+
 fn copy_tree(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).unwrap();
     for entry in fs::read_dir(source).unwrap() {
