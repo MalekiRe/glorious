@@ -479,13 +479,25 @@ pub fn emit_llvm_native_object_units(
     options: &LlvmOptions,
 ) -> Result<LlvmNativeObjectUnits, Vec<Diagnostic>> {
     let mut fragments = LlvmFragmentCache::default();
+    emit_llvm_native_object_units_with_fragment_cache(phases, options, &mut fragments)
+}
+
+/// Emit partitioned native units while retaining independently emitted source
+/// fragments in a caller-owned cache.  The persistent compiler service uses
+/// this form so a body-only edit does not re-emit every unchanged function
+/// merely to reconstruct the partitioned object inputs.
+pub fn emit_llvm_native_object_units_with_fragment_cache(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+    fragments: &mut LlvmFragmentCache,
+) -> Result<LlvmNativeObjectUnits, Vec<Diagnostic>> {
     // The self-host compiler's monolithic IR is gigabytes large.  Once it is
     // emitted, partitioning needs it only for the shared object unit, so move
     // rather than clone it before replacing source bodies with declarations.
     let LlvmModule {
         ir: mut shared_ir,
         target_triple,
-    } = emit_llvm_ir_with_fragment_cache(phases, options, &mut fragments)?;
+    } = emit_llvm_ir_with_fragment_cache(phases, options, fragments)?;
     let manifest = llvm_incremental_manifest(phases, options);
     let fingerprints = manifest
         .functions

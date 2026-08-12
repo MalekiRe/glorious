@@ -993,7 +993,10 @@ fn compile_loaded(
         // process-local requests still take a fresh Wild link.
         if kind == EmitKind::Executable && command.native_incremental {
             if let Some(cache_dir) = &command.native_incremental_cache {
-                let units = match emit_llvm_native_object_units(&phases, &llvm_options) {
+                let units = match incremental.as_deref_mut().map_or_else(
+                    || emit_llvm_native_object_units(&phases, &llvm_options),
+                    |driver| driver.emit_llvm_native_object_units(&phases, &llvm_options),
+                ) {
                     Ok(units) => units,
                     Err(diagnostics) => {
                         return report_diagnostics(
@@ -1050,7 +1053,7 @@ fn compile_loaded(
                     &output,
                     cache_dir,
                     workers,
-                    jobs.clone(),
+                    &jobs,
                 ) {
                     Ok(objects) => objects,
                     Err(error) => {
@@ -1079,7 +1082,7 @@ fn compile_loaded(
                 return 0;
             }
             if let Some(driver) = incremental.as_deref_mut() {
-                let units = match emit_llvm_native_object_units(&phases, &llvm_options) {
+                let units = match driver.emit_llvm_native_object_units(&phases, &llvm_options) {
                     Ok(units) => units,
                     Err(diagnostics) => {
                         return report_diagnostics(
@@ -1591,11 +1594,11 @@ fn materialize_disk_partitioned_native_objects(
     output: &Path,
     cache_dir: &Path,
     workers: usize,
-    jobs: Vec<DiskNativeObjectJob>,
+    jobs: &[DiskNativeObjectJob],
 ) -> Result<Vec<TemporaryNativeObject>, String> {
     let count = jobs.len();
     let mut results = (0..count).map(|_| None).collect::<Vec<_>>();
-    let mut pending = jobs.into_iter();
+    let mut pending = jobs.iter();
     loop {
         let wave = pending.by_ref().take(workers).collect::<Vec<_>>();
         if wave.is_empty() {

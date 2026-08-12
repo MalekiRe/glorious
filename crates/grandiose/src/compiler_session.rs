@@ -259,6 +259,26 @@ impl CompilationDriver {
         Ok(module)
     }
 
+    /// Emit native object partitions while retaining reusable LLVM function
+    /// fragments for later `--serve` requests.  This is separate from the
+    /// exact whole-module cache: partitioned native output still needs a
+    /// current shared unit and final link after a body edit.
+    pub fn emit_llvm_native_object_units(
+        &mut self,
+        phases: &CompiledPhases,
+        target: &LlvmOptions,
+    ) -> Result<crate::llvm_backend::LlvmNativeObjectUnits, Vec<Diagnostic>> {
+        let units = crate::llvm_backend::emit_llvm_native_object_units_with_fragment_cache(
+            phases,
+            target,
+            &mut self.llvm_fragment_cache,
+        )?;
+        self.stats.reused_llvm_ir = 0;
+        self.stats.reused_llvm_fragments = self.llvm_fragment_cache.reused_fragments();
+        self.stats.emitted_llvm_fragments = self.llvm_fragment_cache.emitted_fragments();
+        Ok(units)
+    }
+
     /// Return immutable native object bytes only for the exact emitted IR and
     /// complete native compiler ABI/options. The caller owns writing bytes to
     /// its current `-o` path; paths and executables are deliberately absent
@@ -830,6 +850,41 @@ mod tests {
             dependency_ir,
             crate::emit_llvm_ir(&dependency_phases, &target).unwrap()
         );
+    }
+
+    #[test]
+    fn native_partitions_reuse_unchanged_llvm_fragments_after_a_body_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let target = LlvmOptions::default();
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut driver = CompilationDriver::new();
+
+        let before_phases = driver.compile_bundle(&before, options).unwrap();
+        let cold = driver
+            .emit_llvm_native_object_units(&before_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_fragments, 0);
+        assert_eq!(driver.stats().emitted_llvm_fragments, 3);
+
+        let after_phases = driver.compile_bundle(&after, options).unwrap();
+        let warm = driver
+            .emit_llvm_native_object_units(&after_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_fragments, 2);
+        assert_eq!(driver.stats().emitted_llvm_fragments, 1);
+        assert_eq!(
+            warm,
+            crate::llvm_backend::emit_llvm_native_object_units(&after_phases, &target).unwrap(),
+            "cache-backed native partitions must remain byte-for-byte canonical"
+        );
+        assert_ne!(cold, warm, "the changed leaf must produce fresh native units");
     }
 
     #[test]
