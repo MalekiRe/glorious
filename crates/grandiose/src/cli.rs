@@ -47,7 +47,8 @@ const DISK_CACHE_LOCK_WAIT: Duration = Duration::from_secs(30);
 /// `IncrementalTypeCache`.  Change it whenever either stops being compatible.
 const PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA: u32 = 1;
 const PERSISTENT_COMPILER_LLVM_FRAGMENT_CACHE_SCHEMA: u32 = 1;
-const MAX_PERSISTENT_COMPILER_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const PERSISTENT_COMPILER_MIR_CACHE_SCHEMA: u32 = 1;
+const MAX_PERSISTENT_COMPILER_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 static DISK_CACHE_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TemporaryNativeHost {
@@ -808,6 +809,97 @@ fn persist_compiler_llvm_fragment_cache(
     Ok(())
 }
 
+/// Per-function MIR and exact local O3 pass snapshots. This is separate from
+/// type evidence and LLVM text so each successfully completed compiler phase
+/// remains useful even if a later phase is interrupted.
+struct DiskCompilerMirCache {
+    bytes: PathBuf,
+    manifest: PathBuf,
+    lock: PathBuf,
+}
+
+impl DiskCompilerMirCache {
+    fn new(cache_dir: &Path) -> Self {
+        let stem = format!("compiler-mir-cache-v{PERSISTENT_COMPILER_MIR_CACHE_SCHEMA}");
+        Self {
+            bytes: cache_dir.join(format!("{stem}.bin")),
+            manifest: cache_dir.join(format!("{stem}.manifest")),
+            lock: cache_dir.join(format!(".{stem}.lock")),
+        }
+    }
+
+    fn manifest_text(bytes: &[u8]) -> String {
+        format!(
+            "schema={PERSISTENT_COMPILER_MIR_CACHE_SCHEMA}\ncodec=bincode-1\nbytes={}\nblake3={}\n",
+            bytes.len(),
+            blake3::hash(bytes).to_hex(),
+        )
+    }
+
+    fn read_valid(&self) -> Option<Vec<u8>> {
+        let length = std::fs::metadata(&self.bytes).ok()?.len();
+        if length > MAX_PERSISTENT_COMPILER_CACHE_BYTES {
+            return None;
+        }
+        let (Ok(bytes), Ok(manifest)) = (
+            std::fs::read(&self.bytes),
+            std::fs::read_to_string(&self.manifest),
+        ) else {
+            return None;
+        };
+        (manifest == Self::manifest_text(&bytes)).then_some(bytes)
+    }
+}
+
+fn restore_persistent_compiler_mir_cache(driver: &mut CompilationDriver, cache_dir: &Path) {
+    let cache = DiskCompilerMirCache::new(cache_dir);
+    if let Some(bytes) = cache.read_valid() {
+        let _ = driver.restore_persistent_mir_cache(&bytes);
+    }
+}
+
+fn persist_compiler_mir_cache(
+    driver: &mut CompilationDriver,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(cache_dir).map_err(|error| {
+        format!("could not create MIR cache {}: {error}", cache_dir.display())
+    })?;
+    let cache = DiskCompilerMirCache::new(cache_dir);
+    let _lock = DiskCacheLock::acquire(cache.lock.clone())?;
+    let bytes = driver
+        .persistent_mir_cache()
+        .map_err(|error| format!("could not encode MIR cache: {error}"))?;
+    if bytes.len() as u64 > MAX_PERSISTENT_COMPILER_CACHE_BYTES {
+        return Err(format!("MIR cache snapshot is too large ({} bytes)", bytes.len()));
+    }
+    if cache.read_valid().as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
+    }
+    let directory = cache.bytes.parent().expect("MIR cache has parent");
+    let bytes_temporary = disk_cache_temporary(directory, "compiler-mir-cache", "mir.tmp")?;
+    if let Err(error) = std::fs::write(&bytes_temporary, &bytes) {
+        let _ = std::fs::remove_file(&bytes_temporary);
+        return Err(format!("could not write MIR cache: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&bytes_temporary, &cache.bytes) {
+        let _ = std::fs::remove_file(&bytes_temporary);
+        return Err(format!("could not publish MIR cache: {error}"));
+    }
+    let manifest_temporary =
+        disk_cache_temporary(directory, "compiler-mir-cache", "mir-manifest.tmp")?;
+    let manifest = DiskCompilerMirCache::manifest_text(&bytes);
+    if let Err(error) = std::fs::write(&manifest_temporary, manifest) {
+        let _ = std::fs::remove_file(&manifest_temporary);
+        return Err(format!("could not write MIR cache manifest: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&manifest_temporary, &cache.manifest) {
+        let _ = std::fs::remove_file(&manifest_temporary);
+        return Err(format!("could not publish MIR cache manifest: {error}"));
+    }
+    Ok(())
+}
+
 fn line_and_column(source: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(source.len());
     let prefix = &source[..offset];
@@ -1033,6 +1125,7 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
         let cache_dir = durable_native_cache_dir(&output);
         let mut driver = CompilationDriver::new();
         restore_persistent_compiler_type_cache(&mut driver, &cache_dir);
+        restore_persistent_compiler_mir_cache(&mut driver, &cache_dir);
         restore_persistent_compiler_llvm_fragment_cache(&mut driver, &cache_dir);
         return compile_loaded(
             command,
@@ -1205,6 +1298,12 @@ fn compile_loaded(
             let _ = writeln!(
                 stderr,
                 "grc: warning: could not update compiler incremental cache: {error}"
+            );
+        }
+        if let Err(error) = persist_compiler_mir_cache(driver, cache_dir) {
+            let _ = writeln!(
+                stderr,
+                "grc: warning: could not update MIR incremental cache: {error}"
             );
         }
     }
@@ -3083,6 +3182,31 @@ mod tests {
             .unwrap();
         assert_eq!(restarted.stats().reused_llvm_fragments, 2);
         assert_eq!(restarted.stats().emitted_llvm_fragments, 1);
+    }
+
+    #[test]
+    fn mir_cache_persists_reusable_bodies_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_dir = durable_native_cache_dir(&directory.path().join("compiler"));
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let before = compiler_cache_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = compiler_cache_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut writer = CompilationDriver::new();
+        assert!(writer.compile_bundle(&before, options).is_ok());
+        persist_compiler_mir_cache(&mut writer, &cache_dir).unwrap();
+
+        let key = DiskCompilerMirCache::new(&cache_dir);
+        assert!(key.read_valid().is_some());
+        let mut restarted = CompilationDriver::new();
+        restore_persistent_compiler_mir_cache(&mut restarted, &cache_dir);
+        assert!(restarted.compile_bundle(&after, options).is_ok());
+        assert_eq!(restarted.stats().reused_mir_bodies, 2);
     }
 
     #[test]

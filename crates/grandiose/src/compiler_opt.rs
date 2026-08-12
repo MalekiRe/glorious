@@ -45,7 +45,7 @@ impl OptimizationLevel {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub enum MirPhase {
     #[default]
     Raw,
@@ -57,7 +57,7 @@ pub enum MirPhase {
 
 /// Cheap, stable body-property mask. Bits are part of MIR fingerprints, so new
 /// properties must use fresh bits and inference must not depend on hash order.
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct FeatureBits(u32);
 
 impl FeatureBits {
@@ -124,7 +124,7 @@ impl DenseWorklist {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub enum PassId {
     ValidateRawMir,
     ImportAndValidatePlaceFlow,
@@ -167,7 +167,7 @@ impl Default for OptimizationPlan {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub enum PassOutcome {
     Unchanged,
     Changed,
@@ -11359,7 +11359,7 @@ fn inline_by_cost_with_admission_caps(
 /// incremental scheduling may retain these snapshots only at the *same* pass
 /// and body slot that produced them; replaying an entire prefix at once would
 /// change the shared optimizer work-budget ordering.
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct TransactionalPassBodySnapshot {
     pub(crate) input: Function,
     pub(crate) output: Function,

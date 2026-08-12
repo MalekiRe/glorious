@@ -147,7 +147,7 @@ pub struct ManifestPrimitiveLeaf {
 /// Frozen host-import identities supplied by the compiler distribution.  The
 /// source declaration name is only a lookup key inside the trusted standard
 /// library segment; it is not itself authority.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub enum HostImportRole {
     ProcessArgsGet,
     FsRead,

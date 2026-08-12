@@ -8,7 +8,7 @@
 //! downstream work for duplicate checks and editor undo/redo without reusing
 //! results across a semantic input change.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use grandiose_vm::{Type, TypeId};
 
@@ -299,6 +299,20 @@ impl CompilationDriver {
     /// driver's freshly generated optimized fragments as the authority.
     pub fn merge_persistent_llvm_fragment_cache(&mut self, bytes: &[u8]) -> bool {
         self.llvm_fragment_cache.merge_persistent(bytes)
+    }
+
+    /// Restore exact per-function MIR, cleanup facts, and local O3 pass
+    /// snapshots from the durable compiler cache.
+    pub fn restore_persistent_mir_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = IncrementalMirCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.mir_cache = cache;
+        true
+    }
+
+    pub fn persistent_mir_cache(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.mir_cache.encode_persistent()
     }
 
     pub fn compile_bundle(
@@ -736,7 +750,7 @@ pub(crate) struct IncrementalMirCache {
     reused_optimizer_body_snapshots: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 struct CachedMirSchema {
     id: u64,
     types: Vec<Type>,
@@ -744,13 +758,33 @@ struct CachedMirSchema {
 }
 
 const INCREMENTAL_MIR_SCHEMA_CAPACITY: usize = 4;
+const PERSISTENT_MIR_CACHE_SCHEMA: u32 = 1;
 
 #[derive(Clone)]
 struct CachedMirBody {
-    core: core::Function,
+    core: Option<core::Function>,
+    core_debug: String,
     lowered: mir::Function,
     /// Cleanup MIR is only valid under the exact summary fingerprint for the
     /// direct array-call facts consumed while ownership was imported.
+    cleanup: Option<(u64, mir::Function)>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentMirCache {
+    schema: u32,
+    schemas: VecDeque<CachedMirSchema>,
+    entries: BTreeMap<(u64, u32), PersistentMirBody>,
+    local_pass_snapshots: BTreeMap<
+        (u64, u32, crate::compiler_mir::optimizer::PassId),
+        VecDeque<crate::compiler_mir::optimizer::TransactionalPassBodySnapshot>,
+    >,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentMirBody {
+    core_debug: String,
+    lowered: mir::Function,
     cleanup: Option<(u64, mir::Function)>,
 }
 
@@ -794,7 +828,12 @@ impl IncrementalMirCache {
 
     pub(crate) fn reuse(&mut self, function: &core::Function) -> Option<mir::Function> {
         let cached = self.entries.get(&self.active_key(function.declaration)?)?;
-        if cached.core != *function {
+        let matches = cached
+            .core
+            .as_ref()
+            .is_some_and(|core| *core == *function)
+            || cached.core_debug == format!("{function:?}");
+        if !matches {
             return None;
         }
         self.reused_bodies += 1;
@@ -845,11 +884,94 @@ impl IncrementalMirCache {
             .insert(
                 key,
                 CachedMirBody {
-                    core: function,
+                    core_debug: format!("{function:?}"),
+                    core: Some(function),
                     lowered,
                     cleanup: None,
                 },
             );
+    }
+
+    /// Persist exact per-function raw/cleanup MIR plus transactional local
+    /// optimizer snapshots. Core validity is bound to its deterministic
+    /// structural representation, while MIR remains binary data.
+    pub(crate) fn encode_persistent(&self) -> Result<Vec<u8>, bincode::Error> {
+        let entries = self
+            .entries
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    *key,
+                    PersistentMirBody {
+                        core_debug: entry.core_debug.clone(),
+                        lowered: entry.lowered.clone(),
+                        cleanup: entry.cleanup.clone(),
+                    },
+                )
+            })
+            .collect();
+        bincode::serialize(&PersistentMirCache {
+            schema: PERSISTENT_MIR_CACHE_SCHEMA,
+            schemas: self.schemas.clone(),
+            entries,
+            local_pass_snapshots: self.local_pass_snapshots.clone(),
+        })
+    }
+
+    pub(crate) fn decode_persistent(bytes: &[u8]) -> Option<Self> {
+        let persisted = bincode::deserialize::<PersistentMirCache>(bytes).ok()?;
+        if persisted.schema != PERSISTENT_MIR_CACHE_SCHEMA
+            || persisted.schemas.len() > INCREMENTAL_MIR_SCHEMA_CAPACITY
+        {
+            return None;
+        }
+        let known_schemas = persisted
+            .schemas
+            .iter()
+            .map(|schema| schema.id)
+            .collect::<BTreeSet<_>>();
+        if persisted
+            .entries
+            .keys()
+            .any(|(schema, _)| !known_schemas.contains(schema))
+            || persisted
+                .local_pass_snapshots
+                .keys()
+                .any(|(schema, _, _)| !known_schemas.contains(schema))
+        {
+            return None;
+        }
+        let next_schema = persisted
+            .schemas
+            .iter()
+            .map(|schema| schema.id)
+            .max()
+            .unwrap_or_default();
+        Some(Self {
+            schemas: persisted.schemas,
+            entries: persisted
+                .entries
+                .into_iter()
+                .map(|(key, entry)| {
+                    (
+                        key,
+                        CachedMirBody {
+                            core: None,
+                            core_debug: entry.core_debug,
+                            lowered: entry.lowered,
+                            cleanup: entry.cleanup,
+                        },
+                    )
+                })
+                .collect(),
+            local_pass_snapshots: persisted.local_pass_snapshots,
+            active_schema: None,
+            next_schema,
+            lowered_bodies: 0,
+            reused_bodies: 0,
+            reused_cleanup_bodies: 0,
+            reused_optimizer_body_snapshots: 0,
+        })
     }
 }
 
@@ -1230,6 +1352,32 @@ mod tests {
             warm,
             crate::llvm_backend::emit_llvm_native_object_units(&after_phases, &target).unwrap()
         );
+    }
+
+    #[test]
+    fn persistent_mir_cache_reuses_raw_and_cleanup_bodies_after_restart() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        assert!(first_driver.compile_bundle(&before, options).is_ok());
+        let persisted = first_driver.persistent_mir_cache().unwrap();
+        assert!(!persisted.is_empty());
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_mir_cache(&persisted));
+        let warm = restarted_driver.compile_bundle(&after, options).unwrap();
+        assert_eq!(restarted_driver.stats().reused_mir_bodies, 2);
+
+        let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+        assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
     }
 
     #[test]
