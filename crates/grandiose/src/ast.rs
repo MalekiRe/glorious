@@ -257,7 +257,7 @@ pub enum GenericParamKind {
     Const(ConstKind),
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub enum ConstKind {
     Quantity,
     U32,

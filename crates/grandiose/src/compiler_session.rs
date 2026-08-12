@@ -255,6 +255,31 @@ impl CompilationDriver {
         Self::default()
     }
 
+    /// Restore only validated, per-body type evidence from a durable compiler
+    /// cache.  Higher layers remain ordinary cache misses until they gain
+    /// their own independently versioned on-disk formats.
+    pub fn restore_persistent_type_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = IncrementalTypeCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.type_cache = cache;
+        true
+    }
+
+    pub fn persistent_type_cache(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.type_cache.encode_persistent()
+    }
+
+    /// Incorporate a concurrently published durable type cache.  Entries
+    /// produced by this driver remain authoritative for matching bodies.
+    pub fn merge_persistent_type_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = IncrementalTypeCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.type_cache.merge_persistent(cache);
+        true
+    }
+
     pub fn compile_bundle(
         &mut self,
         bundle: &SourceBundle,
@@ -1120,6 +1145,36 @@ mod tests {
             cold, warm,
             "the changed leaf must produce fresh native units"
         );
+    }
+
+    #[test]
+    fn persistent_type_cache_reuses_unchanged_bodies_after_driver_restart() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        // Keep the edited body byte length stable. The two other callable
+        // bodies are eligible for reuse after the fresh driver restores its
+        // serialized state, exactly as a new CLI invocation does.
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        assert!(first_driver.compile_bundle(&before, options).is_ok());
+        let persisted = first_driver.persistent_type_cache().unwrap();
+        assert!(!persisted.is_empty());
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_type_cache(&persisted));
+        let warm = restarted_driver.compile_bundle(&after, options).unwrap();
+        assert_eq!(restarted_driver.stats().reused_bodies, 2);
+
+        let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        assert_eq!(warm.provisional_fingerprint(), cold.provisional_fingerprint());
+        assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+        assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
     }
 
     #[test]

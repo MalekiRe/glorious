@@ -5,6 +5,7 @@ use std::{
     ops::Range,
     sync::Arc,
 };
+use serde::{Deserialize, Serialize};
 
 pub type TypeId = u32;
 pub type Register = u32;
@@ -31,26 +32,26 @@ pub const TEXT: TypeId = 17;
 pub const BYTES: TypeId = 18;
 pub const NONE32: u32 = u32::MAX;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Field {
     pub name: String,
     pub ty: TypeId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct EnumVariant {
     pub name: String,
     pub fields: Vec<Field>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Signature {
     pub params: Vec<TypeId>,
     pub result: TypeId,
     pub outward_protocols: Vec<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Import {
     pub capability: String,
     pub symbol: String,
@@ -58,14 +59,14 @@ pub struct Import {
     pub may_trap: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Export {
     pub name: String,
     pub function: FunctionId,
     pub signature: Signature,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Operation {
     pub name: String,
     pub payload_signature: Signature,
@@ -75,14 +76,14 @@ pub struct Operation {
     pub terminal: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Protocol {
     pub display_name: String,
     pub type_arguments: Vec<TypeId>,
     pub operations: Vec<Operation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct HandlerClause {
     pub protocol: u32,
     pub operation: u32,
@@ -90,7 +91,7 @@ pub struct HandlerClause {
     pub resumption_type: Option<TypeId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct HandlerDef {
     pub result_type: TypeId,
     pub clauses: Vec<HandlerClause>,
@@ -165,7 +166,7 @@ fn maximal_capability_flags(ty: &Type) -> u8 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum Type {
     /// The same runtime type with deliberately narrower source-level `Use`
     /// capabilities. This wrapper has no type identity of its own.
@@ -362,7 +363,7 @@ pub(crate) fn projection_field_type(ty: &Type, variant: Option<u32>, field: u32)
         .copied()
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Constant {
     Unit,
     U8(u8),
@@ -385,7 +386,7 @@ pub enum Constant {
 }
 
 /// Supported subset of the frozen, type-generic primitive table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[repr(u32)]
 pub enum Primitive {
     IntCheckedAdd = 0x0000,

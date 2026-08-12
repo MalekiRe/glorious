@@ -43,6 +43,10 @@ const NATIVE_RUNTIME: &[u8] = include_bytes!("native_runtime.c");
 const MAX_DURABLE_NATIVE_OBJECT_WORKERS: usize = 4;
 const DURABLE_NATIVE_OBJECT_WORKERS_ENV: &str = "G1_NATIVE_OBJECT_WORKERS";
 const DISK_CACHE_LOCK_WAIT: Duration = Duration::from_secs(30);
+/// This covers the bincode layout and the exact semantic evidence carried by
+/// `IncrementalTypeCache`.  Change it whenever either stops being compatible.
+const PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA: u32 = 1;
+const MAX_PERSISTENT_COMPILER_TYPE_CACHE_BYTES: u64 = 512 * 1024 * 1024;
 static DISK_CACHE_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TemporaryNativeHost {
@@ -563,6 +567,130 @@ fn durable_native_cache_dir(output: &Path) -> PathBuf {
         .join(".grandiose-native-cache")
 }
 
+/// Versioned compiler evidence that survives a one-shot executable build.
+/// This is deliberately separate from native objects: it is loaded before
+/// frontend/type compilation, where the old object-only cache could not help.
+struct DiskCompilerTypeCache {
+    bytes: PathBuf,
+    manifest: PathBuf,
+    lock: PathBuf,
+}
+
+impl DiskCompilerTypeCache {
+    fn new(cache_dir: &Path) -> Self {
+        let stem = format!(
+            "compiler-type-cache-v{PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA}"
+        );
+        Self {
+            bytes: cache_dir.join(format!("{stem}.bin")),
+            manifest: cache_dir.join(format!("{stem}.manifest")),
+            lock: cache_dir.join(format!(".{stem}.lock")),
+        }
+    }
+
+    fn manifest_text(bytes: &[u8]) -> String {
+        format!(
+            "schema={PERSISTENT_COMPILER_TYPE_CACHE_SCHEMA}\ncodec=bincode-1\nbytes={}\nblake3={}\n",
+            bytes.len(),
+            blake3::hash(bytes).to_hex(),
+        )
+    }
+
+    /// A damaged, stale, or oversized entry is simply a cache miss.  The
+    /// normal successful compilation will publish a fresh entry later; no
+    /// cache directory is ever reset as part of this path.
+    fn read_valid(&self) -> Option<Vec<u8>> {
+        let length = std::fs::metadata(&self.bytes).ok()?.len();
+        if length > MAX_PERSISTENT_COMPILER_TYPE_CACHE_BYTES {
+            return None;
+        }
+        let (Ok(bytes), Ok(manifest)) = (
+            std::fs::read(&self.bytes),
+            std::fs::read_to_string(&self.manifest),
+        ) else {
+            return None;
+        };
+        (manifest == Self::manifest_text(&bytes)).then_some(bytes)
+    }
+}
+
+fn restore_persistent_compiler_type_cache(
+    driver: &mut CompilationDriver,
+    cache_dir: &Path,
+) {
+    let cache = DiskCompilerTypeCache::new(cache_dir);
+    if let Some(bytes) = cache.read_valid() {
+        let _ = driver.restore_persistent_type_cache(&bytes);
+    }
+}
+
+/// Atomically publish a merged compiler-state snapshot.  Holding the same
+/// small lock used by native entries lets independent command invocations
+/// keep each other's retained contexts instead of replacing the cache whole.
+fn persist_compiler_type_cache(
+    driver: &mut CompilationDriver,
+    cache_dir: &Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(cache_dir).map_err(|error| {
+        format!(
+            "could not create compiler incremental cache {}: {error}",
+            cache_dir.display()
+        )
+    })?;
+    let cache = DiskCompilerTypeCache::new(cache_dir);
+    let _lock = DiskCacheLock::acquire(cache.lock.clone())?;
+    let existing = cache.read_valid();
+    if let Some(bytes) = existing.as_deref() {
+        let _ = driver.merge_persistent_type_cache(bytes);
+    }
+    let bytes = driver
+        .persistent_type_cache()
+        .map_err(|error| format!("could not encode compiler incremental cache: {error}"))?;
+    if bytes.len() as u64 > MAX_PERSISTENT_COMPILER_TYPE_CACHE_BYTES {
+        return Err(format!(
+            "compiler incremental cache snapshot is too large ({} bytes)",
+            bytes.len()
+        ));
+    }
+    if existing.as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
+    }
+
+    let directory = cache.bytes.parent().expect("compiler cache has parent");
+    let bytes_temporary = disk_cache_temporary(
+        directory,
+        "compiler-type-cache",
+        "type-cache.tmp",
+    )?;
+    if let Err(error) = std::fs::write(&bytes_temporary, &bytes) {
+        let _ = std::fs::remove_file(&bytes_temporary);
+        return Err(format!("could not write compiler incremental cache: {error}"));
+    }
+    if let Err(error) = std::fs::rename(&bytes_temporary, &cache.bytes) {
+        let _ = std::fs::remove_file(&bytes_temporary);
+        return Err(format!("could not publish compiler incremental cache: {error}"));
+    }
+    let manifest_temporary = disk_cache_temporary(
+        directory,
+        "compiler-type-cache",
+        "type-cache-manifest.tmp",
+    )?;
+    let manifest = DiskCompilerTypeCache::manifest_text(&bytes);
+    if let Err(error) = std::fs::write(&manifest_temporary, manifest) {
+        let _ = std::fs::remove_file(&manifest_temporary);
+        return Err(format!(
+            "could not write compiler incremental cache manifest: {error}"
+        ));
+    }
+    if let Err(error) = std::fs::rename(&manifest_temporary, &cache.manifest) {
+        let _ = std::fs::remove_file(&manifest_temporary);
+        return Err(format!(
+            "could not publish compiler incremental cache manifest: {error}"
+        ));
+    }
+    Ok(())
+}
+
 fn line_and_column(source: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(source.len());
     let prefix = &source[..offset];
@@ -780,7 +908,26 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
             return 1;
         }
     };
-    compile_loaded(command, segments, None, None, None, stdout, stderr)
+    if command.emit.unwrap_or(EmitKind::Bytecode) == EmitKind::Executable {
+        let output = command
+            .output
+            .clone()
+            .unwrap_or_else(|| default_output(&command.inputs[0], EmitKind::Executable));
+        let cache_dir = durable_native_cache_dir(&output);
+        let mut driver = CompilationDriver::new();
+        restore_persistent_compiler_type_cache(&mut driver, &cache_dir);
+        return compile_loaded(
+            command,
+            segments,
+            Some(&mut driver),
+            Some(&cache_dir),
+            None,
+            None,
+            stdout,
+            stderr,
+        );
+    }
+    compile_loaded(command, segments, None, None, None, None, stdout, stderr)
 }
 
 #[derive(Default)]
@@ -815,6 +962,7 @@ fn compile_loaded(
     command: CompileCommand,
     mut segments: Vec<Segment>,
     mut incremental: Option<&mut CompilationDriver>,
+    persistent_compiler_cache_dir: Option<&Path>,
     mut native_wild_relink: Option<&mut bool>,
     mut timing: Option<&mut CompileTiming>,
     stdout: &mut dyn Write,
@@ -931,6 +1079,17 @@ fn compile_loaded(
             return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
         }
     };
+    if let (Some(driver), Some(cache_dir)) = (
+        incremental.as_deref_mut(),
+        persistent_compiler_cache_dir,
+    ) {
+        if let Err(error) = persist_compiler_type_cache(driver, cache_dir) {
+            let _ = writeln!(
+                stderr,
+                "grc: warning: could not update compiler incremental cache: {error}"
+            );
+        }
+    }
     for diagnostic in &phases.diagnostics {
         let written = if command.json_diagnostics {
             write_json_diagnostic(&bundle, diagnostic, &mut *stderr)
@@ -2428,6 +2587,7 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
             command,
             segments,
             Some(&mut state.compiler),
+            None,
             Some(&mut wild_relink),
             compile_timing.as_mut(),
             &mut stdout,
@@ -2727,6 +2887,41 @@ fn inspect_bundle_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compiler_cache_bundle(source: &str) -> SourceBundle {
+        SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", source),
+            [],
+        )
+    }
+
+    #[test]
+    fn compiler_type_cache_persists_and_reuses_after_process_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_dir = durable_native_cache_dir(&directory.path().join("compiler"));
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let before = compiler_cache_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = compiler_cache_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut writer = CompilationDriver::new();
+        assert!(writer.compile_bundle(&before, options).is_ok());
+        persist_compiler_type_cache(&mut writer, &cache_dir).unwrap();
+
+        let key = DiskCompilerTypeCache::new(&cache_dir);
+        assert!(key.read_valid().is_some());
+        assert!(key.manifest.exists());
+
+        let mut restarted = CompilationDriver::new();
+        restore_persistent_compiler_type_cache(&mut restarted, &cache_dir);
+        assert!(restarted.compile_bundle(&after, options).is_ok());
+        assert_eq!(restarted.stats().reused_bodies, 2);
+    }
 
     #[test]
     fn durable_native_worker_request_is_bounded_by_available_parallelism() {
