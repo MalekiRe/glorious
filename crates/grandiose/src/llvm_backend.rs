@@ -855,13 +855,15 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
     options: &LlvmOptions,
     fragments: &mut LlvmFragmentCache,
 ) -> Result<LlvmNativeObjectUnits, Vec<Diagnostic>> {
-    // The self-host compiler's monolithic IR is gigabytes large.  Once it is
-    // emitted, partitioning needs it only for the shared object unit, so move
-    // rather than clone it before replacing source bodies with declarations.
+    // Do not first assemble a monolithic module and then search it once per
+    // source body.  The self-host compiler's IR is gigabytes large, making
+    // that adapter both memory hungry and quadratic in the number of source
+    // functions.  The emitter already has independent body fragments; keep
+    // those out of the shared stream from the outset.
     let LlvmModule {
         ir: mut shared_ir,
         target_triple,
-    } = emit_llvm_ir_with_fragment_cache(phases, options, fragments)?;
+    } = Emitter::new(phases, options).emit_partitioned_with_fragment_cache(fragments)?;
     let manifest = llvm_incremental_manifest(phases, options);
     // Fragment text remains owned by the cache until its corresponding final
     // unit is materialized below.  Avoiding this intermediate clone prevents
@@ -876,36 +878,16 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
         })
         .map(|function| (function.declaration, function.fragment_fingerprint))
         .collect::<Vec<_>>();
-    for (declaration, _) in &source_functions {
-        let text = &fragments
-            .fragment(&manifest, *declaration)
-            .expect("current canonical emission produced every function fragment")
-            .emitted_text;
-        // Fragment text came from this exact canonical module emission. A
-        // missing replacement would make a supposedly independent unit retain
-        // another function body, so fail closed rather than returning it.
-        let Some(offset) = shared_ir.find(text) else {
-            return Err(vec![backend_error(
-                "could not partition canonical LLVM function fragment",
-            )]);
-        };
-        shared_ir.replace_range(
-            offset..offset + text.len(),
-            &llvm_fragment_declarations(text),
-        );
-    }
     // Literal globals are private to the source fragments that reference
     // them. Keeping all of them in every partition's prelude made one new
     // diagnostic string alter every function object's exact IR cache key.
-    // The shared unit has no remaining source body after partitioning, so it
-    // needs none of these definitions either.
+    // The shared unit has no source body, so it needs none of these
+    // definitions either.
     let literal_definitions = llvm_literal_global_definitions(&shared_ir);
     shared_ir = llvm_without_literal_global_definitions(shared_ir);
     // Runtime helpers were internal in the monolith. The shared unit now owns
     // them, so the function units must resolve them through external symbols.
-    // Source fragments have already been replaced with declarations above.
     shared_ir = llvm_externalize_internal_definitions(&shared_ir);
-    let function_prelude = llvm_declarations_only(&shared_ir);
     let source_declarations = source_functions
         .iter()
         .map(|(declaration, _)| {
@@ -922,19 +904,14 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    // Every function unit needs the runtime/global declaration prelude, but
-    // only direct source-function dependencies. Previously each unit started
-    // by cloning the complete prelude and repeatedly deleting every unrelated
-    // source prototype. On a self-host build that made partitioning do a
-    // quadratic amount of whole-prelude copying. Strip only source-function
-    // prototypes once, then append the small dependency set for each unit
-    // below. A source fragment can also emit internal effect/closure helpers;
-    // their declarations belong to the shared runtime prelude and must remain.
-    let runtime_prelude = source_declarations
-        .values()
-        .fold(function_prelude, |prelude, prototype| {
-            prelude.replacen(prototype, "", 1)
-        });
+    // Function units need runtime/global declarations and only their direct
+    // source-function dependencies.  Because the shared stream was emitted
+    // without source bodies, it has no source prototypes to strip one at a
+    // time.  This avoids another quadratic scan of the large self-host IR.
+    let runtime_prelude = llvm_declarations_only(&shared_ir);
+    for declaration in source_declarations.values() {
+        shared_ir.push_str(declaration);
+    }
     let functions = source_functions
         .into_iter()
         .map(|(declaration, fragment_fingerprint)| {
@@ -1077,15 +1054,6 @@ fn llvm_definition_symbol(line: &str) -> Option<&str> {
     Some(&line[symbol_start..symbol_start + symbol_end])
 }
 
-/// Convert each definition in a function fragment to an external declaration.
-fn llvm_fragment_declarations(fragment: &str) -> String {
-    fragment
-        .lines()
-        .filter(|line| line.starts_with("define "))
-        .map(llvm_definition_declaration)
-        .collect()
-}
-
 fn llvm_definition_declaration(line: &str) -> String {
     let header = line
         .strip_prefix("define ")
@@ -1204,19 +1172,32 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit(self) -> Result<LlvmModule, Vec<Diagnostic>> {
-        self.emit_inner(None)
+        self.emit_inner(None, false)
     }
 
     fn emit_with_fragment_cache(
         self,
         cache: &mut LlvmFragmentCache,
     ) -> Result<LlvmModule, Vec<Diagnostic>> {
-        self.emit_inner(Some(cache))
+        self.emit_inner(Some(cache), false)
+    }
+
+    /// Emit the shared native unit while retaining source-function bodies
+    /// exclusively in the fragment cache.  This is intentionally separate
+    /// from normal LLVM-module emission: callers that request a monolithic
+    /// module still receive one, while the durable executable route never
+    /// builds then reparses that enormous intermediate string.
+    fn emit_partitioned_with_fragment_cache(
+        self,
+        cache: &mut LlvmFragmentCache,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        self.emit_inner(Some(cache), true)
     }
 
     fn emit_inner(
         mut self,
         mut cache: Option<&mut LlvmFragmentCache>,
+        omit_source_function_bodies: bool,
     ) -> Result<LlvmModule, Vec<Diagnostic>> {
         if let Some(cache) = cache.as_deref_mut() {
             cache.begin_emission();
@@ -1319,7 +1300,9 @@ impl<'a> Emitter<'a> {
                 _ => None,
             };
             if let Some(fragment) = cached {
-                self.output.push_str(&fragment.emitted_text);
+                if !omit_source_function_bodies {
+                    self.output.push_str(&fragment.emitted_text);
+                }
                 self.overflow_widths.extend(fragment.overflow_widths);
                 self.snapshot_capture_fix_types
                     .extend(fragment.snapshot_capture_fix_types);
@@ -1344,7 +1327,9 @@ impl<'a> Emitter<'a> {
             self.output = module_output;
             self.overflow_widths = module_overflow_widths;
             self.snapshot_capture_fix_types = module_snapshot_capture_fix_types;
-            self.output.push_str(&emitted_text);
+            if !omit_source_function_bodies {
+                self.output.push_str(&emitted_text);
+            }
             self.overflow_widths.extend(overflow_widths.iter().copied());
             self.snapshot_capture_fix_types
                 .extend(snapshot_capture_fix_types.iter().copied());
@@ -13824,6 +13809,52 @@ mod tests {
             .emit_with_fragment_cache(&mut cache)
             .unwrap();
         assert_eq!(restored, original);
+        assert_eq!(cache.reused_fragments(), 1);
+        assert_eq!(cache.emitted_fragments(), 0);
+    }
+
+    #[test]
+    fn partitioned_emission_keeps_source_bodies_out_of_the_shared_unit() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> () { () }"),
+            [],
+        );
+        let phases = crate::compile_bundle_to_phases_with_options(
+            &bundle,
+            CompileOptions {
+                optimization_level: OptimizationLevel::O3,
+            },
+        )
+        .unwrap();
+        let options = LlvmOptions::default();
+        let manifest = llvm_incremental_manifest(&phases, &options);
+        let declaration = manifest.functions.first().unwrap().declaration;
+        let mut cache = LlvmFragmentCache::default();
+
+        let units =
+            emit_llvm_native_object_units_with_fragment_cache(&phases, &options, &mut cache)
+                .unwrap();
+        let fragment = &cache
+            .fragment(&manifest, declaration)
+            .expect("partitioned emission must retain the source fragment")
+            .emitted_text;
+        let source_declaration = llvm_fragment_source_declaration(fragment, declaration).unwrap();
+
+        assert!(units.shared.ir.contains(&source_declaration));
+        assert!(!units.shared.ir.contains(fragment));
+        assert!(units.functions.iter().any(|unit| {
+            unit.declaration == declaration
+                && unit
+                    .module
+                    .ir
+                    .contains(&llvm_externalize_internal_definitions(fragment))
+        }));
+
+        let repeated =
+            emit_llvm_native_object_units_with_fragment_cache(&phases, &options, &mut cache)
+                .unwrap();
+        assert_eq!(repeated.shared, units.shared);
         assert_eq!(cache.reused_fragments(), 1);
         assert_eq!(cache.emitted_fragments(), 0);
     }
