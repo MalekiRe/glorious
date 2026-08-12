@@ -13543,7 +13543,18 @@ fn push_checked(
     types: &[Type],
 ) -> Result<(), ValidationError> {
     let pass = report.pass;
+    let changed = report.outcome == PassOutcome::Changed;
     passes.push(report);
+
+    // Every optimizer transform is transactional: an Unchanged, skipped, or
+    // budget-exhausted report has not published MIR mutations.  In release
+    // builds, repeatedly walking every function to rediscover that there are
+    // no invalidated ownership facts becomes noticeable in O3's bounded
+    // fixed-point tails.  A changed report is still refreshed immediately;
+    // debug builds retain the unconditional checkpoint as a contract check.
+    if !changed && !cfg!(debug_assertions) {
+        return Ok(());
+    }
     validate_cleanup_checkpoint(program, types).map_err(|mut error| {
         if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
             eprintln!(
