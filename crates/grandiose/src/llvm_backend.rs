@@ -103,7 +103,9 @@ pub struct LlvmFunctionFragment {
 /// these in the cache key creates a new exact namespace when the runtime ABI
 /// or target changes instead of overwriting every fragment from the previous
 /// namespace.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize,
+)]
 struct LlvmFragmentEnvironment {
     schema: u32,
     target_triple: String,
@@ -126,7 +128,9 @@ impl From<&LlvmIncrementalManifest> for LlvmFragmentEnvironment {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize,
+)]
 struct LlvmFragmentKey {
     environment: LlvmFragmentEnvironment,
     declaration: u32,
@@ -142,6 +146,37 @@ pub struct LlvmFragmentCache {
     fragments: BTreeMap<LlvmFragmentKey, LlvmFunctionFragment>,
     reused_fragments: usize,
     emitted_fragments: usize,
+}
+
+/// Disk representation deliberately owns overflow-operation names.  The live
+/// cache keeps static names so generated LLVM declaration replay stays free of
+/// allocations; decoding validates those names back into that closed set.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentLlvmFragmentCache {
+    schema: u32,
+    fragments: Vec<PersistentLlvmFragment>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentLlvmFragment {
+    key: LlvmFragmentKey,
+    emitted_text: String,
+    overflow_widths: Vec<(u16, String)>,
+    snapshot_capture_fix_types: Vec<TypeId>,
+}
+
+const PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA: u32 = 1;
+
+fn persistent_overflow_operation(operation: &str) -> Option<&'static str> {
+    match operation {
+        "sadd" => Some("sadd"),
+        "uadd" => Some("uadd"),
+        "ssub" => Some("ssub"),
+        "usub" => Some("usub"),
+        "smul" => Some("smul"),
+        "umul" => Some("umul"),
+        _ => None,
+    }
 }
 
 impl LlvmFragmentCache {
@@ -178,6 +213,74 @@ impl LlvmFragmentCache {
             .find(|function| function.declaration == declaration)?
             .fragment_fingerprint;
         self.fragments.get(&Self::key(manifest, declaration, fingerprint))
+    }
+
+    /// Serialize only independently reusable function fragments. The caller
+    /// validates and atomically publishes the bytes; malformed payloads are
+    /// cache misses rather than compiler failures.
+    pub(crate) fn encode_persistent(&self) -> Result<Vec<u8>, bincode::Error> {
+        let fragments = self
+            .fragments
+            .iter()
+            .map(|(key, fragment)| PersistentLlvmFragment {
+                key: key.clone(),
+                emitted_text: fragment.emitted_text.clone(),
+                overflow_widths: fragment
+                    .overflow_widths
+                    .iter()
+                    .map(|(width, operation)| (*width, (*operation).to_owned()))
+                    .collect(),
+                snapshot_capture_fix_types: fragment
+                    .snapshot_capture_fix_types
+                    .iter()
+                    .copied()
+                    .collect(),
+            })
+            .collect();
+        bincode::serialize(&PersistentLlvmFragmentCache {
+            schema: PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA,
+            fragments,
+        })
+    }
+
+    pub(crate) fn decode_persistent(bytes: &[u8]) -> Option<Self> {
+        let persisted = bincode::deserialize::<PersistentLlvmFragmentCache>(bytes).ok()?;
+        if persisted.schema != PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA {
+            return None;
+        }
+        let mut cache = Self::default();
+        for fragment in persisted.fragments {
+            let overflow_widths = fragment
+                .overflow_widths
+                .into_iter()
+                .map(|(width, operation)| {
+                    persistent_overflow_operation(&operation).map(|operation| (width, operation))
+                })
+                .collect::<Option<BTreeSet<_>>>()?;
+            cache.fragments.entry(fragment.key.clone()).or_insert(LlvmFunctionFragment {
+                fingerprint: fragment.key.fingerprint,
+                emitted_text: fragment.emitted_text,
+                overflow_widths,
+                snapshot_capture_fix_types: fragment
+                    .snapshot_capture_fix_types
+                    .into_iter()
+                    .collect(),
+            });
+        }
+        Some(cache)
+    }
+
+    /// Merge another disk snapshot without overwriting fragments emitted by
+    /// this process. This prevents concurrent warm compiles from discarding
+    /// independent caller/callee fragments when they publish in either order.
+    pub(crate) fn merge_persistent(&mut self, bytes: &[u8]) -> bool {
+        let Some(other) = Self::decode_persistent(bytes) else {
+            return false;
+        };
+        for (key, fragment) in other.fragments {
+            self.fragments.entry(key).or_insert(fragment);
+        }
+        true
     }
 }
 

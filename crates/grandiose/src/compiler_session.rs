@@ -280,6 +280,27 @@ impl CompilationDriver {
         true
     }
 
+    /// Restore validated, independently emitted LLVM function fragments. The
+    /// backend replays their exact post-specialization/post-inlining text and
+    /// regenerates only the current module-level scaffolding.
+    pub fn restore_persistent_llvm_fragment_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = LlvmFragmentCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.llvm_fragment_cache = cache;
+        true
+    }
+
+    pub fn persistent_llvm_fragment_cache(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.llvm_fragment_cache.encode_persistent()
+    }
+
+    /// Merge concurrent durable fragment publication while retaining this
+    /// driver's freshly generated optimized fragments as the authority.
+    pub fn merge_persistent_llvm_fragment_cache(&mut self, bytes: &[u8]) -> bool {
+        self.llvm_fragment_cache.merge_persistent(bytes)
+    }
+
     pub fn compile_bundle(
         &mut self,
         bundle: &SourceBundle,
@@ -1175,6 +1196,40 @@ mod tests {
         assert_eq!(warm.provisional_fingerprint(), cold.provisional_fingerprint());
         assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
         assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    }
+
+    #[test]
+    fn persistent_llvm_fragments_reuse_post_inlining_bodies_after_restart() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let target = LlvmOptions::default();
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        let before_phases = first_driver.compile_bundle(&before, options).unwrap();
+        first_driver
+            .emit_llvm_native_object_units(&before_phases, &target)
+            .unwrap();
+        let persisted = first_driver.persistent_llvm_fragment_cache().unwrap();
+        assert!(!persisted.is_empty());
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_llvm_fragment_cache(&persisted));
+        let after_phases = restarted_driver.compile_bundle(&after, options).unwrap();
+        let warm = restarted_driver
+            .emit_llvm_native_object_units(&after_phases, &target)
+            .unwrap();
+        assert_eq!(restarted_driver.stats().reused_llvm_fragments, 2);
+        assert_eq!(restarted_driver.stats().emitted_llvm_fragments, 1);
+        assert_eq!(
+            warm,
+            crate::llvm_backend::emit_llvm_native_object_units(&after_phases, &target).unwrap()
+        );
     }
 
     #[test]
