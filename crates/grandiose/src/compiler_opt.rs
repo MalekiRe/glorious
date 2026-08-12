@@ -10278,6 +10278,24 @@ fn inline_weight(function: &Function) -> u64 {
         .sum()
 }
 
+/// Keep the inliner's profitability accounting explicit so accepted clones can
+/// update their caller's weight incrementally. Re-scanning a growing caller
+/// after every accepted clone is quadratic in the hot O3 case.
+fn inline_instruction_weight(statement: &Instruction) -> u64 {
+    match statement.kind {
+        // The compact optimizer does not yet receive the drop-glue table, so
+        // use the custom-cleanup weight conservatively.
+        InstructionKind::Drop { .. } => 12,
+        InstructionKind::MakeHandler { .. } | InstructionKind::MakeHandlerShared { .. } => 20,
+        _ => 1,
+    }
+}
+
+fn inline_replaced_direct_call_weight(current: u64, added: u64) -> u64 {
+    // A direct-call terminator is always weight five.
+    current.saturating_sub(5).saturating_add(added)
+}
+
 fn type_carries_reference(types: &[Type], ty: TypeId) -> bool {
     fn visit(types: &[Type], ty: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
         if !visiting.insert(ty) {
@@ -10851,6 +10869,9 @@ fn inline_by_cost_with_admission_caps(
     let components = inline_call_graph_sccs(program);
     let mut scratch = program.clone();
     let mut scratch_policy = policy.clone();
+    // Updated exactly for every accepted clone. This lets profitability and
+    // target-threshold checks avoid walking repeatedly-expanded bodies.
+    let mut current_weights = originals.clone();
     let mut work = scan_work;
     let mut changed = false;
     for declaration in originals.keys().copied() {
@@ -10862,7 +10883,8 @@ fn inline_by_cost_with_admission_caps(
             .functions
             .iter()
             .filter(|function| {
-                inline_leaf_legal(function, types) && inline_weight(function) <= threshold
+                inline_leaf_legal(function, types)
+                    && current_weights[&function.declaration] <= threshold
             })
             .map(|function| function.declaration)
             .collect::<BTreeSet<_>>();
@@ -10941,6 +10963,24 @@ fn inline_by_cost_with_admission_caps(
             let Terminator::Return { value: returned } = &target_block.terminator else {
                 continue;
             };
+            let added_weight = (target.params.len() as u64)
+                .saturating_add(2) // replacement Goto
+                .saturating_add(
+                    target_block
+                        .statements
+                        .iter()
+                        .map(inline_instruction_weight)
+                        .sum(),
+                );
+            let new_weight = inline_replaced_direct_call_weight(
+                current_weights[&candidate.caller],
+                added_weight,
+            );
+            let original = originals[&candidate.caller];
+            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
+            if new_weight > cap {
+                continue;
+            }
             let Some(caller_index) = scratch
                 .functions
                 .iter()
@@ -10981,8 +11021,6 @@ fn inline_by_cost_with_admission_caps(
             }
 
             let old_caller = scratch.functions[caller_index].clone();
-            let original = originals[&candidate.caller];
-            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
             let accepted = {
                 let (caller, target) =
                     inline_caller_and_target(&mut scratch.functions, caller_index, target_index);
@@ -11029,7 +11067,8 @@ fn inline_by_cost_with_admission_caps(
                     args: edge_args,
                 });
                 caller.features = infer_feature_bits(caller);
-                inline_weight(caller) <= cap
+                debug_assert_eq!(inline_weight(caller), new_weight);
+                true
             };
             if !accepted {
                 scratch.functions[caller_index] = old_caller;
@@ -11037,6 +11076,7 @@ fn inline_by_cost_with_admission_caps(
             }
             let caller = &mut scratch.functions[caller_index];
             caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
+            current_weights.insert(candidate.caller, new_weight);
             scratch_policy
                 .depths
                 .entry(candidate.caller)
@@ -11063,7 +11103,8 @@ fn inline_by_cost_with_admission_caps(
             .functions
             .iter()
             .filter(|function| {
-                inline_multiblock_legal(function, types) && inline_weight(function) <= threshold
+                inline_multiblock_legal(function, types)
+                    && current_weights[&function.declaration] <= threshold
             })
             .map(|function| function.declaration)
             .collect::<BTreeSet<_>>();
@@ -11138,6 +11179,25 @@ fn inline_by_cost_with_admission_caps(
                 continue;
             };
             let target = &scratch.functions[target_index];
+            let added_weight = (target.params.len() as u64)
+                .saturating_add(2) // replacement Goto
+                .saturating_add(current_weights[&candidate.target])
+                .saturating_add(
+                    target
+                        .blocks
+                        .iter()
+                        .filter(|block| matches!(block.terminator, Terminator::Return { .. }))
+                        .count() as u64,
+                );
+            let new_weight = inline_replaced_direct_call_weight(
+                current_weights[&candidate.caller],
+                added_weight,
+            );
+            let original = originals[&candidate.caller];
+            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
+            if new_weight > cap {
+                continue;
+            }
             let Some(caller_index) = scratch
                 .functions
                 .iter()
@@ -11184,8 +11244,6 @@ fn inline_by_cost_with_admission_caps(
             }
 
             let old_caller = scratch.functions[caller_index].clone();
-            let original = originals[&candidate.caller];
-            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
             let accepted = (|| {
                 let (caller, target) =
                     inline_caller_and_target(&mut scratch.functions, caller_index, target_index);
@@ -11261,7 +11319,8 @@ fn inline_by_cost_with_admission_caps(
                 }
                 caller.blocks.extend(cloned);
                 caller.features = infer_feature_bits(caller);
-                (inline_weight(caller) <= cap).then_some(())
+                debug_assert_eq!(inline_weight(caller), new_weight);
+                Some(())
             })()
             .is_some();
             if !accepted {
@@ -11270,6 +11329,7 @@ fn inline_by_cost_with_admission_caps(
             }
             let caller = &mut scratch.functions[caller_index];
             caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
+            current_weights.insert(candidate.caller, new_weight);
             scratch_policy
                 .depths
                 .entry(candidate.caller)
