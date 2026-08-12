@@ -157,9 +157,8 @@ impl<'a> VerifiedFunction<'a> {
 
     pub(crate) fn instructions(&self) -> &'a [Instruction] {
         self.decoded.get_or_init(|| {
-            self.code.materialize_range(
-                self.code_range.start as usize..self.code_range.end as usize,
-            )
+            self.code
+                .materialize_range(self.code_range.start as usize..self.code_range.end as usize)
         })
     }
 
@@ -944,7 +943,7 @@ pub fn load_verified(bytes: &[u8]) -> Result<VerifiedArtifact, LoadError> {
     let encoded: Arc<[u8]> = Arc::from(bytes);
     let decoded = Artifact::decode_internal(&encoded).map_err(LoadError::Decode)?;
     let artifact = decoded.tables.as_artifact();
-    verify_artifact(artifact, true, false).map_err(LoadError::Verify)?;
+    verify_artifact(artifact, true, false, None).map_err(LoadError::Verify)?;
     let layout = Arc::new(RuntimeLayout::from_verified(artifact));
     let decoded_functions = (0..layout.functions.len())
         .map(|_| OnceLock::new())
@@ -964,11 +963,72 @@ pub fn load_verified(bytes: &[u8]) -> Result<VerifiedArtifact, LoadError> {
     })
 }
 
+/// An optional cache for the expensive function-local portion of bytecode
+/// verification. Implementors own cache-key construction: the verifier only
+/// accepts a completed cleanup table for the exact mode currently requested.
+/// This keeps the VM independent from any particular compiler cache layout.
+pub trait FunctionVerificationCache {
+    /// Start a verification pass for `artifact`. Called before any individual
+    /// function lookup, including every cleanup fixed-point iteration.
+    fn begin_artifact(&mut self, artifact: &Artifact);
+
+    /// Return the exact completed cleanup plans for `function`, if this pass's
+    /// semantic input is known-good.
+    fn reuse(
+        &mut self,
+        function: u32,
+        require_cleanup_metadata: bool,
+        allow_seeded_leave_generation: bool,
+    ) -> Option<Vec<crate::bytecode::CleanupPlan>>;
+
+    /// Retain a function-local result provisionally. Compiler-owned caches
+    /// should publish it durably only after their outer artifact verification
+    /// succeeds.
+    fn record(
+        &mut self,
+        function: u32,
+        require_cleanup_metadata: bool,
+        allow_seeded_leave_generation: bool,
+        plans: &[crate::bytecode::CleanupPlan],
+    );
+}
+
 pub fn verify(mut artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
-    verify_artifact(&artifact, true, false)?;
+    verify_artifact(&artifact, true, false, None)?;
     // The decoded/assembled form is deliberately mutable and often has spare
     // construction capacity. Verification is the freeze boundary: compact the
     // large top-level instruction and descriptor arrays before sharing them.
+    artifact.types.shrink_to_fit();
+    artifact.constants.shrink_to_fit();
+    artifact.imports.shrink_to_fit();
+    artifact.protocols.shrink_to_fit();
+    artifact.handler_defs.shrink_to_fit();
+    artifact.cleanups.shrink_to_fit();
+    artifact.exports.shrink_to_fit();
+    artifact.drop_glue.shrink_to_fit();
+    artifact.functions.shrink_to_fit();
+    artifact.code.shrink_to_fit();
+    let layout = Arc::new(RuntimeLayout::from_verified(&artifact));
+    let decoded_functions = (0..layout.functions.len())
+        .map(|_| OnceLock::new())
+        .collect::<Vec<_>>()
+        .into();
+    Ok(VerifiedArtifact {
+        image: Arc::new(ExecutionImage::from_artifact(artifact)),
+        layout,
+        decoded_functions,
+        compatibility_artifact: Arc::new(OnceLock::new()),
+    })
+}
+
+/// Verify an artifact while reusing compiler-owned function-local proof
+/// results. The ordinary global validation and quantity-summary construction
+/// still run on every request.
+pub fn verify_with_function_cache(
+    mut artifact: Artifact,
+    cache: &mut dyn FunctionVerificationCache,
+) -> Result<VerifiedArtifact, VerifyError> {
+    verify_artifact(&artifact, true, false, Some(cache))?;
     artifact.types.shrink_to_fit();
     artifact.constants.shrink_to_fit();
     artifact.imports.shrink_to_fit();
@@ -997,7 +1057,7 @@ pub fn verify(mut artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
 /// cleanup boundaries must be emitted explicitly by the compiler.
 pub fn with_generated_cleanup_plans(mut artifact: Artifact) -> Result<Artifact, VerifyError> {
     artifact = with_generated_cleanup_plans_unverified(artifact)?;
-    verify_artifact(&artifact, true, false)?;
+    verify_artifact(&artifact, true, false, None)?;
     Ok(artifact)
 }
 
@@ -1012,7 +1072,7 @@ pub fn with_generated_cleanup_plans_unverified(
     mut artifact: Artifact,
 ) -> Result<Artifact, VerifyError> {
     artifact.cleanups.clear();
-    artifact.cleanups = verify_artifact(&artifact, false, false)?;
+    artifact.cleanups = verify_artifact(&artifact, false, false, None)?;
     Ok(artifact)
 }
 
@@ -1027,7 +1087,7 @@ pub fn with_generated_cleanup_plans_unverified(
 /// completed table to be exact everywhere.
 pub fn with_compiler_seeded_cleanup_plans(mut artifact: Artifact) -> Result<Artifact, VerifyError> {
     artifact = with_compiler_seeded_cleanup_plans_unverified(artifact)?;
-    verify_artifact(&artifact, true, false)?;
+    verify_artifact(&artifact, true, false, None)?;
     Ok(artifact)
 }
 
@@ -1038,7 +1098,17 @@ pub fn with_compiler_seeded_cleanup_plans(mut artifact: Artifact) -> Result<Arti
 /// representation-only rewrites. Most callers should use
 /// [`with_compiler_seeded_cleanup_plans`] instead.
 pub fn with_compiler_seeded_cleanup_plans_unverified(
+    artifact: Artifact,
+) -> Result<Artifact, VerifyError> {
+    with_compiler_seeded_cleanup_plans_unverified_with_function_cache(artifact, None)
+}
+
+/// Cached counterpart to [`with_compiler_seeded_cleanup_plans_unverified`].
+/// It retains the global fixed-point schedule while allowing the expensive
+/// per-function state proof to be restored independently.
+pub fn with_compiler_seeded_cleanup_plans_unverified_with_function_cache(
     mut artifact: Artifact,
+    mut cache: Option<&mut dyn FunctionVerificationCache>,
 ) -> Result<Artifact, VerifyError> {
     if artifact.cleanups.is_empty()
         || artifact
@@ -1061,7 +1131,10 @@ pub fn with_compiler_seeded_cleanup_plans_unverified(
         })
         .fold(2usize, usize::saturating_add);
     for _ in 0..iteration_limit {
-        let completed = verify_artifact(&artifact, false, true)?;
+        let completed = match cache.as_mut() {
+            Some(cache) => verify_artifact(&artifact, false, true, Some(&mut **cache))?,
+            None => verify_artifact(&artifact, false, true, None)?,
+        };
         if completed == artifact.cleanups {
             return Ok(artifact);
         }
@@ -1074,6 +1147,7 @@ fn verify_artifact(
     artifact: &Artifact,
     require_cleanup_metadata: bool,
     allow_seeded_leave_generation: bool,
+    mut cache: Option<&mut dyn FunctionVerificationCache>,
 ) -> Result<Vec<crate::bytecode::CleanupPlan>, VerifyError> {
     let timing_enabled = std::env::var_os("G1_BOOTSTRAP_TIMINGS").is_some();
     let verification_started = std::time::Instant::now();
@@ -1143,17 +1217,49 @@ fn verify_artifact(
             verification_started.elapsed().as_secs_f64()
         );
     }
+    if let Some(cache) = cache.as_deref_mut() {
+        cache.begin_artifact(artifact);
+    }
     let functions_started = std::time::Instant::now();
     let mut cleanups = Vec::new();
     for (i, f) in artifact.functions.iter().enumerate() {
-        let verified = verify_function(
-            artifact,
-            i as u32,
-            f,
-            require_cleanup_metadata,
-            allow_seeded_leave_generation,
-            &quantity_cache,
-        );
+        let function = i as u32;
+        let verified = if let Some(cache) = cache.as_deref_mut() {
+            if let Some(plans) = cache.reuse(
+                function,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+            ) {
+                Ok(plans)
+            } else {
+                let verified = verify_function(
+                    artifact,
+                    function,
+                    f,
+                    require_cleanup_metadata,
+                    allow_seeded_leave_generation,
+                    &quantity_cache,
+                );
+                if let Ok(plans) = &verified {
+                    cache.record(
+                        function,
+                        require_cleanup_metadata,
+                        allow_seeded_leave_generation,
+                        plans,
+                    );
+                }
+                verified
+            }
+        } else {
+            verify_function(
+                artifact,
+                function,
+                f,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+                &quantity_cache,
+            )
+        };
         match verified {
             Ok(plans) => cleanups.extend(plans),
             Err(error) => {

@@ -10269,23 +10269,33 @@ fn compile_program_with_phases(
 
     canonicalize_protocols(&mut artifact);
 
-    artifact.cleanups = serialize_mir_cleanup_plans(&artifact, &mir_program, &peephole_pc_maps)
-        .map_err(|error| {
-            vec![
-                Diagnostic::plain(format!(
-                    "failed to serialize cleanup metadata directly from MIR: {error}"
-                ))
-                .with_code("G1BC999"),
-            ]
-        })?;
+    let (serialized_cleanups, serialized_cleanup_reused) = serialize_mir_cleanup_plans_incremental(
+        &artifact,
+        &mir_program,
+        &peephole_pc_maps,
+        incremental_mir.as_deref_mut(),
+    )
+    .map_err(|error| {
+        vec![
+            Diagnostic::plain(format!(
+                "failed to serialize cleanup metadata directly from MIR: {error}"
+            ))
+            .with_code("G1BC999"),
+        ]
+    })?;
+    artifact.cleanups = serialized_cleanups;
     // Validate MIR-derived cleanup identities before the final dense rename:
     // the latter is a representation-only bijection and intentionally has no
     // source-level register identity to compare against.
+    let cleanup_cross_validation_reused = emission_prepared
+        .union(&serialized_cleanup_reused)
+        .copied()
+        .collect::<BTreeSet<_>>();
     cross_validate_cleanup_maps(
         &artifact,
         &mir_program,
         &peephole_pc_maps,
-        &emission_prepared,
+        &cleanup_cross_validation_reused,
     )
     .map_err(|error| {
         vec![
@@ -10351,7 +10361,12 @@ fn compile_program_with_phases(
         })?;
     }
     artifact = if has_leave {
-        grandiose_vm::verify::with_compiler_seeded_cleanup_plans_unverified(artifact)
+        grandiose_vm::verify::with_compiler_seeded_cleanup_plans_unverified_with_function_cache(
+            artifact,
+            incremental_mir
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn grandiose_vm::verify::FunctionVerificationCache),
+        )
     } else {
         grandiose_vm::verify::with_generated_cleanup_plans_unverified(artifact)
     }
@@ -10425,7 +10440,12 @@ fn compile_program_with_phases(
         });
 
     let artifact_for_diagnostics = &artifact;
-    grandiose_vm::verify::verify(artifact.clone()).map_err(|error| {
+    if let Some(cache) = incremental_mir.as_deref_mut() {
+        grandiose_vm::verify::verify_with_function_cache(artifact.clone(), cache)
+    } else {
+        grandiose_vm::verify::verify(artifact.clone())
+    }
+    .map_err(|error| {
             let function = match &error {
                 grandiose_vm::VerifyError::BorrowConflict {
                     function,
@@ -10561,6 +10581,8 @@ fn compile_program_with_phases(
         for input in emission_prepared_inputs.as_deref().unwrap_or_default() {
             cache.verify_emission_prepared(input);
         }
+        cache.verify_serialized_cleanups();
+        cache.verify_bytecode_verifications();
     }
     optimization_report
         .passes
@@ -55747,6 +55769,7 @@ fn layout_and_peephole(artifact: &mut Artifact) -> bool {
 /// Like `layout_and_peephole`, but also returns one old-PC-to-new-PC map per
 /// function (`None` when that body was unchanged) so cleanup facts computed
 /// against pre-peephole ordinals can be revalidated afterwards.
+#[derive(serde::Serialize)]
 struct PeepholePcMap {
     ordinals: Vec<u32>,
     /// Number of instructions after the rewrite. `ordinals` may contain this
@@ -56843,17 +56866,65 @@ fn reverse_edge_cleanup_states(
 /// Serialize the complete cleanup table from MIR ownership states. This owns
 /// edge-transfer temporaries as well as statement/terminator points; the VM is
 /// subsequently only an independent checker of the finished table.
+#[cfg(test)]
 fn serialize_mir_cleanup_plans(
     artifact: &Artifact,
     mir_program: &mir::Program,
     pc_maps: &[Option<PeepholePcMap>],
 ) -> Result<Vec<CleanupPlan>, String> {
+    serialize_mir_cleanup_plans_incremental(artifact, mir_program, pc_maps, None)
+        .map(|(plans, _)| plans)
+}
+
+/// Incremental form of [`serialize_mir_cleanup_plans`]. Exact per-function
+/// cleanup intervals are restored only after a previous whole-artifact VM
+/// verification accepted them; restored functions are also excluded from the
+/// expensive ownership-flow solve that derives the remaining lists.
+fn serialize_mir_cleanup_plans_incremental(
+    artifact: &Artifact,
+    mir_program: &mir::Program,
+    pc_maps: &[Option<PeepholePcMap>],
+    mut cache: Option<&mut crate::compiler_session::IncrementalMirCache>,
+) -> Result<(Vec<CleanupPlan>, BTreeSet<u32>), String> {
     let mut plans = Vec::new();
-    let cleanup_lists =
-        mir::optimizer::derive_program_serialization_cleanup_lists(mir_program, &artifact.types)
-            .map_err(|error| error.to_string())?;
+    let mut cached = Vec::with_capacity(mir_program.functions.len());
+    let mut already_serialized = BTreeSet::new();
     for (fid, function) in mir_program.functions.iter().enumerate() {
-        let lists = &cleanup_lists[fid];
+        let mut descriptor = artifact.functions[fid].clone();
+        descriptor.code_start = 0;
+        let input = bincode::serialize(&(
+            b"grandiose:mir-cleanup-serialization-v1\0".as_slice(),
+            &artifact.types,
+            function,
+            descriptor,
+            pc_maps.get(fid).and_then(|map| map.as_ref()),
+        ))
+        .ok();
+        let restored = match (cache.as_deref_mut(), input.as_deref()) {
+            (Some(cache), Some(input)) => cache.reuse_serialized_cleanup(input, fid as u32),
+            _ => None,
+        };
+        if restored.is_some() {
+            already_serialized.insert(function.declaration);
+        }
+        cached.push((input, restored));
+    }
+    let cleanup_lists = mir::optimizer::derive_program_serialization_cleanup_lists_except(
+        mir_program,
+        &artifact.types,
+        &already_serialized,
+    )
+    .map_err(|error| error.to_string())?;
+    for (fid, function) in mir_program.functions.iter().enumerate() {
+        let (input, restored) = &cached[fid];
+        if let Some(restored) = restored {
+            plans.extend(restored.clone());
+            continue;
+        }
+        let lists = cleanup_lists[fid]
+            .as_ref()
+            .expect("uncached function must have serialization cleanup lists");
+        let plan_start = plans.len();
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
             .map_err(|error| error.to_string())?;
         let reachable = reachable_mir_blocks(function);
@@ -57137,8 +57208,11 @@ fn serialize_mir_cleanup_plans(
                 registers,
             });
         }
+        if let (Some(cache), Some(input)) = (cache.as_deref_mut(), input.clone()) {
+            cache.cache_serialized_cleanup(input, &plans[plan_start..]);
+        }
     }
-    Ok(plans)
+    Ok((plans, already_serialized))
 }
 
 /// Cross-validate the serialized bytecode cleanup maps against the MIR

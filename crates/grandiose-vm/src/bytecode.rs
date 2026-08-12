@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
     error::Error,
@@ -5,7 +6,6 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use serde::{Deserialize, Serialize};
 
 pub type TypeId = u32;
 pub type Register = u32;
@@ -685,7 +685,7 @@ pub(crate) fn primitive_signature(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum Instruction {
     Nop,
     Const {
@@ -912,7 +912,7 @@ pub enum Instruction {
     Unreachable,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Function {
     pub name: String,
     pub flags: u32,
@@ -928,7 +928,7 @@ pub struct Function {
     pub label_slot_count: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct CleanupPlan {
     pub function: FunctionId,
     pub first_instruction: u32,
@@ -936,25 +936,25 @@ pub struct CleanupPlan {
     pub registers: Vec<Register>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct DropGlue {
     pub ty: TypeId,
     pub function: FunctionId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum ReferenceReturnOrigin {
     Parameter { parameter: u32, path: Vec<u32> },
     Receiver { path: Vec<u32> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ReferenceReturnRoute {
     pub result_path: Vec<u32>,
     pub origin: ReferenceReturnOrigin,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ReferenceReturnContract {
     pub function: FunctionId,
     pub routes: Vec<ReferenceReturnRoute>,
@@ -1345,13 +1345,12 @@ impl Artifact {
             }
             spans.push((start, code.len() as u32 - start, range.len() as u32));
         }
-        let (cleanups, cleanup_spans) =
-            encode_cleanups(
-                &self.cleanups,
-                &self.functions,
-                &mut operands,
-                &mut operand_lists,
-            )?;
+        let (cleanups, cleanup_spans) = encode_cleanups(
+            &self.cleanups,
+            &self.functions,
+            &mut operands,
+            &mut operand_lists,
+        )?;
         let functions = encode_functions(
             &self.functions,
             &self.types,
@@ -6465,7 +6464,10 @@ mod tests {
 
         // [2] first reuses a suffix of [1, 2], and then a prefix of [2, 3].
         assert_eq!(operands, vec![1, 2, 2, 3]);
-        assert_eq!(decode_instructions(&code, &operands, &[]).unwrap(), [instruction]);
+        assert_eq!(
+            decode_instructions(&code, &operands, &[]).unwrap(),
+            [instruction]
+        );
         assert_eq!(
             decode_cleanups(&cleanups, 4, &operands, &[function], &spans).unwrap(),
             plans

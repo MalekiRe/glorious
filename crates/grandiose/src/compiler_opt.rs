@@ -13332,6 +13332,7 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission_incremental(
 /// ownership validation may prune a statically impossible enum-switch arm;
 /// the bytecode verifier still structurally checks that encoded target, so
 /// serialization follows every arm without applying tag refinement.
+#[cfg(test)]
 pub(crate) fn derive_program_serialization_cleanup_lists(
     program: &Program,
     types: &[Type],

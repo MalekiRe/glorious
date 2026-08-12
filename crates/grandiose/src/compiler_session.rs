@@ -13,7 +13,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use grandiose_vm::{Type, TypeId};
+use grandiose_vm::{
+    Artifact as BytecodeArtifact, Constant, Function as BytecodeFunction,
+    Instruction as BytecodeInstruction, Type, TypeId, bytecode::CleanupPlan,
+};
 
 use crate::compiler_traits::{TraitDb, TrustedTraitManifest};
 use crate::compiler_typeck::{DeclarationKey, IncrementalTypeCache};
@@ -788,6 +791,13 @@ pub(crate) struct IncrementalMirCache {
     recursive_optimized_disk_directory: Option<PathBuf>,
     emission_prepared: BTreeMap<EmissionPreparedMirKey, EmissionPreparedMirEntry>,
     emission_prepared_disk_directory: Option<PathBuf>,
+    serialized_cleanup: BTreeMap<BytecodePlanCacheKey, BytecodePlanCacheEntry>,
+    serialized_cleanup_disk_directory: Option<PathBuf>,
+    provisional_serialized_cleanup: BTreeSet<BytecodePlanCacheKey>,
+    bytecode_verification: BTreeMap<BytecodePlanCacheKey, BytecodePlanCacheEntry>,
+    bytecode_verification_disk_directory: Option<PathBuf>,
+    provisional_bytecode_verification: BTreeSet<BytecodePlanCacheKey>,
+    current_bytecode_verification: BTreeMap<(u32, bool, bool), BytecodePlanCacheInput>,
     final_validation: BTreeMap<FinalValidationKey, FinalValidationEntry>,
     final_validation_disk_directory: Option<PathBuf>,
     active_schema: Option<u64>,
@@ -922,6 +932,38 @@ struct PersistentEmissionPreparedMirEntry {
 
 const PERSISTENT_EMISSION_PREPARED_MIR_ENTRY_SCHEMA: u32 = 1;
 
+/// Every bytecode proof is addressed by its complete serialized semantic
+/// input. The BLAKE3 name selects a small file, and the retained bytes are
+/// compared again after loading so a collision can only become a cache miss.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct BytecodePlanCacheKey {
+    input_hash: [u8; 32],
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct BytecodePlanCacheEntry {
+    input: Vec<u8>,
+    /// Plans are stored with local function id zero and rebound on reuse.
+    plans: Vec<CleanupPlan>,
+    verified: bool,
+}
+
+#[derive(Clone)]
+struct BytecodePlanCacheInput {
+    key: BytecodePlanCacheKey,
+    input: Vec<u8>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentBytecodePlanCacheEntry {
+    schema: u32,
+    key: BytecodePlanCacheKey,
+    entry: BytecodePlanCacheEntry,
+}
+
+const PERSISTENT_SERIALIZED_CLEANUP_ENTRY_SCHEMA: u32 = 1;
+const PERSISTENT_BYTECODE_VERIFICATION_ENTRY_SCHEMA: u32 = 1;
+
 /// A completed final ownership/cleanup proof is reusable independently of O3
 /// output reuse. This intentionally accepts generated and handler bodies: the
 /// exact post-O3 MIR input, its active type schema, and the summaries it can
@@ -972,6 +1014,492 @@ fn emission_prepared_mir_entry_path(
     Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
 }
 
+fn bytecode_plan_entry_path(
+    directory: &Path,
+    key: &BytecodePlanCacheKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode bytecode proof cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn normalize_bytecode_function(function: &BytecodeFunction) -> BytecodeFunction {
+    let mut normalized = function.clone();
+    // Code positions are artifact-wide layout details. Function verification
+    // observes only the local code slice and length.
+    normalized.code_start = 0;
+    normalized
+}
+
+fn normalized_function_code(
+    artifact: &BytecodeArtifact,
+    function: &BytecodeFunction,
+) -> Option<(Vec<BytecodeInstruction>, Vec<Constant>)> {
+    let start = usize::try_from(function.code_start).ok()?;
+    let end = start.checked_add(usize::try_from(function.code_len).ok()?)?;
+    let mut code = artifact.code.get(start..end)?.to_vec();
+    let mut values = BTreeMap::<Vec<u8>, Constant>::new();
+    let mut old_to_value = BTreeMap::<u32, Vec<u8>>::new();
+    for instruction in &code {
+        let BytecodeInstruction::Const { constant, .. } = instruction else {
+            continue;
+        };
+        let value = artifact.constants.get(*constant as usize)?.clone();
+        let bytes = bincode::serialize(&value).ok()?;
+        values.entry(bytes.clone()).or_insert(value);
+        old_to_value.insert(*constant, bytes);
+    }
+    let constants = values.into_iter().collect::<Vec<_>>();
+    let value_to_local = constants
+        .iter()
+        .enumerate()
+        .map(|(index, (bytes, _))| (bytes.clone(), index as u32))
+        .collect::<BTreeMap<_, _>>();
+    for instruction in &mut code {
+        let BytecodeInstruction::Const { constant, .. } = instruction else {
+            continue;
+        };
+        *constant = *value_to_local.get(old_to_value.get(constant)?)?;
+    }
+    Some((
+        code,
+        constants.into_iter().map(|(_, value)| value).collect(),
+    ))
+}
+
+fn normalized_function_cleanups(artifact: &BytecodeArtifact, function: u32) -> Vec<CleanupPlan> {
+    artifact
+        .cleanups
+        .iter()
+        .filter(|plan| plan.function == function)
+        .cloned()
+        .map(|mut plan| {
+            plan.function = 0;
+            plan
+        })
+        .collect()
+}
+
+fn bytecode_direct_dependencies(code: &[BytecodeInstruction], function: u32) -> BTreeSet<u32> {
+    let mut dependencies = BTreeSet::new();
+    for instruction in code {
+        match instruction {
+            BytecodeInstruction::Call { function, .. }
+            | BytecodeInstruction::TailCall { function, .. }
+            | BytecodeInstruction::CallKnownReceiver { function, .. }
+            | BytecodeInstruction::TailCallKnownReceiver { function, .. }
+            | BytecodeInstruction::MakeCallable { function, .. } => {
+                dependencies.insert(*function);
+            }
+            BytecodeInstruction::MakeHandlerShared { functions, .. } => {
+                dependencies.extend(functions.iter().copied());
+            }
+            BytecodeInstruction::CallSelf { .. } | BytecodeInstruction::TailCallSelf { .. } => {
+                dependencies.insert(function);
+            }
+            _ => {}
+        }
+    }
+    dependencies
+}
+
+/// The original direct-closure key is deliberately retained for acyclic
+/// functions.  Besides preserving already-persisted proofs, this is the
+/// cheapest possible dependency check for the overwhelmingly common leaf and
+/// acyclic-call-chain cases.
+fn acyclic_bytecode_dependency_fingerprints(
+    bodies: &[Option<Vec<u8>>],
+    dependencies: &[Option<BTreeSet<u32>>],
+) -> Vec<Option<[u8; 32]>> {
+    fn visit(
+        function: u32,
+        bodies: &[Option<Vec<u8>>],
+        dependencies: &[Option<BTreeSet<u32>>],
+        memo: &mut BTreeMap<u32, Option<[u8; 32]>>,
+        visiting: &mut BTreeSet<u32>,
+    ) -> Option<[u8; 32]> {
+        if let Some(result) = memo.get(&function) {
+            return *result;
+        }
+        if !visiting.insert(function) {
+            return None;
+        }
+        let result = (|| {
+            let body = bodies.get(function as usize)?.as_ref()?;
+            let direct = dependencies.get(function as usize)?.as_ref()?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"grandiose:bytecode-verifier-direct-closure-v1\0");
+            hasher.update(&(body.len() as u64).to_le_bytes());
+            hasher.update(body);
+            for dependency in direct {
+                let fingerprint = visit(*dependency, bodies, dependencies, memo, visiting)?;
+                hasher.update(&dependency.to_le_bytes());
+                hasher.update(&fingerprint);
+            }
+            Some(*hasher.finalize().as_bytes())
+        })();
+        visiting.remove(&function);
+        memo.insert(function, result);
+        result
+    }
+
+    let mut memo = BTreeMap::new();
+    for function in 0..bodies.len() as u32 {
+        let _ = visit(
+            function,
+            bodies,
+            dependencies,
+            &mut memo,
+            &mut BTreeSet::new(),
+        );
+    }
+    (0..bodies.len() as u32)
+        .map(|function| memo.get(&function).copied().flatten())
+        .collect()
+}
+
+/// Compute direct-closure fingerprints for every cacheable bytecode
+/// function, including recursive call components.  Function-local verifier
+/// proofs are valid only when all direct callees retain their exact code, so a
+/// recursive component must be keyed as one atomic unit; Tarjan condenses the
+/// graph before the ordinary dependency fold.  A caller of a recursive group
+/// is then independently cacheable again through that group's fingerprint.
+fn bytecode_dependency_fingerprints(
+    bodies: &[Option<Vec<u8>>],
+    dependencies: &[Option<BTreeSet<u32>>],
+) -> Vec<Option<[u8; 32]>> {
+    let legacy = acyclic_bytecode_dependency_fingerprints(bodies, dependencies);
+    let functions = 0..bodies.len() as u32;
+
+    fn visit_scc(
+        function: u32,
+        dependencies: &[Option<BTreeSet<u32>>],
+        index: &mut usize,
+        indices: &mut BTreeMap<u32, usize>,
+        lowlinks: &mut BTreeMap<u32, usize>,
+        stack: &mut Vec<u32>,
+        on_stack: &mut BTreeSet<u32>,
+        components: &mut Vec<Vec<u32>>,
+    ) {
+        indices.insert(function, *index);
+        lowlinks.insert(function, *index);
+        *index += 1;
+        stack.push(function);
+        on_stack.insert(function);
+        if let Some(Some(edges)) = dependencies.get(function as usize) {
+            for dependency in edges {
+                if !indices.contains_key(dependency) {
+                    if (*dependency as usize) < dependencies.len() {
+                        visit_scc(
+                            *dependency,
+                            dependencies,
+                            index,
+                            indices,
+                            lowlinks,
+                            stack,
+                            on_stack,
+                            components,
+                        );
+                        let dependency_lowlink = lowlinks[dependency];
+                        let lowlink = lowlinks
+                            .get_mut(&function)
+                            .expect("current Tarjan node has a lowlink");
+                        *lowlink = (*lowlink).min(dependency_lowlink);
+                    }
+                } else if on_stack.contains(dependency) {
+                    let dependency_index = indices[dependency];
+                    let lowlink = lowlinks
+                        .get_mut(&function)
+                        .expect("current Tarjan node has a lowlink");
+                    *lowlink = (*lowlink).min(dependency_index);
+                }
+            }
+        }
+        if lowlinks[&function] == indices[&function] {
+            let mut component = Vec::new();
+            loop {
+                let member = stack.pop().expect("Tarjan root has a stack entry");
+                on_stack.remove(&member);
+                component.push(member);
+                if member == function {
+                    break;
+                }
+            }
+            component.sort_unstable();
+            components.push(component);
+        }
+    }
+
+    let mut components = Vec::new();
+    let mut index = 0;
+    let mut indices = BTreeMap::new();
+    let mut lowlinks = BTreeMap::new();
+    let mut stack = Vec::new();
+    let mut on_stack = BTreeSet::new();
+    for function in functions {
+        if !indices.contains_key(&function) {
+            visit_scc(
+                function,
+                dependencies,
+                &mut index,
+                &mut indices,
+                &mut lowlinks,
+                &mut stack,
+                &mut on_stack,
+                &mut components,
+            );
+        }
+    }
+    components.sort_by_key(|component| component.first().copied().unwrap_or_default());
+    let component_for_function = components
+        .iter()
+        .enumerate()
+        .flat_map(|(component, members)| {
+            members
+                .iter()
+                .copied()
+                .map(move |function| (function, component))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let component_dependencies = components
+        .iter()
+        .enumerate()
+        .map(|(component, members)| {
+            let mut valid = true;
+            let mut external = BTreeSet::new();
+            for function in members {
+                if bodies
+                    .get(*function as usize)
+                    .and_then(Option::as_ref)
+                    .is_none()
+                {
+                    valid = false;
+                }
+                let Some(Some(edges)) = dependencies.get(*function as usize) else {
+                    valid = false;
+                    continue;
+                };
+                for dependency in edges {
+                    let Some(dependency_component) = component_for_function.get(dependency) else {
+                        valid = false;
+                        continue;
+                    };
+                    if *dependency_component != component {
+                        external.insert(*dependency_component);
+                    }
+                }
+            }
+            (valid, external)
+        })
+        .collect::<Vec<_>>();
+    fn component_fingerprint(
+        component: usize,
+        components: &[Vec<u32>],
+        component_dependencies: &[(bool, BTreeSet<usize>)],
+        bodies: &[Option<Vec<u8>>],
+        memo: &mut BTreeMap<usize, Option<[u8; 32]>>,
+        visiting: &mut BTreeSet<usize>,
+    ) -> Option<[u8; 32]> {
+        if let Some(fingerprint) = memo.get(&component) {
+            return *fingerprint;
+        }
+        if !component_dependencies[component].0 || !visiting.insert(component) {
+            memo.insert(component, None);
+            return None;
+        }
+        let fingerprint = (|| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"grandiose:bytecode-verifier-scc-closure-v1\0");
+            for function in &components[component] {
+                let body = bodies.get(*function as usize)?.as_ref()?;
+                hasher.update(&function.to_le_bytes());
+                hasher.update(&(body.len() as u64).to_le_bytes());
+                hasher.update(body);
+            }
+            for dependency in &component_dependencies[component].1 {
+                let fingerprint = component_fingerprint(
+                    *dependency,
+                    components,
+                    component_dependencies,
+                    bodies,
+                    memo,
+                    visiting,
+                )?;
+                for function in &components[*dependency] {
+                    hasher.update(&function.to_le_bytes());
+                }
+                hasher.update(&fingerprint);
+            }
+            Some(*hasher.finalize().as_bytes())
+        })();
+        visiting.remove(&component);
+        memo.insert(component, fingerprint);
+        fingerprint
+    }
+
+    let mut memo = BTreeMap::new();
+    let recursive = (0..components.len())
+        .map(|component| {
+            component_fingerprint(
+                component,
+                &components,
+                &component_dependencies,
+                bodies,
+                &mut memo,
+                &mut BTreeSet::new(),
+            )
+        })
+        .collect::<Vec<_>>();
+    (0..bodies.len())
+        .map(|function| {
+            legacy[function].or_else(|| {
+                component_for_function
+                    .get(&(function as u32))
+                    .and_then(|component| recursive[*component])
+            })
+        })
+        .collect()
+}
+
+fn bytecode_verification_inputs(
+    artifact: &BytecodeArtifact,
+) -> BTreeMap<(u32, bool, bool), BytecodePlanCacheInput> {
+    let Ok(namespace) = bincode::serialize(&(
+        b"grandiose:bytecode-verifier-namespace-v1\0".as_slice(),
+        artifact.required_features,
+        artifact.entry_function,
+        &artifact.types,
+        &artifact.imports,
+        &artifact.protocols,
+        &artifact.handler_defs,
+        &artifact.exports,
+        &artifact.drop_glue,
+        &artifact.reference_return_contracts,
+    )) else {
+        return BTreeMap::new();
+    };
+    let namespace = *blake3::hash(&namespace).as_bytes();
+    let normalized = artifact
+        .functions
+        .iter()
+        .map(|function| {
+            normalized_function_code(artifact, function).and_then(|(code, constants)| {
+                bincode::serialize(&(normalize_bytecode_function(function), code, constants)).ok()
+            })
+        })
+        .collect::<Vec<_>>();
+    let dependencies = artifact
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(function, _)| {
+            normalized[function].as_ref().map(|bytes| {
+                let (_, code, _): (BytecodeFunction, Vec<BytecodeInstruction>, Vec<Constant>) =
+                    bincode::deserialize(bytes).ok()?;
+                Some(bytecode_direct_dependencies(&code, function as u32))
+            })?
+        })
+        .collect::<Vec<Option<BTreeSet<u32>>>>();
+    let dependency_fingerprints = bytecode_dependency_fingerprints(&normalized, &dependencies);
+    let mut inputs = BTreeMap::new();
+    for (function, body) in normalized.iter().enumerate() {
+        let Some(body) = body else { continue };
+        let Some(dependency) = dependency_fingerprints[function] else {
+            continue;
+        };
+        let cleanups = normalized_function_cleanups(artifact, function as u32);
+        for (require_cleanup_metadata, allow_seeded_leave_generation) in
+            [(false, true), (false, false), (true, false)]
+        {
+            let Ok(input) = bincode::serialize(&(
+                b"grandiose:bytecode-verifier-function-v1\0".as_slice(),
+                namespace,
+                function as u32,
+                dependency,
+                body,
+                &cleanups,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+            )) else {
+                continue;
+            };
+            let key = BytecodePlanCacheKey {
+                input_hash: *blake3::hash(&input).as_bytes(),
+            };
+            inputs.insert(
+                (
+                    function as u32,
+                    require_cleanup_metadata,
+                    allow_seeded_leave_generation,
+                ),
+                BytecodePlanCacheInput { key, input },
+            );
+        }
+    }
+    inputs
+}
+
+fn rebind_cleanup_plans(plans: &[CleanupPlan], function: u32) -> Vec<CleanupPlan> {
+    plans
+        .iter()
+        .cloned()
+        .map(|mut plan| {
+            plan.function = function;
+            plan
+        })
+        .collect()
+}
+
+fn normalize_cleanup_plans(plans: &[CleanupPlan]) -> Vec<CleanupPlan> {
+    rebind_cleanup_plans(plans, 0)
+}
+
+fn persist_bytecode_plan_cache(
+    directory: &Path,
+    entries: &BTreeMap<BytecodePlanCacheKey, BytecodePlanCacheEntry>,
+    schema: u32,
+    description: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(directory).map_err(|error| {
+        format!(
+            "could not create {description} cache directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    for (key, entry) in entries {
+        if !entry.verified {
+            continue;
+        }
+        let path = bytecode_plan_entry_path(directory, key)?;
+        if path.exists() {
+            continue;
+        }
+        let bytes = bincode::serialize(&PersistentBytecodePlanCacheEntry {
+            schema,
+            key: key.clone(),
+            entry: entry.clone(),
+        })
+        .map_err(|error| format!("could not encode {description} cache entry: {error}"))?;
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&temporary, bytes).map_err(|error| {
+            format!(
+                "could not write {description} cache entry {}: {error}",
+                temporary.display()
+            )
+        })?;
+        if let Err(error) = std::fs::rename(&temporary, &path) {
+            let _ = std::fs::remove_file(&temporary);
+            if !path.exists() {
+                return Err(format!(
+                    "could not publish {description} cache entry {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn recursive_optimized_outputs_match(output: &[mir::Function], declarations: &[u32]) -> bool {
     output.len() == declarations.len()
         && output
@@ -1014,6 +1542,9 @@ impl IncrementalMirCache {
         self.reused_optimized_bodies = 0;
         self.reused_final_validation_bodies = 0;
         self.reused_optimizer_body_snapshots = 0;
+        self.provisional_serialized_cleanup.clear();
+        self.provisional_bytecode_verification.clear();
+        self.current_bytecode_verification.clear();
     }
 
     pub(crate) fn prepare(&mut self, types: &[Type], custom_drop_types: &[TypeId]) {
@@ -1046,6 +1577,15 @@ impl IncrementalMirCache {
                 .retain(|key, _| key.schema != evicted.id);
             self.emission_prepared
                 .retain(|key, _| key.schema != evicted.id);
+            // Bytecode cache keys contain the exact active bytecode types,
+            // but keeping only the current MIR schema's recent entries makes
+            // memory use match the existing per-body cache policy. Durable
+            // entries remain independently addressable on disk.
+            self.serialized_cleanup.clear();
+            self.bytecode_verification.clear();
+            self.provisional_serialized_cleanup.clear();
+            self.provisional_bytecode_verification.clear();
+            self.current_bytecode_verification.clear();
             self.final_validation
                 .retain(|key, _| key.schema != evicted.id);
         }
@@ -1117,6 +1657,9 @@ impl IncrementalMirCache {
         self.final_validation_disk_directory = Some(directory.join("final-validation-v1"));
         self.recursive_optimized_disk_directory = Some(directory.join("recursive-scc-v1"));
         self.emission_prepared_disk_directory = Some(directory.join("emission-prepared-v1"));
+        self.serialized_cleanup_disk_directory = Some(directory.join("serialized-cleanup-v1"));
+        self.bytecode_verification_disk_directory =
+            Some(directory.join("bytecode-verification-v1"));
         self.optimized_disk_directory = Some(directory);
     }
 
@@ -1334,6 +1877,132 @@ impl IncrementalMirCache {
     pub(crate) fn verify_emission_prepared(&mut self, input: &mir::Function) {
         for entry in self.emission_prepared.values_mut() {
             if entry.input == *input {
+                entry.verified = true;
+            }
+        }
+    }
+
+    /// Restore a cleanup interval table derived directly from one exact MIR
+    /// body after its bytecode layout and peephole ordinal map are known.
+    /// The caller supplies the complete serialized input so this layer stays
+    /// independent of compiler-private emission structs.
+    pub(crate) fn reuse_serialized_cleanup(
+        &mut self,
+        input: &[u8],
+        function: u32,
+    ) -> Option<Vec<CleanupPlan>> {
+        let key = BytecodePlanCacheKey {
+            input_hash: *blake3::hash(input).as_bytes(),
+        };
+        if let Some(entry) = self.serialized_cleanup.get(&key) {
+            if entry.verified && entry.input == input {
+                return Some(rebind_cleanup_plans(&entry.plans, function));
+            }
+        }
+        let directory = self.serialized_cleanup_disk_directory.as_ref()?;
+        let path = bytecode_plan_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let persisted = bincode::deserialize::<PersistentBytecodePlanCacheEntry>(&bytes).ok()?;
+        if persisted.schema != PERSISTENT_SERIALIZED_CLEANUP_ENTRY_SCHEMA
+            || persisted.key != key
+            || !persisted.entry.verified
+            || persisted.entry.input != input
+        {
+            return None;
+        }
+        let plans = rebind_cleanup_plans(&persisted.entry.plans, function);
+        self.serialized_cleanup.insert(key, persisted.entry);
+        Some(plans)
+    }
+
+    /// Record a provisional MIR-derived cleanup result. It becomes durable
+    /// only after the compiler's final artifact verifier succeeds.
+    pub(crate) fn cache_serialized_cleanup(&mut self, input: Vec<u8>, plans: &[CleanupPlan]) {
+        let key = BytecodePlanCacheKey {
+            input_hash: *blake3::hash(&input).as_bytes(),
+        };
+        let verified = self
+            .serialized_cleanup
+            .get(&key)
+            .is_some_and(|entry| entry.verified && entry.input == input);
+        self.serialized_cleanup.insert(
+            key.clone(),
+            BytecodePlanCacheEntry {
+                input,
+                plans: normalize_cleanup_plans(plans),
+                verified,
+            },
+        );
+        if !verified {
+            self.provisional_serialized_cleanup.insert(key);
+        }
+    }
+
+    /// Publish only cleanup plans produced during this successful compiler
+    /// revision; unfinished/error revisions never become reusable.
+    pub(crate) fn verify_serialized_cleanups(&mut self) {
+        for key in std::mem::take(&mut self.provisional_serialized_cleanup) {
+            if let Some(entry) = self.serialized_cleanup.get_mut(&key) {
+                entry.verified = true;
+            }
+        }
+    }
+
+    fn reuse_bytecode_verification(
+        &mut self,
+        input: &BytecodePlanCacheInput,
+        function: u32,
+    ) -> Option<Vec<CleanupPlan>> {
+        if let Some(entry) = self.bytecode_verification.get(&input.key) {
+            if entry.verified && entry.input == input.input {
+                return Some(rebind_cleanup_plans(&entry.plans, function));
+            }
+        }
+        let directory = self.bytecode_verification_disk_directory.as_ref()?;
+        let path = bytecode_plan_entry_path(directory, &input.key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let persisted = bincode::deserialize::<PersistentBytecodePlanCacheEntry>(&bytes).ok()?;
+        if persisted.schema != PERSISTENT_BYTECODE_VERIFICATION_ENTRY_SCHEMA
+            || persisted.key != input.key
+            || !persisted.entry.verified
+            || persisted.entry.input != input.input
+        {
+            return None;
+        }
+        let plans = rebind_cleanup_plans(&persisted.entry.plans, function);
+        self.bytecode_verification
+            .insert(input.key.clone(), persisted.entry);
+        Some(plans)
+    }
+
+    fn cache_bytecode_verification(
+        &mut self,
+        input: BytecodePlanCacheInput,
+        plans: &[CleanupPlan],
+    ) {
+        let verified = self
+            .bytecode_verification
+            .get(&input.key)
+            .is_some_and(|entry| entry.verified && entry.input == input.input);
+        self.bytecode_verification.insert(
+            input.key.clone(),
+            BytecodePlanCacheEntry {
+                input: input.input,
+                plans: normalize_cleanup_plans(plans),
+                verified,
+            },
+        );
+        if !verified {
+            self.provisional_bytecode_verification.insert(input.key);
+        }
+    }
+
+    /// Permit bytecode verification entries generated during this compiler
+    /// revision to reach the persistent per-function cache after the final
+    /// artifact verifier accepted the whole result.
+    pub(crate) fn verify_bytecode_verifications(&mut self) {
+        for key in std::mem::take(&mut self.provisional_bytecode_verification) {
+            if let Some(entry) = self.bytecode_verification.get_mut(&key) {
                 entry.verified = true;
             }
         }
@@ -1600,6 +2269,22 @@ impl IncrementalMirCache {
                 }
             }
         }
+        if let Some(directory) = &self.serialized_cleanup_disk_directory {
+            persist_bytecode_plan_cache(
+                directory,
+                &self.serialized_cleanup,
+                PERSISTENT_SERIALIZED_CLEANUP_ENTRY_SCHEMA,
+                "serialized cleanup",
+            )?;
+        }
+        if let Some(directory) = &self.bytecode_verification_disk_directory {
+            persist_bytecode_plan_cache(
+                directory,
+                &self.bytecode_verification,
+                PERSISTENT_BYTECODE_VERIFICATION_ENTRY_SCHEMA,
+                "bytecode verification",
+            )?;
+        }
         let Some(directory) = &self.final_validation_disk_directory else {
             return Ok(());
         };
@@ -1747,6 +2432,13 @@ impl IncrementalMirCache {
             recursive_optimized_disk_directory: None,
             emission_prepared: BTreeMap::new(),
             emission_prepared_disk_directory: None,
+            serialized_cleanup: BTreeMap::new(),
+            serialized_cleanup_disk_directory: None,
+            provisional_serialized_cleanup: BTreeSet::new(),
+            bytecode_verification: BTreeMap::new(),
+            bytecode_verification_disk_directory: None,
+            provisional_bytecode_verification: BTreeSet::new(),
+            current_bytecode_verification: BTreeMap::new(),
             final_validation: BTreeMap::new(),
             final_validation_disk_directory: None,
             active_schema: None,
@@ -1758,6 +2450,50 @@ impl IncrementalMirCache {
             reused_final_validation_bodies: 0,
             reused_optimizer_body_snapshots: 0,
         })
+    }
+}
+
+impl grandiose_vm::verify::FunctionVerificationCache for IncrementalMirCache {
+    fn begin_artifact(&mut self, artifact: &BytecodeArtifact) {
+        self.current_bytecode_verification = bytecode_verification_inputs(artifact);
+    }
+
+    fn reuse(
+        &mut self,
+        function: u32,
+        require_cleanup_metadata: bool,
+        allow_seeded_leave_generation: bool,
+    ) -> Option<Vec<CleanupPlan>> {
+        let input = self
+            .current_bytecode_verification
+            .get(&(
+                function,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+            ))?
+            .clone();
+        self.reuse_bytecode_verification(&input, function)
+    }
+
+    fn record(
+        &mut self,
+        function: u32,
+        require_cleanup_metadata: bool,
+        allow_seeded_leave_generation: bool,
+        plans: &[CleanupPlan],
+    ) {
+        let Some(input) = self
+            .current_bytecode_verification
+            .get(&(
+                function,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+            ))
+            .cloned()
+        else {
+            return;
+        };
+        self.cache_bytecode_verification(input, plans);
     }
 }
 
@@ -1898,6 +2634,37 @@ mod tests {
             Segment::new("main.glorious", source),
             [],
         )
+    }
+
+    #[test]
+    fn bytecode_verifier_fingerprints_cache_recursive_components_and_callers() {
+        let bodies = vec![
+            Some(b"first".to_vec()),
+            Some(b"second".to_vec()),
+            Some(b"caller".to_vec()),
+            Some(b"independent".to_vec()),
+        ];
+        let dependencies = vec![
+            Some([1].into_iter().collect()),
+            Some([0].into_iter().collect()),
+            Some([0].into_iter().collect()),
+            Some(BTreeSet::new()),
+        ];
+
+        let legacy = acyclic_bytecode_dependency_fingerprints(&bodies, &dependencies);
+        let fingerprints = bytecode_dependency_fingerprints(&bodies, &dependencies);
+
+        assert_eq!(legacy[..3], [None, None, None]);
+        assert!(fingerprints[..3].iter().all(Option::is_some));
+        assert_eq!(fingerprints[3], legacy[3]);
+
+        let mut edited = bodies.clone();
+        edited[1] = Some(b"changed".to_vec());
+        let after = bytecode_dependency_fingerprints(&edited, &dependencies);
+        assert_ne!(fingerprints[0], after[0]);
+        assert_ne!(fingerprints[1], after[1]);
+        assert_ne!(fingerprints[2], after[2]);
+        assert_eq!(fingerprints[3], after[3]);
     }
 
     #[test]

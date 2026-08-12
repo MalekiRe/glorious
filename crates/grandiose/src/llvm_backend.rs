@@ -42,7 +42,8 @@ pub const DEFAULT_NATIVE_ALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Bump this whenever LLVM fragment generation changes independently of MIR.
 /// Cached fragments with another schema are never reusable.
-pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 4;
+pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 5;
+const LLVM_SPANFUL_INCREMENTAL_MANIFEST_SCHEMA: u32 = 4;
 
 // Schema 3 assigned byte and explicit-abort globals by their position in a
 // module-wide sorted table. Retain its exact table identity so old fragments
@@ -73,6 +74,10 @@ pub struct LlvmFunctionManifest {
     pub callee_interfaces: Vec<LlvmCalleeDependency>,
     /// Includes the selected target/runtime ABI and every interface dependency.
     pub fragment_fingerprint: u64,
+    /// Schema-4 identity that still includes diagnostic spans and ownership
+    /// provenance. It exists solely to migrate exact older disk fragments
+    /// into the span-independent schema-5 cache.
+    spanful_fragment_fingerprint: u64,
     /// Schema-3 identity used only for a safe, read-only cache migration.
     legacy_fragment_fingerprint: u64,
 }
@@ -336,6 +341,29 @@ impl LlvmFragmentCache {
         }
     }
 
+    /// Schema-4 keys used the current content-addressed literal/runtime
+    /// namespace but accidentally folded source spans into every body key.
+    /// They are read-only migration candidates: an exact old entry is copied
+    /// into the current schema after it is selected.
+    fn spanful_key(
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+        fingerprint: u64,
+    ) -> LlvmFragmentKey {
+        LlvmFragmentKey {
+            environment: LlvmFragmentEnvironment {
+                schema: LLVM_SPANFUL_INCREMENTAL_MANIFEST_SCHEMA,
+                target_triple: manifest.target_triple.clone(),
+                target_data_layout: manifest.target_data_layout.clone(),
+                emit_entry_wrapper: manifest.emit_entry_wrapper,
+                native_allocation_limit: manifest.native_allocation_limit,
+                runtime_abi_fingerprint: manifest.runtime_abi_fingerprint,
+            },
+            declaration,
+            fingerprint,
+        }
+    }
+
     fn manifest_function(
         manifest: &LlvmIncrementalManifest,
         declaration: u32,
@@ -392,6 +420,21 @@ impl LlvmFragmentCache {
             return Some(fragment.clone());
         }
         if let Some(fragment) = self.load_disk_fragment(&current) {
+            self.fragments.insert(current.clone(), fragment.clone());
+            return Some(fragment);
+        }
+        let spanful =
+            Self::spanful_key(manifest, declaration, function.spanful_fragment_fingerprint);
+        let spanful_fragment = self
+            .fragments
+            .get(&spanful)
+            .cloned()
+            .or_else(|| self.load_disk_fragment(&spanful));
+        if let Some(fragment) = spanful_fragment {
+            // The schema-4 key includes every current span and MIR fact, so
+            // this is an exact old body. Publish a schema-5 alias after the
+            // caller's normal successful emission path without recompiling
+            // the unchanged LLVM fragment.
             self.fragments.insert(current.clone(), fragment.clone());
             return Some(fragment);
         }
@@ -559,10 +602,40 @@ fn function_interface_fingerprint(function: &mir::Function) -> u64 {
 }
 
 fn function_body_fingerprint(function: &mir::Function) -> u64 {
-    // Blocks and ownership/flow evidence are all consumed by LLVM emission.
-    // Source spans are retained in this representation, so harmless source
-    // edits may rebuild a fragment, but no semantic edit can accidentally
-    // reuse stale native code.
+    // LLVM receives MIR instruction kinds, terminators, register layouts and
+    // return cleanup; it never reads source spans or `PlaceFlow` provenance.
+    // Keeping either in this key made a same-width diagnostic edit invalidate
+    // every native partition in a distributed source bundle.
+    let blocks = function
+        .blocks
+        .iter()
+        .map(|block| {
+            (
+                block.id,
+                &block.params,
+                block
+                    .statements
+                    .iter()
+                    .map(|statement| &statement.kind)
+                    .collect::<Vec<_>>(),
+                &block.terminator,
+            )
+        })
+        .collect::<Vec<_>>();
+    fingerprint_text(format!(
+        "regs={:?} entry={} blocks={blocks:?} phase={:?} features={:?} cleanup={:?} invalid={}",
+        function.register_types,
+        function.entry,
+        function.phase,
+        function.features,
+        function.return_cleanup,
+        function.invalid_analyses,
+    ))
+}
+
+/// Exact schema-4 body identity retained only for non-destructive disk-cache
+/// migration. New entries must use [`function_body_fingerprint`] above.
+fn spanful_function_body_fingerprint(function: &mir::Function) -> u64 {
     fingerprint_text(format!(
         "regs={:?} entry={} blocks={:?} phase={:?} features={:?} cleanup={:?} flow={:?} invalid={}",
         function.register_types,
@@ -662,6 +735,7 @@ pub fn llvm_incremental_manifest(
             callees.dedup();
             let interface_fingerprint = interfaces[&function.declaration];
             let body_fingerprint = function_body_fingerprint(function);
+            let spanful_body_fingerprint = spanful_function_body_fingerprint(function);
             let fragment_fingerprint = fingerprint_text(format!(
                 "schema={LLVM_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={runtime_abi_fingerprint};interface={interface_fingerprint};body={body_fingerprint};callees={callees:?}",
                 options.target_triple,
@@ -670,7 +744,14 @@ pub fn llvm_incremental_manifest(
                 options.native_allocation_limit,
             ));
             let legacy_fragment_fingerprint = fingerprint_text(format!(
-                "schema={LLVM_LEGACY_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={legacy_runtime_abi_fingerprint};interface={interface_fingerprint};body={body_fingerprint};callees={callees:?}",
+                "schema={LLVM_LEGACY_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={legacy_runtime_abi_fingerprint};interface={interface_fingerprint};body={spanful_body_fingerprint};callees={callees:?}",
+                options.target_triple,
+                options.target_data_layout,
+                options.emit_entry_wrapper,
+                options.native_allocation_limit,
+            ));
+            let spanful_fragment_fingerprint = fingerprint_text(format!(
+                "schema={LLVM_SPANFUL_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={runtime_abi_fingerprint};interface={interface_fingerprint};body={spanful_body_fingerprint};callees={callees:?}",
                 options.target_triple,
                 options.target_data_layout,
                 options.emit_entry_wrapper,
@@ -682,6 +763,7 @@ pub fn llvm_incremental_manifest(
                 body_fingerprint,
                 callee_interfaces: callees,
                 fragment_fingerprint,
+                spanful_fragment_fingerprint,
                 legacy_fragment_fingerprint,
             }
         })
@@ -758,6 +840,9 @@ pub struct LlvmNativeObjectUnits {
 pub struct LlvmNativeFunctionUnit {
     pub declaration: u32,
     pub fragment_fingerprint: u64,
+    /// Schema-4 fragment identity for a read-only native-object cache
+    /// migration. The current object key is exact IR, not this cache key.
+    pub spanful_fragment_fingerprint: u64,
     pub module: LlvmModule,
 }
 
@@ -876,7 +961,13 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
                 .fragment(&manifest, function.declaration)
                 .is_some()
         })
-        .map(|function| (function.declaration, function.fragment_fingerprint))
+        .map(|function| {
+            (
+                function.declaration,
+                function.fragment_fingerprint,
+                function.spanful_fragment_fingerprint,
+            )
+        })
         .collect::<Vec<_>>();
     // Literal globals are private to the source fragments that reference
     // them. Keeping all of them in every partition's prelude made one new
@@ -890,7 +981,7 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
     shared_ir = llvm_externalize_internal_definitions(&shared_ir);
     let source_declarations = source_functions
         .iter()
-        .map(|(declaration, _)| {
+        .map(|(declaration, _, _)| {
             (
                 format!("@g1_f{declaration}"),
                 llvm_fragment_source_declaration(
@@ -912,7 +1003,7 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
     // partition: an unrelated helper must not perturb a cached object.
     let helper_declarations = source_functions
         .iter()
-        .flat_map(|(declaration, _)| {
+        .flat_map(|(declaration, _, _)| {
             let fragment = &fragments
                 .fragment(&manifest, *declaration)
                 .expect("current canonical emission produced every function fragment")
@@ -930,34 +1021,37 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
     }
     let functions = source_functions
         .into_iter()
-        .map(|(declaration, fragment_fingerprint)| {
-            let text = &fragments
-                .fragment(&manifest, declaration)
-                .expect("current canonical emission produced every function fragment")
-                .emitted_text;
-            // LLVM permits recursive and forward references inside a
-            // definition, so only direct external source calls need their
-            // prototypes restored to this unit's runtime prelude.
-            let prelude = llvm_fragment_source_dependency_prelude(
-                &runtime_prelude,
-                &text,
-                declaration,
-                &source_declarations,
-                &helper_declarations,
-                &literal_definitions,
-            );
-            LlvmNativeFunctionUnit {
-                declaration,
-                fragment_fingerprint,
-                module: LlvmModule {
-                    ir: format!(
-                        "{prelude}\n{}",
-                        llvm_externalize_internal_definitions(&text)
-                    ),
-                    target_triple: target_triple.clone(),
-                },
-            }
-        })
+        .map(
+            |(declaration, fragment_fingerprint, spanful_fragment_fingerprint)| {
+                let text = &fragments
+                    .fragment(&manifest, declaration)
+                    .expect("current canonical emission produced every function fragment")
+                    .emitted_text;
+                // LLVM permits recursive and forward references inside a
+                // definition, so only direct external source calls need their
+                // prototypes restored to this unit's runtime prelude.
+                let prelude = llvm_fragment_source_dependency_prelude(
+                    &runtime_prelude,
+                    &text,
+                    declaration,
+                    &source_declarations,
+                    &helper_declarations,
+                    &literal_definitions,
+                );
+                LlvmNativeFunctionUnit {
+                    declaration,
+                    fragment_fingerprint,
+                    spanful_fragment_fingerprint,
+                    module: LlvmModule {
+                        ir: format!(
+                            "{prelude}\n{}",
+                            llvm_externalize_internal_definitions(&text)
+                        ),
+                        target_triple: target_triple.clone(),
+                    },
+                }
+            },
+        )
         .collect();
     Ok(LlvmNativeObjectUnits {
         shared_fingerprint: fingerprint_text(&shared_ir),
@@ -13891,6 +13985,86 @@ mod tests {
         assert_eq!(restored, original);
         assert_eq!(cache.reused_fragments(), 1);
         assert_eq!(cache.emitted_fragments(), 0);
+    }
+
+    #[test]
+    fn schema_four_spanful_fragment_is_promoted_without_reemission() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> () { () }"),
+            [],
+        );
+        let phases = crate::compile_bundle_to_phases_with_options(
+            &bundle,
+            CompileOptions {
+                optimization_level: OptimizationLevel::O3,
+            },
+        )
+        .unwrap();
+        let options = LlvmOptions::default();
+        let manifest = llvm_incremental_manifest(&phases, &options);
+        let function = manifest.functions.first().unwrap();
+        let mut cache = LlvmFragmentCache::default();
+        let original = Emitter::new(&phases, &options)
+            .emit_with_fragment_cache(&mut cache)
+            .unwrap();
+        let current = LlvmFragmentCache::key(
+            &manifest,
+            function.declaration,
+            function.fragment_fingerprint,
+        );
+        let fragment = cache.fragments.remove(&current).unwrap();
+        let spanful = LlvmFragmentCache::spanful_key(
+            &manifest,
+            function.declaration,
+            function.spanful_fragment_fingerprint,
+        );
+        cache.fragments.insert(spanful, fragment);
+
+        let restored = Emitter::new(&phases, &options)
+            .emit_with_fragment_cache(&mut cache)
+            .unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(cache.reused_fragments(), 1);
+        assert_eq!(cache.emitted_fragments(), 0);
+        assert!(cache.fragments.contains_key(&current));
+    }
+
+    #[test]
+    fn fragment_body_fingerprint_ignores_unconsumed_source_provenance() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> () { () }"),
+            [],
+        );
+        let phases = crate::compile_bundle_to_phases_with_options(
+            &bundle,
+            CompileOptions {
+                optimization_level: OptimizationLevel::O3,
+            },
+        )
+        .unwrap();
+        let function = &phases.mir.functions[0];
+        let mut changed = function.clone();
+        changed.flow.sources.push(crate::span::Span::new(10, 20));
+        if let Some(statement) = changed
+            .blocks
+            .iter_mut()
+            .flat_map(|block| block.statements.iter_mut())
+            .next()
+        {
+            statement.span = crate::span::Span::new(30, 40);
+        }
+        assert_eq!(
+            function_body_fingerprint(function),
+            function_body_fingerprint(&changed),
+            "LLVM fragment identity must exclude diagnostic-only spans and flow provenance"
+        );
+        assert_ne!(
+            spanful_function_body_fingerprint(function),
+            spanful_function_body_fingerprint(&changed),
+            "the schema-4 migration key must retain its exact historical identity"
+        );
     }
 
     #[test]

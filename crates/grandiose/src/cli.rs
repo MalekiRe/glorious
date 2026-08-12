@@ -1377,17 +1377,23 @@ fn compile_loaded(
                 role: "shared",
                 ir: units.shared.ir.clone(),
                 abi: shared_abi,
+                legacy_abis: Vec::new(),
             });
             for (index, function) in units.functions.iter().enumerate() {
                 let abi = format!(
-                    "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;decl={};fragment={}",
-                    function.declaration, function.fragment_fingerprint
+                    "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;decl={}",
+                    function.declaration
                 );
+                let legacy_abis = vec![format!(
+                    "{toolchain_abi};partition-schema={LLVM_NATIVE_OBJECT_PARTITION_SCHEMA};role=function;decl={};fragment={}",
+                    function.declaration, function.spanful_fragment_fingerprint
+                )];
                 jobs.push(DiskNativeObjectJob {
                     ordinal: index + 1,
                     role: "function",
                     ir: function.module.ir.clone(),
                     abi,
+                    legacy_abis,
                 });
             }
             let workers = match durable_native_object_workers() {
@@ -1685,6 +1691,9 @@ struct DiskNativeObjectJob {
     role: &'static str,
     ir: String,
     abi: String,
+    /// Prior cache-key spellings whose matching object is byte-identical to
+    /// this job because the full LLVM IR remains in the digest.
+    legacy_abis: Vec<String>,
 }
 
 /// The ordered identities which make one final native link reproducible.
@@ -1835,7 +1844,13 @@ fn materialize_disk_partitioned_native_objects(
                     role,
                     scope.spawn(move || {
                         materialize_disk_partitioned_native_object(
-                            &output, ordinal, role, &job.ir, &job.abi, &cache_dir,
+                            &output,
+                            ordinal,
+                            role,
+                            &job.ir,
+                            &job.abi,
+                            &job.legacy_abis,
+                            &cache_dir,
                         )
                     }),
                 ));
@@ -2024,6 +2039,7 @@ fn materialize_disk_partitioned_native_object(
     role: &str,
     ir: &str,
     abi: &str,
+    legacy_abis: &[String],
     cache_dir: &Path,
 ) -> Result<TemporaryNativeObject, String> {
     std::fs::create_dir_all(cache_dir).map_err(|error| {
@@ -2039,6 +2055,19 @@ fn materialize_disk_partitioned_native_object(
         std::fs::write(&object.path, bytes)
             .map_err(|error| format!("could not materialize cached native object: {error}"))?;
         return Ok(object);
+    }
+    for legacy_abi in legacy_abis {
+        let legacy = DiskCacheKey::new(cache_dir, ir, legacy_abi);
+        if let Some(bytes) = legacy.read_valid(legacy_abi) {
+            let bytes = publish_disk_cache_entry(&key, abi, &bytes)?;
+            std::fs::write(&object.path, bytes).map_err(|error| {
+                format!(
+                    "could not materialize migrated native object {}: {error}",
+                    object.path.display()
+                )
+            })?;
+            return Ok(object);
+        }
     }
     let result = ProcessCommand::new("clang")
         .args(["-x", "ir", "-O3", "-c", "-"])
@@ -3150,7 +3179,10 @@ mod tests {
         let optimized = DiskCompilerOptimizedMirCache::new(&cache_dir);
         assert!(
             optimized.directory.is_dir()
-                && std::fs::read_dir(&optimized.directory).unwrap().next().is_some(),
+                && std::fs::read_dir(&optimized.directory)
+                    .unwrap()
+                    .next()
+                    .is_some(),
             "eligible final O3 bodies should persist independently"
         );
         let mut restarted = CompilationDriver::new();
