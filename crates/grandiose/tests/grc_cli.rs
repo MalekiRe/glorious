@@ -378,10 +378,14 @@ fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
             .is_ok_and(|contents| contents.contains("role=function;"))),
         "body edit must publish at least one function-object manifest: {newly_written:?}"
     );
-    eprintln!(
+    let timings = format!(
         "self-host native serve timings: cold={cold_elapsed:.2?}, body_edit={edited_elapsed:.2?}, speedup={:.2}x",
         cold_elapsed.as_secs_f64() / edited_elapsed.as_secs_f64(),
     );
+    eprintln!("{timings}");
+    if let Some(path) = std::env::var_os("G1_SELFHOST_TIMING_FILE") {
+        fs::write(path, timings).unwrap();
+    }
 }
 
 #[test]
