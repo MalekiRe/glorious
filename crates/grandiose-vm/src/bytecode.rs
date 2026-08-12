@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
     error::Error,
@@ -31,13 +32,13 @@ pub const TEXT: TypeId = 17;
 pub const BYTES: TypeId = 18;
 pub const NONE32: u32 = u32::MAX;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Field {
     pub name: String,
     pub ty: TypeId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct EnumVariant {
     pub name: String,
     pub fields: Vec<Field>,
@@ -55,14 +56,14 @@ impl EnumVariant {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Signature {
     pub params: Vec<TypeId>,
     pub result: TypeId,
     pub outward_protocols: Vec<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Import {
     pub capability: String,
     pub symbol: String,
@@ -70,14 +71,14 @@ pub struct Import {
     pub may_trap: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Export {
     pub name: String,
     pub function: FunctionId,
     pub signature: Signature,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Operation {
     pub name: String,
     pub payload_signature: Signature,
@@ -87,14 +88,14 @@ pub struct Operation {
     pub terminal: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Protocol {
     pub display_name: String,
     pub type_arguments: Vec<TypeId>,
     pub operations: Vec<Operation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct HandlerClause {
     pub protocol: u32,
     pub operation: u32,
@@ -102,7 +103,7 @@ pub struct HandlerClause {
     pub resumption_type: Option<TypeId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct HandlerDef {
     pub result_type: TypeId,
     pub clauses: Vec<HandlerClause>,
@@ -177,7 +178,7 @@ fn maximal_capability_flags(ty: &Type) -> u8 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum Type {
     /// The same runtime type with deliberately narrower source-level `Use`
     /// capabilities. This wrapper has no type identity of its own.
@@ -374,7 +375,7 @@ pub(crate) fn projection_field_type(ty: &Type, variant: Option<u32>, field: u32)
         .copied()
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum Constant {
     Unit,
     U8(u8),
@@ -397,7 +398,7 @@ pub enum Constant {
 }
 
 /// Supported subset of the frozen, type-generic primitive table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[repr(u32)]
 pub enum Primitive {
     IntCheckedAdd = 0x0000,
@@ -696,7 +697,7 @@ pub(crate) fn primitive_signature(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum Instruction {
     Nop,
     Const {
@@ -923,7 +924,7 @@ pub enum Instruction {
     Unreachable,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Function {
     pub name: String,
     pub flags: u32,
@@ -939,7 +940,7 @@ pub struct Function {
     pub label_slot_count: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct CleanupPlan {
     pub function: FunctionId,
     pub first_instruction: u32,
@@ -947,25 +948,25 @@ pub struct CleanupPlan {
     pub registers: Vec<Register>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct DropGlue {
     pub ty: TypeId,
     pub function: FunctionId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum ReferenceReturnOrigin {
     Parameter { parameter: u32, path: Vec<u32> },
     Receiver { path: Vec<u32> },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ReferenceReturnRoute {
     pub result_path: Vec<u32>,
     pub origin: ReferenceReturnOrigin,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ReferenceReturnContract {
     pub function: FunctionId,
     pub routes: Vec<ReferenceReturnRoute>,
@@ -1055,10 +1056,17 @@ impl PackedCode {
             .collect::<BTreeMap<_, _>>();
         let mut words = Vec::new();
         let mut operands = Vec::new();
+        let mut operand_lists = BTreeMap::new();
         let mut offsets = Vec::with_capacity(instructions.len() + 1);
         for instruction in instructions {
             offsets.push(words.len() as u32);
-            encode_instruction(instruction, &names, &mut words, &mut operands);
+            encode_instruction_with_operand_lists(
+                instruction,
+                &names,
+                &mut words,
+                &mut operands,
+                &mut operand_lists,
+            );
         }
         offsets.push(words.len() as u32);
         Self {
@@ -1329,6 +1337,7 @@ impl Artifact {
         let exports = encode_exports(&self.exports, &self.functions, &name_id, &signature_values)?;
         validate_function_metadata(&self.functions, &self.exports, &self.drop_glue)?;
         let mut operands = Vec::new();
+        let mut operand_lists = BTreeMap::new();
         let mut code = Vec::new();
         let mut spans = Vec::new();
         for f in &self.functions {
@@ -1338,12 +1347,22 @@ impl Artifact {
                 .get(f.code_start as usize..(f.code_start + f.code_len) as usize)
                 .ok_or(DecodeError::InvalidTable("function"))?;
             for i in range {
-                encode_instruction(i, &name_id, &mut code, &mut operands);
+                encode_instruction_with_operand_lists(
+                    i,
+                    &name_id,
+                    &mut code,
+                    &mut operands,
+                    &mut operand_lists,
+                );
             }
             spans.push((start, code.len() as u32 - start, range.len() as u32));
         }
-        let (cleanups, cleanup_spans) =
-            encode_cleanups(&self.cleanups, &self.functions, &mut operands)?;
+        let (cleanups, cleanup_spans) = encode_cleanups(
+            &self.cleanups,
+            &self.functions,
+            &mut operands,
+            &mut operand_lists,
+        )?;
         let functions = encode_functions(
             &self.functions,
             &self.types,
@@ -3718,6 +3737,7 @@ fn encode_cleanups(
     plans: &[CleanupPlan],
     functions: &[Function],
     operands: &mut Vec<u32>,
+    operand_lists: &mut BTreeMap<Vec<u32>, u32>,
 ) -> Result<(Vec<u8>, CleanupSpans), DecodeError> {
     let mut w = Vec::new();
     let mut spans = Vec::with_capacity(functions.len());
@@ -3725,6 +3745,7 @@ fn encode_cleanups(
     for (function_id, function) in functions.iter().enumerate() {
         let start = at as u32;
         let mut next = 0;
+        let mut previous_registers: Option<(&[u32], u32)> = None;
         while at < plans.len() && plans[at].function == function_id as u32 {
             let plan = &plans[at];
             if plan.first_instruction != next
@@ -3745,14 +3766,34 @@ fn encode_cleanups(
             {
                 return Err(DecodeError::InvalidTable("cleanup"));
             }
-            let operand_start = operands.len() as u32;
-            operands.extend(&plan.registers);
+            // Adjacent ownership states often retain either end of their
+            // predecessor. Operand ranges are immutable, so a prefix or
+            // suffix can reuse the previous plan's entries without changing
+            // the decoded cleanup state at either PC range.
+            let shared_start = match previous_registers {
+                Some((registers, operand_start))
+                    if !plan.registers.is_empty() && registers.starts_with(&plan.registers) =>
+                {
+                    Some(operand_start)
+                }
+                Some((registers, operand_start))
+                    if !plan.registers.is_empty() && registers.ends_with(&plan.registers) =>
+                {
+                    Some(operand_start + (registers.len() - plan.registers.len()) as u32)
+                }
+                _ => None,
+            };
+            let (operand_start, operand_count) = shared_start.map_or_else(
+                || intern_operand_list(&plan.registers, operands, operand_lists),
+                |operand_start| (operand_start, plan.registers.len() as u32),
+            );
             put_u32(&mut w, plan.function);
             put_u32(&mut w, plan.first_instruction);
             put_u32(&mut w, plan.end_instruction);
             put_u32(&mut w, operand_start);
-            put_u32(&mut w, plan.registers.len() as u32);
+            put_u32(&mut w, operand_count);
             put_u32(&mut w, 0);
+            previous_registers = Some((&plan.registers, operand_start));
             next = plan.end_instruction;
             at += 1;
         }
@@ -3766,16 +3807,39 @@ fn encode_cleanups(
     }
     Ok((w, spans))
 }
+fn intern_operand_list(
+    values: &[u32],
+    operands: &mut Vec<u32>,
+    operand_lists: &mut BTreeMap<Vec<u32>, u32>,
+) -> (u32, u32) {
+    if let Some(start) = operand_lists.get(values) {
+        return (*start, values.len() as u32);
+    }
+    let start = operands.len() as u32;
+    operands.extend(values);
+    operand_lists.insert(values.to_vec(), start);
+    (start, values.len() as u32)
+}
+
 fn encode_instruction(
     i: &Instruction,
     names: &BTreeMap<String, u32>,
     code: &mut Vec<u32>,
     ops: &mut Vec<u32>,
 ) {
-    let list = |xs: &[u32], ops: &mut Vec<u32>| {
-        let at = ops.len() as u32;
-        ops.extend(xs);
-        (at, xs.len() as u32)
+    let mut operand_lists = BTreeMap::new();
+    encode_instruction_with_operand_lists(i, names, code, ops, &mut operand_lists);
+}
+
+fn encode_instruction_with_operand_lists(
+    i: &Instruction,
+    names: &BTreeMap<String, u32>,
+    code: &mut Vec<u32>,
+    ops: &mut Vec<u32>,
+    operand_lists: &mut BTreeMap<Vec<u32>, u32>,
+) {
+    let list = |xs: &[u32], ops: &mut Vec<u32>, operand_lists: &mut BTreeMap<Vec<u32>, u32>| {
+        intern_operand_list(xs, ops, operand_lists)
     };
     let (op, w): (u16, Vec<u32>) = match i {
         Instruction::Nop => (0x000, vec![]),
@@ -3793,7 +3857,7 @@ fn encode_instruction(
             variant,
             fields,
         } => {
-            let (s, n) = list(fields, ops);
+            let (s, n) = list(fields, ops, operand_lists);
             (0x009, vec![*dst, *ty, variant.unwrap_or(NONE32), s, n])
         }
         Instruction::ProjectMove { dst, src, field } => (0x00a, vec![*dst, *src, *field]),
@@ -3809,7 +3873,7 @@ fn encode_instruction(
         Instruction::Drop { register } => (0x011, vec![*register]),
         Instruction::Deconstruct { src } => (0x013, vec![*src]),
         Instruction::Primitive { dst, op, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x045, vec![*dst, *op as u32, s, n])
         }
         Instruction::Jump { target } => (0x020, vec![*target]),
@@ -3822,7 +3886,7 @@ fn encode_instruction(
             for &(c, t) in cases {
                 pairs.extend([c, t])
             }
-            let (s, _) = list(&pairs, ops);
+            let (s, _) = list(&pairs, ops, operand_lists);
             (0x021, vec![*discr, s, cases.len() as u32, *otherwise])
         }
         Instruction::Call {
@@ -3830,19 +3894,19 @@ fn encode_instruction(
             function,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x022, vec![dst.unwrap_or(NONE32), *function, s, n])
         }
         Instruction::TailCall { function, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x024, vec![*function, s, n])
         }
         Instruction::CallSelf { dst, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x02b, vec![dst.unwrap_or(NONE32), s, n])
         }
         Instruction::TailCallSelf { args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x02c, vec![s, n])
         }
         Instruction::CallKnownReceiver {
@@ -3851,7 +3915,7 @@ fn encode_instruction(
             receiver,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (
                 0x02d,
                 vec![dst.unwrap_or(NONE32), *function, *receiver, s, n],
@@ -3862,7 +3926,7 @@ fn encode_instruction(
             receiver,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x02e, vec![*function, *receiver, s, n])
         }
         Instruction::MakeCallable {
@@ -3871,7 +3935,7 @@ fn encode_instruction(
             function,
             captures,
         } => {
-            let (s, n) = list(captures, ops);
+            let (s, n) = list(captures, ops, operand_lists);
             (0x00f, vec![*dst, *callable_type, *function, s, n])
         }
         Instruction::MakeHandler {
@@ -3879,7 +3943,7 @@ fn encode_instruction(
             handler_def,
             clauses,
         } => {
-            let (s, n) = list(clauses, ops);
+            let (s, n) = list(clauses, ops, operand_lists);
             (0x010, vec![*dst, *handler_def, s, n])
         }
         Instruction::MakeHandlerShared {
@@ -3888,8 +3952,8 @@ fn encode_instruction(
             functions,
             captures,
         } => {
-            let (fs, fn_) = list(functions, ops);
-            let (cs, cn) = list(captures, ops);
+            let (fs, fn_) = list(functions, ops, operand_lists);
+            let (cs, cn) = list(captures, ops, operand_lists);
             (0x047, vec![*dst, *handler_def, fs, fn_, cs, cn])
         }
         Instruction::MakeBindingPack {
@@ -3897,7 +3961,7 @@ fn encode_instruction(
             binding_type,
             payloads,
         } => {
-            let (s, n) = list(payloads, ops);
+            let (s, n) = list(payloads, ops, operand_lists);
             (0x012, vec![*dst, *binding_type, s, n])
         }
         Instruction::CallIndirect {
@@ -3906,7 +3970,7 @@ fn encode_instruction(
             receiver_mode,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (
                 0x023,
                 vec![dst.unwrap_or(NONE32), *callable, *receiver_mode, s, n],
@@ -3917,7 +3981,7 @@ fn encode_instruction(
             receiver_mode,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x025, vec![*callable, *receiver_mode, s, n])
         }
         Instruction::Handle {
@@ -3926,7 +3990,7 @@ fn encode_instruction(
             body,
             args,
         } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x040, vec![*dst, *handler, *body, s, n])
         }
         Instruction::Perform {
@@ -3935,7 +3999,7 @@ fn encode_instruction(
             operation,
             payloads,
         } => {
-            let (s, n) = list(payloads, ops);
+            let (s, n) = list(payloads, ops, operand_lists);
             (
                 0x041,
                 vec![dst.unwrap_or(NONE32), *protocol, *operation, s, n],
@@ -3954,7 +4018,7 @@ fn encode_instruction(
         } => (0x048, vec![*resumption, *receiver_mode, *value]),
         Instruction::Cancel { dst, resumption } => (0x043, vec![*dst, *resumption]),
         Instruction::HostCall { dst, import, args } => {
-            let (s, n) = list(args, ops);
+            let (s, n) = list(args, ops, operand_lists);
             (0x044, vec![dst.unwrap_or(NONE32), *import, s, n])
         }
         Instruction::Abort { message } => (
@@ -6326,6 +6390,12 @@ mod tests {
                 variant: None,
                 fields: (0..1024).collect(),
             },
+            Instruction::Construct {
+                dst: 1,
+                ty: 19,
+                variant: None,
+                fields: (0..1024).collect(),
+            },
             Instruction::Abort {
                 message: Some("packed abort".into()),
             },
@@ -6346,7 +6416,84 @@ mod tests {
         let packed = PackedCode::from_instructions(&instructions);
 
         assert_eq!(packed.materialize(), instructions);
+        assert_eq!(packed.operands.len(), 1024);
         assert!(packed.storage_bytes() < public_bytes);
+    }
+
+    #[test]
+    fn operand_table_interns_instruction_and_cleanup_register_lists() {
+        let instruction = Instruction::Construct {
+            dst: 3,
+            ty: 19,
+            variant: None,
+            fields: vec![1, 2],
+        };
+        let function = Function {
+            name: "intern_operands".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 4,
+            label_slot_count: 0,
+        };
+        let plans = vec![
+            CleanupPlan {
+                function: 0,
+                first_instruction: 0,
+                end_instruction: 1,
+                registers: vec![1, 2],
+            },
+            CleanupPlan {
+                function: 0,
+                first_instruction: 1,
+                end_instruction: 2,
+                registers: vec![2],
+            },
+            CleanupPlan {
+                function: 0,
+                first_instruction: 2,
+                end_instruction: 3,
+                registers: vec![2, 3],
+            },
+            CleanupPlan {
+                function: 0,
+                first_instruction: 3,
+                end_instruction: 4,
+                registers: vec![2],
+            },
+        ];
+        let mut code = Vec::new();
+        let mut operands = Vec::new();
+        let mut operand_lists = BTreeMap::new();
+        encode_instruction_with_operand_lists(
+            &instruction,
+            &BTreeMap::new(),
+            &mut code,
+            &mut operands,
+            &mut operand_lists,
+        );
+        let (cleanups, spans) = encode_cleanups(
+            &plans,
+            std::slice::from_ref(&function),
+            &mut operands,
+            &mut operand_lists,
+        )
+        .unwrap();
+
+        // [2] first reuses a suffix of [1, 2], and then a prefix of [2, 3].
+        assert_eq!(operands, vec![1, 2, 2, 3]);
+        assert_eq!(
+            decode_instructions(&code, &operands, &[]).unwrap(),
+            [instruction]
+        );
+        assert_eq!(
+            decode_cleanups(&cleanups, 4, &operands, &[function], &spans).unwrap(),
+            plans
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use grandiose::{CompileOptions, OptimizationLevel, compile_source_to_phases_with_options};
+use grandiose::{
+    CompileOptions, OptimizationLevel, OptimizationPass, compile_source_to_phases_with_options,
+};
 use grandiose_vm::{Host, HostFault, Value, Vm, verify};
 
 const SOURCE: &str = r#"
@@ -151,6 +153,23 @@ fn optimization_preserves_effect_control_and_host_call_trace() {
         ]
     );
     assert_eq!(baseline.1, grandiose_vm::RuntimeError::ArithmeticOverflow);
+    let o3 = compile_source_to_phases_with_options(
+        "optimizer-trace-equivalence.glorious",
+        SOURCE,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        },
+    )
+    .expect("O3 trace fixture must compile");
+    assert_eq!(
+        o3.optimization_report
+            .passes
+            .iter()
+            .filter(|pass| pass.pass == OptimizationPass::InlineByCost)
+            .count(),
+        2,
+        "O3 must retain its bounded follow-up inline round for this trace fixture"
+    );
     for level in [
         OptimizationLevel::O1,
         OptimizationLevel::O2,

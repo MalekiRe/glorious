@@ -128,7 +128,7 @@ const SOURCE: &str = r#"
     }
     inline_range_fold() -> usize {
         fold_range(usize_range(0, 4), 0, { total, index =>
-            total + index + 1
+            add_index(add_index(total, index), 1)
         })
     }
     inline_range_find() -> usize {
@@ -220,7 +220,7 @@ const SOURCE: &str = r#"
             let values = collect_until(
                 usize_range(0, 4),
                 @done,
-                { index, _ => index + 1 }
+                { index, _ => __g1_usize_successor(index) }
             );
             Vec::len(&values)
         }

@@ -4995,18 +4995,26 @@ fn releasing_one_projected_child_keeps_its_live_sibling_registered() {
 fn shared_call_result_downgrades_a_transferred_unique_loan() {
     let source = r#"
         downgrade<'a>(value: &'a mut i64) -> &'a i64 { &*value }
-        exercise() -> () {
+        exercise() -> i64 {
             let value = 21;
             let first = downgrade(&mut value);
             let second = &value;
-            first;
-            second;
-            ()
+            *first + *second
         }
-        main() -> { exercise() }
+        main() -> { exercise(); () }
     "#;
     let artifact = compile_source_to_bytecode("shared-call-downgrade.glorious", source).unwrap();
-    verify(artifact).unwrap();
+    let exercise = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "exercise")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(exercise, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
 }
 
 #[test]
@@ -5179,7 +5187,7 @@ fn captureless_callback_tuple_reference_signatures_transport_aggregate_origins()
 }
 
 #[test]
-fn captureless_reference_callback_requires_a_direct_compatible_origin() {
+fn captureless_reference_callback_projects_a_nominal_reference_origin() {
     let source = r#"
         struct Holder { value: &i64 }
         apply<F, T, R>(value: T, body: F) -> R
@@ -5187,17 +5195,38 @@ fn captureless_reference_callback_requires_a_direct_compatible_origin() {
         bad(holder: Holder) -> &i64 {
             apply(holder, { item => item.value })
         }
+        answer() -> i64 {
+            let value = 42;
+            let holder = Holder { value: &value };
+            *bad(move holder)
+        }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("nominal-reference-closure-origin.glorious", source)
-        .unwrap_err();
+    let artifact =
+        compile_source_to_bytecode("nominal-reference-closure-origin.glorious", source).unwrap();
+    let answer = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
     assert!(
-        errors.iter().any(|error| {
-            error.code.is_some()
-                && error.span.is_some()
-                && error.message.contains("exactly one compatible reference")
+        artifact.reference_return_contracts.iter().any(|contract| {
+            artifact.functions[contract.function as usize].name == "bad"
+                && contract.routes.iter().any(|route| matches!(
+                    route.origin,
+                    grandiose_vm::bytecode::ReferenceReturnOrigin::Parameter {
+                        parameter: 0,
+                        ref path,
+                    }
+                        if path == &[0]
+                ))
         }),
-        "{errors:#?}"
+        "missing projected parameter origin: {:#?}",
+        artifact.reference_return_contracts
+    );
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap()).run(answer, vec![]).unwrap(),
+        Value::I64(42)
     );
 }
 
@@ -7203,6 +7232,46 @@ fn unit_return_uses_the_none32_operand_form() {
 }
 
 #[test]
+fn o1_partially_evaluates_direct_callee_literals_at_constant_callers() {
+    let phases = compile_source_to_phases_with_options(
+        "direct-callee-literal.glorious",
+        r#"
+            add_one(value: i64) -> i64 { value + 1 }
+            run() -> i64 { add_one(40) }
+            main() -> { () }
+        "#,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O1,
+        },
+    )
+    .unwrap();
+    let run = phases
+        .artifact
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .unwrap();
+    let code = function_code(&phases.artifact, run);
+    assert!(
+        !code.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::Call { .. } | Instruction::Primitive { .. }
+        )),
+        "constant direct call should lower to a constant result: {code:?}"
+    );
+    let run_id = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "run")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact).unwrap()).run(run_id, vec![]).unwrap(),
+        Value::I64(41)
+    );
+}
+
+#[test]
 fn direct_calls_resolve_forward_declarations() {
     let source = "main() -> { finish() } finish() -> { () }";
     let artifact = compile_source_to_bytecode("forward.glorious", source).unwrap();
@@ -8406,19 +8475,24 @@ fn mir_owns_final_use_transfer_and_explicit_operand_modes() {
         .iter()
         .find(|function| function.name == "shadow")
         .unwrap();
-    assert!(
-        function.return_cleanup.is_empty(),
-        "every scalar owner is discharged by its inferred final transfer"
-    );
-    assert!(function.blocks.iter().any(|block| matches!(
-        block.terminator,
+    // `return_cleanup` is now the ordered ownership snapshot for the scalar
+    // owners left behind by the final transfer. The returned scalar itself is
+    // discharged by the Return operand and must not be cleaned up again.
+    let returned = function.blocks.iter().find_map(|block| match block.terminator {
         grandiose::compiler_mir::Terminator::Return {
-            value: Some(grandiose::compiler_mir::Operand {
-                mode: grandiose::compiler_mir::UseMode::Move,
-                ..
-            })
-        }
-    )));
+            value:
+                Some(grandiose::compiler_mir::Operand {
+                    register,
+                    mode: grandiose::compiler_mir::UseMode::Move,
+                }),
+        } => Some(register),
+        _ => None,
+    });
+    let returned = returned.expect("scalar result has an inferred final transfer");
+    assert!(!function.return_cleanup.contains(&returned));
+    assert!(function.return_cleanup.iter().all(|register| {
+        function.register_types[*register as usize] == grandiose_vm::I64
+    }));
 }
 
 #[test]

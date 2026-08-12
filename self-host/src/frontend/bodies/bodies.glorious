@@ -76,7 +76,8 @@ pub type BodyTokenRange = super::syntax::TokenSpan;
 pub enum PatternBinder {
     Wildcard(usize),
     Binding(Id<String>, usize),
-    Integer(usize)
+    Integer(usize),
+    Boolean(usize, Bool)
 }
 
 enum PatternKind {
@@ -124,6 +125,8 @@ pub struct HandleArm {
     variant_token: usize,
     effect_type: Option<BodyTypeId>,
     binders: PatternBinderRange,
+    resumption: Option<Id<String>>,
+    resumption_token: Option<usize>,
     body: ExprId
 }
 
@@ -176,6 +179,9 @@ impl Use<[0, *]> for ExpressionName {}
 
 enum ExprKind {
     Identifier(ExpressionNameRange),
+    // `$name` is an explicit function value, deliberately distinct from an
+    // identifier so ordinary names keep their direct-call-only semantics.
+    FunctionValue(ExpressionNameRange),
     Number,
     Float,
     Text(Id<String>),
@@ -195,6 +201,11 @@ enum ExprKind {
     Perform(EffectOperationSyntax, ExprEdgeRange),
     Block(ExprEdgeRange),
     ContextBlock(ExprEdgeRange),
+    // Keep list syntax distinct from tuples even though both own ordered
+    // expression edges. The bootstrap frontend accepts lists structurally;
+    // semantic lowering remains responsible for its existing unsupported
+    // collection diagnostic.
+    List(ExprEdgeRange),
     Tuple(ExprEdgeRange),
     Construction(ExpressionNameRange, ExprEdgeRange),
     Projection(ExprId, ExpressionNameRange),
@@ -211,6 +222,10 @@ pub struct ExprNode { kind: ExprKind, tokens: BodyTokenRange }
 
 pub struct ParsedBody {
     shell: ShellId,
+    // Ordinary functions are identified by their scanner shell. Nominal
+    // members share the enclosing trait/impl shell, so preserve the callable
+    // header index selected by the bounded method-body parser.
+    callable_index: Option<usize>,
     root: ExprId,
     nodes: Arena<ExprTag, ExprNode>,
     edges: Vec<ExprEdge>,
@@ -227,6 +242,7 @@ pub struct ParsedBody {
 
 pub enum BodyExpressionView<'a> {
     Identifier(BodyTokenRange),
+    FunctionValue(BodyTokenRange),
     Number(BodyTokenRange),
     Float(BodyTokenRange),
     Text(Id<String>, usize),
@@ -246,6 +262,7 @@ pub enum BodyExpressionView<'a> {
     Perform(EffectOperationSyntax, Slice<'a, ExprEdge>),
     Block(Slice<'a, ExprEdge>),
     ContextBlock(Slice<'a, ExprEdge>),
+    List(Slice<'a, ExprEdge>),
     Tuple(Slice<'a, ExprEdge>),
     Construction(ExpressionNameView, Slice<'a, ExprEdge>),
     Projection(ExprId, ExpressionNameView),
@@ -455,6 +472,13 @@ expression_child_set(
                 usize_from_u32(range.start + child)
             ), replacement);
             ExprKind::Block(range)
+        },
+        ExprKind::List(range) => {
+            expression_edge_set_value(Vec::index_mut(
+                &mut value.edges,
+                usize_from_u32(range.start + child)
+            ), replacement);
+            ExprKind::List(range)
         },
         ExprKind::Tuple(range) => {
             expression_edge_set_value(Vec::index_mut(
@@ -1112,6 +1136,8 @@ struct PendingHandleArm {
     variant_token: usize,
     effect_type: Option<BodyTypeId>,
     binders: Vec<PatternBinder>,
+    resumption: Option<Id<String>>,
+    resumption_token: Option<usize>,
     body: ExprId
 }
 
@@ -1155,6 +1181,10 @@ pub expression_at<'a>(
 
 pub body_shell(value: &ParsedBody) -> ShellId { value.shell }
 
+pub body_callable_index(value: &ParsedBody) -> Option<usize> {
+    value.callable_index
+}
+
 pub body_root_index(value: &ParsedBody) -> u32 { Id::to_u32(value.root) }
 
 pub expression_token_start_at(value: &ParsedBody, index: u32) -> usize {
@@ -1183,6 +1213,14 @@ pub effect_operation_effect_type(value: &EffectOperationSyntax) -> BodyTypeId {
 
 pub handle_arm_effect_type(value: &HandleArm) -> Option<BodyTypeId> {
     value.effect_type
+}
+
+pub handle_arm_resumption(value: &HandleArm) -> Option<Id<String>> {
+    value.resumption
+}
+
+pub handle_arm_resumption_token(value: &HandleArm) -> Option<usize> {
+    value.resumption_token
 }
 
 pub body_type_token_start(value: &ParsedBody, ty: BodyTypeId) -> usize {
@@ -1348,6 +1386,7 @@ pub expression_label_name(value: &ParsedBody, expression: u32) -> Id<String> {
 node_name_range(value: &ExprNode) -> ExpressionNameRange {
     handle value.kind {
         ExprKind::Identifier(range) => range,
+        ExprKind::FunctionValue(range) => range,
         ExprKind::Construction(range, _) => range,
         ExprKind::Projection(_, range) => range,
         _ => super::syntax::empty_id_range(0)
@@ -1537,6 +1576,7 @@ pub expression_child_count_at(
 ) -> u32 {
     handle expression_view(value, expression) {
         BodyExpressionView::Identifier(_) => 0,
+        BodyExpressionView::FunctionValue(_) => 0,
         BodyExpressionView::Number(_) => 0,
         BodyExpressionView::Float(_) => 0,
         BodyExpressionView::Text(_, _) => 0,
@@ -1709,6 +1749,7 @@ pub expression_view<'a>(
     let node = arena_node_at_raw(&value.nodes, expression);
     handle node.kind {
         ExprKind::Identifier(_) => BodyExpressionView::Identifier(node.tokens),
+        ExprKind::FunctionValue(_) => BodyExpressionView::FunctionValue(node.tokens),
         ExprKind::Number => BodyExpressionView::Number(node.tokens),
         ExprKind::Float => BodyExpressionView::Float(node.tokens),
         ExprKind::Text(name) => BodyExpressionView::Text(name, node.tokens.start),
@@ -1745,6 +1786,8 @@ pub expression_view<'a>(
             BodyExpressionView::Block(expression_edges(value, children)),
         ExprKind::ContextBlock(children) =>
             BodyExpressionView::ContextBlock(expression_edges(value, children)),
+        ExprKind::List(children) =>
+            BodyExpressionView::List(expression_edges(value, children)),
         ExprKind::Tuple(children) =>
             BodyExpressionView::Tuple(expression_edges(value, children)),
         ExprKind::Construction(_, children) => BodyExpressionView::Construction(
@@ -2176,6 +2219,20 @@ push_identifier(
     )
 }
 
+push_function_value(
+    value: &mut BodyParser,
+    start: usize,
+    end: usize,
+    name_start: usize
+) -> ExprId {
+    let name_end = Vec::len(&value.names);
+    push_node(
+        value,
+        ExprKind::FunctionValue(name_range(name_start, name_end)),
+        token_range(start, end)
+    )
+}
+
 node_name_at(
     value: &BodyParser,
     id: ExprId,
@@ -2226,6 +2283,7 @@ push_move(
 }
 
 push_binary(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     operator: OperatorUse,
     left: ExprId,
@@ -2233,15 +2291,39 @@ push_binary(
 ) -> ExprId {
     let start = node_tokens(&*value, left).start;
     let end = node_tokens(&*value, right).end;
-    push_node(
-        value,
-        ExprKind::Infix(
-            token_range(operator.start, operator.end),
-            left,
-            right
-        ),
-        token_range(start, end)
-    )
+    // Bootstrap parses declared word operators, including the lazy `else`
+    // control operator, as ordinary calls. Keep punctuation operators in the
+    // compact infix form consumed by primitive elaboration, but give a word
+    // operator an identifier child so normal resolution and call elaboration
+    // see exactly the same shape as the bootstrap compiler.
+    handle super::lexer::token_kind_at(source, operator.start) {
+        TokenKind::Ident(name) => {
+            let names_start = super::syntax::range_mark(&value.names);
+            Vec::push(
+                &mut value.names,
+                ExpressionName::Identifier(name, operator.start)
+            );
+            let callee = push_identifier(
+                value,
+                operator.start,
+                operator.end,
+                names_start
+            );
+            let arguments = Vec::new();
+            Vec::push(&mut arguments, left);
+            Vec::push(&mut arguments, right);
+            push_call(value, callee, &arguments, start, end)
+        },
+        _ => push_node(
+            value,
+            ExprKind::Infix(
+                token_range(operator.start, operator.end),
+                left,
+                right
+            ),
+            token_range(start, end)
+        )
+    }
 }
 
 push_argument_edges(
@@ -2422,6 +2504,23 @@ push_tuple(
     )
 }
 
+push_list(
+    value: &mut BodyParser,
+    elements: &Vec<ExprId>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let edge_start = super::syntax::range_mark(&value.edges);
+    push_expression_edges(value, elements, 0);
+    let edge_end = Vec::len(&value.edges);
+    let edges = edge_range(edge_start, edge_end);
+    push_node(
+        value,
+        ExprKind::List(edges),
+        token_range(start, end)
+    )
+}
+
 push_struct_fields(
     value: &mut BodyParser,
     fields: &Vec<PendingField>,
@@ -2577,6 +2676,125 @@ parse_contextual_block(
         start,
         value.tokens.position
     ))
+}
+
+// Source `if(condition) { positive } else { negative }` is deliberately
+// represented as the same two ordinary calls consumed by elaboration and MIR
+// lowering: `else(if(condition, positive), negative)`.  `if` and `else` are
+// contextual identifiers rather than lexer keywords, so this stays aligned
+// with the bootstrap parser and leaves other identifier uses untouched.
+parse_if_expression(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize
+) -> Result<ExprId, BodyError> {
+    let if_callee = try(parse_identifier(source, value, start), @parse_if_expression);
+    let open = value.tokens.position;
+    try(expect(
+        value,
+        source,
+        TokenPattern::LParen,
+        BodyError::ExpectedCallClose(open, start)
+    ), @parse_if_expression);
+    let arguments = Vec::new();
+    try(parse_call_arguments(
+        original,
+        source,
+        declarations,
+        nominal,
+        value,
+        owner,
+        depth + 1,
+        &mut arguments,
+        open
+    ), @parse_if_expression);
+    if(Vec::len(&arguments) != 1) {
+        Result::Err(BodyError::ExpectedExpression(start, value.tokens.position))
+    } else {
+        let block_start = value.tokens.position;
+        try(expect(
+            value,
+            source,
+            TokenPattern::LBrace,
+            BodyError::ExpectedExpression(block_start, start)
+        ), @parse_if_expression);
+        // parse_contextual_block consumes the opening brace itself, whereas
+        // `expect` above only validates it. Restore the cursor to that brace.
+        value.tokens.position = block_start;
+        let positive = try(parse_contextual_block(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            depth + 1
+        ), @parse_if_expression);
+        let else_start = value.tokens.position;
+        if(not(token_is_contextual_ident(source, else_start, &"else"))) {
+            Result::Err(BodyError::ExpectedExpression(else_start, start))
+        } else {
+            let else_callee = try(parse_identifier(
+                source,
+                value,
+                else_start
+            ), @parse_if_expression);
+            let negative_start = value.tokens.position;
+            try(expect(
+                value,
+                source,
+                TokenPattern::LBrace,
+                BodyError::ExpectedExpression(negative_start, else_start)
+            ), @parse_if_expression);
+            value.tokens.position = negative_start;
+            let negative = try(parse_contextual_block(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth + 1
+            ), @parse_if_expression);
+            let if_arguments = Vec::new();
+            Vec::push(&mut if_arguments, *Vec::index(&arguments, 0));
+            Vec::push(&mut if_arguments, positive);
+            let positive_end = node_tokens(&*value, positive).end;
+            let conditional = push_call(
+                value,
+                if_callee,
+                &if_arguments,
+                start,
+                positive_end
+            );
+            let else_arguments = Vec::new();
+            Vec::push(&mut else_arguments, conditional);
+            Vec::push(&mut else_arguments, negative);
+            let negative_end = node_tokens(&*value, negative).end;
+            let combined = push_call(
+                value,
+                else_callee,
+                &else_arguments,
+                start,
+                negative_end
+            );
+            parse_postfix(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth + 1,
+                combined
+            )
+        }
+    }
 }
 
 shell_owner(
@@ -3110,7 +3328,17 @@ parse_callable_reference(
                 @parse_callable_reference
             );
             value.tokens.position = name + 1;
-            parse_identifier_tail(source, value, start, name_start)
+            let result = try(
+                parse_identifier_tail(source, value, start, name_start),
+                @parse_callable_reference
+            );
+            let node = Arena::index_mut(&mut value.nodes, result);
+            let names = handle node.kind {
+                ExprKind::Identifier(found) => found,
+                _ => unreachable()
+            };
+            node.kind = ExprKind::FunctionValue(names);
+            Result::Ok(result)
         }
     }
 }
@@ -3197,6 +3425,39 @@ parse_tuple_tail(
     }
 }
 
+parse_list_tail(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner: Option<ShellId>,
+    depth: u16,
+    start: usize,
+    elements: &mut Vec<ExprId>
+) -> Result<ExprId, BodyError> {
+    if(eat_token(value, source, TokenPattern::RBracket)) {
+        Result::Ok(push_list(value, &*elements, start, value.tokens.position))
+    } else {
+        let element = try(parse_expression(
+            original, source, declarations, nominal, value, owner, 0, depth
+        ), @parse_list_tail);
+        Vec::push(&mut *elements, element);
+        if(eat_token(value, source, TokenPattern::RBracket)) {
+            Result::Ok(push_list(value, &*elements, start, value.tokens.position))
+        } else if(eat_token(value, source, TokenPattern::Comma)) {
+            parse_list_tail(
+                original, source, declarations, nominal, value, owner, depth,
+                start, elements
+            )
+        } else {
+            Result::Err(BodyError::ExpectedTupleDelimiter(
+                value.tokens.position, start
+            ))
+        }
+    }
+}
+
 pattern_binder_named(
     value: &Vec<PatternBinder>,
     name: Id<String>,
@@ -3207,6 +3468,8 @@ pattern_binder_named(
             PatternBinder::Wildcard(_) =>
                 pattern_binder_named(value, name, index + 1),
             PatternBinder::Integer(_) =>
+                pattern_binder_named(value, name, index + 1),
+            PatternBinder::Boolean(_, _) =>
                 pattern_binder_named(value, name, index + 1),
             PatternBinder::Binding(found, _) =>
                 if(found == name) {
@@ -3252,6 +3515,14 @@ parse_pattern_binder(
                         &mut *binders,
                         PatternBinder::Wildcard(token)
                     );
+                    value.tokens.position = token + 1;
+                    Result::Ok(())
+                } else if(String::eq(text, &"true")) {
+                    Vec::push(&mut *binders, PatternBinder::Boolean(token, true));
+                    value.tokens.position = token + 1;
+                    Result::Ok(())
+                } else if(String::eq(text, &"false")) {
+                    Vec::push(&mut *binders, PatternBinder::Boolean(token, false));
                     value.tokens.position = token + 1;
                     Result::Ok(())
                 } else {
@@ -3451,6 +3722,28 @@ direct_handle_metadata(
     }
 }
 
+// `with name` is contextual handler syntax, matching the bootstrap parser.
+// Keep it out of the lexer keyword set so an ordinary identifier named
+// `with` remains valid everywhere else.
+parse_handle_resumption(
+    source: &super::lexer::LexedSource,
+    value: &mut BodyParser
+) -> Result<(Option<Id<String>>, Option<usize>), BodyError> {
+    let token = value.tokens.position;
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(word) => handle super::lexer::lexeme(source, word) {
+            Result::Ok(text) => if(String::eq(text, &"with")) {
+                let binder_token = token + 1;
+                let binder = try(identifier_name(source, binder_token, token), @parse_handle_resumption);
+                value.tokens.position = binder_token + 1;
+                Result::Ok((Option::Some(binder), Option::Some(binder_token)))
+            } else { Result::Ok((None, None)) },
+            Result::Err(_) => Result::Ok((None, None))
+        },
+        _ => Result::Ok((None, None))
+    }
+}
+
 parse_handle_arm(
     original: &String,
     source: &super::lexer::LexedSource,
@@ -3509,6 +3802,9 @@ parse_handle_arm(
                     open
                 ), @parse_handle_arm)
             } else { () };
+            let (resumption, resumption_token) = try(
+                parse_handle_resumption(source, value), @parse_handle_arm
+            );
             if(value.tokens.position < value.tokens.limit
                 and {
                     super::lexer::token_matches_at(
@@ -3535,6 +3831,8 @@ parse_handle_arm(
                     variant_token: variant_token,
                     effect_type: selected_effect_type,
                     binders: binders,
+                    resumption: resumption,
+                    resumption_token: resumption_token,
                     body: body
                 })
             } else {
@@ -3576,9 +3874,11 @@ parse_handle_arm(
                 enum_token: enum_token,
                 variant_name: enum_name,
                 variant_token: enum_token,
-                effect_type: None,
-                binders: Vec::new(),
-                body: body
+                    effect_type: None,
+                    binders: Vec::new(),
+                    resumption: None,
+                    resumption_token: None,
+                    body: body
             })
         } else {
             Result::Err(BodyError::ExpectedIdentifier(separator, enum_token))
@@ -3677,6 +3977,8 @@ append_handle_arms(
                 variant_token,
                 effect_type,
                 binders,
+                resumption,
+                resumption_token,
                 body
             } = arm;
             let binder_start =
@@ -3697,6 +3999,8 @@ append_handle_arms(
                 variant_token: variant_token,
                 effect_type: effect_type,
                 binders: binders_range,
+                resumption: resumption,
+                resumption_token: resumption_token,
                 body: body
             });
             append_handle_arms(remaining, value)
@@ -4259,6 +4563,22 @@ parse_atom(
                         )
                     } else { false }
                 } else { false };
+                if(token_is_contextual_ident(source, start, &"if")
+                    and { next < value.tokens.limit }
+                    and { super::lexer::token_matches_at(
+                        source, next, TokenPattern::LParen
+                    ) }) {
+                    parse_if_expression(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth,
+                        start
+                    )
+                } else {
                 let control = handle super::lexer::lexeme(source, name) {
                     None => 0,
                     Option::Some(text) => if(String::eq(text, &"label")
@@ -4275,6 +4595,7 @@ parse_atom(
                     Result::Err(BodyError::ExpectedExpression(start, start))
                 } else {
                     parse_identifier(source, value, start)
+                }
                 }
             },
             TokenKind::Dollar => parse_callable_reference(source, value, start),
@@ -4408,6 +4729,14 @@ parse_atom(
                     start,
                     true,
                     &mut statements
+                )
+            },
+            TokenKind::LBracket => {
+                value.tokens.position = start + 1;
+                let elements = Vec::new();
+                parse_list_tail(
+                    original, source, declarations, nominal, value, owner,
+                    depth + 1, start, &mut elements
                 )
             },
             _ => Result::Err(BodyError::ExpectedExpression(start, start))
@@ -5590,9 +5919,9 @@ parse_chain(
         @parse_chain
     );
     handle found {
-            Result::Err(_) => finish_chain(value, output, pending),
+            Result::Err(_) => finish_chain(source, value, output, pending),
             Result::Ok(operator) => if(operator.precedence < minimum) {
-                finish_chain(value, output, pending)
+                finish_chain(source, value, output, pending)
             } else {
                 let left = last_expr(output);
                     if(infix_separated(source, &*value, left, operator)) {
@@ -5611,6 +5940,7 @@ parse_chain(
                             );
                             try(
                                 prepare_operator(
+                                    source,
                                     &mut *value,
                                     &mut *output,
                                     &mut *pending,
@@ -5633,13 +5963,14 @@ parse_chain(
                                 pending
                             )
                     } else {
-                        finish_chain(value, output, pending)
+                        finish_chain(source, value, output, pending)
                     }
             }
     }
 }
 
 reduce_once(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     output: &mut Vec<ExprId>,
     pending: &mut Vec<OperatorUse>
@@ -5647,7 +5978,7 @@ reduce_once(
     let operator = pop_operator(&mut *pending);
     let right = pop_expr(&mut *output);
     let left = pop_expr(&mut *output);
-    let grouped = push_binary(value, operator, left, right);
+    let grouped = push_binary(source, value, operator, left, right);
     Vec::push(&mut *output, grouped)
 }
 
@@ -5681,6 +6012,7 @@ operator_should_reduce(
 }
 
 prepare_operator(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     output: &mut Vec<ExprId>,
     pending: &mut Vec<OperatorUse>,
@@ -5695,8 +6027,8 @@ prepare_operator(
             @prepare_operator
         );
         if(reduce) {
-                reduce_once(&mut *value, &mut *output, &mut *pending);
-                    prepare_operator(value, output, pending, incoming)
+                reduce_once(source, &mut *value, &mut *output, &mut *pending);
+                    prepare_operator(source, value, output, pending, incoming)
         } else {
             Result::Ok(())
         }
@@ -5704,6 +6036,7 @@ prepare_operator(
 }
 
 finish_chain(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
     output: &mut Vec<ExprId>,
     pending: &mut Vec<OperatorUse>
@@ -5711,8 +6044,8 @@ finish_chain(
     if(Vec::len(&*pending) == 0) {
         Result::Ok(pop_expr(&mut *output))
     } else {
-        reduce_once(&mut *value, &mut *output, &mut *pending);
-            finish_chain(value, output, pending)
+        reduce_once(source, &mut *value, &mut *output, &mut *pending);
+            finish_chain(source, value, output, pending)
     }
 }
 
@@ -6141,6 +6474,7 @@ pub parse_function_body(
                     } = parser;
                     let output = ParsedBody {
                         shell: shell,
+                        callable_index: None,
                         root: root,
                         nodes: nodes,
                         edges: edges,
@@ -6239,6 +6573,7 @@ pub parse_impl_method_body(
                     } = parser;
                     let output = ParsedBody {
                         shell: super::headers::callable_shell(callable),
+                        callable_index: Option::Some(method),
                         root: root,
                         nodes: nodes,
                         edges: edges,

@@ -74,13 +74,57 @@ fn incremental_session_reuses_only_valid_unchanged_body_inference() {
     let shifted = session.stats();
     assert!(shifted.elaborated_bodies >= 2, "{shifted:?}");
 
-    // Signature/context changes invalidate every retained body inference.
+    // A signature/context change cannot reuse entries *under the new context*,
+    // but must retain the prior context rather than clearing every body.
     session
         .compile_bundle(&bundle("1", "u64"), options())
         .unwrap();
     let context_changed = session.stats();
     assert_eq!(context_changed.reused_bodies, 0, "{context_changed:?}");
     assert_eq!(context_changed.elaborated_bodies, first.elaborated_bodies);
+
+    // Returning to the original signature context with one body edit should
+    // reuse its unchanged siblings from the retained namespace. This guards
+    // against a context transition clearing the complete typed/MIR cache.
+    session
+        .compile_bundle(&bundle("3", "i64"), options())
+        .unwrap();
+    let returned_context = session.stats();
+    assert_eq!(returned_context.reused_phase_artifacts, 0, "{returned_context:?}");
+    assert!(
+        returned_context.elaborated_bodies < first.elaborated_bodies,
+        "a context return must not re-elaborate every body: {returned_context:?}"
+    );
+    assert!(returned_context.reused_bodies > 0, "{returned_context:?}");
+    assert!(
+        returned_context.lowered_mir_bodies < first.lowered_mir_bodies,
+        "a context return must not re-lower every body: {returned_context:?}"
+    );
+    assert!(returned_context.reused_mir_bodies > 0, "{returned_context:?}");
+}
+
+#[test]
+fn incremental_session_reuses_cleanup_mir_only_after_exact_dependency_validation() {
+    let original = bundle("1", "i64");
+    let edited = bundle("2", "i64");
+    let mut incremental = IncrementalCompilerSession::new();
+
+    incremental.compile_bundle(&original, options()).unwrap();
+    let warm = incremental.compile_bundle(&edited, options()).unwrap();
+    let stats = incremental.stats();
+    assert!(
+        stats.reused_cleanup_mir_bodies > 0,
+        "a no-call unchanged body has no interprocedural summary dependencies: {stats:?}"
+    );
+
+    // The cache is an implementation detail at the Raw -> Cleanup boundary;
+    // it must be observationally identical to a cold import/elaboration.
+    let cold = IncrementalCompilerSession::new()
+        .compile_bundle(&edited, options())
+        .unwrap();
+    assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+    assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    assert_eq!(warm.artifact, cold.artifact);
 }
 
 #[test]
@@ -118,6 +162,29 @@ fn failed_revision_rolls_back_incremental_inference_transaction() {
     assert_eq!(session.stats().reused_bodies, total);
     assert_eq!(session.stats().reused_phase_artifacts, 0);
     assert_eq!(session.stats().reused_mir_bodies, total_mir);
+}
+
+#[test]
+fn incremental_o1_reuses_exact_local_optimizer_snapshots() {
+    let o1 = CompileOptions {
+        optimization_level: OptimizationLevel::O1,
+    };
+    let mut session = IncrementalCompilerSession::new();
+    session.compile_bundle(&bundle("1", "i64"), o1).unwrap();
+
+    let warm = session.compile_bundle(&bundle("2", "i64"), o1).unwrap();
+    let stats = session.stats();
+    assert_eq!(stats.reused_phase_artifacts, 0, "{stats:?}");
+    assert!(
+        stats.reused_optimizer_body_snapshots > 0,
+        "unchanged O1 bodies should restore exact local snapshots: {stats:?}"
+    );
+
+    let mut ordinary = IncrementalCompilerSession::new();
+    let expected = ordinary.compile_bundle(&bundle("2", "i64"), o1).unwrap();
+    assert_eq!(warm.core_fingerprint(), expected.core_fingerprint());
+    assert_eq!(warm.mir_fingerprint(), expected.mir_fingerprint());
+    assert_eq!(warm.artifact, expected.artifact);
 }
 
 #[test]

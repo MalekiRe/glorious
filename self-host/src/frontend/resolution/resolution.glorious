@@ -72,7 +72,8 @@ pub struct LocalBinding {
 pub enum ResolvedPatternBinder {
     Wildcard,
     Local(LocalId),
-    Integer(usize)
+    Integer(usize),
+    Boolean(usize, Bool)
 }
 
 impl Use<[0, *]> for ResolvedPatternBinder {}
@@ -90,7 +91,8 @@ impl Use<[0, *]> for ResolvedHandleTarget {}
 
 pub struct ResolvedHandleArm {
     target: ResolvedHandleTarget,
-    binders: ResolvedBinderRange
+    binders: ResolvedBinderRange,
+    resumption: Option<LocalId>
 }
 
 impl Use<[0, *]> for ResolvedHandleArm {}
@@ -317,6 +319,10 @@ pub resolved_handle_binders<'a>(
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
+}
+
+pub resolved_handle_resumption(value: &ResolvedHandleArm) -> Option<LocalId> {
+    value.resumption
 }
 
 shell_parent_module(
@@ -1350,36 +1356,45 @@ resolve_identifier(
                     );
                     Result::Ok(())
                 },
-                Result::Err(_) => if(bare_bool_literal(headers, raw)) {
-                    // `true`/`false` are prelude values, but the focused
-                    // self-host probe intentionally has no prelude index.
-                    // Leave them unresolved for elaboration's literal path.
-                    Result::Ok(())
-                } else {
-                    let found = handle resolve_global_alias(
-                        headers,
-                        index,
-                        declarations,
-                        raw,
-                        None,
-                        module,
-                        token
-                    ) {
-                        Option::Some(found) => found,
-                        None => try(resolve_function_name(
+                Result::Err(_) => handle resolve_global_alias(
+                    headers,
+                    index,
+                    declarations,
+                    raw,
+                    None,
+                    module,
+                    token
+                ) {
+                    // The distributed prelude binds `true` and `false` to
+                    // Result-backed global factories. Prefer that binding so
+                    // their type stays identical to the declared Bool alias.
+                    Option::Some(found) => {
+                        push_resolution(
+                            output,
+                            Id::from_u32(expression),
+                            found
+                        );
+                        Result::Ok(())
+                    },
+                    None => if(bare_bool_literal(headers, raw)) {
+                        // Focused self-host probes intentionally omit the
+                        // prelude. Preserve their unresolved literal path.
+                        Result::Ok(())
+                    } else {
+                        let found = try(resolve_function_name(
                             index,
                             declarations,
                             raw,
                             module,
                             token
-                        ), @resolve_identifier)
-                    };
-                    push_resolution(
-                        output,
-                        Id::from_u32(expression),
-                        found
-                    );
-                    Result::Ok(())
+                        ), @resolve_identifier);
+                        push_resolution(
+                            output,
+                            Id::from_u32(expression),
+                            found
+                        );
+                        Result::Ok(())
+                    }
                 }
             }
         },
@@ -1651,10 +1666,49 @@ resolve_closure<'a>(
     )
 }
 
-// Typed closures introduce the same lexical parameter binders as ordinary
-// closures. The closure body resolves under a fresh scope so its parameters
-// shadow outer names for that body only.
-resolve_typed_closure<'a>(
+// Typed closures share ordinary closure lexical semantics: their parameter
+// annotations are consumed by elaboration, while their names are fresh local
+// bindings visible only inside the closure body.  Keep this separate from
+// resolve_closure because the parsed typed form stores its parameter range
+// rather than a borrowed slice.
+resolve_typed_closure_parameters(
+    body: &super::bodies::ParsedBody,
+    bindings: &mut ScopeMap,
+    output: &mut ResolvedBody,
+    expression: u32,
+    count: usize,
+    ordinal: usize
+) -> Result<(), ResolutionError> {
+    if(ordinal == count) {
+        Result::Ok(())
+    } else {
+        let token = super::bodies::typed_closure_parameter_token_at(
+            body, expression, ordinal
+        );
+        let local = try(Result::map_err(
+            local_id_from_usize(Vec::len(&output.locals)),
+            { _ => ResolutionError::LocalIdExhausted(
+                token, Vec::len(&output.locals)
+            ) }
+        ), @resolve_typed_closure_parameters);
+        Vec::push(&mut output.locals, LocalBinding {
+            name_token: token,
+            block_expression: Id::from_u32(expression)
+        });
+        scope_push(
+            bindings,
+            super::bodies::typed_closure_parameter_name_at(
+                body, expression, ordinal
+            ),
+            ResolvedTarget::Local(local)
+        );
+        resolve_typed_closure_parameters(
+            body, bindings, output, expression, count, ordinal + 1
+        )
+    }
+}
+
+resolve_typed_closure(
     headers: &super::headers::ParsedHeaders,
     index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
@@ -1671,8 +1725,10 @@ resolve_typed_closure<'a>(
         &mut *frame.scope,
         output,
         expression,
-        0,
-        module
+        usize_from_u32(super::bodies::typed_closure_parameter_count(
+            body, expression
+        )),
+        0
     ), @resolve_typed_closure);
     resolve_expression(
         headers,
@@ -1684,56 +1740,6 @@ resolve_typed_closure<'a>(
         Id::to_u32(closure_body),
         module
     )
-}
-
-resolve_typed_closure_parameters(
-    body: &super::bodies::ParsedBody,
-    scope: &mut ScopeMap,
-    output: &mut ResolvedBody,
-    expression: u32,
-    ordinal: u32,
-    module: Option<ShellId>
-) -> Result<(), ResolutionError> {
-    if(ordinal < super::bodies::typed_closure_parameter_count(
-        body,
-        expression
-    )) {
-        let token = super::bodies::typed_closure_parameter_token_at(
-            body,
-            expression,
-            usize_from_u32(ordinal)
-        );
-        let local = handle local_id_from_usize(Vec::len(&output.locals)) {
-            Result::Err(_) => @resolve_typed_closure_parameters(Result::Err(
-                ResolutionError::LocalIdExhausted(
-                    token,
-                    Vec::len(&output.locals)
-                )
-            )),
-            Result::Ok(found) => found
-        };
-        Vec::push(&mut output.locals, LocalBinding {
-            name_token: token,
-            block_expression: Id::from_u32(expression)
-        });
-        scope_push(
-            scope,
-            super::bodies::typed_closure_parameter_name_at(
-                body,
-                expression,
-                usize_from_u32(ordinal)
-            ),
-            ResolvedTarget::Local(local)
-        );
-        resolve_typed_closure_parameters(
-            body,
-            scope,
-            output,
-            expression,
-            ordinal + 1,
-            module
-        )
-    } else { Result::Ok(()) }
 }
 
 resolve_pattern_binders<'a>(
@@ -1758,6 +1764,11 @@ resolve_pattern_binders<'a>(
                 Vec::push(
                     &mut output.pattern_binders,
                     ResolvedPatternBinder::Integer(token)
+                ),
+            PatternBinder::Boolean(token, flag) =>
+                Vec::push(
+                    &mut output.pattern_binders,
+                    ResolvedPatternBinder::Boolean(token, flag)
                 ),
             PatternBinder::Binding(name, token) => {
                 let local = try(
@@ -1912,6 +1923,33 @@ resolve_handle_arm(
             Slice::len(source_binders)
         )
     } else { () };
+    // A handler resumption is lexical to this arm just like payload binders,
+    // but is kept separately from the payload-pattern range. Later Core
+    // elaboration gives it the operation's instantiated continuation type.
+    let resumption = handle (
+        super::bodies::handle_arm_resumption(arm),
+        super::bodies::handle_arm_resumption_token(arm)
+    ) {
+        (Option::Some(name), Option::Some(token)) => {
+            let local = handle local_id_from_usize(Vec::len(&output.locals)) {
+                Result::Err(_) => @resolve_handle_arm(Result::Err(
+                    ResolutionError::LocalIdExhausted(token, Vec::len(&output.locals))
+                )),
+                Result::Ok(found) => found
+            };
+            Vec::push(&mut output.locals, LocalBinding {
+                name_token: token,
+                block_expression: Id::from_u32(expression)
+            });
+            scope_push(
+                &mut *frame.scope,
+                name,
+                ResolvedTarget::Local(local)
+            );
+            Option::Some(local)
+        },
+        _ => None
+    };
     // Seal the parent arm's contiguous binder range before resolving its
     // body. Nested handles append their own binders to the same flat arena
     // and must not become part of this arm's payload pattern.
@@ -1920,7 +1958,8 @@ resolve_handle_arm(
     *IndexVec::index_mut(&mut output.handle_arms, arm_id) =
         Option::Some(ResolvedHandleArm {
             target: target,
-            binders: resolved_binders
+            binders: resolved_binders,
+            resumption: resumption
         });
     try(resolve_expression(
         headers,
@@ -2135,12 +2174,35 @@ resolve_expression(
             expression,
             module
         ),
+        // Resolution still uses the ordinary qualified-name lookup.  The
+        // elaborator enforces that this explicit `$` form denotes a function.
+        super::bodies::BodyExpressionView::FunctionValue(_) => resolve_identifier(
+            headers,
+            index,
+            declarations,
+            body,
+            &*bindings,
+            output,
+            expression,
+            module
+        ),
         super::bodies::BodyExpressionView::Number(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Float(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Text(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::Character(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::Byte(_, _) => Result::Ok(()),
         super::bodies::BodyExpressionView::ByteString(_, _) => Result::Ok(()),
+        super::bodies::BodyExpressionView::Is(subject, _) =>
+            resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(subject),
+                module
+            ),
         super::bodies::BodyExpressionView::Unit(_) => Result::Ok(()),
         super::bodies::BodyExpressionView::Is(subject, pattern) =>
             resolve_is_refinement(
@@ -2232,6 +2294,67 @@ resolve_expression(
                 module
             )
         },
+        super::bodies::BodyExpressionView::Resume(resumption, result) => {
+            try(resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(resumption),
+                module
+            ), @resolve_expression);
+            handle result {
+                None => Result::Ok(()),
+                Option::Some(value) => resolve_expression(
+                    headers,
+                    index,
+                    declarations,
+                    body,
+                    bindings,
+                    output,
+                    Id::to_u32(value),
+                    module
+                )
+            }
+        },
+        super::bodies::BodyExpressionView::Cancel(resumption) =>
+            resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(resumption),
+                module
+            ),
+        super::bodies::BodyExpressionView::TailResume(resumption, result) => {
+            try(resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(resumption),
+                module
+            ), @resolve_expression);
+            handle result {
+                None => Result::Ok(()),
+                Option::Some(value) => resolve_expression(
+                    headers,
+                    index,
+                    declarations,
+                    body,
+                    bindings,
+                    output,
+                    Id::to_u32(value),
+                    module
+                )
+            }
+        },
         super::bodies::BodyExpressionView::Perform(path, arguments) => {
             let operation = try(resolve_effect_operation(
                 headers,
@@ -2259,6 +2382,17 @@ resolve_expression(
             )
         },
         super::bodies::BodyExpressionView::Block(children) => resolve_block(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            children,
+            module
+        ),
+        super::bodies::BodyExpressionView::ContextBlock(children) => resolve_block(
             headers,
             index,
             declarations,
@@ -2459,6 +2593,21 @@ push_missing_resolved_handle_arms(
     }
 }
 
+body_callable_for_parsed_body<'a>(
+    index: &ResolutionIndex,
+    headers: &'a super::headers::HeaderIndex,
+    body: &super::bodies::ParsedBody
+) -> Option<&'a super::headers::CallableHeader> {
+    handle super::bodies::body_callable_index(body) {
+        // Nominal members share their enclosing shell. Their parsed body
+        // therefore carries the exact header selected by the method parser.
+        Result::Ok(method) => super::headers::callable_at(headers, method),
+        Result::Err(_) => body_callable(
+            index, headers, super::bodies::body_shell(body)
+        )
+    }
+}
+
 pub resolve_function_body_indexed(
     index: &ResolutionIndex,
     headers: &super::headers::ParsedHeaders,
@@ -2476,10 +2625,10 @@ pub resolve_function_body_indexed(
                 shell_index
             )
         ),
-        Result::Ok(shell) => handle body_callable(
+        Result::Ok(shell) => handle body_callable_for_parsed_body(
             index,
             headers_index,
-            shell_index
+            body
         ) {
             Result::Err(_) => Result::Err(
                 ResolutionError::MissingBodyCallable(

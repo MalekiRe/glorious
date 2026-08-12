@@ -7,12 +7,15 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel,
     ast::{Expr, ExprKind, Function, PatternKind, Program, Stmt},
     modules::{ModuleId, ModuleResolution},
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
+
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -769,8 +772,9 @@ fn self_hosted_effect_path_syntax_and_name_resolution_match_rust_in_vm_and_nativ
                 encode_rust_resolution(&mut expected, &fs::read_to_string(path).unwrap());
             }
 
+            let bundle = self_host_bundle();
             let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle(),
+                &bundle,
                 CompileOptions {
                     optimization_level: OptimizationLevel::O2,
                 },
@@ -821,45 +825,10 @@ fn self_hosted_effect_path_syntax_and_name_resolution_match_rust_in_vm_and_nativ
                 "VM name resolution diverged"
             );
 
-            let asan = std::env::var_os("G1_SELF_HOST_NAME_RESOLUTION_ASAN").is_some();
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let debug_directory = repository_root().join("target/self-host-name-resolution-debug");
-            if asan {
-                fs::create_dir_all(&debug_directory).unwrap();
-                let functions = phases
-                    .mir
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, function)| format!("{index}\t{}\n", function.name))
-                    .collect::<String>();
-                fs::write(debug_directory.join("functions.txt"), functions).unwrap();
-            }
-            let llvm = if asan {
-                debug_directory.join("self-host-name-resolution.ll")
-            } else {
-                directory.path().join("self-host-name-resolution.ll")
-            };
-            let executable = if asan {
-                debug_directory.join("self-host-name-resolution")
-            } else {
-                directory.path().join("self-host-name-resolution")
-            };
-            fs::write(&llvm, module.ir).unwrap();
-            let mut clang_command = Command::new("clang");
-            clang_command
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0");
-            if asan {
-                clang_command.args(["-fsanitize=address", "-fno-omit-frame-pointer", "-g"]);
-            }
-            let clang = clang_command.arg("-o").arg(&executable).output().unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &bundle,
+                directory.path(),
+                "self-host-name-resolution",
             );
 
             let native_all_path = directory.path().join("native-all.bin");
@@ -937,8 +906,9 @@ fn self_host_resolution_generic_binders_shadow_global_aliases() {
     let input = directory.path().join("generic-binders.glorious");
     let vm_output = directory.path().join("vm.bin");
     fs::write(&input, source).unwrap();
+    let bundle = self_host_generic_bundle();
     let phases = grandiose::compile_bundle_to_phases_with_options(
-        &self_host_generic_bundle(),
+        &bundle,
         CompileOptions {
             optimization_level: OptimizationLevel::O2,
         },
@@ -958,20 +928,11 @@ fn self_host_resolution_generic_binders_shadow_global_aliases() {
     expected.extend(&expected_one);
     assert_eq!(fs::read(&vm_output).unwrap(), expected);
 
-    let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-    let llvm = directory.path().join("generic-binders.ll");
-    let executable = directory.path().join("generic-binders");
-    fs::write(&llvm, module.ir).unwrap();
-    let clang = Command::new("clang")
-        .arg(&llvm)
-        .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-        .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-        .arg("-O0")
-        .arg("-o")
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+    let executable = native_incremental::build_cached_native(
+        &bundle,
+        directory.path(),
+        "generic-binders",
+    );
     let native_output = directory.path().join("native.bin");
     let native = Command::new(&executable)
         .arg(&native_output)

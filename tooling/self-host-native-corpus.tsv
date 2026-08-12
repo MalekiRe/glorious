@@ -1,0 +1,31 @@
+# schema-version: 1
+# case-id<TAB>accept|reject<TAB>repository-relative-primary-source-path<TAB>[additional-source-path...]
+# This is the bootstrap compiler fixture corpus that can be fed to one source
+# file at a time. Multi-file rows preserve source order and are passed directly
+# to the native self-host compiler's ordered-source CLI. Files are merged into
+# one semantic stream; filesystem-backed external `mod` discovery is not yet
+# part of the self-host frontend.
+contextual-pub-headers	accept	crates/grandiose/tests/fixtures/contextual_pub_headers.glorious
+arithmetic-calls	accept	tooling/self-host-native-fixtures/arithmetic-calls.glorious
+associated-call	accept	tooling/self-host-native-fixtures/associated-call.glorious
+byte-char-literals	accept	tooling/self-host-native-fixtures/byte-char-literals.glorious
+float-literals-in-conditional	accept	tooling/self-host-native-fixtures/float-literals-in-conditional.glorious
+indirect-call-pure	accept	tooling/self-host-native-fixtures/indirect-call-pure.glorious
+indirect-call-generic-direct	accept	tooling/self-host-native-fixtures/indirect-call-generic-direct.glorious
+indirect-call-constraint-generic	accept	tooling/self-host-native-fixtures/indirect-call-constraint-generic.glorious
+enum-match	accept	tooling/self-host-native-fixtures/enum-match.glorious
+reference-reborrow	accept	tooling/self-host-native-fixtures/reference-reborrow.glorious
+struct-deconstruction	accept	tooling/self-host-native-fixtures/struct-deconstruction.glorious
+invalid-arity	reject	tooling/self-host-native-fixtures/invalid-arity.glorious
+invalid-duplicate-field-pattern	reject	tooling/self-host-native-fixtures/invalid-duplicate-field-pattern.glorious
+invalid-malformed-callable-reference	reject	tooling/self-host-native-fixtures/invalid-malformed-callable-reference.glorious
+invalid-missing-binding-name	reject	tooling/self-host-native-fixtures/invalid-missing-binding-name.glorious
+invalid-return-type	reject	tooling/self-host-native-fixtures/invalid-return-type.glorious
+invalid-unclosed-block	reject	tooling/self-host-native-fixtures/invalid-unclosed-block.glorious
+invalid-unknown-field-pattern	reject	tooling/self-host-native-fixtures/invalid-unknown-field-pattern.glorious
+invalid-unknown-name	reject	tooling/self-host-native-fixtures/invalid-unknown-name.glorious
+invalid-unterminated-string	reject	tooling/self-host-native-fixtures/invalid-unterminated-string.glorious
+malformed-modules-and-uses	reject	crates/grandiose/tests/fixtures/malformed-modules-and-uses.glorious
+module-frontend-conformance	reject	crates/grandiose/tests/fixtures/module_frontend_conformance.glorious
+ordered-bundle	accept	tooling/self-host-native-fixtures/ordered-bundle/main.glorious	tooling/self-host-native-fixtures/ordered-bundle/library.glorious
+use-trees	reject	crates/grandiose/tests/fixtures/use_trees.glorious

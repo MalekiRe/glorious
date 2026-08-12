@@ -8,14 +8,24 @@
 //! downstream work for duplicate checks and editor undo/redo without reusing
 //! results across a semantic input change.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    path::{Path, PathBuf},
+};
 
-use grandiose_vm::{Type, TypeId};
+use grandiose_vm::{
+    Artifact as BytecodeArtifact, Constant, Function as BytecodeFunction,
+    Instruction as BytecodeInstruction, Type, TypeId, bytecode::CleanupPlan,
+};
 
+use crate::compiler_traits::{TraitDb, TrustedTraitManifest};
 use crate::compiler_typeck::{DeclarationKey, IncrementalTypeCache};
 use crate::diagnostic::Diagnostic;
 use crate::source_bundle::SourceBundle;
-use crate::{CompileOptions, CompiledPhases};
+use crate::{
+    CompileOptions, CompiledPhases,
+    llvm_backend::{LlvmFragmentCache, LlvmModule, LlvmOptions},
+};
 use crate::{compiler_core as core, compiler_mir as mir};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -29,8 +39,47 @@ pub struct IncrementalCompilationStats {
     /// than the immediately preceding revision. This is the common editor
     /// undo/redo and branch-switch case.
     pub reused_historical_phase_artifacts: usize,
+    /// Exact LLVM backend emissions restored from the bounded persistent
+    /// backend cache. This is intentionally separate from phase reuse: LLVM
+    /// emission can be avoided even when callers only observe native output.
+    pub reused_llvm_ir: usize,
+    /// Individual LLVM functions restored from manifest-valid cached fragments
+    /// while the current module prelude/runtime/wrapper were regenerated.
+    pub reused_llvm_fragments: usize,
+    /// LLVM-reachable functions freshly emitted after the latest
+    /// function-fragment cache lookup. This is paired with
+    /// `reused_llvm_fragments` for the JSON-line incremental-native report.
+    pub emitted_llvm_fragments: usize,
+    /// Exact native object artifacts restored from the persistent backend
+    /// cache. Object bytes are keyed by the complete generated IR and native
+    /// compiler ABI/options; executable links are never eligible.
+    pub reused_native_objects: usize,
+    /// Independently compiled native units emitted for the current request.
+    pub emitted_native_objects: usize,
+    pub reused_native_function_objects: usize,
+    pub emitted_native_function_objects: usize,
+    pub emitted_native_shared_objects: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
+    /// Bodies restored after the ownership import and cleanup-elaboration
+    /// boundary. This is deliberately separate from raw MIR lowering reuse:
+    /// the entry is usable only when its consumed array-call summaries match.
+    pub reused_cleanup_mir_bodies: usize,
+    /// Complete O3 MIR bodies restored from the dependency-validated durable
+    /// cache. These bodies bypass repeated local ownership analysis while
+    /// their changed direct-call closure continues through the normal O3
+    /// schedule.
+    pub reused_optimized_mir_bodies: usize,
+    /// Final optimized bodies whose exact ownership/cleanup proof was restored
+    /// from the durable per-body validation cache.
+    pub reused_final_validation_bodies: usize,
+    /// Exact local O3 transformation snapshots restored after a body edit.
+    /// Snapshots are segregated by the complete MIR type/drop schema and are
+    /// checked again against their precise MIR input before use.
+    pub reused_optimizer_body_snapshots: usize,
+    /// Structural trait/nominal/impl database restored after a callable-body
+    /// edit. Span-keyed source const arguments are refreshed before use.
+    pub reused_trait_databases: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
 }
 
@@ -47,12 +96,75 @@ pub struct DiagnosticCacheStats {
 pub struct CompilationDriver {
     pub(crate) frontend_cache: crate::frontend_cache::IncrementalFrontendCache,
     pub(crate) type_cache: IncrementalTypeCache,
+    pub(crate) trait_db_cache: IncrementalTraitDbCache,
     pub(crate) mir_cache: IncrementalMirCache,
     phase_cache: VecDeque<CachedPhases>,
     diagnostic_cache: VecDeque<CachedDiagnostics>,
+    llvm_cache: VecDeque<CachedLlvmIr>,
+    llvm_fragment_cache: LlvmFragmentCache,
+    native_object_cache: VecDeque<CachedNativeObject>,
+    native_function_object_cache: VecDeque<CachedNativeFunctionObject>,
     request_revision: u64,
     stats: IncrementalCompilationStats,
     diagnostic_stats: DiagnosticCacheStats,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct IncrementalTraitDbCache {
+    entries: VecDeque<CachedTraitDb>,
+    reused_databases: usize,
+}
+
+const INCREMENTAL_TRAIT_DB_CONTEXT_CAPACITY: usize = 4;
+
+#[derive(Clone)]
+struct CachedTraitDb {
+    /// Exact source with callable bodies masked byte-for-byte. Masking retains
+    /// body lengths, so all declaration spans remain part of the key.
+    context: Vec<u8>,
+    manifest: TrustedTraitManifest,
+    database: TraitDb,
+}
+
+impl IncrementalTraitDbCache {
+    fn begin_revision(&mut self) {
+        self.reused_databases = 0;
+    }
+
+    pub(crate) fn build_or_reuse(
+        &mut self,
+        program: &crate::ast::Program,
+        manifest: &TrustedTraitManifest,
+        context: &[u8],
+    ) -> Result<TraitDb, Vec<Diagnostic>> {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|cached| cached.context == context && cached.manifest == *manifest)
+        {
+            let cached = self
+                .entries
+                .remove(index)
+                .expect("trait-db index was found");
+            self.reused_databases = self.reused_databases.saturating_add(1);
+            let database = cached
+                .database
+                .clone()
+                .with_current_type_const_arguments(program);
+            self.entries.push_front(cached);
+            return Ok(database);
+        }
+        let database = TraitDb::build_with_manifest(program, manifest)?;
+        self.entries
+            .retain(|cached| cached.context != context || cached.manifest != *manifest);
+        self.entries.push_front(CachedTraitDb {
+            context: context.to_vec(),
+            manifest: manifest.clone(),
+            database: database.clone(),
+        });
+        self.entries.truncate(INCREMENTAL_TRAIT_DB_CONTEXT_CAPACITY);
+        Ok(database)
+    }
 }
 
 #[derive(Clone)]
@@ -72,6 +184,67 @@ struct CachedDiagnostics {
     options: CompileOptions,
     include_interfaces: bool,
     diagnostics: Vec<Diagnostic>,
+    last_used_revision: u64,
+}
+
+/// Cache schema is independent of the bytecode artifact version.  Bumping it
+/// deliberately invalidates all retained LLVM text after backend changes.
+const LLVM_CACHE_SCHEMA: u32 = 1;
+const LLVM_CACHE_CAPACITY: usize = 4;
+const NATIVE_OBJECT_CACHE_CAPACITY: usize = 4;
+/// Function units are intentionally independent of a source revision. Their
+/// exact IR and native compiler ABI are the complete cache authority.
+const NATIVE_FUNCTION_OBJECT_CACHE_CAPACITY: usize = 128;
+
+/// Cached native units are process-local, but they are still treated as
+/// untrusted bytes at the materialization boundary.  Recognize the portable
+/// object-file container magics emitted by Clang; a truncated or otherwise
+/// corrupt cache entry is evicted and recompiled rather than handed to Wild.
+fn native_object_bytes_are_plausible(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x7fELF")
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xce])
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+        || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0x4c, 0x01]) // COFF i386
+        || bytes.starts_with(&[0x64, 0x86]) // COFF x86_64
+        || bytes.starts_with(&[0xaa, 0x64]) // COFF arm64
+}
+
+#[derive(Clone)]
+struct CachedLlvmIr {
+    schema: u32,
+    bundle: SourceBundle,
+    source_fingerprint: [u8; 32],
+    options: CompileOptions,
+    target: LlvmOptions,
+    module: LlvmModule,
+    last_used_revision: u64,
+}
+
+#[derive(Clone)]
+struct CachedNativeObject {
+    /// The source/options/target values are retained in addition to the exact
+    /// IR so cache retention remains inspectable and an object cannot survive
+    /// a backend-cache schema change accidentally.
+    schema: u32,
+    bundle: SourceBundle,
+    source_fingerprint: [u8; 32],
+    options: CompileOptions,
+    target: LlvmOptions,
+    ir: String,
+    toolchain_abi: String,
+    bytes: Vec<u8>,
+    last_used_revision: u64,
+}
+
+#[derive(Clone)]
+struct CachedNativeFunctionObject {
+    schema: u32,
+    target: LlvmOptions,
+    ir: String,
+    toolchain_abi: String,
+    bytes: Vec<u8>,
     last_used_revision: u64,
 }
 
@@ -97,6 +270,90 @@ impl CompilationDriver {
         Self::default()
     }
 
+    /// Restore only validated, per-body type evidence from a durable compiler
+    /// cache.  Higher layers remain ordinary cache misses until they gain
+    /// their own independently versioned on-disk formats.
+    pub fn restore_persistent_type_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = IncrementalTypeCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.type_cache = cache;
+        true
+    }
+
+    pub fn persistent_type_cache(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.type_cache.encode_persistent()
+    }
+
+    /// Incorporate a concurrently published durable type cache.  Entries
+    /// produced by this driver remain authoritative for matching bodies.
+    pub fn merge_persistent_type_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = IncrementalTypeCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.type_cache.merge_persistent(cache);
+        true
+    }
+
+    /// Restore validated, independently emitted LLVM function fragments. The
+    /// backend replays their exact post-specialization/post-inlining text and
+    /// regenerates only the current module-level scaffolding.
+    pub fn restore_persistent_llvm_fragment_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = LlvmFragmentCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.llvm_fragment_cache = cache;
+        true
+    }
+
+    /// Configure lazy, independently validated LLVM fragment files. Unlike
+    /// the historical blob cache, this does not deserialize unrelated
+    /// functions before a request can start compiling.
+    pub fn configure_persistent_llvm_fragment_directory(&mut self, directory: std::path::PathBuf) {
+        self.llvm_fragment_cache
+            .configure_persistent_directory(directory);
+    }
+
+    pub fn persist_persistent_llvm_fragment_directory(&self) -> Result<(), String> {
+        self.llvm_fragment_cache.persist_to_directory()
+    }
+
+    pub fn persistent_llvm_fragment_cache(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.llvm_fragment_cache.encode_persistent()
+    }
+
+    /// Merge concurrent durable fragment publication while retaining this
+    /// driver's freshly generated optimized fragments as the authority.
+    pub fn merge_persistent_llvm_fragment_cache(&mut self, bytes: &[u8]) -> bool {
+        self.llvm_fragment_cache.merge_persistent(bytes)
+    }
+
+    /// Restore exact per-function MIR, cleanup facts, and local O3 pass
+    /// snapshots from the durable compiler cache.
+    pub fn restore_persistent_mir_cache(&mut self, bytes: &[u8]) -> bool {
+        let Some(cache) = IncrementalMirCache::decode_persistent(bytes) else {
+            return false;
+        };
+        self.mir_cache = cache;
+        true
+    }
+
+    pub fn persistent_mir_cache(&self) -> Result<Vec<u8>, bincode::Error> {
+        self.mir_cache.encode_persistent()
+    }
+
+    /// Configure lazy per-function final O3 snapshots beside the durable MIR
+    /// cache. This does not hydrate the directory; bodies are read only after
+    /// their exact dependency key is known.
+    pub fn configure_persistent_optimized_mir_directory(&mut self, directory: PathBuf) {
+        self.mir_cache
+            .configure_persistent_optimized_directory(directory);
+    }
+
+    pub fn persist_persistent_optimized_mir_directory(&self) -> Result<(), String> {
+        self.mir_cache.persist_optimized_to_directory()
+    }
+
     pub fn compile_bundle(
         &mut self,
         bundle: &SourceBundle,
@@ -119,6 +376,220 @@ impl CompilationDriver {
                 phases,
                 interfaces: interfaces.expect("interface compilation produced no snapshot"),
             })
+    }
+
+    /// Emit LLVM IR with a bounded exact-input cache owned by this persistent
+    /// driver. The key contains both a collision-resistant source/dependency
+    /// fingerprint and the complete bundle/options values, so a digest can
+    /// never authorize reuse by itself. Target layout and entry-wrapper ABI
+    /// are included because either changes generated IR.
+    pub fn emit_llvm_ir(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+        phases: &CompiledPhases,
+        target: &LlvmOptions,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        let source_fingerprint = llvm_source_fingerprint(bundle);
+        if let Some(index) = self.llvm_cache.iter().position(|cached| {
+            cached.schema == LLVM_CACHE_SCHEMA
+                && cached.source_fingerprint == source_fingerprint
+                && cached.bundle == *bundle
+                && cached.options == options
+                && cached.target == *target
+        }) {
+            let mut cached = self
+                .llvm_cache
+                .remove(index)
+                .expect("LLVM cache index disappeared");
+            cached.last_used_revision = self.request_revision;
+            let module = cached.module.clone();
+            self.llvm_cache.push_front(cached);
+            self.stats.reused_llvm_ir = self.stats.reused_llvm_ir.saturating_add(1);
+            self.stats.reused_llvm_fragments = 0;
+            return Ok(module);
+        }
+
+        let module =
+            crate::emit_llvm_ir_with_fragment_cache(phases, target, &mut self.llvm_fragment_cache)?;
+        self.llvm_cache.push_front(CachedLlvmIr {
+            schema: LLVM_CACHE_SCHEMA,
+            bundle: bundle.clone(),
+            source_fingerprint,
+            options,
+            target: target.clone(),
+            module: module.clone(),
+            last_used_revision: self.request_revision,
+        });
+        self.llvm_cache.truncate(LLVM_CACHE_CAPACITY);
+        self.stats.reused_llvm_ir = 0;
+        self.stats.reused_llvm_fragments = self.llvm_fragment_cache.reused_fragments();
+        self.stats.emitted_llvm_fragments = self.llvm_fragment_cache.emitted_fragments();
+        Ok(module)
+    }
+
+    /// Emit native object partitions while retaining reusable LLVM function
+    /// fragments for later `--serve` requests.  This is separate from the
+    /// exact whole-module cache: partitioned native output still needs a
+    /// current shared unit and final link after a body edit.
+    pub fn emit_llvm_native_object_units(
+        &mut self,
+        phases: &CompiledPhases,
+        target: &LlvmOptions,
+    ) -> Result<crate::llvm_backend::LlvmNativeObjectUnits, Vec<Diagnostic>> {
+        let units = crate::llvm_backend::emit_llvm_native_object_units_with_fragment_cache(
+            phases,
+            target,
+            &mut self.llvm_fragment_cache,
+        )?;
+        self.stats.reused_llvm_ir = 0;
+        self.stats.reused_llvm_fragments = self.llvm_fragment_cache.reused_fragments();
+        self.stats.emitted_llvm_fragments = self.llvm_fragment_cache.emitted_fragments();
+        Ok(units)
+    }
+
+    /// Return immutable native object bytes only for the exact emitted IR and
+    /// complete native compiler ABI/options. The caller owns writing bytes to
+    /// its current `-o` path; paths and executables are deliberately absent
+    /// from this cache.
+    pub fn cached_native_object(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: &str,
+    ) -> Option<Vec<u8>> {
+        let source_fingerprint = llvm_source_fingerprint(bundle);
+        let index = self.native_object_cache.iter().position(|cached| {
+            cached.schema == LLVM_CACHE_SCHEMA
+                && cached.source_fingerprint == source_fingerprint
+                && cached.bundle == *bundle
+                && cached.options == options
+                && cached.target == *target
+                && cached.ir == ir
+                && cached.toolchain_abi == toolchain_abi
+        })?;
+        let mut cached = self
+            .native_object_cache
+            .remove(index)
+            .expect("native object cache index disappeared");
+        if !native_object_bytes_are_plausible(&cached.bytes) {
+            return None;
+        }
+        cached.last_used_revision = self.request_revision;
+        let bytes = cached.bytes.clone();
+        self.native_object_cache.push_front(cached);
+        self.stats.reused_native_objects = self.stats.reused_native_objects.saturating_add(1);
+        Some(bytes)
+    }
+
+    pub fn cache_native_object(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: String,
+        bytes: Vec<u8>,
+    ) {
+        let source_fingerprint = llvm_source_fingerprint(bundle);
+        self.native_object_cache.retain(|cached| {
+            cached.schema != LLVM_CACHE_SCHEMA
+                || cached.source_fingerprint != source_fingerprint
+                || cached.bundle != *bundle
+                || cached.options != options
+                || cached.target != *target
+                || cached.ir != ir
+                || cached.toolchain_abi != toolchain_abi
+        });
+        self.native_object_cache.push_front(CachedNativeObject {
+            schema: LLVM_CACHE_SCHEMA,
+            bundle: bundle.clone(),
+            source_fingerprint,
+            options,
+            target: target.clone(),
+            ir: ir.to_owned(),
+            toolchain_abi,
+            bytes,
+            last_used_revision: self.request_revision,
+        });
+        self.native_object_cache
+            .truncate(NATIVE_OBJECT_CACHE_CAPACITY);
+    }
+
+    /// Restore one independently compiled native unit. Unlike the monolithic
+    /// object cache this deliberately does not include the source bundle: a
+    /// body-only edit may retain a byte-identical sibling function object.
+    pub fn cached_native_partitioned_object(
+        &mut self,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: &str,
+        source_function: bool,
+    ) -> Option<Vec<u8>> {
+        let index = self
+            .native_function_object_cache
+            .iter()
+            .position(|cached| {
+                cached.schema == LLVM_CACHE_SCHEMA
+                    && cached.target == *target
+                    && cached.ir == ir
+                    && cached.toolchain_abi == toolchain_abi
+            })?;
+        let mut cached = self
+            .native_function_object_cache
+            .remove(index)
+            .expect("native function object cache index disappeared");
+        if !native_object_bytes_are_plausible(&cached.bytes) {
+            return None;
+        }
+        cached.last_used_revision = self.request_revision;
+        let bytes = cached.bytes.clone();
+        self.native_function_object_cache.push_front(cached);
+        self.stats.reused_native_objects = self.stats.reused_native_objects.saturating_add(1);
+        if source_function {
+            self.stats.reused_native_function_objects =
+                self.stats.reused_native_function_objects.saturating_add(1);
+        }
+        Some(bytes)
+    }
+
+    pub fn cache_native_partitioned_object(
+        &mut self,
+        target: &LlvmOptions,
+        ir: &str,
+        toolchain_abi: String,
+        bytes: Vec<u8>,
+    ) {
+        self.native_function_object_cache.retain(|cached| {
+            cached.schema != LLVM_CACHE_SCHEMA
+                || cached.target != *target
+                || cached.ir != ir
+                || cached.toolchain_abi != toolchain_abi
+        });
+        self.native_function_object_cache
+            .push_front(CachedNativeFunctionObject {
+                schema: LLVM_CACHE_SCHEMA,
+                target: target.clone(),
+                ir: ir.to_owned(),
+                toolchain_abi,
+                bytes,
+                last_used_revision: self.request_revision,
+            });
+        self.native_function_object_cache
+            .truncate(NATIVE_FUNCTION_OBJECT_CACHE_CAPACITY);
+    }
+
+    pub fn record_native_partitioned_object_emitted(&mut self, source_function: bool) {
+        self.stats.emitted_native_objects = self.stats.emitted_native_objects.saturating_add(1);
+        if source_function {
+            self.stats.emitted_native_function_objects =
+                self.stats.emitted_native_function_objects.saturating_add(1);
+        } else {
+            self.stats.emitted_native_shared_objects =
+                self.stats.emitted_native_shared_objects.saturating_add(1);
+        }
     }
 
     fn compile_bundle_inner(
@@ -152,8 +623,21 @@ impl CompilationDriver {
                 reused_bodies: cached.reusable_bodies,
                 reused_phase_artifacts: 1,
                 reused_historical_phase_artifacts: usize::from(historical),
+                reused_llvm_ir: 0,
+                reused_llvm_fragments: 0,
+                emitted_llvm_fragments: 0,
+                reused_native_objects: 0,
+                emitted_native_objects: 0,
+                reused_native_function_objects: 0,
+                emitted_native_function_objects: 0,
+                emitted_native_shared_objects: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
+                reused_cleanup_mir_bodies: 0,
+                reused_optimized_mir_bodies: 0,
+                reused_final_validation_bodies: 0,
+                reused_optimizer_body_snapshots: 0,
+                reused_trait_databases: 0,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
             };
             self.diagnostic_stats = DiagnosticCacheStats::default();
@@ -186,6 +670,7 @@ impl CompilationDriver {
         let checkpoint = self.type_cache.clone();
         let mir_checkpoint = self.mir_cache.clone();
         self.mir_cache.begin_revision();
+        self.trait_db_cache.begin_revision();
         self.stats = IncrementalCompilationStats::default();
         self.diagnostic_stats = DiagnosticCacheStats::default();
         let result = if include_interfaces {
@@ -256,59 +741,1814 @@ impl CompilationDriver {
             reused_bodies: self.type_cache.stats.reused_bodies,
             reused_phase_artifacts: 0,
             reused_historical_phase_artifacts: 0,
+            reused_llvm_ir: 0,
+            reused_llvm_fragments: 0,
+            emitted_llvm_fragments: 0,
+            reused_native_objects: 0,
+            emitted_native_objects: 0,
+            reused_native_function_objects: 0,
+            emitted_native_function_objects: 0,
+            emitted_native_shared_objects: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
+            reused_cleanup_mir_bodies: self.mir_cache.reused_cleanup_bodies,
+            reused_optimized_mir_bodies: self.mir_cache.reused_optimized_bodies,
+            reused_final_validation_bodies: self.mir_cache.reused_final_validation_bodies,
+            reused_optimizer_body_snapshots: self.mir_cache.reused_optimizer_body_snapshots,
+            reused_trait_databases: self.trait_db_cache.reused_databases,
             frontend: self.frontend_cache.stats(),
         };
     }
 }
 
+fn llvm_source_fingerprint(bundle: &SourceBundle) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"grandiose:llvm-ir-cache:source-v1\0");
+    for segment in bundle.segments() {
+        for field in [
+            segment.name().as_bytes(),
+            segment.package_root().unwrap_or_default().as_bytes(),
+            segment.source().as_bytes(),
+        ] {
+            hasher.update(&(field.len() as u64).to_le_bytes());
+            hasher.update(field);
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct IncrementalMirCache {
-    types: Vec<Type>,
-    custom_drop_types: Vec<TypeId>,
-    entries: BTreeMap<u32, (core::Function, mir::Function)>,
-    initialized: bool,
+    schemas: VecDeque<CachedMirSchema>,
+    entries: BTreeMap<(u64, u32), CachedMirBody>,
+    local_pass_snapshots: BTreeMap<
+        (u64, u32, crate::compiler_mir::optimizer::PassId),
+        VecDeque<crate::compiler_mir::optimizer::TransactionalPassBodySnapshot>,
+    >,
+    optimized: BTreeMap<OptimizedMirKey, OptimizedMirEntry>,
+    optimized_disk_directory: Option<PathBuf>,
+    recursive_optimized: BTreeMap<RecursiveOptimizedMirKey, RecursiveOptimizedMirEntry>,
+    recursive_optimized_disk_directory: Option<PathBuf>,
+    emission_prepared: BTreeMap<EmissionPreparedMirKey, EmissionPreparedMirEntry>,
+    emission_prepared_disk_directory: Option<PathBuf>,
+    serialized_cleanup: BTreeMap<BytecodePlanCacheKey, BytecodePlanCacheEntry>,
+    serialized_cleanup_disk_directory: Option<PathBuf>,
+    provisional_serialized_cleanup: BTreeSet<BytecodePlanCacheKey>,
+    bytecode_verification: BTreeMap<BytecodePlanCacheKey, BytecodePlanCacheEntry>,
+    bytecode_verification_disk_directory: Option<PathBuf>,
+    provisional_bytecode_verification: BTreeSet<BytecodePlanCacheKey>,
+    current_bytecode_verification: BTreeMap<(u32, bool, bool), BytecodePlanCacheInput>,
+    final_validation: BTreeMap<FinalValidationKey, FinalValidationEntry>,
+    final_validation_disk_directory: Option<PathBuf>,
+    active_schema: Option<u64>,
+    next_schema: u64,
     lowered_bodies: usize,
     reused_bodies: usize,
+    reused_cleanup_bodies: usize,
+    reused_optimized_bodies: usize,
+    reused_final_validation_bodies: usize,
+    reused_optimizer_body_snapshots: usize,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct CachedMirSchema {
+    id: u64,
+    types: Vec<Type>,
+    custom_drop_types: Vec<TypeId>,
+}
+
+const INCREMENTAL_MIR_SCHEMA_CAPACITY: usize = 4;
+const PERSISTENT_MIR_CACHE_SCHEMA: u32 = 1;
+
+#[derive(Clone)]
+struct CachedMirBody {
+    core: Option<core::Function>,
+    core_debug: String,
+    lowered: mir::Function,
+    /// Cleanup MIR is only valid under the exact summary fingerprint for the
+    /// direct array-call facts consumed while ownership was imported.
+    cleanup: Option<(u64, mir::Function)>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentMirCache {
+    schema: u32,
+    schemas: VecDeque<CachedMirSchema>,
+    entries: BTreeMap<(u64, u32), PersistentMirBody>,
+    local_pass_snapshots: BTreeMap<
+        (u64, u32, crate::compiler_mir::optimizer::PassId),
+        VecDeque<crate::compiler_mir::optimizer::TransactionalPassBodySnapshot>,
+    >,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentMirBody {
+    core_debug: String,
+    lowered: mir::Function,
+    cleanup: Option<(u64, mir::Function)>,
+}
+
+/// A final O3 body is retained separately from the monolithic raw-MIR cache.
+/// Its key includes the exact pre-optimization body and the complete direct
+/// dependency closure, letting an unrelated source edit keep already
+/// specialized and inlined compiler functions intact.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct OptimizedMirKey {
+    schema: u64,
+    declaration: u32,
+    dependency_fingerprint: u64,
+    namespace_fingerprint: u64,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct OptimizedMirEntry {
+    input: mir::Function,
+    output: mir::Function,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentOptimizedMirEntry {
+    schema: u32,
+    key: OptimizedMirKey,
+    input: mir::Function,
+    output: mir::Function,
+}
+
+const PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA: u32 = 1;
+
+/// One cyclic call component is optimized as a unit. Reusing its members
+/// together preserves the O3 fixed point while still allowing unrelated SCCs
+/// and their acyclic callers to remain independently incremental.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct RecursiveOptimizedMirKey {
+    schema: u64,
+    declarations: Vec<u32>,
+    dependency_fingerprint: u64,
+    namespace_fingerprint: u64,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct RecursiveOptimizedMirEntry {
+    input: Vec<mir::Function>,
+    output: Vec<mir::Function>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentRecursiveOptimizedMirEntry {
+    schema: u32,
+    key: RecursiveOptimizedMirKey,
+    input: Vec<mir::Function>,
+    output: Vec<mir::Function>,
+}
+
+const PERSISTENT_RECURSIVE_OPTIMIZED_MIR_ENTRY_SCHEMA: u32 = 1;
+
+/// Post-O3 edge-copy/cleanup normalization is a representation-only
+/// per-function lowering. Retaining it separately lets a warm native build
+/// avoid re-solving ownership for every unchanged O3 body before bytecode
+/// emission.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct EmissionPreparedMirKey {
+    schema: u64,
+    declaration: u32,
+    dependency_fingerprint: u64,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct EmissionPreparedMirEntry {
+    input: mir::Function,
+    output: mir::Function,
+    verified: bool,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentEmissionPreparedMirEntry {
+    schema: u32,
+    key: EmissionPreparedMirKey,
+    input: mir::Function,
+    output: mir::Function,
+    verified: bool,
+}
+
+const PERSISTENT_EMISSION_PREPARED_MIR_ENTRY_SCHEMA: u32 = 1;
+
+/// Every bytecode proof is addressed by its complete serialized semantic
+/// input. The BLAKE3 name selects a small file, and the retained bytes are
+/// compared again after loading so a collision can only become a cache miss.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct BytecodePlanCacheKey {
+    input_hash: [u8; 32],
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct BytecodePlanCacheEntry {
+    input: Vec<u8>,
+    /// Plans are stored with local function id zero and rebound on reuse.
+    plans: Vec<CleanupPlan>,
+    verified: bool,
+}
+
+#[derive(Clone)]
+struct BytecodePlanCacheInput {
+    key: BytecodePlanCacheKey,
+    input: Vec<u8>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentBytecodePlanCacheEntry {
+    schema: u32,
+    key: BytecodePlanCacheKey,
+    entry: BytecodePlanCacheEntry,
+}
+
+const PERSISTENT_SERIALIZED_CLEANUP_ENTRY_SCHEMA: u32 = 1;
+const PERSISTENT_BYTECODE_VERIFICATION_ENTRY_SCHEMA: u32 = 1;
+
+/// A completed final ownership/cleanup proof is reusable independently of O3
+/// output reuse. This intentionally accepts generated and handler bodies: the
+/// exact post-O3 MIR input, its active type schema, and the summaries it can
+/// consume are all checked again before a proof is trusted.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct FinalValidationKey {
+    schema: u64,
+    declaration: u32,
+    dependency_fingerprint: u64,
+    body_fingerprint: [u8; 32],
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct FinalValidationEntry {
+    input: mir::Function,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentFinalValidationEntry {
+    schema: u32,
+    key: FinalValidationKey,
+    input: mir::Function,
+}
+
+const PERSISTENT_FINAL_VALIDATION_ENTRY_SCHEMA: u32 = 1;
+
+fn optimized_mir_entry_path(directory: &Path, key: &OptimizedMirKey) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode optimized MIR cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn recursive_optimized_mir_entry_path(
+    directory: &Path,
+    key: &RecursiveOptimizedMirKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode recursive optimized MIR cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn emission_prepared_mir_entry_path(
+    directory: &Path,
+    key: &EmissionPreparedMirKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode emission-prepared MIR cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn bytecode_plan_entry_path(
+    directory: &Path,
+    key: &BytecodePlanCacheKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode bytecode proof cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn normalize_bytecode_function(function: &BytecodeFunction) -> BytecodeFunction {
+    let mut normalized = function.clone();
+    // Code positions are artifact-wide layout details. Function verification
+    // observes only the local code slice and length.
+    normalized.code_start = 0;
+    normalized
+}
+
+fn normalized_function_code(
+    artifact: &BytecodeArtifact,
+    function: &BytecodeFunction,
+) -> Option<(Vec<BytecodeInstruction>, Vec<Constant>)> {
+    let start = usize::try_from(function.code_start).ok()?;
+    let end = start.checked_add(usize::try_from(function.code_len).ok()?)?;
+    let mut code = artifact.code.get(start..end)?.to_vec();
+    let mut values = BTreeMap::<Vec<u8>, Constant>::new();
+    let mut old_to_value = BTreeMap::<u32, Vec<u8>>::new();
+    for instruction in &code {
+        let BytecodeInstruction::Const { constant, .. } = instruction else {
+            continue;
+        };
+        let value = artifact.constants.get(*constant as usize)?.clone();
+        let bytes = bincode::serialize(&value).ok()?;
+        values.entry(bytes.clone()).or_insert(value);
+        old_to_value.insert(*constant, bytes);
+    }
+    let constants = values.into_iter().collect::<Vec<_>>();
+    let value_to_local = constants
+        .iter()
+        .enumerate()
+        .map(|(index, (bytes, _))| (bytes.clone(), index as u32))
+        .collect::<BTreeMap<_, _>>();
+    for instruction in &mut code {
+        let BytecodeInstruction::Const { constant, .. } = instruction else {
+            continue;
+        };
+        *constant = *value_to_local.get(old_to_value.get(constant)?)?;
+    }
+    Some((
+        code,
+        constants.into_iter().map(|(_, value)| value).collect(),
+    ))
+}
+
+fn normalized_function_cleanups(artifact: &BytecodeArtifact, function: u32) -> Vec<CleanupPlan> {
+    artifact
+        .cleanups
+        .iter()
+        .filter(|plan| plan.function == function)
+        .cloned()
+        .map(|mut plan| {
+            plan.function = 0;
+            plan
+        })
+        .collect()
+}
+
+fn bytecode_direct_dependencies(code: &[BytecodeInstruction], function: u32) -> BTreeSet<u32> {
+    let mut dependencies = BTreeSet::new();
+    for instruction in code {
+        match instruction {
+            BytecodeInstruction::Call { function, .. }
+            | BytecodeInstruction::TailCall { function, .. }
+            | BytecodeInstruction::CallKnownReceiver { function, .. }
+            | BytecodeInstruction::TailCallKnownReceiver { function, .. }
+            | BytecodeInstruction::MakeCallable { function, .. } => {
+                dependencies.insert(*function);
+            }
+            BytecodeInstruction::MakeHandlerShared { functions, .. } => {
+                dependencies.extend(functions.iter().copied());
+            }
+            BytecodeInstruction::CallSelf { .. } | BytecodeInstruction::TailCallSelf { .. } => {
+                dependencies.insert(function);
+            }
+            _ => {}
+        }
+    }
+    dependencies
+}
+
+/// The original direct-closure key is deliberately retained for acyclic
+/// functions.  Besides preserving already-persisted proofs, this is the
+/// cheapest possible dependency check for the overwhelmingly common leaf and
+/// acyclic-call-chain cases.
+fn acyclic_bytecode_dependency_fingerprints(
+    bodies: &[Option<Vec<u8>>],
+    dependencies: &[Option<BTreeSet<u32>>],
+) -> Vec<Option<[u8; 32]>> {
+    fn visit(
+        function: u32,
+        bodies: &[Option<Vec<u8>>],
+        dependencies: &[Option<BTreeSet<u32>>],
+        memo: &mut BTreeMap<u32, Option<[u8; 32]>>,
+        visiting: &mut BTreeSet<u32>,
+    ) -> Option<[u8; 32]> {
+        if let Some(result) = memo.get(&function) {
+            return *result;
+        }
+        if !visiting.insert(function) {
+            return None;
+        }
+        let result = (|| {
+            let body = bodies.get(function as usize)?.as_ref()?;
+            let direct = dependencies.get(function as usize)?.as_ref()?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"grandiose:bytecode-verifier-direct-closure-v1\0");
+            hasher.update(&(body.len() as u64).to_le_bytes());
+            hasher.update(body);
+            for dependency in direct {
+                let fingerprint = visit(*dependency, bodies, dependencies, memo, visiting)?;
+                hasher.update(&dependency.to_le_bytes());
+                hasher.update(&fingerprint);
+            }
+            Some(*hasher.finalize().as_bytes())
+        })();
+        visiting.remove(&function);
+        memo.insert(function, result);
+        result
+    }
+
+    let mut memo = BTreeMap::new();
+    for function in 0..bodies.len() as u32 {
+        let _ = visit(
+            function,
+            bodies,
+            dependencies,
+            &mut memo,
+            &mut BTreeSet::new(),
+        );
+    }
+    (0..bodies.len() as u32)
+        .map(|function| memo.get(&function).copied().flatten())
+        .collect()
+}
+
+/// Compute direct-closure fingerprints for every cacheable bytecode
+/// function, including recursive call components.  Function-local verifier
+/// proofs are valid only when all direct callees retain their exact code, so a
+/// recursive component must be keyed as one atomic unit; Tarjan condenses the
+/// graph before the ordinary dependency fold.  A caller of a recursive group
+/// is then independently cacheable again through that group's fingerprint.
+fn bytecode_dependency_fingerprints(
+    bodies: &[Option<Vec<u8>>],
+    dependencies: &[Option<BTreeSet<u32>>],
+) -> Vec<Option<[u8; 32]>> {
+    let legacy = acyclic_bytecode_dependency_fingerprints(bodies, dependencies);
+    let functions = 0..bodies.len() as u32;
+
+    fn visit_scc(
+        function: u32,
+        dependencies: &[Option<BTreeSet<u32>>],
+        index: &mut usize,
+        indices: &mut BTreeMap<u32, usize>,
+        lowlinks: &mut BTreeMap<u32, usize>,
+        stack: &mut Vec<u32>,
+        on_stack: &mut BTreeSet<u32>,
+        components: &mut Vec<Vec<u32>>,
+    ) {
+        indices.insert(function, *index);
+        lowlinks.insert(function, *index);
+        *index += 1;
+        stack.push(function);
+        on_stack.insert(function);
+        if let Some(Some(edges)) = dependencies.get(function as usize) {
+            for dependency in edges {
+                if !indices.contains_key(dependency) {
+                    if (*dependency as usize) < dependencies.len() {
+                        visit_scc(
+                            *dependency,
+                            dependencies,
+                            index,
+                            indices,
+                            lowlinks,
+                            stack,
+                            on_stack,
+                            components,
+                        );
+                        let dependency_lowlink = lowlinks[dependency];
+                        let lowlink = lowlinks
+                            .get_mut(&function)
+                            .expect("current Tarjan node has a lowlink");
+                        *lowlink = (*lowlink).min(dependency_lowlink);
+                    }
+                } else if on_stack.contains(dependency) {
+                    let dependency_index = indices[dependency];
+                    let lowlink = lowlinks
+                        .get_mut(&function)
+                        .expect("current Tarjan node has a lowlink");
+                    *lowlink = (*lowlink).min(dependency_index);
+                }
+            }
+        }
+        if lowlinks[&function] == indices[&function] {
+            let mut component = Vec::new();
+            loop {
+                let member = stack.pop().expect("Tarjan root has a stack entry");
+                on_stack.remove(&member);
+                component.push(member);
+                if member == function {
+                    break;
+                }
+            }
+            component.sort_unstable();
+            components.push(component);
+        }
+    }
+
+    let mut components = Vec::new();
+    let mut index = 0;
+    let mut indices = BTreeMap::new();
+    let mut lowlinks = BTreeMap::new();
+    let mut stack = Vec::new();
+    let mut on_stack = BTreeSet::new();
+    for function in functions {
+        if !indices.contains_key(&function) {
+            visit_scc(
+                function,
+                dependencies,
+                &mut index,
+                &mut indices,
+                &mut lowlinks,
+                &mut stack,
+                &mut on_stack,
+                &mut components,
+            );
+        }
+    }
+    components.sort_by_key(|component| component.first().copied().unwrap_or_default());
+    let component_for_function = components
+        .iter()
+        .enumerate()
+        .flat_map(|(component, members)| {
+            members
+                .iter()
+                .copied()
+                .map(move |function| (function, component))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let component_dependencies = components
+        .iter()
+        .enumerate()
+        .map(|(component, members)| {
+            let mut valid = true;
+            let mut external = BTreeSet::new();
+            for function in members {
+                if bodies
+                    .get(*function as usize)
+                    .and_then(Option::as_ref)
+                    .is_none()
+                {
+                    valid = false;
+                }
+                let Some(Some(edges)) = dependencies.get(*function as usize) else {
+                    valid = false;
+                    continue;
+                };
+                for dependency in edges {
+                    let Some(dependency_component) = component_for_function.get(dependency) else {
+                        valid = false;
+                        continue;
+                    };
+                    if *dependency_component != component {
+                        external.insert(*dependency_component);
+                    }
+                }
+            }
+            (valid, external)
+        })
+        .collect::<Vec<_>>();
+    fn component_fingerprint(
+        component: usize,
+        components: &[Vec<u32>],
+        component_dependencies: &[(bool, BTreeSet<usize>)],
+        bodies: &[Option<Vec<u8>>],
+        memo: &mut BTreeMap<usize, Option<[u8; 32]>>,
+        visiting: &mut BTreeSet<usize>,
+    ) -> Option<[u8; 32]> {
+        if let Some(fingerprint) = memo.get(&component) {
+            return *fingerprint;
+        }
+        if !component_dependencies[component].0 || !visiting.insert(component) {
+            memo.insert(component, None);
+            return None;
+        }
+        let fingerprint = (|| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"grandiose:bytecode-verifier-scc-closure-v1\0");
+            for function in &components[component] {
+                let body = bodies.get(*function as usize)?.as_ref()?;
+                hasher.update(&function.to_le_bytes());
+                hasher.update(&(body.len() as u64).to_le_bytes());
+                hasher.update(body);
+            }
+            for dependency in &component_dependencies[component].1 {
+                let fingerprint = component_fingerprint(
+                    *dependency,
+                    components,
+                    component_dependencies,
+                    bodies,
+                    memo,
+                    visiting,
+                )?;
+                for function in &components[*dependency] {
+                    hasher.update(&function.to_le_bytes());
+                }
+                hasher.update(&fingerprint);
+            }
+            Some(*hasher.finalize().as_bytes())
+        })();
+        visiting.remove(&component);
+        memo.insert(component, fingerprint);
+        fingerprint
+    }
+
+    let mut memo = BTreeMap::new();
+    let recursive = (0..components.len())
+        .map(|component| {
+            component_fingerprint(
+                component,
+                &components,
+                &component_dependencies,
+                bodies,
+                &mut memo,
+                &mut BTreeSet::new(),
+            )
+        })
+        .collect::<Vec<_>>();
+    (0..bodies.len())
+        .map(|function| {
+            legacy[function].or_else(|| {
+                component_for_function
+                    .get(&(function as u32))
+                    .and_then(|component| recursive[*component])
+            })
+        })
+        .collect()
+}
+
+fn bytecode_verification_inputs(
+    artifact: &BytecodeArtifact,
+) -> BTreeMap<(u32, bool, bool), BytecodePlanCacheInput> {
+    let Ok(namespace) = bincode::serialize(&(
+        b"grandiose:bytecode-verifier-namespace-v1\0".as_slice(),
+        artifact.required_features,
+        artifact.entry_function,
+        &artifact.types,
+        &artifact.imports,
+        &artifact.protocols,
+        &artifact.handler_defs,
+        &artifact.exports,
+        &artifact.drop_glue,
+        &artifact.reference_return_contracts,
+    )) else {
+        return BTreeMap::new();
+    };
+    let namespace = *blake3::hash(&namespace).as_bytes();
+    let normalized = artifact
+        .functions
+        .iter()
+        .map(|function| {
+            normalized_function_code(artifact, function).and_then(|(code, constants)| {
+                bincode::serialize(&(normalize_bytecode_function(function), code, constants)).ok()
+            })
+        })
+        .collect::<Vec<_>>();
+    let dependencies = artifact
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(function, _)| {
+            normalized[function].as_ref().map(|bytes| {
+                let (_, code, _): (BytecodeFunction, Vec<BytecodeInstruction>, Vec<Constant>) =
+                    bincode::deserialize(bytes).ok()?;
+                Some(bytecode_direct_dependencies(&code, function as u32))
+            })?
+        })
+        .collect::<Vec<Option<BTreeSet<u32>>>>();
+    let dependency_fingerprints = bytecode_dependency_fingerprints(&normalized, &dependencies);
+    let mut inputs = BTreeMap::new();
+    for (function, body) in normalized.iter().enumerate() {
+        let Some(body) = body else { continue };
+        let Some(dependency) = dependency_fingerprints[function] else {
+            continue;
+        };
+        let cleanups = normalized_function_cleanups(artifact, function as u32);
+        for (require_cleanup_metadata, allow_seeded_leave_generation) in
+            [(false, true), (false, false), (true, false)]
+        {
+            let Ok(input) = bincode::serialize(&(
+                b"grandiose:bytecode-verifier-function-v1\0".as_slice(),
+                namespace,
+                function as u32,
+                dependency,
+                body,
+                &cleanups,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+            )) else {
+                continue;
+            };
+            let key = BytecodePlanCacheKey {
+                input_hash: *blake3::hash(&input).as_bytes(),
+            };
+            inputs.insert(
+                (
+                    function as u32,
+                    require_cleanup_metadata,
+                    allow_seeded_leave_generation,
+                ),
+                BytecodePlanCacheInput { key, input },
+            );
+        }
+    }
+    inputs
+}
+
+fn rebind_cleanup_plans(plans: &[CleanupPlan], function: u32) -> Vec<CleanupPlan> {
+    plans
+        .iter()
+        .cloned()
+        .map(|mut plan| {
+            plan.function = function;
+            plan
+        })
+        .collect()
+}
+
+fn normalize_cleanup_plans(plans: &[CleanupPlan]) -> Vec<CleanupPlan> {
+    rebind_cleanup_plans(plans, 0)
+}
+
+fn persist_bytecode_plan_cache(
+    directory: &Path,
+    entries: &BTreeMap<BytecodePlanCacheKey, BytecodePlanCacheEntry>,
+    schema: u32,
+    description: &str,
+) -> Result<(), String> {
+    std::fs::create_dir_all(directory).map_err(|error| {
+        format!(
+            "could not create {description} cache directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    for (key, entry) in entries {
+        if !entry.verified {
+            continue;
+        }
+        let path = bytecode_plan_entry_path(directory, key)?;
+        if path.exists() {
+            continue;
+        }
+        let bytes = bincode::serialize(&PersistentBytecodePlanCacheEntry {
+            schema,
+            key: key.clone(),
+            entry: entry.clone(),
+        })
+        .map_err(|error| format!("could not encode {description} cache entry: {error}"))?;
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&temporary, bytes).map_err(|error| {
+            format!(
+                "could not write {description} cache entry {}: {error}",
+                temporary.display()
+            )
+        })?;
+        if let Err(error) = std::fs::rename(&temporary, &path) {
+            let _ = std::fs::remove_file(&temporary);
+            if !path.exists() {
+                return Err(format!(
+                    "could not publish {description} cache entry {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn recursive_optimized_outputs_match(output: &[mir::Function], declarations: &[u32]) -> bool {
+    output.len() == declarations.len()
+        && output
+            .iter()
+            .map(|function| function.declaration)
+            .eq(declarations.iter().copied())
+        && output
+            .iter()
+            .all(|function| function.phase == mir::MirPhase::Optimized)
+}
+
+fn final_validation_key(
+    schema: u64,
+    input: &mir::Function,
+    dependency_fingerprint: u64,
+) -> Option<FinalValidationKey> {
+    let body = bincode::serialize(input).ok()?;
+    Some(FinalValidationKey {
+        schema,
+        declaration: input.declaration,
+        dependency_fingerprint,
+        body_fingerprint: *blake3::hash(&body).as_bytes(),
+    })
+}
+
+fn final_validation_entry_path(
+    directory: &Path,
+    key: &FinalValidationKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode final validation cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
 }
 
 impl IncrementalMirCache {
     fn begin_revision(&mut self) {
         self.lowered_bodies = 0;
         self.reused_bodies = 0;
+        self.reused_cleanup_bodies = 0;
+        self.reused_optimized_bodies = 0;
+        self.reused_final_validation_bodies = 0;
+        self.reused_optimizer_body_snapshots = 0;
+        self.provisional_serialized_cleanup.clear();
+        self.provisional_bytecode_verification.clear();
+        self.current_bytecode_verification.clear();
     }
 
     pub(crate) fn prepare(&mut self, types: &[Type], custom_drop_types: &[TypeId]) {
-        if !self.initialized
-            || self.types != types
-            || self.custom_drop_types.as_slice() != custom_drop_types
-        {
-            self.types = types.to_vec();
-            self.custom_drop_types = custom_drop_types.to_vec();
-            self.entries.clear();
-            self.initialized = true;
+        if let Some(position) = self.schemas.iter().position(|schema| {
+            schema.types == types && schema.custom_drop_types.as_slice() == custom_drop_types
+        }) {
+            let schema = self
+                .schemas
+                .remove(position)
+                .expect("schema index was found");
+            self.active_schema = Some(schema.id);
+            self.schemas.push_front(schema);
+            return;
+        }
+        self.next_schema = self.next_schema.wrapping_add(1);
+        let schema = CachedMirSchema {
+            id: self.next_schema,
+            types: types.to_vec(),
+            custom_drop_types: custom_drop_types.to_vec(),
+        };
+        self.active_schema = Some(schema.id);
+        self.schemas.push_front(schema);
+        while self.schemas.len() > INCREMENTAL_MIR_SCHEMA_CAPACITY {
+            let evicted = self.schemas.pop_back().expect("length was checked");
+            self.entries.retain(|(schema, _), _| *schema != evicted.id);
+            self.local_pass_snapshots
+                .retain(|(schema, _, _), _| *schema != evicted.id);
+            self.optimized.retain(|key, _| key.schema != evicted.id);
+            self.recursive_optimized
+                .retain(|key, _| key.schema != evicted.id);
+            self.emission_prepared
+                .retain(|key, _| key.schema != evicted.id);
+            // Bytecode cache keys contain the exact active bytecode types,
+            // but keeping only the current MIR schema's recent entries makes
+            // memory use match the existing per-body cache policy. Durable
+            // entries remain independently addressable on disk.
+            self.serialized_cleanup.clear();
+            self.bytecode_verification.clear();
+            self.provisional_serialized_cleanup.clear();
+            self.provisional_bytecode_verification.clear();
+            self.current_bytecode_verification.clear();
+            self.final_validation
+                .retain(|key, _| key.schema != evicted.id);
         }
     }
 
+    fn active_key(&self, declaration: u32) -> Option<(u64, u32)> {
+        self.active_schema.map(|schema| (schema, declaration))
+    }
+
     pub(crate) fn reuse(&mut self, function: &core::Function) -> Option<mir::Function> {
-        let cached = self.entries.get(&function.declaration)?;
-        if cached.0 != *function {
+        let cached = self.entries.get(&self.active_key(function.declaration)?)?;
+        let matches = cached.core.as_ref().is_some_and(|core| *core == *function)
+            || cached.core_debug == format!("{function:?}");
+        if !matches {
             return None;
         }
         self.reused_bodies += 1;
-        Some(cached.1.clone())
+        Some(cached.lowered.clone())
+    }
+
+    /// Restore a post-cleanup body only after the caller has completely
+    /// accounted for every interprocedural array summary it consumes.
+    pub(crate) fn reuse_cleanup(
+        &mut self,
+        function: &mir::Function,
+        dependency_fingerprint: Option<u64>,
+        legacy_fingerprint_matches: impl FnOnce(u64) -> bool,
+    ) -> Option<mir::Function> {
+        let cached = self.entries.get(&self.active_key(function.declaration)?)?;
+        let (cached_fingerprint, cleanup) = cached.cleanup.as_ref()?;
+        // The dependency fingerprint protects interprocedural ownership
+        // summaries, but it is not a body identity. A body-only source edit
+        // must never recover the previous function's cleanup facts merely
+        // because its direct callees happened not to change.
+        if cached.lowered != *function {
+            return None;
+        }
+        if dependency_fingerprint != Some(*cached_fingerprint)
+            && !legacy_fingerprint_matches(*cached_fingerprint)
+        {
+            return None;
+        }
+        self.reused_cleanup_bodies += 1;
+        Some(cleanup.clone())
+    }
+
+    pub(crate) fn cache_cleanup(
+        &mut self,
+        function: &mir::Function,
+        dependency_fingerprint: Option<u64>,
+    ) {
+        let Some(dependency_fingerprint) = dependency_fingerprint else {
+            return;
+        };
+        let Some(key) = self.active_key(function.declaration) else {
+            return;
+        };
+        let Some(cached) = self.entries.get_mut(&key) else {
+            // Pattern/synthesized bodies have no exact raw-Core authority.
+            return;
+        };
+        cached.cleanup = Some((dependency_fingerprint, function.clone()));
+    }
+
+    /// Assign a worktree-local directory holding independently readable final
+    /// O3 bodies. Unlike the historical monolithic caches, configuring this
+    /// directory does not read or deserialize any body.
+    pub(crate) fn configure_persistent_optimized_directory(&mut self, directory: PathBuf) {
+        self.final_validation_disk_directory = Some(directory.join("final-validation-v1"));
+        self.recursive_optimized_disk_directory = Some(directory.join("recursive-scc-v1"));
+        self.emission_prepared_disk_directory = Some(directory.join("emission-prepared-v1"));
+        self.serialized_cleanup_disk_directory = Some(directory.join("serialized-cleanup-v1"));
+        self.bytecode_verification_disk_directory =
+            Some(directory.join("bytecode-verification-v1"));
+        self.optimized_disk_directory = Some(directory);
+    }
+
+    fn optimized_key(
+        &self,
+        declaration: u32,
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<OptimizedMirKey> {
+        Some(OptimizedMirKey {
+            schema: self.active_schema?,
+            declaration,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        })
+    }
+
+    fn recursive_optimized_key(
+        &self,
+        inputs: &[mir::Function],
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<RecursiveOptimizedMirKey> {
+        let mut declarations = inputs
+            .iter()
+            .map(|function| function.declaration)
+            .collect::<Vec<_>>();
+        declarations.sort_unstable();
+        declarations.dedup();
+        (declarations.len() == inputs.len()).then_some(RecursiveOptimizedMirKey {
+            schema: self.active_schema?,
+            declarations,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        })
+    }
+
+    /// Recover an exact final O3 body. The caller supplies the current
+    /// cleanup-boundary body as well as its complete direct-call dependency
+    /// fingerprint; both values must match the entry before it becomes
+    /// eligible to bypass the optimizer.
+    pub(crate) fn reuse_optimized(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<mir::Function> {
+        let key = self.optimized_key(
+            input.declaration,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        )?;
+        if let Some(entry) = self.optimized.get(&key) {
+            if entry.input == *input && entry.output.phase == mir::MirPhase::Optimized {
+                self.reused_optimized_bodies = self.reused_optimized_bodies.saturating_add(1);
+                return Some(entry.output.clone());
+            }
+        }
+        let directory = self.optimized_disk_directory.as_ref()?;
+        let path = optimized_mir_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentOptimizedMirEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != *input
+            || entry.output.declaration != input.declaration
+            || entry.output.phase != mir::MirPhase::Optimized
+        {
+            return None;
+        }
+        let output = entry.output.clone();
+        self.optimized.insert(
+            key,
+            OptimizedMirEntry {
+                input: entry.input,
+                output: entry.output,
+            },
+        );
+        self.reused_optimized_bodies = self.reused_optimized_bodies.saturating_add(1);
+        Some(output)
+    }
+
+    /// Recover a complete cyclic O3 component atomically. Every cleanup input
+    /// and every optimized output must agree with the requested declaration
+    /// set, so a changed member or external dependency invalidates precisely
+    /// this component and its callers rather than the whole cache.
+    pub(crate) fn reuse_recursive_optimized(
+        &mut self,
+        inputs: &[mir::Function],
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<Vec<mir::Function>> {
+        let key =
+            self.recursive_optimized_key(inputs, dependency_fingerprint, namespace_fingerprint)?;
+        let mut expected_input = inputs.to_vec();
+        expected_input.sort_by_key(|function| function.declaration);
+        if let Some(entry) = self.recursive_optimized.get(&key) {
+            if entry.input == expected_input
+                && recursive_optimized_outputs_match(&entry.output, &key.declarations)
+            {
+                self.reused_optimized_bodies = self
+                    .reused_optimized_bodies
+                    .saturating_add(entry.output.len());
+                return Some(entry.output.clone());
+            }
+        }
+        let directory = self.recursive_optimized_disk_directory.as_ref()?;
+        let path = recursive_optimized_mir_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentRecursiveOptimizedMirEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_RECURSIVE_OPTIMIZED_MIR_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != expected_input
+            || !recursive_optimized_outputs_match(&entry.output, &key.declarations)
+        {
+            return None;
+        }
+        let output = entry.output.clone();
+        self.recursive_optimized.insert(
+            key,
+            RecursiveOptimizedMirEntry {
+                input: entry.input,
+                output: entry.output,
+            },
+        );
+        self.reused_optimized_bodies = self.reused_optimized_bodies.saturating_add(output.len());
+        Some(output)
+    }
+
+    fn emission_prepared_key(
+        &self,
+        declaration: u32,
+        dependency_fingerprint: u64,
+    ) -> Option<EmissionPreparedMirKey> {
+        Some(EmissionPreparedMirKey {
+            schema: self.active_schema?,
+            declaration,
+            dependency_fingerprint,
+        })
+    }
+
+    /// Restore the exact representation-prepared body for an unchanged O3
+    /// input. The cached output has passed edge-copy ownership reconciliation
+    /// but deliberately has not undergone physical register compaction yet.
+    pub(crate) fn reuse_emission_prepared(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+    ) -> Option<mir::Function> {
+        let key = self.emission_prepared_key(input.declaration, dependency_fingerprint)?;
+        if let Some(entry) = self.emission_prepared.get(&key) {
+            if entry.verified
+                && entry.input == *input
+                && entry.output.phase == mir::MirPhase::Optimized
+            {
+                return Some(entry.output.clone());
+            }
+        }
+        let directory = self.emission_prepared_disk_directory.as_ref()?;
+        let path = emission_prepared_mir_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentEmissionPreparedMirEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_EMISSION_PREPARED_MIR_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != *input
+            || entry.output.declaration != input.declaration
+            || entry.output.phase != mir::MirPhase::Optimized
+            || !entry.verified
+        {
+            return None;
+        }
+        let output = entry.output.clone();
+        self.emission_prepared.insert(
+            key,
+            EmissionPreparedMirEntry {
+                input: entry.input,
+                output: entry.output,
+                verified: entry.verified,
+            },
+        );
+        Some(output)
+    }
+
+    /// Retain a post-O3 representation-prepared body after the edge-copy
+    /// cleanup pass has proved it against the current array-call summaries.
+    pub(crate) fn cache_emission_prepared(
+        &mut self,
+        input: &mir::Function,
+        output: &mir::Function,
+        dependency_fingerprint: u64,
+    ) {
+        if input.declaration != output.declaration
+            || input.phase != mir::MirPhase::Optimized
+            || output.phase != mir::MirPhase::Optimized
+        {
+            return;
+        }
+        let Some(key) = self.emission_prepared_key(input.declaration, dependency_fingerprint)
+        else {
+            return;
+        };
+        self.emission_prepared.insert(
+            key,
+            EmissionPreparedMirEntry {
+                input: input.clone(),
+                output: output.clone(),
+                verified: false,
+            },
+        );
+    }
+
+    /// Mark an emission-prepared output reusable only after the complete
+    /// bytecode artifact, including its cleanup-map cross-check and VM
+    /// verifier pass, has accepted the containing compilation.
+    pub(crate) fn verify_emission_prepared(&mut self, input: &mir::Function) {
+        for entry in self.emission_prepared.values_mut() {
+            if entry.input == *input {
+                entry.verified = true;
+            }
+        }
+    }
+
+    /// Restore a cleanup interval table derived directly from one exact MIR
+    /// body after its bytecode layout and peephole ordinal map are known.
+    /// The caller supplies the complete serialized input so this layer stays
+    /// independent of compiler-private emission structs.
+    pub(crate) fn reuse_serialized_cleanup(
+        &mut self,
+        input: &[u8],
+        function: u32,
+    ) -> Option<Vec<CleanupPlan>> {
+        let key = BytecodePlanCacheKey {
+            input_hash: *blake3::hash(input).as_bytes(),
+        };
+        if let Some(entry) = self.serialized_cleanup.get(&key) {
+            if entry.verified && entry.input == input {
+                return Some(rebind_cleanup_plans(&entry.plans, function));
+            }
+        }
+        let directory = self.serialized_cleanup_disk_directory.as_ref()?;
+        let path = bytecode_plan_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let persisted = bincode::deserialize::<PersistentBytecodePlanCacheEntry>(&bytes).ok()?;
+        if persisted.schema != PERSISTENT_SERIALIZED_CLEANUP_ENTRY_SCHEMA
+            || persisted.key != key
+            || !persisted.entry.verified
+            || persisted.entry.input != input
+        {
+            return None;
+        }
+        let plans = rebind_cleanup_plans(&persisted.entry.plans, function);
+        self.serialized_cleanup.insert(key, persisted.entry);
+        Some(plans)
+    }
+
+    /// Record a provisional MIR-derived cleanup result. It becomes durable
+    /// only after the compiler's final artifact verifier succeeds.
+    pub(crate) fn cache_serialized_cleanup(&mut self, input: Vec<u8>, plans: &[CleanupPlan]) {
+        let key = BytecodePlanCacheKey {
+            input_hash: *blake3::hash(&input).as_bytes(),
+        };
+        let verified = self
+            .serialized_cleanup
+            .get(&key)
+            .is_some_and(|entry| entry.verified && entry.input == input);
+        self.serialized_cleanup.insert(
+            key.clone(),
+            BytecodePlanCacheEntry {
+                input,
+                plans: normalize_cleanup_plans(plans),
+                verified,
+            },
+        );
+        if !verified {
+            self.provisional_serialized_cleanup.insert(key);
+        }
+    }
+
+    /// Publish only cleanup plans produced during this successful compiler
+    /// revision; unfinished/error revisions never become reusable.
+    pub(crate) fn verify_serialized_cleanups(&mut self) {
+        for key in std::mem::take(&mut self.provisional_serialized_cleanup) {
+            if let Some(entry) = self.serialized_cleanup.get_mut(&key) {
+                entry.verified = true;
+            }
+        }
+    }
+
+    fn reuse_bytecode_verification(
+        &mut self,
+        input: &BytecodePlanCacheInput,
+        function: u32,
+    ) -> Option<Vec<CleanupPlan>> {
+        if let Some(entry) = self.bytecode_verification.get(&input.key) {
+            if entry.verified && entry.input == input.input {
+                return Some(rebind_cleanup_plans(&entry.plans, function));
+            }
+        }
+        let directory = self.bytecode_verification_disk_directory.as_ref()?;
+        let path = bytecode_plan_entry_path(directory, &input.key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let persisted = bincode::deserialize::<PersistentBytecodePlanCacheEntry>(&bytes).ok()?;
+        if persisted.schema != PERSISTENT_BYTECODE_VERIFICATION_ENTRY_SCHEMA
+            || persisted.key != input.key
+            || !persisted.entry.verified
+            || persisted.entry.input != input.input
+        {
+            return None;
+        }
+        let plans = rebind_cleanup_plans(&persisted.entry.plans, function);
+        self.bytecode_verification
+            .insert(input.key.clone(), persisted.entry);
+        Some(plans)
+    }
+
+    fn cache_bytecode_verification(
+        &mut self,
+        input: BytecodePlanCacheInput,
+        plans: &[CleanupPlan],
+    ) {
+        let verified = self
+            .bytecode_verification
+            .get(&input.key)
+            .is_some_and(|entry| entry.verified && entry.input == input.input);
+        self.bytecode_verification.insert(
+            input.key.clone(),
+            BytecodePlanCacheEntry {
+                input: input.input,
+                plans: normalize_cleanup_plans(plans),
+                verified,
+            },
+        );
+        if !verified {
+            self.provisional_bytecode_verification.insert(input.key);
+        }
+    }
+
+    /// Permit bytecode verification entries generated during this compiler
+    /// revision to reach the persistent per-function cache after the final
+    /// artifact verifier accepted the whole result.
+    pub(crate) fn verify_bytecode_verifications(&mut self) {
+        for key in std::mem::take(&mut self.provisional_bytecode_verification) {
+            if let Some(entry) = self.bytecode_verification.get_mut(&key) {
+                entry.verified = true;
+            }
+        }
+    }
+
+    /// Retain an output only when its source function has a current exact
+    /// cleanup cache entry. Pattern-generated bodies intentionally have no
+    /// durable Core identity and are left on the ordinary optimizer path.
+    pub(crate) fn cache_optimized(
+        &mut self,
+        output: &mir::Function,
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) {
+        let Some(key) = self.optimized_key(
+            output.declaration,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        ) else {
+            return;
+        };
+        let Some(active_key) = self.active_key(output.declaration) else {
+            return;
+        };
+        let Some(cached) = self.entries.get(&active_key) else {
+            return;
+        };
+        let Some((_, input)) = &cached.cleanup else {
+            return;
+        };
+        self.optimized.insert(
+            key,
+            OptimizedMirEntry {
+                input: input.clone(),
+                output: output.clone(),
+            },
+        );
+    }
+
+    /// Record a stable optimized recursive component. The raw cleanup inputs
+    /// are recovered from the per-body cache so output publication remains
+    /// bound to the exact pre-O3 fixed-point inputs.
+    pub(crate) fn cache_recursive_optimized(
+        &mut self,
+        outputs: &[mir::Function],
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) {
+        let mut output = outputs.to_vec();
+        output.sort_by_key(|function| function.declaration);
+        let mut input = Vec::with_capacity(output.len());
+        for function in &output {
+            let Some(active_key) = self.active_key(function.declaration) else {
+                return;
+            };
+            let Some(cached) = self.entries.get(&active_key) else {
+                return;
+            };
+            let Some((_, cleanup)) = &cached.cleanup else {
+                return;
+            };
+            input.push(cleanup.clone());
+        }
+        input.sort_by_key(|function| function.declaration);
+        let Some(key) =
+            self.recursive_optimized_key(&input, dependency_fingerprint, namespace_fingerprint)
+        else {
+            return;
+        };
+        if !recursive_optimized_outputs_match(&output, &key.declarations) {
+            return;
+        }
+        self.recursive_optimized
+            .insert(key, RecursiveOptimizedMirEntry { input, output });
+    }
+
+    /// Reuse a completed final optimized-MIR ownership/cleanup proof. The
+    /// body comparison is deliberately exact after the BLAKE3-addressed disk
+    /// lookup, so a hash collision can only turn into a cache miss.
+    pub(crate) fn reuse_final_validation(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+    ) -> bool {
+        let Some(schema) = self.active_schema else {
+            return false;
+        };
+        let Some(key) = final_validation_key(schema, input, dependency_fingerprint) else {
+            return false;
+        };
+        if let Some(entry) = self.final_validation.get(&key) {
+            if entry.input == *input {
+                self.reused_final_validation_bodies =
+                    self.reused_final_validation_bodies.saturating_add(1);
+                return true;
+            }
+        }
+        let Some(directory) = self.final_validation_disk_directory.as_ref() else {
+            return false;
+        };
+        let Ok(path) = final_validation_entry_path(directory, &key) else {
+            return false;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        let Ok(entry) = bincode::deserialize::<PersistentFinalValidationEntry>(&bytes) else {
+            return false;
+        };
+        if entry.schema != PERSISTENT_FINAL_VALIDATION_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != *input
+            || entry.input.phase != mir::MirPhase::Optimized
+        {
+            return false;
+        }
+        self.final_validation
+            .insert(key, FinalValidationEntry { input: entry.input });
+        self.reused_final_validation_bodies = self.reused_final_validation_bodies.saturating_add(1);
+        true
+    }
+
+    /// Record one exact final checkpoint input after its ownership/cleanup
+    /// proof succeeds. Unlike the O3 output cache, this includes generated
+    /// declarations because the body itself anchors their current IDs.
+    pub(crate) fn cache_final_validation(
+        &mut self,
+        input: &mir::Function,
+        dependency_fingerprint: u64,
+    ) {
+        let Some(schema) = self.active_schema else {
+            return;
+        };
+        let Some(key) = final_validation_key(schema, input, dependency_fingerprint) else {
+            return;
+        };
+        self.final_validation.insert(
+            key,
+            FinalValidationEntry {
+                input: input.clone(),
+            },
+        );
+    }
+
+    /// Publish each newly produced final O3 body separately. Cache files are
+    /// addressed by every semantic input in `OptimizedMirKey`, so retaining a
+    /// previous source revision never invalidates unrelated entries.
+    pub(crate) fn persist_optimized_to_directory(&self) -> Result<(), String> {
+        let Some(directory) = &self.optimized_disk_directory else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "could not create optimized MIR directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        for (key, entry) in &self.optimized {
+            let path = optimized_mir_entry_path(directory, key)?;
+            if path.exists() {
+                continue;
+            }
+            let bytes = bincode::serialize(&PersistentOptimizedMirEntry {
+                schema: PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA,
+                key: key.clone(),
+                input: entry.input.clone(),
+                output: entry.output.clone(),
+            })
+            .map_err(|error| format!("could not encode optimized MIR body: {error}"))?;
+            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temporary, bytes).map_err(|error| {
+                format!(
+                    "could not write optimized MIR body {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                let _ = std::fs::remove_file(&temporary);
+                if !path.exists() {
+                    return Err(format!(
+                        "could not publish optimized MIR body {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if let Some(directory) = &self.recursive_optimized_disk_directory {
+            std::fs::create_dir_all(directory).map_err(|error| {
+                format!(
+                    "could not create recursive optimized MIR directory {}: {error}",
+                    directory.display()
+                )
+            })?;
+            for (key, entry) in &self.recursive_optimized {
+                let path = recursive_optimized_mir_entry_path(directory, key)?;
+                if path.exists() {
+                    continue;
+                }
+                let bytes = bincode::serialize(&PersistentRecursiveOptimizedMirEntry {
+                    schema: PERSISTENT_RECURSIVE_OPTIMIZED_MIR_ENTRY_SCHEMA,
+                    key: key.clone(),
+                    input: entry.input.clone(),
+                    output: entry.output.clone(),
+                })
+                .map_err(|error| {
+                    format!("could not encode recursive optimized MIR component: {error}")
+                })?;
+                let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+                std::fs::write(&temporary, bytes).map_err(|error| {
+                    format!(
+                        "could not write recursive optimized MIR component {}: {error}",
+                        temporary.display()
+                    )
+                })?;
+                if let Err(error) = std::fs::rename(&temporary, &path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    if !path.exists() {
+                        return Err(format!(
+                            "could not publish recursive optimized MIR component {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(directory) = &self.emission_prepared_disk_directory {
+            std::fs::create_dir_all(directory).map_err(|error| {
+                format!(
+                    "could not create emission-prepared MIR directory {}: {error}",
+                    directory.display()
+                )
+            })?;
+            for (key, entry) in &self.emission_prepared {
+                if !entry.verified {
+                    continue;
+                }
+                let path = emission_prepared_mir_entry_path(directory, key)?;
+                if path.exists() {
+                    continue;
+                }
+                let bytes = bincode::serialize(&PersistentEmissionPreparedMirEntry {
+                    schema: PERSISTENT_EMISSION_PREPARED_MIR_ENTRY_SCHEMA,
+                    key: key.clone(),
+                    input: entry.input.clone(),
+                    output: entry.output.clone(),
+                    verified: entry.verified,
+                })
+                .map_err(|error| format!("could not encode emission-prepared MIR body: {error}"))?;
+                let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+                std::fs::write(&temporary, bytes).map_err(|error| {
+                    format!(
+                        "could not write emission-prepared MIR body {}: {error}",
+                        temporary.display()
+                    )
+                })?;
+                if let Err(error) = std::fs::rename(&temporary, &path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    if !path.exists() {
+                        return Err(format!(
+                            "could not publish emission-prepared MIR body {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(directory) = &self.serialized_cleanup_disk_directory {
+            persist_bytecode_plan_cache(
+                directory,
+                &self.serialized_cleanup,
+                PERSISTENT_SERIALIZED_CLEANUP_ENTRY_SCHEMA,
+                "serialized cleanup",
+            )?;
+        }
+        if let Some(directory) = &self.bytecode_verification_disk_directory {
+            persist_bytecode_plan_cache(
+                directory,
+                &self.bytecode_verification,
+                PERSISTENT_BYTECODE_VERIFICATION_ENTRY_SCHEMA,
+                "bytecode verification",
+            )?;
+        }
+        let Some(directory) = &self.final_validation_disk_directory else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "could not create final validation cache directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        for (key, entry) in &self.final_validation {
+            let path = final_validation_entry_path(directory, key)?;
+            if path.exists() {
+                continue;
+            }
+            let bytes = bincode::serialize(&PersistentFinalValidationEntry {
+                schema: PERSISTENT_FINAL_VALIDATION_ENTRY_SCHEMA,
+                key: key.clone(),
+                input: entry.input.clone(),
+            })
+            .map_err(|error| format!("could not encode final validation body: {error}"))?;
+            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temporary, bytes).map_err(|error| {
+                format!(
+                    "could not write final validation body {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                let _ = std::fs::remove_file(&temporary);
+                if !path.exists() {
+                    return Err(format!(
+                        "could not publish final validation body {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn insert(&mut self, function: core::Function, lowered: mir::Function) {
         self.lowered_bodies += 1;
-        self.entries
-            .insert(function.declaration, (function, lowered));
+        let Some(key) = self.active_key(function.declaration) else {
+            return;
+        };
+        // A restored cache may not retain the in-memory Core AST, and its
+        // debug identity can legitimately differ across a fresh frontend
+        // process (for example after source-position remapping). Re-lowering
+        // such a body is cheap. If that fresh raw MIR is byte-for-byte equal
+        // to the retained raw MIR, however, its cleanup proof remains exact
+        // and must survive this replacement; otherwise this insert erases the
+        // very snapshot needed to skip the ownership fixed point below.
+        let cleanup = self
+            .entries
+            .get(&key)
+            .filter(|cached| cached.lowered == lowered)
+            .and_then(|cached| cached.cleanup.clone());
+        self.entries.insert(
+            key,
+            CachedMirBody {
+                core_debug: format!("{function:?}"),
+                core: Some(function),
+                lowered,
+                cleanup,
+            },
+        );
+    }
+
+    /// Persist exact per-function raw/cleanup MIR plus transactional local
+    /// optimizer snapshots. Core validity is bound to its deterministic
+    /// structural representation, while MIR remains binary data.
+    pub(crate) fn encode_persistent(&self) -> Result<Vec<u8>, bincode::Error> {
+        let entries = self
+            .entries
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    *key,
+                    PersistentMirBody {
+                        core_debug: entry.core_debug.clone(),
+                        lowered: entry.lowered.clone(),
+                        cleanup: entry.cleanup.clone(),
+                    },
+                )
+            })
+            .collect();
+        bincode::serialize(&PersistentMirCache {
+            schema: PERSISTENT_MIR_CACHE_SCHEMA,
+            schemas: self.schemas.clone(),
+            entries,
+            local_pass_snapshots: self.local_pass_snapshots.clone(),
+        })
+    }
+
+    pub(crate) fn decode_persistent(bytes: &[u8]) -> Option<Self> {
+        let persisted = bincode::deserialize::<PersistentMirCache>(bytes).ok()?;
+        if persisted.schema != PERSISTENT_MIR_CACHE_SCHEMA
+            || persisted.schemas.len() > INCREMENTAL_MIR_SCHEMA_CAPACITY
+        {
+            return None;
+        }
+        let known_schemas = persisted
+            .schemas
+            .iter()
+            .map(|schema| schema.id)
+            .collect::<BTreeSet<_>>();
+        if persisted
+            .entries
+            .keys()
+            .any(|(schema, _)| !known_schemas.contains(schema))
+            || persisted
+                .local_pass_snapshots
+                .keys()
+                .any(|(schema, _, _)| !known_schemas.contains(schema))
+        {
+            return None;
+        }
+        let next_schema = persisted
+            .schemas
+            .iter()
+            .map(|schema| schema.id)
+            .max()
+            .unwrap_or_default();
+        Some(Self {
+            schemas: persisted.schemas,
+            entries: persisted
+                .entries
+                .into_iter()
+                .map(|(key, entry)| {
+                    (
+                        key,
+                        CachedMirBody {
+                            core: None,
+                            core_debug: entry.core_debug,
+                            lowered: entry.lowered,
+                            cleanup: entry.cleanup,
+                        },
+                    )
+                })
+                .collect(),
+            local_pass_snapshots: persisted.local_pass_snapshots,
+            optimized: BTreeMap::new(),
+            optimized_disk_directory: None,
+            recursive_optimized: BTreeMap::new(),
+            recursive_optimized_disk_directory: None,
+            emission_prepared: BTreeMap::new(),
+            emission_prepared_disk_directory: None,
+            serialized_cleanup: BTreeMap::new(),
+            serialized_cleanup_disk_directory: None,
+            provisional_serialized_cleanup: BTreeSet::new(),
+            bytecode_verification: BTreeMap::new(),
+            bytecode_verification_disk_directory: None,
+            provisional_bytecode_verification: BTreeSet::new(),
+            current_bytecode_verification: BTreeMap::new(),
+            final_validation: BTreeMap::new(),
+            final_validation_disk_directory: None,
+            active_schema: None,
+            next_schema,
+            lowered_bodies: 0,
+            reused_bodies: 0,
+            reused_cleanup_bodies: 0,
+            reused_optimized_bodies: 0,
+            reused_final_validation_bodies: 0,
+            reused_optimizer_body_snapshots: 0,
+        })
+    }
+}
+
+impl grandiose_vm::verify::FunctionVerificationCache for IncrementalMirCache {
+    fn begin_artifact(&mut self, artifact: &BytecodeArtifact) {
+        self.current_bytecode_verification = bytecode_verification_inputs(artifact);
+    }
+
+    fn reuse(
+        &mut self,
+        function: u32,
+        require_cleanup_metadata: bool,
+        allow_seeded_leave_generation: bool,
+    ) -> Option<Vec<CleanupPlan>> {
+        let input = self
+            .current_bytecode_verification
+            .get(&(
+                function,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+            ))?
+            .clone();
+        self.reuse_bytecode_verification(&input, function)
+    }
+
+    fn record(
+        &mut self,
+        function: u32,
+        require_cleanup_metadata: bool,
+        allow_seeded_leave_generation: bool,
+        plans: &[CleanupPlan],
+    ) {
+        let Some(input) = self
+            .current_bytecode_verification
+            .get(&(
+                function,
+                require_cleanup_metadata,
+                allow_seeded_leave_generation,
+            ))
+            .cloned()
+        else {
+            return;
+        };
+        self.cache_bytecode_verification(input, plans);
+    }
+}
+
+impl crate::compiler_mir::optimizer::TransactionalPassBodyCache for IncrementalMirCache {
+    fn restore(
+        &mut self,
+        pass: crate::compiler_mir::optimizer::PassId,
+        input: &mir::Function,
+        work_limit: u64,
+    ) -> Option<crate::compiler_mir::optimizer::TransactionalPassBodySnapshot> {
+        let (schema, declaration) = self.active_key(input.declaration)?;
+        let key = (schema, declaration, pass);
+        let snapshots = self.local_pass_snapshots.get_mut(&key)?;
+        let position = snapshots.iter().position(|snapshot| {
+            snapshot.input == *input
+                && snapshot.work_units <= work_limit
+                && snapshot.outcome != crate::compiler_mir::optimizer::PassOutcome::BudgetExhausted
+        })?;
+        let snapshot = snapshots
+            .remove(position)
+            .expect("snapshot index was found");
+        snapshots.push_front(snapshot.clone());
+        self.reused_optimizer_body_snapshots += 1;
+        Some(snapshot)
+    }
+
+    fn record(
+        &mut self,
+        pass: crate::compiler_mir::optimizer::PassId,
+        snapshot: crate::compiler_mir::optimizer::TransactionalPassBodySnapshot,
+    ) {
+        let Some((schema, declaration)) = self.active_key(snapshot.input.declaration) else {
+            return;
+        };
+        let snapshots = self
+            .local_pass_snapshots
+            .entry((schema, declaration, pass))
+            .or_default();
+        if let Some(position) = snapshots
+            .iter()
+            .position(|cached| cached.input == snapshot.input)
+        {
+            snapshots.remove(position);
+        }
+        snapshots.push_front(snapshot);
+        snapshots.truncate(3);
     }
 }
 
 pub(crate) struct IncrementalFingerprints {
     pub(crate) context: u64,
+    /// Exact source context for structural trait-db reuse. Callable-body bytes
+    /// are masked but their byte positions are retained, so edits that shift a
+    /// later declaration cannot accidentally reuse stale span-keyed facts.
+    pub(crate) trait_db_context: Vec<u8>,
     pub(crate) bodies: BTreeMap<DeclarationKey, u64>,
 }
 
@@ -338,8 +2578,28 @@ pub(crate) fn fingerprints(
         cursor = end;
     }
     context.write(&source[cursor..]);
+    let mut trait_db_context = source.to_vec();
+    let mut callable_ranges = program
+        .functions
+        .iter()
+        .map(|function| function.body.span)
+        .chain(
+            program
+                .impls
+                .iter()
+                .flat_map(|implementation| &implementation.methods)
+                .filter_map(|method| method.body.as_ref().map(|body| body.span)),
+        )
+        .collect::<Vec<_>>();
+    callable_ranges.sort_by_key(|span| (span.start, span.end));
+    for span in callable_ranges {
+        let start = span.start.min(trait_db_context.len());
+        let end = span.end.min(trait_db_context.len()).max(start);
+        trait_db_context[start..end].fill(0);
+    }
     IncrementalFingerprints {
         context: context.finish(),
+        trait_db_context,
         bodies,
     }
 }
@@ -374,6 +2634,37 @@ mod tests {
             Segment::new("main.glorious", source),
             [],
         )
+    }
+
+    #[test]
+    fn bytecode_verifier_fingerprints_cache_recursive_components_and_callers() {
+        let bodies = vec![
+            Some(b"first".to_vec()),
+            Some(b"second".to_vec()),
+            Some(b"caller".to_vec()),
+            Some(b"independent".to_vec()),
+        ];
+        let dependencies = vec![
+            Some([1].into_iter().collect()),
+            Some([0].into_iter().collect()),
+            Some([0].into_iter().collect()),
+            Some(BTreeSet::new()),
+        ];
+
+        let legacy = acyclic_bytecode_dependency_fingerprints(&bodies, &dependencies);
+        let fingerprints = bytecode_dependency_fingerprints(&bodies, &dependencies);
+
+        assert_eq!(legacy[..3], [None, None, None]);
+        assert!(fingerprints[..3].iter().all(Option::is_some));
+        assert_eq!(fingerprints[3], legacy[3]);
+
+        let mut edited = bodies.clone();
+        edited[1] = Some(b"changed".to_vec());
+        let after = bytecode_dependency_fingerprints(&edited, &dependencies);
+        assert_ne!(fingerprints[0], after[0]);
+        assert_ne!(fingerprints[1], after[1]);
+        assert_ne!(fingerprints[2], after[2]);
+        assert_eq!(fingerprints[3], after[3]);
     }
 
     #[test]
@@ -440,5 +2731,522 @@ mod tests {
         assert!(driver.compile_bundle(&invalid, options).is_err());
         assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
         assert_eq!(driver.diagnostic_cache_stats().reused_historical_results, 1);
+    }
+
+    #[test]
+    fn llvm_ir_cache_hits_only_for_exact_bundle_and_target_options() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let first = invalid_bundle("main() -> { () }");
+        let second = invalid_bundle("main() -> { let marker = 2; () }");
+        let target = LlvmOptions::default();
+        let mut driver = CompilationDriver::new();
+
+        let first_phases = driver.compile_bundle(&first, options).unwrap();
+        let first_ir = driver
+            .emit_llvm_ir(&first, options, &first_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        let cached_ir = driver
+            .emit_llvm_ir(&first, options, &first_phases, &target)
+            .unwrap();
+        assert_eq!(cached_ir, first_ir);
+        assert_eq!(driver.stats().reused_llvm_ir, 1);
+
+        // A content change has a distinct fingerprint and exact bundle value;
+        // it must re-emit rather than returning stale IR for the first body.
+        let second_phases = driver.compile_bundle(&second, options).unwrap();
+        let second_ir = driver
+            .emit_llvm_ir(&second, options, &second_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        assert_eq!(
+            second_ir,
+            crate::emit_llvm_ir(&second_phases, &target).unwrap(),
+            "a cache miss must return the current phases' IR, never stale text"
+        );
+
+        // The allocation ceiling is embedded in native runtime helpers.  It
+        // is target ABI, not merely a driver preference, so it must also miss
+        // the persistent IR/fragment cache.
+        let mut different_allocation_limit = target.clone();
+        different_allocation_limit.native_allocation_limit *= 2;
+        driver
+            .emit_llvm_ir(
+                &second,
+                options,
+                &second_phases,
+                &different_allocation_limit,
+            )
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        assert_eq!(driver.stats().reused_llvm_fragments, 0);
+
+        let mut different_target = target.clone();
+        different_target.emit_entry_wrapper = false;
+        driver
+            .emit_llvm_ir(&second, options, &second_phases, &different_target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+
+        // Dependency segments participate in the same source fingerprint.
+        // Changing an otherwise inert dependency comment must still miss:
+        // package/module topology affects resolution and backend reachability.
+        let dependency_changed = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> { let marker = 2; () }"),
+            [Segment::new("dependency.glorious", "// changed dependency")],
+        );
+        let dependency_phases = driver.compile_bundle(&dependency_changed, options).unwrap();
+        let dependency_ir = driver
+            .emit_llvm_ir(&dependency_changed, options, &dependency_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_ir, 0);
+        assert_eq!(
+            dependency_ir,
+            crate::emit_llvm_ir(&dependency_phases, &target).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_partitions_reuse_unchanged_llvm_fragments_after_a_body_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let target = LlvmOptions::default();
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut driver = CompilationDriver::new();
+
+        let before_phases = driver.compile_bundle(&before, options).unwrap();
+        let cold = driver
+            .emit_llvm_native_object_units(&before_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_fragments, 0);
+        assert_eq!(driver.stats().emitted_llvm_fragments, 3);
+
+        let after_phases = driver.compile_bundle(&after, options).unwrap();
+        let warm = driver
+            .emit_llvm_native_object_units(&after_phases, &target)
+            .unwrap();
+        assert_eq!(driver.stats().reused_llvm_fragments, 2);
+        assert_eq!(driver.stats().emitted_llvm_fragments, 1);
+        assert_eq!(
+            warm,
+            crate::llvm_backend::emit_llvm_native_object_units(&after_phases, &target).unwrap(),
+            "cache-backed native partitions must remain byte-for-byte canonical"
+        );
+        assert_ne!(
+            cold, warm,
+            "the changed leaf must produce fresh native units"
+        );
+    }
+
+    #[test]
+    fn llvm_fragments_retain_unrelated_bodies_after_a_literal_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let target = LlvmOptions::default();
+        // Keep the changed literal's source width fixed so this test isolates
+        // the old global-literal-table dependency rather than source spans.
+        let before = invalid_bundle(
+            "stable() -> Text { \"steady\" } changed() -> Text { \"before\" } main() -> () { stable(); changed(); () }",
+        );
+        let after = invalid_bundle(
+            "stable() -> Text { \"steady\" } changed() -> Text { \"alter!\" } main() -> () { stable(); changed(); () }",
+        );
+        let before_phases = crate::compile_bundle_to_phases_with_options(&before, options).unwrap();
+        let before_manifest =
+            crate::llvm_backend::llvm_incremental_manifest(&before_phases, &target);
+        let before_ir = crate::emit_llvm_ir(&before_phases, &target).unwrap();
+        let after_phases = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        let after_manifest = crate::llvm_backend::llvm_incremental_manifest(&after_phases, &target);
+        let after_ir = crate::emit_llvm_ir(&after_phases, &target).unwrap();
+        assert_eq!(
+            before_manifest.runtime_abi_fingerprint, after_manifest.runtime_abi_fingerprint,
+            "content-addressed literal globals must not be a module ABI change"
+        );
+        let invalidated = after_manifest.invalidated_functions(&before_manifest);
+        // O3 has inlined `changed` into `main`, so its real dependent caller
+        // also changes. `stable` remains independently reusable; the old
+        // ordinal global table incorrectly invalidated all three bodies.
+        assert_eq!(
+            invalidated.len(),
+            2,
+            "only the edit and its inlined caller may miss"
+        );
+        let stable_symbol = format!("@g1.bytes.{}", blake3::hash(b"steady").to_hex());
+        assert!(before_ir.ir.contains(&stable_symbol));
+        assert!(after_ir.ir.contains(&stable_symbol));
+        let partitions =
+            crate::llvm_backend::emit_llvm_native_object_units(&before_phases, &target).unwrap();
+        assert!(
+            !partitions.shared.ir.contains(&stable_symbol),
+            "the shared partition must not inherit source-literal cache dependencies"
+        );
+        assert_eq!(
+            partitions
+                .functions
+                .iter()
+                .filter(|function| function.module.ir.contains(&stable_symbol))
+                .count(),
+            1,
+            "only the source fragment that references a literal receives its definition"
+        );
+    }
+
+    #[test]
+    fn persistent_type_cache_reuses_unchanged_bodies_after_driver_restart() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        // Keep the edited body byte length stable. The two other callable
+        // bodies are eligible for reuse after the fresh driver restores its
+        // serialized state, exactly as a new CLI invocation does.
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        assert!(first_driver.compile_bundle(&before, options).is_ok());
+        let persisted = first_driver.persistent_type_cache().unwrap();
+        assert!(!persisted.is_empty());
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_type_cache(&persisted));
+        let warm = restarted_driver.compile_bundle(&after, options).unwrap();
+        assert_eq!(restarted_driver.stats().reused_bodies, 2);
+
+        let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        assert_eq!(
+            warm.provisional_fingerprint(),
+            cold.provisional_fingerprint()
+        );
+        assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+        assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    }
+
+    #[test]
+    fn persistent_llvm_fragments_reuse_post_inlining_bodies_after_restart() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let target = LlvmOptions::default();
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        let before_phases = first_driver.compile_bundle(&before, options).unwrap();
+        first_driver
+            .emit_llvm_native_object_units(&before_phases, &target)
+            .unwrap();
+        let persisted = first_driver.persistent_llvm_fragment_cache().unwrap();
+        assert!(!persisted.is_empty());
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_llvm_fragment_cache(&persisted));
+        let after_phases = restarted_driver.compile_bundle(&after, options).unwrap();
+        let warm = restarted_driver
+            .emit_llvm_native_object_units(&after_phases, &target)
+            .unwrap();
+        assert_eq!(restarted_driver.stats().reused_llvm_fragments, 2);
+        assert_eq!(restarted_driver.stats().emitted_llvm_fragments, 1);
+        assert_eq!(
+            warm,
+            crate::llvm_backend::emit_llvm_native_object_units(&after_phases, &target).unwrap()
+        );
+    }
+
+    #[test]
+    fn persistent_mir_cache_reuses_raw_and_cleanup_bodies_after_restart() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        assert!(first_driver.compile_bundle(&before, options).is_ok());
+        let persisted = first_driver.persistent_mir_cache().unwrap();
+        assert!(!persisted.is_empty());
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_mir_cache(&persisted));
+        let warm = restarted_driver.compile_bundle(&after, options).unwrap();
+        assert_eq!(restarted_driver.stats().reused_mir_bodies, 2);
+        assert!(
+            restarted_driver.stats().reused_cleanup_mir_bodies > 0,
+            "unchanged bodies should reuse their validated cleanup MIR after restart: {:?}",
+            restarted_driver.stats()
+        );
+        assert!(
+            restarted_driver.stats().reused_optimizer_body_snapshots > 0,
+            "unchanged O3 local-pass slots should replay their exact snapshots"
+        );
+
+        let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+        assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    }
+
+    #[test]
+    fn relowering_an_identical_raw_body_keeps_its_cleanup_snapshot() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        assert!(first_driver.compile_bundle(&bundle, options).is_ok());
+        let persisted = first_driver.persistent_mir_cache().unwrap();
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_mir_cache(&persisted));
+        // Model a cross-process Core identity miss while leaving its raw MIR
+        // unchanged. The lowerer must replace only the Core identity, not
+        // discard the matching ownership/cleanup proof.
+        for cached in restarted_driver.mir_cache.entries.values_mut() {
+            cached.core_debug.push('!');
+        }
+        assert!(restarted_driver.compile_bundle(&bundle, options).is_ok());
+        assert_eq!(restarted_driver.stats().reused_mir_bodies, 0);
+        assert!(
+            restarted_driver.stats().reused_cleanup_mir_bodies > 0,
+            "an identical fresh raw body must retain its persisted cleanup snapshot: {:?}",
+            restarted_driver.stats()
+        );
+    }
+
+    #[test]
+    fn recursive_optimized_mir_groups_persist_and_restore_atomically() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle(
+            "left() -> i64 { 1 } right() -> i64 { 2 } main() -> () { left(); right(); () }",
+        );
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut writer = CompilationDriver::new();
+        assert!(writer.compile_bundle(&bundle, options).is_ok());
+        let schema = writer.mir_cache.active_schema.unwrap();
+        let inputs = writer
+            .mir_cache
+            .entries
+            .iter()
+            .filter(|((entry_schema, _), _)| *entry_schema == schema)
+            .filter_map(|(_, entry)| entry.cleanup.as_ref().map(|(_, body)| body.clone()))
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(inputs.len(), 2);
+        let mut outputs = inputs.clone();
+        for output in &mut outputs {
+            output.phase = mir::MirPhase::Optimized;
+        }
+        writer.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        writer.mir_cache.cache_recursive_optimized(&outputs, 73, 91);
+        writer.persist_persistent_optimized_mir_directory().unwrap();
+        let persisted = writer.persistent_mir_cache().unwrap();
+
+        let mut restarted = CompilationDriver::new();
+        assert!(restarted.restore_persistent_mir_cache(&persisted));
+        restarted.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        let schemas = restarted.mir_cache.schemas.clone();
+        let active = schemas.front().unwrap();
+        restarted
+            .mir_cache
+            .prepare(&active.types, &active.custom_drop_types);
+        assert_eq!(
+            restarted
+                .mir_cache
+                .reuse_recursive_optimized(&inputs, 73, 91),
+            Some(outputs)
+        );
+    }
+
+    #[test]
+    fn emission_prepared_mir_bodies_persist_and_restore_exactly() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle("leaf() -> i64 { 1 } main() -> () { leaf(); () }");
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut writer = CompilationDriver::new();
+        assert!(writer.compile_bundle(&bundle, options).is_ok());
+        let schema = writer.mir_cache.active_schema.unwrap();
+        let mut input = writer
+            .mir_cache
+            .entries
+            .iter()
+            .find(|((entry_schema, _), entry)| *entry_schema == schema && entry.cleanup.is_some())
+            .and_then(|(_, entry)| entry.cleanup.as_ref().map(|(_, body)| body.clone()))
+            .unwrap();
+        input.phase = mir::MirPhase::Optimized;
+        let output = input.clone();
+        writer.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        writer
+            .mir_cache
+            .cache_emission_prepared(&input, &output, 73);
+        writer.mir_cache.verify_emission_prepared(&input);
+        writer.persist_persistent_optimized_mir_directory().unwrap();
+        let persisted = writer.persistent_mir_cache().unwrap();
+
+        let mut restarted = CompilationDriver::new();
+        assert!(restarted.restore_persistent_mir_cache(&persisted));
+        restarted.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        let active = restarted.mir_cache.schemas.front().unwrap().clone();
+        restarted
+            .mir_cache
+            .prepare(&active.types, &active.custom_drop_types);
+        assert_eq!(
+            restarted.mir_cache.reuse_emission_prepared(&input, 73),
+            Some(output)
+        );
+    }
+
+    #[test]
+    fn optimized_mir_cache_reuses_unrelated_o3_body_after_callee_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let before = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } unrelated() -> i64 { 9 } main() -> () { caller(); unrelated(); () }",
+        );
+        let after = invalid_bundle(
+            "leaf() -> i64 { 2 } caller() -> i64 { leaf() } unrelated() -> i64 { 9 } main() -> () { caller(); unrelated(); () }",
+        );
+        let mut driver = CompilationDriver::new();
+        assert!(driver.compile_bundle(&before, options).is_ok());
+        let warm = driver.compile_bundle(&after, options).unwrap();
+        assert!(
+            driver.stats().reused_optimized_mir_bodies > 0,
+            "unrelated O3 bodies should bypass the optimizer: {:?}",
+            driver.stats()
+        );
+        if !cfg!(debug_assertions) {
+            assert!(
+                driver.stats().reused_final_validation_bodies > 0,
+                "unchanged optimized bodies should bypass the repeated final ownership proof: {:?}",
+                driver.stats()
+            );
+        }
+
+        let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
+        assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    }
+
+    #[test]
+    fn structural_trait_db_reuses_after_body_edit_and_invalidates_on_impl_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let before = invalid_bundle(
+            "struct Ticket { value: i64 } impl Use<[0,1]> for Ticket {} leaf() -> i64 { 1 } main() -> () { leaf(); () }",
+        );
+        let body_edit = invalid_bundle(
+            "struct Ticket { value: i64 } impl Use<[0,1]> for Ticket {} leaf() -> i64 { 2 } main() -> () { leaf(); () }",
+        );
+        let impl_edit = invalid_bundle(
+            "struct Ticket { value: i64 } impl Use<[1,1]> for Ticket {} leaf() -> i64 { 2 } main() -> () { leaf(); () }",
+        );
+        let mut driver = CompilationDriver::new();
+
+        assert!(driver.compile_bundle(&before, options).is_ok());
+        let cached = driver.compile_bundle(&body_edit, options).unwrap();
+        assert_eq!(driver.stats().reused_trait_databases, 1);
+        let fresh = crate::compile_bundle_to_phases_with_options(&body_edit, options).unwrap();
+        assert_eq!(
+            cached.provisional_fingerprint(),
+            fresh.provisional_fingerprint()
+        );
+        assert_eq!(cached.core_fingerprint(), fresh.core_fingerprint());
+        assert_eq!(cached.mir_fingerprint(), fresh.mir_fingerprint());
+
+        assert!(driver.compile_bundle(&impl_edit, options).is_ok());
+        assert_eq!(driver.stats().reused_trait_databases, 0);
+    }
+
+    #[test]
+    fn native_object_cache_requires_exact_ir_options_and_toolchain_abi() {
+        let o2 = CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        };
+        let o3 = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle("main() -> () { () }");
+        let changed_bundle = invalid_bundle("main() -> () { let value = (); value }");
+        let target = LlvmOptions::default();
+        let ir = "; exact generated IR";
+        let abi = "clang=example;target=example;opt=-O2";
+        let bytes = vec![0x7f, b'E', b'L', b'F'];
+        let mut driver = CompilationDriver::new();
+
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, ir, abi),
+            None
+        );
+        driver.cache_native_object(&bundle, o2, &target, ir, abi.into(), bytes.clone());
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, ir, abi),
+            Some(bytes),
+            "cache values are artifact bytes, never an output path"
+        );
+        assert_eq!(
+            driver.cached_native_object(&bundle, o3, &target, ir, abi),
+            None,
+            "optimization options are part of the native object ABI"
+        );
+        assert_eq!(
+            driver.cached_native_object(&changed_bundle, o2, &target, ir, abi),
+            None,
+            "source bundle identity is retained alongside exact IR"
+        );
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, "; changed IR", abi),
+            None
+        );
+        assert_eq!(
+            driver.cached_native_object(&bundle, o2, &target, ir, "clang=changed"),
+            None
+        );
+    }
+
+    #[test]
+    fn corrupt_partitioned_native_object_is_evicted_before_reuse() {
+        let mut driver = CompilationDriver::new();
+        let target = LlvmOptions::default();
+        driver.cache_native_partitioned_object(
+            &target,
+            "; function fragment",
+            "clang=example;opt=-O3".into(),
+            vec![0, 1, 2],
+        );
+        assert_eq!(
+            driver.cached_native_partitioned_object(
+                &target,
+                "; function fragment",
+                "clang=example;opt=-O3",
+                true,
+            ),
+            None,
+            "corrupt bytes must be dropped so the caller recompiles the unit"
+        );
+        assert!(driver.native_function_object_cache.is_empty());
     }
 }

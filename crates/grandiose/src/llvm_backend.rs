@@ -4,15 +4,20 @@
 //! core. Unsupported ownership-heavy operations are diagnosed instead of being
 //! assigned an accidental ABI.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use grandiose_vm::{Constant, Primitive, Type, TypeId};
 
 use crate::{
     CompiledPhases,
+    compiler_core::stable_fingerprint,
     compiler_mir::{self as mir, InstructionKind, Terminator},
     compiler_traits::HostImportRole,
     diagnostic::Diagnostic,
+    llvm_runtime_abi::{pointer_width_for_target, runtime_fault_declaration},
 };
 
 const RUNTIME_FAULT_ARITHMETIC_OVERFLOW: u32 = 1;
@@ -28,7 +33,752 @@ const RUNTIME_FAULT_ALLOCATION_OVERFLOW: u32 = 10;
 const RUNTIME_FAULT_ALLOCATION_LIMIT: u32 = 11;
 const RUNTIME_FAULT_UNHANDLED_EFFECT: u32 = 12;
 const RUNTIME_FAULT_EXPLICIT_ABORT: u32 = 13;
-const NATIVE_PRIMITIVE_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+/// Default maximum size of one native-runtime bytes or array allocation.
+///
+/// Ordinary native programs retain this conservative ceiling. The self-host
+/// compiler may opt into a larger, still bounded ceiling through `LlvmOptions`
+/// because its compiler-internal tables exceed this per-allocation size.
+pub const DEFAULT_NATIVE_ALLOCATION_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// Bump this whenever LLVM fragment generation changes independently of MIR.
+/// Cached fragments with another schema are never reusable.
+pub const LLVM_INCREMENTAL_MANIFEST_SCHEMA: u32 = 5;
+const LLVM_SPANFUL_INCREMENTAL_MANIFEST_SCHEMA: u32 = 4;
+
+// Schema 3 assigned byte and explicit-abort globals by their position in a
+// module-wide sorted table. Retain its exact table identity so old fragments
+// remain readable while the complete table still matches. They are never
+// promoted to the stable-name schema.
+const LLVM_LEGACY_INCREMENTAL_MANIFEST_SCHEMA: u32 = 3;
+
+/// Bump whenever the boundary between the shared native unit and the
+/// per-function units changes. Native object caches must include this along
+/// with the compiler/toolchain ABI; an LLVM fragment fingerprint alone cannot
+/// authorize reuse across a changed partition format.
+pub const LLVM_NATIVE_OBJECT_PARTITION_SCHEMA: u32 = 1;
+
+/// The ABI-facing identity of a direct callee used by one emitted fragment.
+/// A callee body change alone deliberately does not invalidate its callers.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LlvmCalleeDependency {
+    pub declaration: u32,
+    pub interface_fingerprint: u64,
+}
+
+/// Cache key for one independently emitted LLVM function fragment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmFunctionManifest {
+    pub declaration: u32,
+    pub interface_fingerprint: u64,
+    pub body_fingerprint: u64,
+    pub callee_interfaces: Vec<LlvmCalleeDependency>,
+    /// Includes the selected target/runtime ABI and every interface dependency.
+    pub fragment_fingerprint: u64,
+    /// Schema-4 identity that still includes diagnostic spans and ownership
+    /// provenance. It exists solely to migrate exact older disk fragments
+    /// into the span-independent schema-5 cache.
+    spanful_fragment_fingerprint: u64,
+    /// Schema-3 identity used only for a safe, read-only cache migration.
+    legacy_fragment_fingerprint: u64,
+}
+
+/// Deterministic cache/invalidation manifest for function-granular LLVM IR.
+///
+/// This intentionally describes reusable fragments rather than caching the
+/// current monolithic IR string. A future cache can retain a matching function
+/// body while rebuilding declarations, runtime support, globals, and the entry
+/// wrapper for every module invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmIncrementalManifest {
+    pub schema: u32,
+    pub target_triple: String,
+    pub target_data_layout: Option<String>,
+    pub emit_entry_wrapper: bool,
+    /// Embedded per-allocation runtime ceiling.  This changes runtime helper
+    /// IR, so fragment reuse across limits would produce an incoherent module.
+    pub native_allocation_limit: u64,
+    /// Changes to the global type/runtime ABI invalidate every fragment.
+    pub runtime_abi_fingerprint: u64,
+    /// Exact schema-3 runtime identity, including its positional literal
+    /// tables. This is retained solely to locate a schema-3 fragment whose
+    /// complete positional table is still exact during the read-only cache
+    /// migration.
+    legacy_runtime_abi_fingerprint: u64,
+    pub functions: Vec<LlvmFunctionManifest>,
+}
+
+/// Reusable text and side metadata for one independently emitted function.
+///
+/// LLVM intrinsic declarations are emitted at module scope.  Consequently a
+/// fragment is not valid text by itself unless its metadata is replayed into
+/// the enclosing module before those declarations are written.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmFunctionFragment {
+    pub fingerprint: u64,
+    pub emitted_text: String,
+    pub overflow_widths: BTreeSet<(u16, &'static str)>,
+    snapshot_capture_fix_types: BTreeSet<TypeId>,
+}
+
+/// Global module properties that a function fragment cannot outlive. Keeping
+/// these in the cache key creates a new exact namespace when the runtime ABI
+/// or target changes instead of overwriting every fragment from the previous
+/// namespace.
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+struct LlvmFragmentEnvironment {
+    schema: u32,
+    target_triple: String,
+    target_data_layout: Option<String>,
+    emit_entry_wrapper: bool,
+    native_allocation_limit: u64,
+    runtime_abi_fingerprint: u64,
+}
+
+impl From<&LlvmIncrementalManifest> for LlvmFragmentEnvironment {
+    fn from(manifest: &LlvmIncrementalManifest) -> Self {
+        Self {
+            schema: manifest.schema,
+            target_triple: manifest.target_triple.clone(),
+            target_data_layout: manifest.target_data_layout.clone(),
+            emit_entry_wrapper: manifest.emit_entry_wrapper,
+            native_allocation_limit: manifest.native_allocation_limit,
+            runtime_abi_fingerprint: manifest.runtime_abi_fingerprint,
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+struct LlvmFragmentKey {
+    environment: LlvmFragmentEnvironment,
+    declaration: u32,
+    fingerprint: u64,
+}
+
+/// Bounded-by-owner cache for independently emitted LLVM functions.  The
+/// owner chooses its lifetime (the persistent compilation driver retains one
+/// across `--serve` requests); this type deliberately owns no filesystem
+/// state and never serializes unchecked IR.
+#[derive(Clone, Debug, Default)]
+pub struct LlvmFragmentCache {
+    fragments: BTreeMap<LlvmFragmentKey, LlvmFunctionFragment>,
+    /// Compatibility fragments live only for the current emission. They come
+    /// from schema 3 and are intentionally never persisted under a schema-4
+    /// key.
+    active_legacy_fragments: BTreeMap<LlvmFragmentKey, LlvmFunctionFragment>,
+    /// The durable CLI route assigns this private directory. Entries are
+    /// addressed by their complete serialized key and loaded only on demand;
+    /// no compiler request deserializes a monolithic fragment blob.
+    disk_directory: Option<PathBuf>,
+    reused_fragments: usize,
+    emitted_fragments: usize,
+}
+
+/// Disk representation deliberately owns overflow-operation names.  The live
+/// cache keeps static names so generated LLVM declaration replay stays free of
+/// allocations; decoding validates those names back into that closed set.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentLlvmFragmentCache {
+    schema: u32,
+    fragments: Vec<PersistentLlvmFragment>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentLlvmFragment {
+    key: LlvmFragmentKey,
+    emitted_text: String,
+    overflow_widths: Vec<(u16, String)>,
+    snapshot_capture_fix_types: Vec<TypeId>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentLlvmFragmentEntry {
+    schema: u32,
+    fragment: PersistentLlvmFragment,
+}
+
+const PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA: u32 = 1;
+const PERSISTENT_LLVM_FRAGMENT_ENTRY_SCHEMA: u32 = 1;
+
+fn persistent_overflow_operation(operation: &str) -> Option<&'static str> {
+    match operation {
+        "sadd" => Some("sadd"),
+        "uadd" => Some("uadd"),
+        "ssub" => Some("ssub"),
+        "usub" => Some("usub"),
+        "smul" => Some("smul"),
+        "umul" => Some("umul"),
+        _ => None,
+    }
+}
+
+fn persistent_fragment(
+    key: &LlvmFragmentKey,
+    fragment: &LlvmFunctionFragment,
+) -> PersistentLlvmFragment {
+    PersistentLlvmFragment {
+        key: key.clone(),
+        emitted_text: fragment.emitted_text.clone(),
+        overflow_widths: fragment
+            .overflow_widths
+            .iter()
+            .map(|(width, operation)| (*width, (*operation).to_owned()))
+            .collect(),
+        snapshot_capture_fix_types: fragment
+            .snapshot_capture_fix_types
+            .iter()
+            .copied()
+            .collect(),
+    }
+}
+
+fn live_fragment(fragment: PersistentLlvmFragment) -> Option<LlvmFunctionFragment> {
+    let overflow_widths = fragment
+        .overflow_widths
+        .into_iter()
+        .map(|(width, operation)| {
+            persistent_overflow_operation(&operation).map(|operation| (width, operation))
+        })
+        .collect::<Option<BTreeSet<_>>>()?;
+    Some(LlvmFunctionFragment {
+        fingerprint: fragment.key.fingerprint,
+        emitted_text: fragment.emitted_text,
+        overflow_widths,
+        snapshot_capture_fix_types: fragment.snapshot_capture_fix_types.into_iter().collect(),
+    })
+}
+
+fn disk_fragment_path(directory: &Path, key: &LlvmFragmentKey) -> Result<PathBuf, String> {
+    let key = bincode::serialize(key)
+        .map_err(|error| format!("could not encode LLVM fragment cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&key).to_hex())))
+}
+
+impl LlvmFragmentCache {
+    pub(crate) fn configure_persistent_directory(&mut self, directory: PathBuf) {
+        self.disk_directory = Some(directory);
+    }
+
+    /// Publish only individual fragments that this process has in memory.
+    /// Entries are content-addressed by their complete cache key, so a body
+    /// edit leaves every other on-disk entry intact.
+    pub(crate) fn persist_to_directory(&self) -> Result<(), String> {
+        let Some(directory) = &self.disk_directory else {
+            return Ok(());
+        };
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "could not create LLVM fragment directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        for (key, fragment) in &self.fragments {
+            let path = disk_fragment_path(directory, key)?;
+            if path.exists() {
+                continue;
+            }
+            let bytes = bincode::serialize(&PersistentLlvmFragmentEntry {
+                schema: PERSISTENT_LLVM_FRAGMENT_ENTRY_SCHEMA,
+                fragment: persistent_fragment(key, fragment),
+            })
+            .map_err(|error| format!("could not encode LLVM fragment: {error}"))?;
+            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+            std::fs::write(&temporary, bytes).map_err(|error| {
+                format!(
+                    "could not write LLVM fragment {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                let _ = std::fs::remove_file(&temporary);
+                if !path.exists() {
+                    return Err(format!(
+                        "could not publish LLVM fragment {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn reused_fragments(&self) -> usize {
+        self.reused_fragments
+    }
+
+    /// Number of LLVM-reachable function fragments emitted rather than reused
+    /// by the most recent cache-backed module emission.
+    pub fn emitted_fragments(&self) -> usize {
+        self.emitted_fragments
+    }
+
+    fn key(
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+        fingerprint: u64,
+    ) -> LlvmFragmentKey {
+        LlvmFragmentKey {
+            environment: LlvmFragmentEnvironment::from(manifest),
+            declaration,
+            fingerprint,
+        }
+    }
+
+    fn legacy_key(
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+        fingerprint: u64,
+    ) -> LlvmFragmentKey {
+        LlvmFragmentKey {
+            environment: LlvmFragmentEnvironment {
+                schema: LLVM_LEGACY_INCREMENTAL_MANIFEST_SCHEMA,
+                target_triple: manifest.target_triple.clone(),
+                target_data_layout: manifest.target_data_layout.clone(),
+                emit_entry_wrapper: manifest.emit_entry_wrapper,
+                native_allocation_limit: manifest.native_allocation_limit,
+                runtime_abi_fingerprint: manifest.legacy_runtime_abi_fingerprint,
+            },
+            declaration,
+            fingerprint,
+        }
+    }
+
+    /// Schema-4 keys used the current content-addressed literal/runtime
+    /// namespace but accidentally folded source spans into every body key.
+    /// They are read-only migration candidates: an exact old entry is copied
+    /// into the current schema after it is selected.
+    fn spanful_key(
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+        fingerprint: u64,
+    ) -> LlvmFragmentKey {
+        LlvmFragmentKey {
+            environment: LlvmFragmentEnvironment {
+                schema: LLVM_SPANFUL_INCREMENTAL_MANIFEST_SCHEMA,
+                target_triple: manifest.target_triple.clone(),
+                target_data_layout: manifest.target_data_layout.clone(),
+                emit_entry_wrapper: manifest.emit_entry_wrapper,
+                native_allocation_limit: manifest.native_allocation_limit,
+                runtime_abi_fingerprint: manifest.runtime_abi_fingerprint,
+            },
+            declaration,
+            fingerprint,
+        }
+    }
+
+    fn manifest_function(
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+    ) -> Option<&LlvmFunctionManifest> {
+        manifest
+            .functions
+            .iter()
+            .find(|function| function.declaration == declaration)
+    }
+
+    fn begin_emission(&mut self) {
+        self.active_legacy_fragments.clear();
+        self.reused_fragments = 0;
+        self.emitted_fragments = 0;
+    }
+
+    /// Whether this module has a schema-3 fragment whose exact positional
+    /// literal table still matches. The emitter then supplies the old table's
+    /// globals alongside stable content-addressed names for this one
+    /// compatibility emission.
+    fn uses_legacy_fragments(
+        &self,
+        manifest: &LlvmIncrementalManifest,
+        declarations: impl IntoIterator<Item = u32>,
+    ) -> bool {
+        declarations.into_iter().any(|declaration| {
+            let Some(function) = Self::manifest_function(manifest, declaration) else {
+                return false;
+            };
+            let current = Self::key(manifest, declaration, function.fragment_fingerprint);
+            !self.fragments.contains_key(&current)
+                && self.fragments.contains_key(&Self::legacy_key(
+                    manifest,
+                    declaration,
+                    function.legacy_fragment_fingerprint,
+                ))
+        })
+    }
+
+    /// Find a schema-4 fragment, or activate an exact schema-3 fragment for
+    /// this emission only. `legacy_key` includes the complete old literal
+    /// table, so a schema-3 fragment is considered only when every positional
+    /// global it may reference has its original value. Activated legacy text
+    /// stays out of `fragments` and therefore cannot become a reusable
+    /// schema-4 cache entry.
+    fn activate_fragment(
+        &mut self,
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+    ) -> Option<LlvmFunctionFragment> {
+        let function = Self::manifest_function(manifest, declaration)?;
+        let current = Self::key(manifest, declaration, function.fragment_fingerprint);
+        if let Some(fragment) = self.fragments.get(&current) {
+            return Some(fragment.clone());
+        }
+        if let Some(fragment) = self.load_disk_fragment(&current) {
+            self.fragments.insert(current.clone(), fragment.clone());
+            return Some(fragment);
+        }
+        let spanful =
+            Self::spanful_key(manifest, declaration, function.spanful_fragment_fingerprint);
+        let spanful_fragment = self
+            .fragments
+            .get(&spanful)
+            .cloned()
+            .or_else(|| self.load_disk_fragment(&spanful));
+        if let Some(fragment) = spanful_fragment {
+            // The schema-4 key includes every current span and MIR fact, so
+            // this is an exact old body. Publish a schema-5 alias after the
+            // caller's normal successful emission path without recompiling
+            // the unchanged LLVM fragment.
+            self.fragments.insert(current.clone(), fragment.clone());
+            return Some(fragment);
+        }
+        if let Some(fragment) = self.active_legacy_fragments.get(&current) {
+            return Some(fragment.clone());
+        }
+        let legacy = Self::legacy_key(manifest, declaration, function.legacy_fragment_fingerprint);
+        let fragment = self.fragments.get(&legacy)?.clone();
+        self.active_legacy_fragments
+            .insert(current, fragment.clone());
+        Some(fragment)
+    }
+
+    fn load_disk_fragment(&self, key: &LlvmFragmentKey) -> Option<LlvmFunctionFragment> {
+        let directory = self.disk_directory.as_ref()?;
+        let path = disk_fragment_path(directory, key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentLlvmFragmentEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_LLVM_FRAGMENT_ENTRY_SCHEMA || entry.fragment.key != *key {
+            return None;
+        }
+        live_fragment(entry.fragment)
+    }
+
+    fn fragment(
+        &self,
+        manifest: &LlvmIncrementalManifest,
+        declaration: u32,
+    ) -> Option<&LlvmFunctionFragment> {
+        let fingerprint = Self::manifest_function(manifest, declaration)?.fragment_fingerprint;
+        let key = Self::key(manifest, declaration, fingerprint);
+        self.fragments
+            .get(&key)
+            .or_else(|| self.active_legacy_fragments.get(&key))
+    }
+
+    /// Serialize only independently reusable function fragments. The caller
+    /// validates and atomically publishes the bytes; malformed payloads are
+    /// cache misses rather than compiler failures.
+    pub(crate) fn encode_persistent(&self) -> Result<Vec<u8>, bincode::Error> {
+        let fragments = self
+            .fragments
+            .iter()
+            .map(|(key, fragment)| persistent_fragment(key, fragment))
+            .collect();
+        bincode::serialize(&PersistentLlvmFragmentCache {
+            schema: PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA,
+            fragments,
+        })
+    }
+
+    pub(crate) fn decode_persistent(bytes: &[u8]) -> Option<Self> {
+        let persisted = bincode::deserialize::<PersistentLlvmFragmentCache>(bytes).ok()?;
+        if persisted.schema != PERSISTENT_LLVM_FRAGMENT_CACHE_SCHEMA {
+            return None;
+        }
+        let mut cache = Self::default();
+        for fragment in persisted.fragments {
+            let key = fragment.key.clone();
+            let live = live_fragment(fragment)?;
+            cache.fragments.entry(key).or_insert(live);
+        }
+        Some(cache)
+    }
+
+    /// Merge another disk snapshot without overwriting fragments emitted by
+    /// this process. This prevents concurrent warm compiles from discarding
+    /// independent caller/callee fragments when they publish in either order.
+    pub(crate) fn merge_persistent(&mut self, bytes: &[u8]) -> bool {
+        let Some(other) = Self::decode_persistent(bytes) else {
+            return false;
+        };
+        for (key, fragment) in other.fragments {
+            self.fragments.entry(key).or_insert(fragment);
+        }
+        true
+    }
+}
+
+impl LlvmIncrementalManifest {
+    /// Functions whose cached fragment cannot be reused from `previous`.
+    /// An option or runtime ABI change conservatively invalidates all bodies.
+    pub fn invalidated_functions(&self, previous: &Self) -> BTreeSet<u32> {
+        if self.schema != previous.schema
+            || self.target_triple != previous.target_triple
+            || self.target_data_layout != previous.target_data_layout
+            || self.emit_entry_wrapper != previous.emit_entry_wrapper
+            || self.native_allocation_limit != previous.native_allocation_limit
+            || self.runtime_abi_fingerprint != previous.runtime_abi_fingerprint
+        {
+            return self
+                .functions
+                .iter()
+                .map(|function| function.declaration)
+                .collect();
+        }
+        let previous_functions = previous
+            .functions
+            .iter()
+            .map(|function| (function.declaration, function))
+            .collect::<BTreeMap<_, _>>();
+        let changed_interfaces = self
+            .functions
+            .iter()
+            .filter_map(|function| {
+                (previous_functions
+                    .get(&function.declaration)
+                    .map(|previous| previous.interface_fingerprint)
+                    != Some(function.interface_fingerprint))
+                .then_some(function.declaration)
+            })
+            .collect::<BTreeSet<_>>();
+        let mut invalidated = self
+            .functions
+            .iter()
+            .filter_map(|function| {
+                (previous_functions
+                    .get(&function.declaration)
+                    .map(|previous| previous.fragment_fingerprint)
+                    != Some(function.fragment_fingerprint))
+                .then_some(function.declaration)
+            })
+            .collect::<BTreeSet<_>>();
+        // An independently emitted fragment calls its direct callee by the
+        // callee's ABI.  Keep that edge explicit instead of relying solely on
+        // the aggregate fragment fingerprint above: it documents the only
+        // caller propagation needed for separate native objects and remains
+        // fail-closed if the fingerprint representation evolves. A body-only
+        // callee edit intentionally does not enter `changed_interfaces`, so
+        // callers can retain their objects and participate in the final Wild
+        // relink unchanged.
+        invalidated.extend(self.functions.iter().filter_map(|function| {
+            function
+                .callee_interfaces
+                .iter()
+                .any(|callee| changed_interfaces.contains(&callee.declaration))
+                .then_some(function.declaration)
+        }));
+        invalidated
+    }
+}
+
+fn fingerprint_text(text: impl std::fmt::Display) -> u64 {
+    stable_fingerprint(text.to_string().as_bytes())
+}
+
+/// A literal's content is its address identity. Unlike a module-wide ordinal,
+/// this name remains valid when another function adds, removes, or edits a
+/// different literal.
+fn literal_global_name(kind: &str, bytes: &[u8]) -> String {
+    format!("@g1.{kind}.{}", blake3::hash(bytes).to_hex())
+}
+
+fn function_interface_fingerprint(function: &mir::Function) -> u64 {
+    fingerprint_text(format!(
+        "decl={} params={:?} result={} receiver={:?}:{} no_return={} outward={:?}",
+        function.declaration,
+        function.params,
+        function.result,
+        function.receiver_mode,
+        function.receiver_type,
+        function.no_return,
+        function.outward_protocols,
+    ))
+}
+
+fn function_body_fingerprint(function: &mir::Function) -> u64 {
+    // LLVM receives MIR instruction kinds, terminators, register layouts and
+    // return cleanup; it never reads source spans or `PlaceFlow` provenance.
+    // Keeping either in this key made a same-width diagnostic edit invalidate
+    // every native partition in a distributed source bundle.
+    let blocks = function
+        .blocks
+        .iter()
+        .map(|block| {
+            (
+                block.id,
+                &block.params,
+                block
+                    .statements
+                    .iter()
+                    .map(|statement| &statement.kind)
+                    .collect::<Vec<_>>(),
+                &block.terminator,
+            )
+        })
+        .collect::<Vec<_>>();
+    fingerprint_text(format!(
+        "regs={:?} entry={} blocks={blocks:?} phase={:?} features={:?} cleanup={:?} invalid={}",
+        function.register_types,
+        function.entry,
+        function.phase,
+        function.features,
+        function.return_cleanup,
+        function.invalid_analyses,
+    ))
+}
+
+/// Exact schema-4 body identity retained only for non-destructive disk-cache
+/// migration. New entries must use [`function_body_fingerprint`] above.
+fn spanful_function_body_fingerprint(function: &mir::Function) -> u64 {
+    fingerprint_text(format!(
+        "regs={:?} entry={} blocks={:?} phase={:?} features={:?} cleanup={:?} flow={:?} invalid={}",
+        function.register_types,
+        function.entry,
+        function.blocks,
+        function.phase,
+        function.features,
+        function.return_cleanup,
+        function.flow,
+        function.invalid_analyses,
+    ))
+}
+
+/// Build cache keys for independently emitted LLVM function fragments.
+pub fn llvm_incremental_manifest(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+) -> LlvmIncrementalManifest {
+    let interfaces = phases
+        .mir
+        .functions
+        .iter()
+        .map(|function| {
+            (
+                function.declaration,
+                function_interface_fingerprint(function),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    // LLVM layout/runtime helpers inspect the artifact type table globally.
+    // Treating it as a module ABI input keeps fragment reuse fail-closed until
+    // type-level dependency slicing is available. Literal globals use their
+    // content hash as their symbol name, so a new literal cannot shift an
+    // unchanged fragment's referenced address.
+    let mut byte_literals = BTreeSet::new();
+    let mut fault_literals = BTreeSet::new();
+    for function in &phases.mir.functions {
+        for block in &function.blocks {
+            if let Terminator::Abort {
+                message: Some(message),
+            } = &block.terminator
+            {
+                fault_literals.insert(message.as_bytes().to_vec());
+            }
+            for instruction in &block.statements {
+                if let InstructionKind::Const { value, .. } = &instruction.kind {
+                    match value {
+                        Constant::Text(value) => {
+                            byte_literals.insert(value.as_bytes().to_vec());
+                        }
+                        Constant::Bytes(value) => {
+                            byte_literals.insert(value.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let runtime_abi_fingerprint = fingerprint_text(format!(
+        "types={:?};imports={:?};protocols={:?};handlers={:?}",
+        phases.artifact.types,
+        phases.artifact.imports,
+        phases.artifact.protocols,
+        phases.artifact.handler_defs,
+    ));
+    // Preserve the precise old identity only to read a schema-3 fragment when
+    // its aggregate positional literal table is still identical. This keeps
+    // the existing disk cache usable without allowing it to cross the old
+    // table-index invalidation boundary.
+    let legacy_runtime_abi_fingerprint = fingerprint_text(format!(
+        "types={:?};imports={:?};protocols={:?};handlers={:?};bytes={byte_literals:?};faults={fault_literals:?}",
+        phases.artifact.types,
+        phases.artifact.imports,
+        phases.artifact.protocols,
+        phases.artifact.handler_defs,
+    ));
+    let functions = phases
+        .mir
+        .functions
+        .iter()
+        .map(|function| {
+            let mut callees = function
+                .blocks
+                .iter()
+                .filter_map(|block| known_direct_call_target(&block.terminator, function.declaration))
+                .filter_map(|declaration| {
+                    interfaces.get(&declaration).copied().map(|interface_fingerprint| {
+                        LlvmCalleeDependency {
+                            declaration,
+                            interface_fingerprint,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            callees.sort();
+            callees.dedup();
+            let interface_fingerprint = interfaces[&function.declaration];
+            let body_fingerprint = function_body_fingerprint(function);
+            let spanful_body_fingerprint = spanful_function_body_fingerprint(function);
+            let fragment_fingerprint = fingerprint_text(format!(
+                "schema={LLVM_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={runtime_abi_fingerprint};interface={interface_fingerprint};body={body_fingerprint};callees={callees:?}",
+                options.target_triple,
+                options.target_data_layout,
+                options.emit_entry_wrapper,
+                options.native_allocation_limit,
+            ));
+            let legacy_fragment_fingerprint = fingerprint_text(format!(
+                "schema={LLVM_LEGACY_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={legacy_runtime_abi_fingerprint};interface={interface_fingerprint};body={spanful_body_fingerprint};callees={callees:?}",
+                options.target_triple,
+                options.target_data_layout,
+                options.emit_entry_wrapper,
+                options.native_allocation_limit,
+            ));
+            let spanful_fragment_fingerprint = fingerprint_text(format!(
+                "schema={LLVM_SPANFUL_INCREMENTAL_MANIFEST_SCHEMA};target={:?};layout={:?};entry={};allocation-limit={};runtime={runtime_abi_fingerprint};interface={interface_fingerprint};body={spanful_body_fingerprint};callees={callees:?}",
+                options.target_triple,
+                options.target_data_layout,
+                options.emit_entry_wrapper,
+                options.native_allocation_limit,
+            ));
+            LlvmFunctionManifest {
+                declaration: function.declaration,
+                interface_fingerprint,
+                body_fingerprint,
+                callee_interfaces: callees,
+                fragment_fingerprint,
+                spanful_fragment_fingerprint,
+                legacy_fragment_fingerprint,
+            }
+        })
+        .collect();
+    LlvmIncrementalManifest {
+        schema: LLVM_INCREMENTAL_MANIFEST_SCHEMA,
+        target_triple: options.target_triple.clone(),
+        target_data_layout: options.target_data_layout.clone(),
+        emit_entry_wrapper: options.emit_entry_wrapper,
+        native_allocation_limit: options.native_allocation_limit,
+        runtime_abi_fingerprint,
+        legacy_runtime_abi_fingerprint,
+        functions,
+    }
+}
 
 fn effect_frame_tail_target(terminator: &Terminator) -> Option<u32> {
     match terminator {
@@ -67,11 +817,42 @@ pub struct LlvmModule {
     pub target_triple: String,
 }
 
+/// LLVM translation units for the function-granular native path.
+///
+/// `shared` owns the generated runtime and entry wrapper. Each element of
+/// `functions` defines exactly one source-function fragment and declares the
+/// shared runtime plus every other source function. This deliberately keeps
+/// the existing monolithic module emitter untouched: callers select this
+/// representation only when they can compile the units separately and make a
+/// fresh Wild link from all of their objects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmNativeObjectUnits {
+    /// Identity of the shared runtime/entry translation unit. A native object
+    /// cache must rebuild this unit whenever the value changes, even when one
+    /// or more source-function fragments remain reusable.
+    pub shared_fingerprint: u64,
+    pub shared: LlvmModule,
+    pub functions: Vec<LlvmNativeFunctionUnit>,
+}
+
+/// One independently compilable source-function LLVM unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LlvmNativeFunctionUnit {
+    pub declaration: u32,
+    pub fragment_fingerprint: u64,
+    /// Schema-4 fragment identity for a read-only native-object cache
+    /// migration. The current object key is exact IR, not this cache key.
+    pub spanful_fragment_fingerprint: u64,
+    pub module: LlvmModule,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmOptions {
     pub target_triple: String,
     pub target_data_layout: Option<String>,
     pub emit_entry_wrapper: bool,
+    /// Embedded maximum size of one bytes/array native-runtime allocation.
+    pub native_allocation_limit: u64,
 }
 
 impl Default for LlvmOptions {
@@ -81,6 +862,7 @@ impl Default for LlvmOptions {
             target_data_layout: default_target_data_layout(&target_triple).map(str::to_owned),
             target_triple,
             emit_entry_wrapper: true,
+            native_allocation_limit: DEFAULT_NATIVE_ALLOCATION_LIMIT,
         }
     }
 }
@@ -120,14 +902,384 @@ pub fn emit_llvm_ir(
     Emitter::new(phases, options).emit()
 }
 
+/// Emit a complete module while reusing only manifest-valid function bodies.
+/// Module globals, runtime support, effects callbacks, and the entry wrapper
+/// are always regenerated from the current phases.
+pub fn emit_llvm_ir_with_fragment_cache(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+    cache: &mut LlvmFragmentCache,
+) -> Result<LlvmModule, Vec<Diagnostic>> {
+    Emitter::new(phases, options).emit_with_fragment_cache(cache)
+}
+
+/// Partition one emitted LLVM module into a shared runtime/entry unit and
+/// independently compilable source-function units.
+///
+/// The generated function IR is already a manifest-keyed unit.  This adapter
+/// gives it the declarations it previously obtained implicitly from the
+/// monolithic module, while moving runtime definitions to `shared`.  Native
+/// callers may compile each resulting unit at `-O3`, cache only function
+/// objects by `fragment_fingerprint`, and still invoke Wild for every final
+/// executable link.  The monolithic `emit_llvm_ir` route remains the baseline
+/// and retains cross-function LLVM optimization.
+pub fn emit_llvm_native_object_units(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+) -> Result<LlvmNativeObjectUnits, Vec<Diagnostic>> {
+    let mut fragments = LlvmFragmentCache::default();
+    emit_llvm_native_object_units_with_fragment_cache(phases, options, &mut fragments)
+}
+
+/// Emit partitioned native units while retaining independently emitted source
+/// fragments in a caller-owned cache.  The persistent compiler service uses
+/// this form so a body-only edit does not re-emit every unchanged function
+/// merely to reconstruct the partitioned object inputs.
+pub fn emit_llvm_native_object_units_with_fragment_cache(
+    phases: &CompiledPhases,
+    options: &LlvmOptions,
+    fragments: &mut LlvmFragmentCache,
+) -> Result<LlvmNativeObjectUnits, Vec<Diagnostic>> {
+    // Do not first assemble a monolithic module and then search it once per
+    // source body.  The self-host compiler's IR is gigabytes large, making
+    // that adapter both memory hungry and quadratic in the number of source
+    // functions.  The emitter already has independent body fragments; keep
+    // those out of the shared stream from the outset.
+    let LlvmModule {
+        ir: mut shared_ir,
+        target_triple,
+    } = Emitter::new(phases, options).emit_partitioned_with_fragment_cache(fragments)?;
+    let manifest = llvm_incremental_manifest(phases, options);
+    // Fragment text remains owned by the cache until its corresponding final
+    // unit is materialized below.  Avoiding this intermediate clone prevents
+    // a transient extra copy of every source body.
+    let source_functions = manifest
+        .functions
+        .iter()
+        .filter(|function| {
+            fragments
+                .fragment(&manifest, function.declaration)
+                .is_some()
+        })
+        .map(|function| {
+            (
+                function.declaration,
+                function.fragment_fingerprint,
+                function.spanful_fragment_fingerprint,
+            )
+        })
+        .collect::<Vec<_>>();
+    // Literal globals are private to the source fragments that reference
+    // them. Keeping all of them in every partition's prelude made one new
+    // diagnostic string alter every function object's exact IR cache key.
+    // The shared unit has no source body, so it needs none of these
+    // definitions either.
+    let literal_definitions = llvm_literal_global_definitions(&shared_ir);
+    shared_ir = llvm_without_literal_global_definitions(shared_ir);
+    // Runtime helpers were internal in the monolith. The shared unit now owns
+    // them, so the function units must resolve them through external symbols.
+    shared_ir = llvm_externalize_internal_definitions(&shared_ir);
+    let source_declarations = source_functions
+        .iter()
+        .map(|(declaration, _, _)| {
+            (
+                format!("@g1_f{declaration}"),
+                llvm_fragment_source_declaration(
+                    &fragments
+                        .fragment(&manifest, *declaration)
+                        .expect("current canonical emission produced every function fragment")
+                        .emitted_text,
+                    *declaration,
+                )
+                .expect("source fragment must define its source-function symbol"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    // Effect/closure lowering emits helper definitions beside their owning
+    // source body.  A different source body can reference one while cloning
+    // an effect snapshot, so partitioned compilation needs the helper's
+    // prototype just as it needs a direct source-function prototype.  Keep a
+    // symbol map rather than appending every helper declaration to every
+    // partition: an unrelated helper must not perturb a cached object.
+    let helper_declarations = source_functions
+        .iter()
+        .flat_map(|(declaration, _, _)| {
+            let fragment = &fragments
+                .fragment(&manifest, *declaration)
+                .expect("current canonical emission produced every function fragment")
+                .emitted_text;
+            llvm_fragment_helper_declarations(fragment, *declaration)
+        })
+        .collect::<BTreeMap<_, _>>();
+    // Function units need runtime/global declarations and only their direct
+    // source-function dependencies.  Because the shared stream was emitted
+    // without source bodies, it has no source prototypes to strip one at a
+    // time.  This avoids another quadratic scan of the large self-host IR.
+    let runtime_prelude = llvm_declarations_only(&shared_ir);
+    for declaration in source_declarations.values() {
+        shared_ir.push_str(declaration);
+    }
+    let functions = source_functions
+        .into_iter()
+        .map(
+            |(declaration, fragment_fingerprint, spanful_fragment_fingerprint)| {
+                let text = &fragments
+                    .fragment(&manifest, declaration)
+                    .expect("current canonical emission produced every function fragment")
+                    .emitted_text;
+                // LLVM permits recursive and forward references inside a
+                // definition, so only direct external source calls need their
+                // prototypes restored to this unit's runtime prelude.
+                let prelude = llvm_fragment_source_dependency_prelude(
+                    &runtime_prelude,
+                    &text,
+                    declaration,
+                    &source_declarations,
+                    &helper_declarations,
+                    &literal_definitions,
+                );
+                LlvmNativeFunctionUnit {
+                    declaration,
+                    fragment_fingerprint,
+                    spanful_fragment_fingerprint,
+                    module: LlvmModule {
+                        ir: format!(
+                            "{prelude}\n{}",
+                            llvm_externalize_internal_definitions(&text)
+                        ),
+                        target_triple: target_triple.clone(),
+                    },
+                }
+            },
+        )
+        .collect();
+    Ok(LlvmNativeObjectUnits {
+        shared_fingerprint: fingerprint_text(&shared_ir),
+        shared: LlvmModule {
+            ir: shared_ir,
+            target_triple,
+        },
+        functions,
+    })
+}
+
+/// Extract only this source function's declaration from a fragment. Effect
+/// functions may emit extra internal helper definitions in the same fragment;
+/// those helpers are shared-runtime symbols, not sibling source functions.
+fn llvm_fragment_source_declaration(fragment: &str, declaration: u32) -> Option<String> {
+    let symbol = format!("@g1_f{declaration}(");
+    fragment
+        .lines()
+        .find(|line| line.starts_with("define ") && line.contains(&symbol))
+        .map(llvm_definition_declaration)
+}
+
+/// Drop source-function declarations that this independently emitted body does
+/// not reference. Runtime/global declarations remain in every unit. This
+/// keeps a sibling ABI edit from changing an unrelated unit's complete IR,
+/// while the exact emitted IR remains the final cache-key authority.
+fn llvm_fragment_source_dependency_prelude(
+    runtime_prelude: &str,
+    body: &str,
+    self_declaration: u32,
+    source_declarations: &BTreeMap<String, String>,
+    helper_declarations: &BTreeMap<String, String>,
+    literal_definitions: &BTreeMap<String, String>,
+) -> String {
+    let own_symbols = llvm_fragment_defined_symbols(body);
+    let referenced_symbols = llvm_fragment_referenced_symbols(body);
+    let self_symbol = format!("@g1_f{self_declaration}");
+    let mut prelude = String::with_capacity(runtime_prelude.len());
+    for line in runtime_prelude.lines() {
+        if llvm_declaration_symbol(line).is_some_and(|symbol| own_symbols.contains(symbol)) {
+            continue;
+        }
+        prelude.push_str(line);
+        prelude.push('\n');
+    }
+    // A self-hosted build has thousands of source declarations and literals.
+    // Walking either table and calling `body.contains(symbol)` turns native
+    // partition preparation quadratic in the emitted LLVM text.  Scan the
+    // body once, then resolve each exact reference through its symbol map.
+    for symbol in referenced_symbols {
+        if own_symbols.contains(symbol.as_str()) {
+            continue;
+        }
+        if symbol != self_symbol {
+            if let Some(prototype) = source_declarations.get(&symbol) {
+                prelude.push_str(prototype);
+                continue;
+            }
+        }
+        if let Some(prototype) = helper_declarations.get(&symbol) {
+            prelude.push_str(prototype);
+            continue;
+        }
+        if let Some(definition) = literal_definitions.get(&symbol) {
+            prelude.push_str(definition);
+        }
+    }
+    prelude
+}
+
+/// Declarations for the generated helpers defined beside one source body.
+/// They are externalized before object emission, so a sibling partition can
+/// resolve an exact referenced helper through Wild at the final link.
+fn llvm_fragment_helper_declarations(
+    fragment: &str,
+    source_declaration: u32,
+) -> Vec<(String, String)> {
+    let source_symbol = format!("@g1_f{source_declaration}");
+    fragment
+        .lines()
+        .filter(|line| line.starts_with("define "))
+        .filter_map(|line| {
+            let symbol = llvm_definition_symbol(line)?;
+            (symbol != source_symbol).then(|| {
+                let externalized = line.replacen("define internal ", "define ", 1);
+                (
+                    symbol.to_owned(),
+                    llvm_definition_declaration(&externalized),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Collect each LLVM global/function symbol referenced by a fragment.  LLVM
+/// generated identifiers are ASCII, so byte scanning avoids a dependency and
+/// does not mistake the `@` inside a quoted byte literal for a symbol.
+fn llvm_fragment_referenced_symbols(fragment: &str) -> BTreeSet<String> {
+    let bytes = fragment.as_bytes();
+    let mut symbols = BTreeSet::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'@' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < bytes.len()
+            && matches!(
+                bytes[index],
+                b'a'..=b'z'
+                    | b'A'..=b'Z'
+                    | b'0'..=b'9'
+                    | b'_'
+                    | b'.'
+                    | b'$'
+            )
+        {
+            index += 1;
+        }
+        if index > start + 1 {
+            symbols.insert(fragment[start..index].to_owned());
+        }
+    }
+    symbols
+}
+
+fn llvm_literal_global_definitions(ir: &str) -> BTreeMap<String, String> {
+    ir.lines()
+        .filter_map(|line| {
+            llvm_literal_global_symbol(line).map(|symbol| (symbol.to_owned(), format!("{line}\n")))
+        })
+        .collect()
+}
+
+fn llvm_without_literal_global_definitions(ir: String) -> String {
+    let mut output = String::with_capacity(ir.len());
+    for line in ir.lines() {
+        if llvm_literal_global_symbol(line).is_none() {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn llvm_literal_global_symbol(line: &str) -> Option<&str> {
+    (line.starts_with("@g1.bytes.") || line.starts_with("@g1.runtime_fault."))
+        .then(|| line.split_once('=').map(|(symbol, _)| symbol.trim_end()))
+        .flatten()
+}
+
+/// Function fragments can contain generated effect/closure helper definitions
+/// in addition to their `@g1_f…` entry point. Their own unit must not retain a
+/// declaration for any such definition, while sibling units still import it
+/// from the shared object.
+fn llvm_fragment_defined_symbols(fragment: &str) -> BTreeSet<&str> {
+    fragment
+        .lines()
+        .filter_map(|line| line.strip_prefix("define "))
+        .filter_map(llvm_definition_symbol)
+        .collect()
+}
+
+fn llvm_declaration_symbol(line: &str) -> Option<&str> {
+    line.strip_prefix("declare ")
+        .and_then(llvm_definition_symbol)
+}
+
+fn llvm_definition_symbol(line: &str) -> Option<&str> {
+    let symbol_start = line.find('@')?;
+    let symbol_end = line[symbol_start..].find('(')?;
+    Some(&line[symbol_start..symbol_start + symbol_end])
+}
+
+fn llvm_definition_declaration(line: &str) -> String {
+    let header = line
+        .strip_prefix("define ")
+        .and_then(|header| header.strip_suffix('{'))
+        .map(str::trim_end)
+        .expect("LLVM function definition header");
+    let header = header
+        .strip_prefix("internal ")
+        .or_else(|| header.strip_prefix("private "))
+        .unwrap_or(header);
+    format!("declare {header}\n")
+}
+
+/// Make helper definitions in the shared unit link-visible to function units.
+fn llvm_externalize_internal_definitions(ir: &str) -> String {
+    ir.replace("define internal ", "define ")
+}
+
+/// Retain target/type/global declarations but replace every function body by
+/// a declaration. Generated LLVM always terminates a function body with a
+/// standalone `}`, and the emitter never emits top-level definitions inside a
+/// function, making this intentionally small parser fail closed by structure.
+fn llvm_declarations_only(ir: &str) -> String {
+    let mut output = String::new();
+    let mut definition = false;
+    for line in ir.lines() {
+        if !definition && line.starts_with("define ") {
+            output.push_str(&llvm_definition_declaration(line));
+            definition = true;
+        } else if definition {
+            if line == "}" {
+                definition = false;
+                output.push('\n');
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    assert!(!definition, "unterminated LLVM function definition");
+    output
+}
+
 struct Emitter<'a> {
     phases: &'a CompiledPhases,
     options: &'a LlvmOptions,
     output: String,
     temporary: u32,
     overflow_widths: BTreeSet<(u16, &'static str)>,
-    byte_literals: BTreeMap<Vec<u8>, u32>,
-    runtime_fault_literals: BTreeMap<Vec<u8>, u32>,
+    byte_literals: BTreeSet<Vec<u8>>,
+    runtime_fault_literals: BTreeSet<Vec<u8>>,
+    emit_legacy_literal_globals: bool,
     uses_byte_runtime: bool,
     uses_array_runtime: bool,
     uses_callable_runtime: bool,
@@ -136,6 +1288,18 @@ struct Emitter<'a> {
     host_imports: BTreeSet<HostImportRole>,
     snapshot_capture_fix_types: BTreeSet<TypeId>,
     llvm_reachable_functions: BTreeSet<usize>,
+}
+
+/// A function-local LLVM SSA name.  Keep generated names alphabetic rather
+/// than numeric: numeric `%0` identifiers share LLVM's implicit numbering
+/// space with unnamed blocks and parameters.
+#[derive(Clone, Copy, Debug)]
+struct Temporary(u32);
+
+impl std::fmt::Display for Temporary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "g1.tmp.{}", self.0)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,8 +1331,9 @@ impl<'a> Emitter<'a> {
             output: String::new(),
             temporary: 0,
             overflow_widths: BTreeSet::new(),
-            byte_literals: BTreeMap::new(),
-            runtime_fault_literals: BTreeMap::new(),
+            byte_literals: BTreeSet::new(),
+            runtime_fault_literals: BTreeSet::new(),
+            emit_legacy_literal_globals: false,
             uses_byte_runtime: false,
             uses_array_runtime: false,
             uses_callable_runtime: false,
@@ -180,10 +1345,52 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit(mut self) -> Result<LlvmModule, Vec<Diagnostic>> {
+    fn emit(self) -> Result<LlvmModule, Vec<Diagnostic>> {
+        self.emit_inner(None, false)
+    }
+
+    fn emit_with_fragment_cache(
+        self,
+        cache: &mut LlvmFragmentCache,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        self.emit_inner(Some(cache), false)
+    }
+
+    /// Emit the shared native unit while retaining source-function bodies
+    /// exclusively in the fragment cache.  This is intentionally separate
+    /// from normal LLVM-module emission: callers that request a monolithic
+    /// module still receive one, while the durable executable route never
+    /// builds then reparses that enormous intermediate string.
+    fn emit_partitioned_with_fragment_cache(
+        self,
+        cache: &mut LlvmFragmentCache,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        self.emit_inner(Some(cache), true)
+    }
+
+    fn emit_inner(
+        mut self,
+        mut cache: Option<&mut LlvmFragmentCache>,
+        omit_source_function_bodies: bool,
+    ) -> Result<LlvmModule, Vec<Diagnostic>> {
+        if let Some(cache) = cache.as_deref_mut() {
+            cache.begin_emission();
+        }
         let reachable = self.reachable_functions()?;
         self.llvm_reachable_functions = reachable.iter().copied().collect();
         self.prepare_runtime(&reachable)?;
+        let manifest = cache
+            .as_ref()
+            .map(|_| llvm_incremental_manifest(self.phases, self.options));
+        self.emit_legacy_literal_globals = match (cache.as_deref(), manifest.as_ref()) {
+            (Some(cache), Some(manifest)) => cache.uses_legacy_fragments(
+                manifest,
+                reachable
+                    .iter()
+                    .map(|index| self.phases.mir.functions[*index].declaration),
+            ),
+            _ => false,
+        };
         self.line("; Grandiose LLVM backend");
         self.line(&format!(
             "target triple = \"{}\"",
@@ -194,16 +1401,41 @@ impl<'a> Emitter<'a> {
         }
         self.line("");
         self.line("declare void @llvm.trap() cold noreturn nounwind");
-        self.line(&format!(
-            "declare void @g1_runtime_fault(i32, i32, i32, ptr, i{}) cold noreturn",
-            self.pointer_width()
-        ));
-        for (bytes, index) in self.runtime_fault_literals.clone() {
+        self.line(&runtime_fault_declaration(self.pointer_width()));
+        // Keep aggregate layouts named instead of repeating their complete
+        // structural spelling at every alloca, load, GEP, and call site.  The
+        // canonical self-host compiler has deeply nested nominal compiler
+        // tables; spelling those layouts inline makes both the emitted IR and
+        // LLVM's O3 type/import work grow with every use of an aggregate.
+        //
+        // These are concrete LLVM layout aliases, not a source-level ABI: the
+        // fields remain exactly the representation used by `llvm_type` below.
+        // Emit every aggregate deterministically before any definition can
+        // mention it, including aggregates only reached through another
+        // aggregate's fields.
+        self.emit_aggregate_type_declarations()?;
+        for bytes in self.runtime_fault_literals.clone() {
             self.line(&format!(
-                "@g1.runtime_fault.{index} = private constant [{} x i8] c\"{}\"",
+                "{} = private constant [{} x i8] c\"{}\"",
+                literal_global_name("runtime_fault", &bytes),
                 bytes.len(),
                 llvm_bytes(&bytes)
             ));
+        }
+        if self.emit_legacy_literal_globals {
+            let legacy_literals = self
+                .runtime_fault_literals
+                .iter()
+                .cloned()
+                .enumerate()
+                .collect::<Vec<_>>();
+            for (index, bytes) in legacy_literals {
+                self.line(&format!(
+                    "@g1.runtime_fault.{index} = private constant [{} x i8] c\"{}\"",
+                    bytes.len(),
+                    llvm_bytes(&bytes)
+                ));
+            }
         }
         if self.uses_byte_runtime {
             self.emit_byte_runtime();
@@ -227,7 +1459,68 @@ impl<'a> Emitter<'a> {
         self.line("");
 
         for function in &reachable {
+            let declaration = self.phases.mir.functions[*function].declaration;
+            let fingerprint = manifest.as_ref().and_then(|manifest| {
+                manifest
+                    .functions
+                    .iter()
+                    .find(|entry| entry.declaration == declaration)
+                    .map(|entry| entry.fragment_fingerprint)
+            });
+            let cached = match (cache.as_deref_mut(), manifest.as_ref(), fingerprint) {
+                (Some(cache), Some(manifest), Some(_)) => {
+                    cache.activate_fragment(manifest, declaration)
+                }
+                _ => None,
+            };
+            if let Some(fragment) = cached {
+                if !omit_source_function_bodies {
+                    self.output.push_str(&fragment.emitted_text);
+                }
+                self.overflow_widths.extend(fragment.overflow_widths);
+                self.snapshot_capture_fix_types
+                    .extend(fragment.snapshot_capture_fix_types);
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.reused_fragments = cache.reused_fragments.saturating_add(1);
+                }
+                continue;
+            }
+
+            // SSA temporary names are function-local. Reset them for every
+            // fragment so fresh and reused emission have identical canonical
+            // text, then isolate all per-function side metadata for replay.
+            let module_output = std::mem::take(&mut self.output);
+            let module_overflow_widths = std::mem::take(&mut self.overflow_widths);
+            let module_snapshot_capture_fix_types =
+                std::mem::take(&mut self.snapshot_capture_fix_types);
+            self.temporary = 0;
             self.emit_function(*function)?;
+            let emitted_text = std::mem::take(&mut self.output);
+            let overflow_widths = std::mem::take(&mut self.overflow_widths);
+            let snapshot_capture_fix_types = std::mem::take(&mut self.snapshot_capture_fix_types);
+            self.output = module_output;
+            self.overflow_widths = module_overflow_widths;
+            self.snapshot_capture_fix_types = module_snapshot_capture_fix_types;
+            if !omit_source_function_bodies {
+                self.output.push_str(&emitted_text);
+            }
+            self.overflow_widths.extend(overflow_widths.iter().copied());
+            self.snapshot_capture_fix_types
+                .extend(snapshot_capture_fix_types.iter().copied());
+            if let (Some(cache), Some(manifest), Some(fingerprint)) =
+                (cache.as_deref_mut(), manifest.as_ref(), fingerprint)
+            {
+                cache.emitted_fragments = cache.emitted_fragments.saturating_add(1);
+                cache.fragments.insert(
+                    LlvmFragmentCache::key(manifest, declaration, fingerprint),
+                    LlvmFunctionFragment {
+                        fingerprint,
+                        emitted_text,
+                        overflow_widths,
+                        snapshot_capture_fix_types,
+                    },
+                );
+            }
         }
         if self.uses_effect_runtime {
             self.emit_snapshot_capture_fix_callbacks(&reachable)?;
@@ -445,16 +1738,8 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        self.byte_literals = literals
-            .into_iter()
-            .enumerate()
-            .map(|(index, bytes)| (bytes, index as u32))
-            .collect();
-        self.runtime_fault_literals = runtime_fault_literals
-            .into_iter()
-            .enumerate()
-            .map(|(index, bytes)| (bytes, index as u32))
-            .collect();
+        self.byte_literals = literals;
+        self.runtime_fault_literals = runtime_fault_literals;
         Ok(())
     }
 
@@ -556,19 +1841,32 @@ impl<'a> Emitter<'a> {
         let usize_ty = format!("i{}", self.pointer_width());
         self.overflow_widths.insert((self.pointer_width(), "uadd"));
         self.line(&format!("%g1.bytes = type {{ i64, {usize_ty}, [0 x i8] }}"));
-        let literals = self
-            .byte_literals
-            .iter()
-            .map(|(bytes, index)| (bytes.clone(), *index))
-            .collect::<Vec<_>>();
-        for (bytes, index) in literals {
+        for bytes in self.byte_literals.clone() {
             self.line(&format!(
-                "@g1.bytes.{index} = private constant {{ i64, {usize_ty}, [{} x i8] }} {{ i64 -1, {usize_ty} {}, [{} x i8] c\"{}\" }}, align 8",
+                "{} = private constant {{ i64, {usize_ty}, [{} x i8] }} {{ i64 -1, {usize_ty} {}, [{} x i8] c\"{}\" }}, align 8",
+                literal_global_name("bytes", &bytes),
                 bytes.len(),
                 bytes.len(),
                 bytes.len(),
                 llvm_bytes(&bytes)
             ));
+        }
+        if self.emit_legacy_literal_globals {
+            let legacy_literals = self
+                .byte_literals
+                .iter()
+                .cloned()
+                .enumerate()
+                .collect::<Vec<_>>();
+            for (index, bytes) in legacy_literals {
+                self.line(&format!(
+                    "@g1.bytes.{index} = private constant {{ i64, {usize_ty}, [{} x i8] }} {{ i64 -1, {usize_ty} {}, [{} x i8] c\"{}\" }}, align 8",
+                    bytes.len(),
+                    bytes.len(),
+                    bytes.len(),
+                    llvm_bytes(&bytes)
+                ));
+            }
         }
         self.line(&format!("declare ptr @malloc({usize_ty})"));
         self.line("declare void @free(ptr)");
@@ -633,7 +1931,8 @@ impl<'a> Emitter<'a> {
         self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("limit.check:");
         self.line(&format!(
-            "  %over.limit = icmp ugt {usize_ty} %length, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+            "  %over.limit = icmp ugt {usize_ty} %length, {}",
+            self.options.native_allocation_limit,
         ));
         self.line("  br i1 %over.limit, label %limit.fault, label %allocate");
         self.line("limit.fault:");
@@ -918,7 +2217,8 @@ impl<'a> Emitter<'a> {
         self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("limit.check:");
         self.line(&format!(
-            "  %over.limit = icmp ugt {usize_ty} %total.size, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+            "  %over.limit = icmp ugt {usize_ty} %total.size, {}",
+            self.options.native_allocation_limit,
         ));
         self.line("  br i1 %over.limit, label %limit.trap, label %allocate.storage.checked");
         self.line("limit.trap:");
@@ -1025,7 +2325,8 @@ impl<'a> Emitter<'a> {
         self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("limit.check:");
         self.line(&format!(
-            "  %over.limit = icmp ugt {usize_ty} %total.size, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+            "  %over.limit = icmp ugt {usize_ty} %total.size, {}",
+            self.options.native_allocation_limit,
         ));
         self.line("  br i1 %over.limit, label %limit.trap, label %resize.checked");
         self.line("limit.trap:");
@@ -2353,6 +3654,9 @@ impl<'a> Emitter<'a> {
             "define {result} @g1_f{index}({}) {{",
             direct_params.join(", ")
         ));
+        // Numeric SSA temporaries require an explicit entry label: otherwise
+        // LLVM assigns the implicit entry block `%0` first.
+        self.line("entry:");
         if function.outward_protocols.is_empty() {
             let return_slot = self.temp();
             let return_init = self.temp();
@@ -4193,7 +5497,7 @@ impl<'a> Emitter<'a> {
         requested_mode: u32,
         cleanup_callable: bool,
         args: &[mir::Operand],
-    ) -> Result<(TypeId, Option<u32>), Vec<Diagnostic>> {
+    ) -> Result<(TypeId, Option<Temporary>), Vec<Diagnostic>> {
         let callable_type = self.register_runtime_type(caller, callable_operand.register)?;
         let Type::Callable {
             signature,
@@ -5403,9 +6707,14 @@ impl<'a> Emitter<'a> {
                         fields.len()
                     ))]);
                 }
+                // Enum values are copied and stored as complete aggregates.
+                // Starting from `poison` would leave inactive variant slots
+                // poison, allowing ordinary aggregate copies to become UB in
+                // native code.  The VM representation initializes those
+                // slots, so use the same deterministic zero baseline here.
                 let tagged = self.temp();
                 self.line(&format!(
-                    "  %{tagged} = insertvalue {aggregate_ty} poison, i32 {variant}, 0"
+                    "  %{tagged} = insertvalue {aggregate_ty} zeroinitializer, i32 {variant}, 0"
                 ));
                 let mut aggregate = format!("%{tagged}");
                 for (index, field) in fields.iter().enumerate() {
@@ -5914,7 +7223,7 @@ impl<'a> Emitter<'a> {
                     .ok_or_else(|| vec![unsupported(function, "non-integer conversion target")])?;
                 if primitive == Primitive::IntConvertChecked {
                     let mut invalid = None;
-                    let mut add_guard = |this: &mut Self, guard: u32| {
+                    let mut add_guard = |this: &mut Self, guard: Temporary| {
                         invalid = Some(if let Some(previous) = invalid {
                             let combined = this.temp();
                             this.line(&format!("  %{combined} = or i1 %{previous}, %{guard}"));
@@ -9038,7 +10347,7 @@ impl<'a> Emitter<'a> {
         result: Option<u32>,
         import: HostImportRole,
         args: &[mir::Operand],
-    ) -> Result<Option<u32>, Vec<Diagnostic>> {
+    ) -> Result<Option<Temporary>, Vec<Diagnostic>> {
         let expected_args = match import {
             HostImportRole::ProcessArgsGet => Vec::new(),
             HostImportRole::FsRead | HostImportRole::DiagnosticWrite => vec![Type::Text],
@@ -12117,8 +13426,8 @@ impl<'a> Emitter<'a> {
 
     fn byte_literal(&self, bytes: &[u8]) -> Result<String, Vec<Diagnostic>> {
         self.byte_literals
-            .get(bytes)
-            .map(|index| format!("@g1.bytes.{index}"))
+            .contains(bytes)
+            .then(|| literal_global_name("bytes", bytes))
             .ok_or_else(|| vec![backend_error("missing prepared Text or Bytes literal")])
     }
 
@@ -12401,35 +13710,8 @@ impl<'a> Emitter<'a> {
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => "ptr".into(),
             Type::BindingPack { payload_type, .. } => self.llvm_type(*payload_type)?,
-            Type::Tuple { .. } | Type::Struct { .. } => {
-                let fields = self
-                    .runtime_aggregate_fields(id)?
-                    .into_iter()
-                    .map(|field| self.llvm_type(field))
-                    .collect::<Result<Vec<_>, _>>()?;
-                if fields.is_empty() {
-                    "{ i8 }".into()
-                } else {
-                    format!("{{ {} }}", fields.join(", "))
-                }
-            }
-            Type::Enum { variants, .. } => {
-                let fields = variants
-                    .iter()
-                    .map(|variant| variant.fields.len())
-                    .max()
-                    .unwrap_or(0);
-                let slots = (0..fields)
-                    .map(|field| {
-                        self.enum_slot_words(id, field as u32)
-                            .map(|words| format!("[{words} x i128]"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if slots.is_empty() {
-                    "{ i32 }".into()
-                } else {
-                    format!("{{ i32, {} }}", slots.join(", "))
-                }
+            Type::Tuple { .. } | Type::Struct { .. } | Type::Enum { .. } => {
+                format!("%g1.type.{id}")
             }
             other => {
                 return Err(vec![backend_error(format!(
@@ -12437,6 +13719,64 @@ impl<'a> Emitter<'a> {
                 ))]);
             }
         })
+    }
+
+    fn emit_aggregate_type_declarations(&mut self) -> Result<(), Vec<Diagnostic>> {
+        let aggregate_ids = self
+            .phases
+            .artifact
+            .types
+            .iter()
+            .enumerate()
+            .filter_map(|(id, ty)| {
+                matches!(
+                    ty.representation(),
+                    Type::Tuple { .. } | Type::Struct { .. } | Type::Enum { .. }
+                )
+                .then_some(id as TypeId)
+            })
+            .collect::<Vec<_>>();
+        for id in aggregate_ids {
+            let ty = self.runtime_type(id)?;
+            let body = match ty {
+                Type::Tuple { .. } | Type::Struct { .. } => {
+                    let fields = self
+                        .runtime_aggregate_fields(id)?
+                        .into_iter()
+                        .map(|field| self.llvm_type(field))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if fields.is_empty() {
+                        "{ i8 }".to_owned()
+                    } else {
+                        format!("{{ {} }}", fields.join(", "))
+                    }
+                }
+                Type::Enum { variants, .. } => {
+                    let fields = variants
+                        .iter()
+                        .map(|variant| variant.fields.len())
+                        .max()
+                        .unwrap_or(0);
+                    let slots = (0..fields)
+                        .map(|field| {
+                            self.enum_slot_words(id, field as u32)
+                                .map(|words| format!("[{words} x i128]"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if slots.is_empty() {
+                        "{ i32 }".to_owned()
+                    } else {
+                        format!("{{ i32, {} }}", slots.join(", "))
+                    }
+                }
+                _ => unreachable!("aggregate type collection must match aggregate layout emission"),
+            };
+            self.line(&format!("%g1.type.{id} = type {body}"));
+        }
+        if !self.phases.artifact.types.is_empty() {
+            self.line("");
+        }
+        Ok(())
     }
 
     fn llvm_return_type(&self, id: TypeId) -> Result<String, Vec<Diagnostic>> {
@@ -12450,10 +13790,10 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn temp(&mut self) -> u32 {
+    fn temp(&mut self) -> Temporary {
         let temporary = self.temporary;
         self.temporary += 1;
-        temporary
+        Temporary(temporary)
     }
 
     fn line(&mut self, line: &str) {
@@ -12461,7 +13801,7 @@ impl<'a> Emitter<'a> {
         self.output.push('\n');
     }
 
-    fn emit_trap_if(&mut self, condition: u32) {
+    fn emit_trap_if(&mut self, condition: Temporary) {
         let trap = self.temp();
         let continuation = self.temp();
         self.line(&format!(
@@ -12488,7 +13828,7 @@ impl<'a> Emitter<'a> {
         self.line("  unreachable");
     }
 
-    fn emit_runtime_fault_if(&mut self, condition: u32, detail: u32) {
+    fn emit_runtime_fault_if(&mut self, condition: Temporary, detail: u32) {
         let fault = self.temp();
         let continuation = self.temp();
         self.line(&format!(
@@ -12502,10 +13842,14 @@ impl<'a> Emitter<'a> {
     fn emit_abort(&mut self, message: Option<&str>) {
         if let Some(message) = message {
             let bytes = message.as_bytes();
-            let index = self.runtime_fault_literals[bytes];
+            assert!(
+                self.runtime_fault_literals.contains(bytes),
+                "prepared runtime-fault literal is missing"
+            );
             let pointer = format!(
-                "getelementptr inbounds ([{} x i8], ptr @g1.runtime_fault.{index}, i32 0, i32 0)",
-                bytes.len()
+                "getelementptr inbounds ([{} x i8], ptr {}, i32 0, i32 0)",
+                bytes.len(),
+                literal_global_name("runtime_fault", bytes),
             );
             self.emit_runtime_fault(
                 RUNTIME_FAULT_EXPLICIT_ABORT,
@@ -12519,7 +13863,7 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn emit_host_fault_if(&mut self, condition: u32, operation: u32) {
+    fn emit_host_fault_if(&mut self, condition: Temporary, operation: u32) {
         let fault = self.temp();
         let continuation = self.temp();
         self.line(&format!(
@@ -12532,19 +13876,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn pointer_width(&self) -> u16 {
-        let triple = self.options.target_triple.as_str();
-        if triple.starts_with("i386")
-            || triple.starts_with("i486")
-            || triple.starts_with("i586")
-            || triple.starts_with("i686")
-            || triple.starts_with("armv7")
-            || triple.starts_with("thumbv7")
-            || triple.starts_with("wasm32")
-        {
-            32
-        } else {
-            64
-        }
+        pointer_width_for_target(&self.options.target_triple)
     }
 }
 
@@ -12643,4 +13975,256 @@ fn llvm_string(value: &str) -> String {
 
 fn llvm_bytes(value: &[u8]) -> String {
     value.iter().map(|byte| format!("\\{byte:02X}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CompileOptions,
+        compiler_mir::OptimizationLevel,
+        source_bundle::{Segment, SourceBundle},
+    };
+
+    #[test]
+    fn schema_three_fragment_is_reused_when_legacy_manifest_matches() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> () { () }"),
+            [],
+        );
+        let phases = crate::compile_bundle_to_phases_with_options(
+            &bundle,
+            CompileOptions {
+                optimization_level: OptimizationLevel::O3,
+            },
+        )
+        .unwrap();
+        let options = LlvmOptions::default();
+        let manifest = llvm_incremental_manifest(&phases, &options);
+        let function = manifest.functions.first().unwrap();
+        let mut cache = LlvmFragmentCache::default();
+        let original = Emitter::new(&phases, &options)
+            .emit_with_fragment_cache(&mut cache)
+            .unwrap();
+        let current = LlvmFragmentCache::key(
+            &manifest,
+            function.declaration,
+            function.fragment_fingerprint,
+        );
+        let fragment = cache.fragments.remove(&current).unwrap();
+        let legacy = LlvmFragmentCache::legacy_key(
+            &manifest,
+            function.declaration,
+            function.legacy_fragment_fingerprint,
+        );
+        cache.fragments.insert(legacy, fragment);
+
+        let restored = Emitter::new(&phases, &options)
+            .emit_with_fragment_cache(&mut cache)
+            .unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(cache.reused_fragments(), 1);
+        assert_eq!(cache.emitted_fragments(), 0);
+    }
+
+    #[test]
+    fn schema_four_spanful_fragment_is_promoted_without_reemission() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> () { () }"),
+            [],
+        );
+        let phases = crate::compile_bundle_to_phases_with_options(
+            &bundle,
+            CompileOptions {
+                optimization_level: OptimizationLevel::O3,
+            },
+        )
+        .unwrap();
+        let options = LlvmOptions::default();
+        let manifest = llvm_incremental_manifest(&phases, &options);
+        let function = manifest.functions.first().unwrap();
+        let mut cache = LlvmFragmentCache::default();
+        let original = Emitter::new(&phases, &options)
+            .emit_with_fragment_cache(&mut cache)
+            .unwrap();
+        let current = LlvmFragmentCache::key(
+            &manifest,
+            function.declaration,
+            function.fragment_fingerprint,
+        );
+        let fragment = cache.fragments.remove(&current).unwrap();
+        let spanful = LlvmFragmentCache::spanful_key(
+            &manifest,
+            function.declaration,
+            function.spanful_fragment_fingerprint,
+        );
+        cache.fragments.insert(spanful, fragment);
+
+        let restored = Emitter::new(&phases, &options)
+            .emit_with_fragment_cache(&mut cache)
+            .unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(cache.reused_fragments(), 1);
+        assert_eq!(cache.emitted_fragments(), 0);
+        assert!(cache.fragments.contains_key(&current));
+    }
+
+    #[test]
+    fn fragment_body_fingerprint_ignores_unconsumed_source_provenance() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> () { () }"),
+            [],
+        );
+        let phases = crate::compile_bundle_to_phases_with_options(
+            &bundle,
+            CompileOptions {
+                optimization_level: OptimizationLevel::O3,
+            },
+        )
+        .unwrap();
+        let function = &phases.mir.functions[0];
+        let mut changed = function.clone();
+        changed.flow.sources.push(crate::span::Span::new(10, 20));
+        if let Some(statement) = changed
+            .blocks
+            .iter_mut()
+            .flat_map(|block| block.statements.iter_mut())
+            .next()
+        {
+            statement.span = crate::span::Span::new(30, 40);
+        }
+        assert_eq!(
+            function_body_fingerprint(function),
+            function_body_fingerprint(&changed),
+            "LLVM fragment identity must exclude diagnostic-only spans and flow provenance"
+        );
+        assert_ne!(
+            spanful_function_body_fingerprint(function),
+            spanful_function_body_fingerprint(&changed),
+            "the schema-4 migration key must retain its exact historical identity"
+        );
+    }
+
+    #[test]
+    fn partitioned_emission_keeps_source_bodies_out_of_the_shared_unit() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", "main() -> () { () }"),
+            [],
+        );
+        let phases = crate::compile_bundle_to_phases_with_options(
+            &bundle,
+            CompileOptions {
+                optimization_level: OptimizationLevel::O3,
+            },
+        )
+        .unwrap();
+        let options = LlvmOptions::default();
+        let manifest = llvm_incremental_manifest(&phases, &options);
+        let declaration = manifest.functions.first().unwrap().declaration;
+        let mut cache = LlvmFragmentCache::default();
+
+        let units =
+            emit_llvm_native_object_units_with_fragment_cache(&phases, &options, &mut cache)
+                .unwrap();
+        let fragment = &cache
+            .fragment(&manifest, declaration)
+            .expect("partitioned emission must retain the source fragment")
+            .emitted_text;
+        let source_declaration = llvm_fragment_source_declaration(fragment, declaration).unwrap();
+
+        assert!(units.shared.ir.contains(&source_declaration));
+        assert!(!units.shared.ir.contains(fragment));
+        assert!(units.functions.iter().any(|unit| {
+            unit.declaration == declaration
+                && unit
+                    .module
+                    .ir
+                    .contains(&llvm_externalize_internal_definitions(fragment))
+        }));
+
+        let repeated =
+            emit_llvm_native_object_units_with_fragment_cache(&phases, &options, &mut cache)
+                .unwrap();
+        assert_eq!(repeated.shared, units.shared);
+        assert_eq!(cache.reused_fragments(), 1);
+        assert_eq!(cache.emitted_fragments(), 0);
+    }
+
+    #[test]
+    fn partition_prelude_imports_only_referenced_sibling_helpers() {
+        let body = concat!(
+            "define void @g1_f1() {\n",
+            "  call void @g1_effect_guard_drop_f2(ptr null)\n",
+            "  ret void\n",
+            "}\n",
+            "define void @g1_effect_guard_drop_f1(ptr %callable) {\n",
+            "  ret void\n",
+            "}\n",
+        );
+        let helpers = BTreeMap::from([
+            (
+                "@g1_effect_guard_drop_f1".to_owned(),
+                "declare void @g1_effect_guard_drop_f1(ptr)\n".to_owned(),
+            ),
+            (
+                "@g1_effect_guard_drop_f2".to_owned(),
+                "declare void @g1_effect_guard_drop_f2(ptr)\n".to_owned(),
+            ),
+        ]);
+        let prelude = llvm_fragment_source_dependency_prelude(
+            "",
+            body,
+            1,
+            &BTreeMap::new(),
+            &helpers,
+            &BTreeMap::new(),
+        );
+        assert!(prelude.contains("declare void @g1_effect_guard_drop_f2(ptr)"));
+        assert!(!prelude.contains("declare void @g1_effect_guard_drop_f1(ptr)"));
+    }
+
+    #[test]
+    fn partition_prelude_looks_up_referenced_source_and_literals_by_symbol() {
+        let body = concat!(
+            "define void @g1_f1() {\n",
+            "  call void @g1_f2()\n",
+            "  %value = load i8, ptr @g1.bytes.used\n",
+            "  ret void\n",
+            "}\n",
+        );
+        let source_declarations = BTreeMap::from([
+            ("@g1_f1".to_owned(), "declare void @g1_f1()\n".to_owned()),
+            ("@g1_f2".to_owned(), "declare void @g1_f2()\n".to_owned()),
+            ("@g1_f3".to_owned(), "declare void @g1_f3()\n".to_owned()),
+        ]);
+        let literals = BTreeMap::from([
+            (
+                "@g1.bytes.used".to_owned(),
+                "@g1.bytes.used = private constant [1 x i8] c\"x\"\n".to_owned(),
+            ),
+            (
+                "@g1.bytes.unused".to_owned(),
+                "@g1.bytes.unused = private constant [1 x i8] c\"y\"\n".to_owned(),
+            ),
+        ]);
+
+        let prelude = llvm_fragment_source_dependency_prelude(
+            "",
+            body,
+            1,
+            &source_declarations,
+            &BTreeMap::new(),
+            &literals,
+        );
+
+        assert!(prelude.contains("declare void @g1_f2()"));
+        assert!(!prelude.contains("declare void @g1_f1()"));
+        assert!(!prelude.contains("declare void @g1_f3()"));
+        assert!(prelude.contains("@g1.bytes.used"));
+        assert!(!prelude.contains("@g1.bytes.unused"));
+    }
 }

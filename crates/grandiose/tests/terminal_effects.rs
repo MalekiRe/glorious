@@ -1,7 +1,9 @@
 use grandiose::{
     CompileOptions, OptimizationLevel, OptimizationPass, OptimizationPassOutcome,
+    TestOptimizerSuppression,
     compile_bundle_to_bytecode, compile_source_to_bytecode, compile_source_to_phases,
-    compile_source_to_phases_with_options,
+    compile_bundle_to_phases_with_test_optimizer_suppression,
+    compile_source_to_phases_with_options, compile_source_to_phases_with_test_optimizer_suppression,
     compiler_mir::{CleanupAction, CleanupEdge},
     diagnostic::Diagnostic,
     eval::{Host, Value as InterpreterValue},
@@ -142,6 +144,79 @@ fn o2_fuses_only_cleanup_empty_single_clause_terminal_handler() {
             .run(function_id, vec![])
             .unwrap()
     );
+}
+
+#[test]
+fn test_suppression_disables_only_terminal_handler_fusion() {
+    let suppressed = compile_source_to_phases_with_test_optimizer_suppression(
+        "terminal-suppressed.glorious",
+        TERMINAL_PROGRAM,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+        TestOptimizerSuppression::TerminalHandlerFusion,
+    )
+    .unwrap();
+
+    assert_eq!(
+        control_outcome(&suppressed),
+        OptimizationPassOutcome::Unchanged
+    );
+}
+
+#[test]
+fn test_suppression_disables_only_direct_resumptive_handler_fusion() {
+    let source = r#"
+        effect Ask { [0,1] ask() -> i64 }
+        test() -> i64 {
+            handle perform Ask::ask() {
+                Ask::ask() with continuation => resume(continuation, 42)
+            }
+        }
+        main() -> { () }
+    "#;
+    let suppressed = compile_source_to_phases_with_test_optimizer_suppression(
+        "resumptive-suppressed.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+        TestOptimizerSuppression::DirectResumptiveHandlerFusion,
+    )
+    .unwrap();
+
+    assert_eq!(control_outcome(&suppressed), OptimizationPassOutcome::Unchanged);
+    let function_id = suppressed
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "test")
+        .unwrap() as u32;
+    let function = &suppressed.artifact.functions[function_id as usize];
+    let code = &suppressed.artifact.code
+        [function.code_start as usize..(function.code_start + function.code_len) as usize];
+    assert!(code.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::MakeHandler { .. } | Instruction::Handle { .. }
+    )));
+}
+
+#[test]
+fn test_suppression_accepts_distributed_bundles_without_source_rewrapping() {
+    let bundle = SourceBundle::distributed(
+        Segment::new("terminal-bundle/main.glorious", TERMINAL_PROGRAM),
+        [],
+    );
+    let suppressed = compile_bundle_to_phases_with_test_optimizer_suppression(
+        &bundle,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+        TestOptimizerSuppression::TerminalHandlerFusion,
+    )
+    .unwrap();
+
+    assert_eq!(control_outcome(&suppressed), OptimizationPassOutcome::Unchanged);
 }
 
 #[test]

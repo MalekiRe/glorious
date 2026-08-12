@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod ast;
+pub mod artifact_llvm;
 pub(crate) mod ast_visit;
 mod builtins;
 mod compiler;
@@ -17,6 +18,7 @@ pub mod frontend_cache;
 pub mod interface;
 pub mod lexer;
 pub mod llvm_backend;
+mod llvm_runtime_abi;
 pub mod lossless;
 pub mod modules;
 pub mod parser;
@@ -36,22 +38,29 @@ static DISTRIBUTED_RUNTIME_LEAF_AUTHORITY: OnceLock<eval::RuntimeLeafAuthority> 
 
 pub use ast::ConstKind;
 pub use compiler::{
-    CompileOptions, CompiledPhases, compile_bundle_to_bytecode,
+    CompileOptions, CompiledPhases, TestOptimizerSuppression, compile_bundle_to_bytecode,
     compile_bundle_to_bytecode_with_manifest, compile_bundle_to_bytecode_with_manifest_and_options,
     compile_bundle_to_bytecode_with_options, compile_bundle_to_phases,
     compile_bundle_to_phases_with_manifest, compile_bundle_to_phases_with_manifest_and_options,
-    compile_bundle_to_phases_with_options, compile_source_to_bytecode,
+    compile_bundle_to_phases_with_options,
+    compile_bundle_to_phases_with_test_optimizer_suppression, compile_source_to_bytecode,
     compile_source_to_bytecode_with_manifest, compile_source_to_bytecode_with_manifest_and_options,
     compile_source_to_bytecode_with_options, compile_source_to_phases,
     compile_source_to_phases_with_manifest, compile_source_to_phases_with_manifest_and_options,
-    compile_source_to_phases_with_options,
+    compile_source_to_phases_with_options, compile_source_to_phases_with_test_optimizer_suppression,
 };
 pub use compiler_mir::{
     OptimizationLevel, OptimizationPass, OptimizationPassOutcome, OptimizationPassReport,
     OptimizationReport,
 };
 pub use llvm_backend::{
-    LlvmModule, LlvmOptions, default_target_data_layout, default_target_triple, emit_llvm_ir,
+    DEFAULT_NATIVE_ALLOCATION_LIMIT, LLVM_INCREMENTAL_MANIFEST_SCHEMA,
+    LLVM_NATIVE_OBJECT_PARTITION_SCHEMA, LlvmCalleeDependency, LlvmFunctionManifest,
+    LlvmFragmentCache, LlvmFunctionFragment, LlvmIncrementalManifest, LlvmModule,
+    LlvmNativeFunctionUnit, LlvmNativeObjectUnits, LlvmOptions,
+    default_target_data_layout, default_target_triple, emit_llvm_ir,
+    emit_llvm_ir_with_fragment_cache, emit_llvm_native_object_units,
+    llvm_incremental_manifest,
 };
 
 pub fn compile_source_to_llvm_ir(

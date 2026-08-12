@@ -1,17 +1,20 @@
 use std::{
+    ffi::OsString,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel, modules,
+    CompileOptions, OptimizationLevel, modules,
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{
-    Artifact, SystemHost, Type, Value, Vm,
+    Artifact, Constant, RuntimeError, SystemHost, Type, Value, Vm,
     bytecode::{I64, Instruction, U64},
-    verify::load_verified,
+    verify::{VerifiedArtifact, load_verified},
 };
 
 const FIXTURE: &str = r#"
@@ -799,6 +802,78 @@ const EFFECT_BACKEND_PROBES: &str = r#"
             + effect_backend_invalid_resumption_reason(4) * 10000
             + effect_backend_invalid_handler_resumption_reason() * 100000
     }
+
+    callable_backend_direct_mir_artifact() -> Bytes {
+        let types = backend::lowering::mir_types();
+        let type_names = Vec::new();
+        Vec::push(&mut type_names, "direct callable");
+        let callable = backend::lowering::push_callable_type(
+            &mut types,
+            0,
+            backend::lowering::artifact_type_id(0),
+            backend::lowering::mir_signature(
+                Vec::new(), backend::lowering::artifact_type_id(0), Vec::new()
+            ),
+            2,
+            0,
+            false
+        );
+        let callable_type = backend::lowering::mir_type_artifact_id(callable);
+        let target = backend::lowering::new_mir_callable_function(
+            "direct_callable_target", Vec::new(),
+            backend::lowering::artifact_type_id(0), Vec::new(), 2,
+            backend::lowering::artifact_type_id(0), 1
+        );
+        backend::lowering::push_mir_instruction(
+            &mut target, backend::lowering::MirInstruction::Return(None)
+        );
+        let receiver_cleanup = Vec::new();
+        Vec::push(&mut receiver_cleanup, Id::from_u32(0));
+        backend::lowering::push_mir_cleanup(
+            &mut target, 0, 1, receiver_cleanup
+        );
+        let caller = backend::lowering::new_mir_function(
+            "direct_callable_entry", Vec::new(),
+            backend::lowering::artifact_type_id(0), Vec::new(), 2
+        );
+        let captures = backend::lowering::alloc_mir_register_pack(
+            &mut caller, Vec::new()
+        );
+        backend::lowering::push_mir_instruction(&mut caller,
+            backend::lowering::MirInstruction::MakeCallable(
+                Id::from_u32(1), callable_type, Id::from_u32(1), captures
+            ));
+        let arguments = backend::lowering::alloc_mir_register_pack(
+            &mut caller, Vec::new()
+        );
+        backend::lowering::push_mir_instruction(&mut caller,
+            backend::lowering::MirInstruction::CallIndirect(
+                None, Id::from_u32(1), 2, arguments
+            ));
+        backend::lowering::push_mir_instruction(
+            &mut caller, backend::lowering::MirInstruction::Return(None)
+        );
+        backend::lowering::push_mir_cleanup(&mut caller, 0, 1, Vec::new());
+        let callable_cleanup = Vec::new();
+        Vec::push(&mut callable_cleanup, Id::from_u32(1));
+        backend::lowering::push_mir_cleanup(
+            &mut caller, 1, 2, callable_cleanup
+        );
+        backend::lowering::push_mir_cleanup(&mut caller, 2, 3, Vec::new());
+        let functions = Arena::new();
+        handle Arena::alloc(&mut functions, caller) {
+            Result::Err(_) => unreachable(), Result::Ok(_) => ()
+        };
+        handle Arena::alloc(&mut functions, target) {
+            Result::Err(_) => unreachable(), Result::Ok(_) => ()
+        };
+        let program = backend::lowering::finish_program(
+            functions, types, type_names
+        );
+        handle backend::emission::encode(&program, Option::Some(Id::from_u32(0))) {
+            Result::Err(_) => unreachable(), Result::Ok(bytes) => bytes
+        }
+    }
 "#;
 
 fn repository_root() -> PathBuf {
@@ -846,6 +921,401 @@ fn production_self_host_bundle() -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
+}
+
+// The canonical production compiler takes long enough in the bytecode VM that
+// a native differential would otherwise have to re-run an already proved VM
+// baseline after every native-only change.  This is an *evidence* cache, not a
+// compiler cache: an entry is usable only when it is bound to the complete VM
+// and SystemHost implementation, Stage-1 artifact, and canonical source bytes
+// which produced it.  The payload is then decoded,
+// re-encoded, and verified again before it is used as the oracle.
+//
+// The runtime source identity, rather than the entire test executable, is
+// deliberate: changing only LLVM/native lowering must not invalidate a VM
+// result whose exact bytecode, source input, and VM implementation are already
+// independently bound.
+const VM_STAGE2_EVIDENCE_SCHEMA: &str = "1";
+
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn vm_stage2_evidence_root() -> PathBuf {
+    std::env::var_os("G1_SELF_HOST_VM_STAGE2_EVIDENCE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("target/self-host-vm-stage2-evidence"))
+}
+
+fn vm_stage2_runtime_identity() -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"grandiose-vm-stage2-runtime\0schema=1\0");
+    // Keep this explicit.  A recursive filesystem walk would make cache
+    // identity depend on untracked files and differ between worktrees.
+    for source in [
+        include_str!("../../grandiose-vm/Cargo.toml"),
+        include_str!("../../grandiose-vm/src/arena.rs"),
+        include_str!("../../grandiose-vm/src/bytecode.rs"),
+        include_str!("../../grandiose-vm/src/lib.rs"),
+        include_str!("../../grandiose-vm/src/supervisor.rs"),
+        include_str!("../../grandiose-vm/src/system_host.rs"),
+        include_str!("../../grandiose-vm/src/value.rs"),
+        include_str!("../../grandiose-vm/src/verify.rs"),
+        include_str!("../../grandiose-vm/src/vm.rs"),
+        // This binds the fixed SystemHost capability set and argument ordering
+        // in `authoritative_vm_stage2`, as well as the differential itself.
+        include_str!("self_host_bytecode.rs"),
+        include_str!("../../../Cargo.lock"),
+    ] {
+        hash.update(&(source.len() as u64).to_le_bytes());
+        hash.update(source.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
+}
+
+fn exact_manifest_value(manifest: &str, key: &str) -> Option<String> {
+    let mut values = manifest
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter_map(|(found, value)| (found == key).then_some(value));
+    let value = values.next()?;
+    values.next().is_none().then(|| value.to_owned())
+}
+
+fn vm_stage2_evidence_key(stage1: &[u8], source: &[u8], vm_runtime: &str) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"grandiose-vm-stage2-evidence\0schema=1\0");
+    for bytes in [stage1, source, vm_runtime.as_bytes()] {
+        hash.update(&(bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    hash.finalize().to_hex().to_string()
+}
+
+fn load_vm_stage2_evidence(
+    root: &Path,
+    key: &str,
+    stage1: &[u8],
+    source: &[u8],
+    vm_runtime: &str,
+) -> Option<Vec<u8>> {
+    let entry = root.join(key);
+    let manifest = fs::read_to_string(entry.join("manifest.tsv")).ok()?;
+    let artifact = fs::read(entry.join("stage2.grbc")).ok()?;
+    let expected = [
+        ("schema", VM_STAGE2_EVIDENCE_SCHEMA.to_owned()),
+        ("key", key.to_owned()),
+        ("vm-runtime-blake3", vm_runtime.to_owned()),
+        ("stage1-blake3", blake3_hex(stage1)),
+        ("source-blake3", blake3_hex(source)),
+        ("stage2-blake3", blake3_hex(&artifact)),
+    ];
+    expected
+        .into_iter()
+        .all(|(field, value)| {
+            exact_manifest_value(&manifest, field).as_deref() == Some(value.as_str())
+        })
+        .then_some(())?;
+    let decoded = Artifact::decode(&artifact).ok()?;
+    (decoded.encode() == artifact).then_some(())?;
+    load_verified(&artifact).ok()?;
+    Some(artifact)
+}
+
+fn store_vm_stage2_evidence(
+    root: &Path,
+    key: &str,
+    stage1: &[u8],
+    source: &[u8],
+    vm_runtime: &str,
+    stage2: &[u8],
+) {
+    static NEXT_EVIDENCE: AtomicUsize = AtomicUsize::new(0);
+
+    if fs::create_dir_all(root).is_err() || root.join(key).exists() {
+        return;
+    }
+    let temporary = root.join(format!(
+        ".{key}.tmp-{}-{}",
+        std::process::id(),
+        NEXT_EVIDENCE.fetch_add(1, Ordering::Relaxed),
+    ));
+    if fs::create_dir(&temporary).is_err() {
+        return;
+    }
+    let manifest = format!(
+        "schema\t{VM_STAGE2_EVIDENCE_SCHEMA}\nkey\t{key}\nvm-runtime-blake3\t{vm_runtime}\nstage1-blake3\t{}\nsource-blake3\t{}\nstage2-blake3\t{}\n",
+        blake3_hex(stage1),
+        blake3_hex(source),
+        blake3_hex(stage2),
+    );
+    let stored = fs::write(temporary.join("stage2.grbc"), stage2)
+        .and_then(|()| fs::write(temporary.join("manifest.tsv"), manifest));
+    if stored.is_ok() {
+        if let Err(error) = fs::rename(&temporary, root.join(key)) {
+            // Another test process may have completed the same immutable
+            // entry first.  Either outcome leaves only a fully written entry
+            // visible to future readers.
+            if error.kind() != ErrorKind::AlreadyExists {
+                let _ = fs::remove_dir_all(&temporary);
+                return;
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(temporary);
+}
+
+fn authoritative_vm_stage2(
+    stage1_bytes: &[u8],
+    compiler: VerifiedArtifact,
+    entry: u32,
+    source: &[u8],
+    input: &Path,
+    output: &Path,
+) -> Vec<u8> {
+    let vm_runtime = vm_stage2_runtime_identity();
+    let root = vm_stage2_evidence_root();
+    let key = vm_stage2_evidence_key(stage1_bytes, source, &vm_runtime);
+    if let Some(stage2) = load_vm_stage2_evidence(&root, &key, stage1_bytes, source, &vm_runtime) {
+        fs::write(output, &stage2).expect("cached VM Stage2 must materialize");
+        return stage2;
+    }
+    let vm = Vm::with_host(
+        compiler,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![
+            output.as_os_str().to_owned(),
+            input.as_os_str().to_owned(),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let stage2 = fs::read(output).expect("VM Stage1 must emit Stage2");
+    let decoded = Artifact::decode(&stage2).expect("VM Stage2 must decode");
+    assert_eq!(decoded.encode(), stage2, "VM Stage2 must be canonical");
+    load_verified(&stage2).expect("VM Stage2 must verify");
+    store_vm_stage2_evidence(&root, &key, stage1_bytes, source, &vm_runtime, &stage2);
+    stage2
+}
+
+/// Keep the expensive complete-bundle artifact available when decoding or
+/// verification fails.  This is deliberately integration-test-only: the
+/// production decoder remains fail-closed and unchanged, while a failing RAM
+/// gate leaves an exact `.grbc` input for `grvm`/`G1_VERIFY_TRACE` diagnosis.
+struct RetainedSelfHostArtifact {
+    directory: PathBuf,
+    artifact: PathBuf,
+    keep: bool,
+}
+
+impl RetainedSelfHostArtifact {
+    fn write(bytes: &[u8]) -> Self {
+        let root = std::env::var_os("G1_SELF_HOST_ARTIFACT_TRACE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repository_root().join("target/self-host-artifact-traces"));
+        Self::write_in(&root, bytes)
+    }
+
+    fn write_in(root: &Path, bytes: &[u8]) -> Self {
+        static NEXT_TRACE: AtomicUsize = AtomicUsize::new(0);
+
+        let ordinal = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
+        let directory = root.join(format!(
+            "full-bundle-{}-{}",
+            std::process::id(),
+            ordinal,
+        ));
+        fs::create_dir_all(&directory).unwrap_or_else(|error| {
+            panic!(
+                "failed to create retained self-host artifact directory {}: {error}",
+                directory.display()
+            )
+        });
+        let artifact = directory.join("full-self-host.grbc");
+        fs::write(&artifact, bytes).unwrap_or_else(|error| {
+            panic!(
+                "failed to retain complete self-host artifact {}: {error}",
+                artifact.display()
+            )
+        });
+        Self {
+            directory,
+            artifact,
+            keep: false,
+        }
+    }
+
+    fn preserve(&mut self, phase: &str, error: impl std::fmt::Debug) -> ! {
+        self.keep = true;
+        eprintln!(
+            "self-host artifact trace: {phase} failed: {error:?}; retained {}\n\
+             rerun with `G1_VERIFY_TRACE=1 cargo test --release -p grandiose \\\n+             --test self_host_bytecode full_self_host_bundle_compiles_to_a_verified_artifact_in_release \\\n+             -- --ignored --nocapture` for the decoder's concise function/register trace",
+            self.artifact.display(),
+        );
+        panic!("complete self-host artifact {phase} failed; retained {}", self.artifact.display());
+    }
+
+    fn discard(mut self) {
+        self.keep = false;
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+impl Drop for RetainedSelfHostArtifact {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
+// The CLI route is deliberately retained even on success: it is the normal
+// iteration surface for the native self-host compiler, and its command/output
+// logs are the evidence needed to diagnose a cold cache or a bad durable
+// object-cache reuse decision. Each invocation gets a fresh trace directory
+// containing its own durable cache, so parallel test processes cannot collide.
+fn retained_native_cli_trace_directory() -> PathBuf {
+    static NEXT_TRACE: AtomicUsize = AtomicUsize::new(0);
+
+    let root = std::env::var_os("G1_SELF_HOST_NATIVE_CLI_TRACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repository_root().join("target/self-host-native-cli-traces"));
+    let ordinal = NEXT_TRACE.fetch_add(1, Ordering::Relaxed);
+    let directory = root.join(format!(
+        "canonical-monolith-{}-{ordinal}",
+        std::process::id(),
+    ));
+    fs::create_dir_all(&directory).unwrap_or_else(|error| {
+        panic!(
+            "failed to create native CLI trace directory {}: {error}",
+            directory.display()
+        )
+    });
+    directory
+}
+
+fn command_log(output: &std::process::Output) -> String {
+    format!(
+        "status: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}\n",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+/// Build an executable through the production release CLI from the bundle's
+/// user segments.  The embedded standard library is omitted because `grc`
+/// supplies that trusted distribution itself; the canonical monolith remains
+/// only the runtime input to the resulting self-host executable.
+fn compile_release_grc_native_cli(bundle: &SourceBundle, executable: &Path, trace: &Path) {
+    let sources = trace.join("native-inputs");
+    // `trace` is unique for each gate invocation (process id plus a local
+    // ordinal), so keeping its durable objects here prevents concurrent test
+    // processes from sharing or deleting one another's native cache entries.
+    let cache = trace.join("native-incremental-cache");
+    fs::create_dir_all(&sources).unwrap();
+    fs::create_dir_all(&cache).unwrap_or_else(|error| {
+        panic!(
+            "failed to create private native CLI cache {}: {error}",
+            cache.display()
+        )
+    });
+    let grc = repository_root().join("target/release/grc");
+    assert!(
+        grc.is_file(),
+        "release grc is required for native CLI tests; run \\
+         `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
+    );
+    let user_segments = &bundle.segments()[1..];
+    assert!(
+        !user_segments.is_empty(),
+        "native CLI bundle must contain a primary user source segment"
+    );
+    let source_root = Path::new(user_segments[0].name())
+        .parent()
+        .expect("native CLI primary source must have a parent path");
+    let mut inputs = Vec::<OsString>::with_capacity(user_segments.len());
+    for segment in user_segments {
+        let relative = Path::new(segment.name())
+            .strip_prefix(source_root)
+            .unwrap_or_else(|_| {
+                panic!(
+                    "native CLI user segment {} escapes primary source root {}",
+                    segment.name(),
+                    source_root.display()
+                )
+            });
+        let path = sources.join(relative);
+        fs::create_dir_all(path.parent().expect("serialized source must have a parent"))
+            .unwrap();
+        fs::write(&path, segment.source()).unwrap();
+        inputs.push(path.into_os_string());
+    }
+    let compile = Command::new(&grc)
+        .current_dir(repository_root())
+        .args(["-O3", "--emit", "executable"])
+        .arg("--native-incremental-cache")
+        .arg(&cache)
+        .arg("-o")
+        .arg(executable)
+        .args(&inputs)
+        .output()
+        .expect("release grc must start for native CLI iteration");
+    let compile_log = command_log(&compile);
+    fs::write(trace.join("grc-o3-wild.log"), &compile_log).unwrap();
+    assert!(
+        compile.status.success() && executable.is_file(),
+        "grc O3 native executable emission failed; retained {}\n{compile_log}",
+        trace.display(),
+    );
+}
+
+fn run_native_cli_self_host(executable: &Path, input: &Path, output: &Path, trace: &Path) {
+    let run = Command::new(executable)
+        .arg(output)
+        .arg(input)
+        .output()
+        .expect("native CLI self-host executable must start");
+    let run_log = command_log(&run);
+    fs::write(trace.join("native-stage1.log"), &run_log).unwrap();
+    assert!(
+        run.status.success(),
+        "native CLI Stage1 failed; retained {}\n{run_log}",
+        trace.display(),
+    );
+}
+
+fn decode_and_verify_full_self_host_artifact(bytes: &[u8]) {
+    let mut trace = RetainedSelfHostArtifact::write(bytes);
+    let decoded = match Artifact::decode(bytes) {
+        Ok(decoded) => decoded,
+        Err(error) => trace.preserve("decode", error),
+    };
+    assert_eq!(decoded.encode(), bytes, "the self-host artifact must be canonical");
+    match load_verified(bytes) {
+        Ok(_) => {}
+        Err(errors) => trace.preserve("verification", errors),
+    }
+    trace.discard();
+}
+
+#[test]
+fn retained_self_host_artifact_keeps_only_failed_gate_inputs() {
+    let directory = tempfile::tempdir().expect("trace scratch directory");
+    let success = RetainedSelfHostArtifact::write_in(directory.path(), b"success");
+    let success_path = success.artifact.clone();
+    let success_directory = success.directory.clone();
+    assert_eq!(fs::read(&success_path).unwrap(), b"success");
+    success.discard();
+    assert!(!success_directory.exists(), "successful gate input must be removed");
+
+    let mut failure = RetainedSelfHostArtifact::write_in(directory.path(), b"failure");
+    let failure_path = failure.artifact.clone();
+    let failure_directory = failure.directory.clone();
+    failure.keep = true;
+    drop(failure);
+    assert_eq!(fs::read(&failure_path).unwrap(), b"failure");
+    assert!(failure_directory.exists(), "failed gate input must be retained");
 }
 
 fn self_host_bundle() -> SourceBundle {
@@ -909,10 +1379,11 @@ fn self_host_bundle() -> SourceBundle {
 // compiler/diagnostic modules and frontend phases (lossless/header parsing)
 // that no probe can reach.  This keeps the test's backend wire-format coverage
 // while preventing unrelated self-host compiler graphs from sharing its peak.
-fn self_host_effect_backend_module_paths(root: &Path) -> [PathBuf; 11] {
-    [
+fn self_host_effect_backend_module_paths(root: &Path) -> Vec<PathBuf> {
+    vec![
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
+        root.join("frontend/lossless/lossless.glorious"),
         root.join("frontend/scanner/scanner.glorious"),
         root.join("frontend/headers/headers.glorious"),
         root.join("frontend/bodies/bodies.glorious"),
@@ -943,18 +1414,7 @@ fn self_host_effect_backend_bundle() -> SourceBundle {
         primary,
         self_host_effect_backend_module_paths(&root)
             .into_iter()
-            .map(|path| {
-                let mut source = fs::read_to_string(&path).unwrap();
-                if path == root.join("frontend/frontend.glorious") {
-                    // The production root declares every frontend phase.  The
-                    // direct MIR test needs lexer/scanner/header/body/
-                    // resolution/elaboration only (body/resolution/elaboration
-                    // all resolve `super::headers`, so headers must stay);
-                    // omit the unreachable lossless sibling module.
-                    source = source.replace("pub mod lossless;\n", "");
-                }
-                Segment::new(path.to_string_lossy(), source)
-            }),
+            .map(|path| Segment::new(path.to_string_lossy(), fs::read_to_string(&path).unwrap())),
     )
 }
 
@@ -964,6 +1424,32 @@ fn function_id(artifact: &Artifact, name: &str) -> u32 {
         .iter()
         .position(|function| function.name == name)
         .unwrap_or_else(|| panic!("self-hosted artifact is missing `{name}`")) as u32
+}
+
+fn bootstrap_self_host_release_vm() -> (VerifiedArtifact, u32, u32) {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let classify = function_id(&phases.artifact, "classify_compile_error");
+    let diagnostic = function_id(&phases.artifact, "diagnostic_fingerprint");
+    let bytes = phases.artifact.encode();
+    drop(phases);
+    (load_verified(&bytes).unwrap(), classify, diagnostic)
+}
+
+fn run_self_host_source_probe(compiler: &VerifiedArtifact, function: u32, source: &str) -> Value {
+    Vm::with_host(
+        compiler.clone(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![]),
+    )
+    .unwrap()
+    .run(function, vec![Value::Text(source.into())])
+    .unwrap()
 }
 
 fn assert_diagnostic_contracts(mut run: impl FnMut(&str, Vec<Value>) -> Value) {
@@ -1245,7 +1731,16 @@ fn assert_compiled_artifact(bytes: &[u8]) {
 }
 
 #[test]
-fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentable_metadata() {
+// Release-only profiling harness for substantial generated bootstrap bytecode.
+//
+// Run without the self-host stage replay, for example:
+// `G1_VM_OPCODE_PROFILE=1 tooling/ram-gate.sh cargo test --release -p grandiose
+// --test self_host_bytecode self_host_callable_backend_direct_mir_emits_vm_callable_wire_format
+// -- --exact --nocapture`
+// The VM prints `g1-vm-opcode-profile` with exact executed instruction and
+// opcode-category counts. Combine it with `G1_VM_HOT_FUNCTION_SAMPLE_STEPS`
+// when selecting the next interpreter optimization target.
+fn self_host_callable_backend_direct_mir_emits_vm_callable_wire_format() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
@@ -1274,9 +1769,13 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
                 panic!("{errors:#?}")
             });
             let terminal_artifact = function_id(&artifact, "effect_backend_terminal_artifact");
-            let nonterminal_artifact = function_id(&artifact, "effect_backend_nonterminal_artifact");
+            let nonterminal_artifact =
+                function_id(&artifact, "effect_backend_nonterminal_artifact");
             let invalid_terminal = function_id(&artifact, "effect_backend_invalid_terminal_reason");
-            let invalid_resumption = function_id(&artifact, "effect_backend_invalid_resumption_reasons");
+            let invalid_resumption =
+                function_id(&artifact, "effect_backend_invalid_resumption_reasons");
+            let callable_artifact =
+                function_id(&artifact, "callable_backend_direct_mir_artifact");
             let compiler_bytes = artifact.encode();
             drop(artifact);
             let compiler = load_verified(&compiler_bytes).unwrap();
@@ -1287,6 +1786,7 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
                     "effect_backend_nonterminal_artifact" => nonterminal_artifact,
                     "effect_backend_invalid_terminal_reason" => invalid_terminal,
                     "effect_backend_invalid_resumption_reasons" => invalid_resumption,
+                    "callable_backend_direct_mir_artifact" => callable_artifact,
                     _ => unreachable!("unknown effect-backend probe {name}"),
                 };
                 Vm::new(compiler.clone()).run(function, vec![]).unwrap()
@@ -1423,6 +1923,35 @@ fn self_host_effect_backend_emits_terminal_wire_format_and_rejects_unrepresentab
             );
             load_verified(bytes.as_ref()).expect("nonterminal effect artifact must verify");
 
+            let Value::Bytes(bytes) = run("callable_backend_direct_mir_artifact") else {
+                panic!("callable backend probe did not return artifact bytes")
+            };
+            let decoded = Artifact::decode(bytes.as_ref())
+                .expect("callable MIR artifact must decode");
+            assert_eq!(decoded.encode(), bytes.as_ref(),
+                "bootstrap and self-host callable encoders must agree");
+            assert!(matches!(decoded.types[19].representation(),
+                Type::Callable {
+                    signature, capture_type: grandiose_vm::UNIT,
+                    receiver_mode: 2, identity_name, copy: false,
+                    zero_use_allowed: false,
+                } if signature.params.is_empty()
+                    && signature.result == grandiose_vm::UNIT
+                    && signature.outward_protocols.is_empty()
+                    && identity_name == "direct callable"
+            ));
+            assert!(matches!(decoded.code.as_slice(), [
+                Instruction::MakeCallable { callable_type: 19, function: 1,
+                    captures, .. },
+                Instruction::CallIndirect { dst: None, callable: 1,
+                    receiver_mode: 2, args },
+                Instruction::Return { src: None },
+                Instruction::Return { src: None },
+            ] if captures.is_empty() && args.is_empty()));
+            let verified = load_verified(bytes.as_ref())
+                .expect("callable MIR artifact must verify");
+            assert_eq!(Vm::new(verified).run(0, vec![]).unwrap(), Value::Unit);
+
             assert_eq!(
                 run("effect_backend_invalid_terminal_reason"),
                 Value::U64(4),
@@ -1460,7 +1989,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 let phases = grandiose::compile_bundle_to_phases_with_options(
                     &bundle,
                     CompileOptions {
-                        optimization_level: OptimizationLevel::O2,
+                        optimization_level: OptimizationLevel::O3,
                     },
                 )
                 .unwrap_or_else(|errors| {
@@ -1491,7 +2020,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
                 CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
+                    optimization_level: OptimizationLevel::O3,
                 },
             )
             .unwrap();
@@ -1532,7 +2061,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 );
             }
 
-            // The VM-only measurement never emits LLVM IR from `phases`, so once
+            // The VM-only measurement never invokes the release CLI, so once
             // the frontend probes have read their function IDs and the GRBC has
             // been decoded into the VM image, neither the bootstrap
             // compile-phase graph (`phases` holds the whole artifact, core, MIR,
@@ -1540,8 +2069,8 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             // again. Release both *before* starting the VM so the VM-only peak
             // does not retain large compile-phase / encoded-byte data
             // simultaneously with the running VM image. This branch always
-            // returns, so the full (LLVM/native) path below still sees `phases`
-            // as live.
+            // returns, so the optional native CLI path below still sees
+            // `phases` as live.
             let vm_only = std::env::var_os("G1_SELF_HOST_BYTECODE_VM_ONLY").is_some();
             if vm_only {
                 drop(phases);
@@ -1576,41 +2105,840 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             let vm_bytes = fs::read(&vm_output).unwrap();
             assert_compiled_artifact(&vm_bytes);
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-bytecode.ll");
-            let executable = directory.path().join("self-host-bytecode");
-            fs::write(&llvm, module.ir).unwrap();
+            // Native compilation is intentionally opt-in for this otherwise
+            // focused frontend test: it requires a prebuilt release `grc`.
+            // The canonical ignored gates below cover it on every native
+            // iteration through the durable partition cache.
+            if std::env::var_os("G1_SELF_HOST_BYTECODE_NATIVE_CLI").is_none() {
+                return;
+            }
+            let trace = retained_native_cli_trace_directory();
+            let native_input = trace.join("fixture.glorious");
+            let executable = trace.join("self-host-bytecode");
+            let native_output = trace.join("native.grbc");
+            fs::write(&native_input, FIXTURE).unwrap();
             drop(phases);
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O2")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            compile_release_grc_native_cli(
+                &self_host_bundle(),
+                &executable,
+                &trace,
+            );
+            run_native_cli_self_host(&executable, &native_input, &native_output, &trace);
+            let native_bytes = fs::read(&native_output).unwrap();
+            assert_eq!(native_bytes, vm_bytes, "VM and native CLI hosts must agree");
+            assert_compiled_artifact(&native_bytes);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM diagnostic gate"]
+fn self_hosted_effect_elaboration_diagnostic_returns_without_abort() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("invalid-terminal-effect.glorious");
+            let output = directory.path().join("unexpected-output.grbc");
+            fs::write(
+                &input,
+                // A terminal operation may not declare a resumption quantity.
+                // Header elaboration reports this as local diagnostic code 64
+                // during InterfaceCollection (G5064). Before the exhaustive
+                // mapping this same ElaborationError reached `unreachable()`.
+                "effect Stop { [1,1] stop() -> ! } main() { () }",
+            )
+            .unwrap();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let bytes = phases.artifact.encode();
+            drop(phases);
+            let compiler = load_verified(&bytes).unwrap();
+            drop(bytes);
+            let vm = Vm::with_host(
+                compiler,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![output.into_os_string(), input.into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM terminal-perform gate"]
+fn self_hosted_terminal_text_perform_emits_vm_effect_and_is_unhandled() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("terminal-perform.glorious");
+            let output = directory.path().join("terminal-perform.grbc");
+            fs::write(
+                &input,
+                // `Template` is a declaration template, not a runtime
+                // protocol until a ground instance is requested. Keep it next
+                // to a real terminal perform so the decoded artifact proves
+                // that the self-host compiler does not serialize an empty
+                // declaration-shaped placeholder.
+                "effect Template<T> { discard(value: T) -> ! } \
+                 effect Stop { stop(message: Text) -> ! } \
+                 trigger() -> ! / {Stop} { perform Stop::stop(\"terminal\") } \
+                 main() { () }",
+            )
+            .unwrap();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let compiler_bytes = phases.artifact.encode();
+            drop(phases);
+            let compiler = load_verified(&compiler_bytes).unwrap();
+            drop(compiler_bytes);
+            let vm = Vm::with_host(
+                compiler,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+
+            let bytes = fs::read(&output).unwrap();
+            let artifact = Artifact::decode(&bytes).unwrap();
+            assert_eq!(artifact.protocols.len(), 1);
+            let operation = &artifact.protocols[0].operations[0];
+            assert_eq!(operation.name, "stop");
+            assert_eq!(operation.payload_signature.params.len(), 1);
+            assert_eq!(operation.payload_signature.result, grandiose_vm::UNIT);
+            assert!(operation.terminal);
+            let trigger = function_id(&artifact, "trigger");
+            assert_eq!(artifact.functions[trigger as usize].outward_protocols, [0]);
+            assert!(artifact.code.iter().any(|instruction| matches!(
+                instruction,
+                Instruction::Perform {
+                    dst: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads,
+                } if payloads.len() == 1
+            )));
+            let verified = load_verified(&bytes).unwrap();
+            assert_eq!(
+                Vm::new(verified).run(trigger, vec![]),
+                Err(RuntimeError::UnhandledEffect {
+                    protocol: 0,
+                    operation: 0,
+                })
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM gate"]
+fn self_hosted_terminal_bool_handler_classifier_reaches_variant_dispatch() {
+    std::thread::Builder::new().stack_size(64 * 1024 * 1024).spawn(|| {
+        let source = "effect Branch { select(condition: Bool) -> ! } \
+            choose(value: Bool) -> u32 { \
+                handle Branch::select(value) { \
+                    Branch::select(true) => 10, \
+                    Branch::select(false) => 20 \
+                } \
+            } main() { () }";
+        let phases = grandiose::compile_bundle_to_phases_with_options(
+            &self_host_bundle(), CompileOptions { optimization_level: OptimizationLevel::O2 }
+        ).unwrap();
+        let classify = function_id(&phases.artifact, "classify_compile_error");
+        let compiler = load_verified(&phases.artifact.encode()).unwrap();
+        assert_eq!(Vm::with_host(compiler, ["process.args", "fs.read", "fs.write", "diagnostic"],
+            SystemHost::new(vec![])).unwrap().run(classify, vec![Value::Text(source.into())]).unwrap(), Value::U64(0));
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM source-capability batch"]
+fn self_hosted_source_capabilities_in_release_vm() {
+    #[derive(Clone, Copy)]
+    enum Probe {
+        Classify,
+        Diagnostic,
+    }
+
+    struct Case {
+        name: &'static str,
+        probe: Probe,
+        source: &'static str,
+        expected: u64,
+    }
+
+    let cases = [
+        Case {
+            // One terminal operation, one u32 payload, literal tests followed
+            // by a wildcard, and one common scalar result.
+            name: "terminal u32 handler scalar dispatch",
+            probe: Probe::Classify,
+            source: "effect Stop { stop(value: u32) -> ! } \
+                selected() -> u32 { \
+                    handle Stop::stop(2) { \
+                        Stop::stop(0) => 10, \
+                        Stop::stop(2) => 20, \
+                        Stop::stop(_) => 30 \
+                    } \
+                } \
+                main() { () }",
+            expected: 0,
+        },
+        Case {
+            name: "terminal Bool handler variant dispatch",
+            probe: Probe::Classify,
+            source: "effect Branch { select(condition: Bool) -> ! } \
+                choose(value: Bool) -> u32 { \
+                    handle Branch::select(value) { \
+                        Branch::select(true) => 10, \
+                        Branch::select(false) => 20 \
+                    } \
+                } main() { () }",
+            expected: 0,
+        },
+        Case {
+            // Abstract trait and generic-impl callables must defer, while the
+            // concrete implementation members remain seedable and lowerable.
+            name: "abstract trait and generic impl callable deferral",
+            probe: Probe::Classify,
+            source: "trait Measure { measure(self: &Self) -> i64; } \
+                struct Wrapper<T> { value: T } \
+                impl<T> Measure for Wrapper<T> { \
+                    measure(self: &Self) -> i64 { 1 } \
+                } \
+                trait Entry { main() -> (); } \
+                impl Entry for i64 { main() -> () { () } } \
+                trait Route { first(value: i64) -> i64; second(other: i64) -> i64; } \
+                impl Route for i64 { \
+                    first(value: i64) -> i64 { value } \
+                    second(other: i64) -> i64 { other } \
+                } \
+                main() { () }",
+            expected: 0,
+        },
+        Case {
+            // Effect MIR is intentionally not implemented, but its structured
+            // lowering diagnostic must return rather than aborting.
+            name: "residual effect control lowering diagnostic",
+            probe: Probe::Diagnostic,
+            source: "effect Ask { [1,1] ask(value: i64) -> i64 } \
+                answer(value: i64) -> i64 / {Ask} { perform Ask::ask(value) }",
+            expected: 10_710_026_103,
+        },
+    ];
+
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let (compiler, classify, diagnostic) = bootstrap_self_host_release_vm();
+            for case in cases {
+                let function = match case.probe {
+                    Probe::Classify => classify,
+                    Probe::Diagnostic => diagnostic,
+                };
+                assert_eq!(
+                    run_self_host_source_probe(&compiler, function, case.source),
+                    Value::U64(case.expected),
+                    "{}",
+                    case.name
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM literal-lowering gate"]
+fn self_hosted_compiler_lowers_text_and_bytes_literals_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "text_value() -> Text { \"hello\" } \
+                bytes_value() -> Bytes { b\"\\x00\\xff\" } \
+                main() { () }";
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("literal-input.glorious");
+            let output = directory.path().join("literal-output.grbc");
+            fs::write(&input, source).unwrap();
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        output.clone().into_os_string(),
+                        input.into_os_string(),
+                    ]),
+                )
+                .unwrap()
+                .run(entry, vec![])
+                .unwrap(),
+                Value::Unit,
+                "self-host compiler must emit literal bytecode"
+            );
+            let bytes = fs::read(output).unwrap();
+            let artifact = Artifact::decode(&bytes)
+                .expect("text and bytes constants must use GRBC wire payloads");
+            assert!(artifact.constants.iter().any(
+                |constant| matches!(constant, Constant::Text(text) if text == "hello")
+            ));
+            assert!(artifact.constants.iter().any(
+                |constant| matches!(constant, Constant::Bytes(bytes) if bytes == &[0, 0xff])
+            ));
+            load_verified(&bytes)
+                .expect("literal artifact must pass VM bytecode verification");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release VM label-control gate"]
+fn self_hosted_compiler_executes_protected_labels_and_nested_leave_in_release_vm() {
+    // Keep this an end-to-end VM check.  The source program deliberately uses
+    // both protected-region exits: `normal_label` reaches its join through
+    // LabelPop, while `nested_leave` skips the inner region and reaches the
+    // outer typed destination through Leave.  This is the executable core of
+    // the bootstrap labels_leave.rs regressions, including lexical shadowing
+    // of the active destination stack.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+                normal_label() -> i64 {
+                    @done: i64 { 7 }
+                }
+                nested_leave() -> i64 {
+                    @outer: i64 {
+                        @inner: i64 {
+                            @outer(42)
+                        }
+                    }
+                }
+                bool_dispatch_to_outer(value: Bool) -> i64 {
+                    @outer: i64 {
+                        @inner: i64 {
+                            match(value) {
+                                true => @outer(11),
+                                false => @outer(22)
+                            }
+                        }
+                    }
+                }
+                integer_dispatch_to_outer(value: u64) -> i64 {
+                    @outer: i64 {
+                        @inner: i64 {
+                            match(value) {
+                                0 => @outer(33),
+                                _ => @outer(44)
+                            }
+                        }
+                    }
+                }
+                bool_dispatch_returns(value: Bool) -> i64 {
+                    match(value) { true => 55, false => 66 }
+                }
+                // Keep one normal arm alongside an outer transfer.  The
+                // lowering must allocate a join result for the normal arm,
+                // while retaining the direct Leave for the terminal one.
+                bool_dispatch_mixed(value: Bool) -> i64 {
+                    @outer: i64 {
+                        match(value) {
+                            true => @outer(101),
+                            false => 102
+                        }
+                    }
+                }
+                // Construct Bool values in source: the production prelude
+                // represents Bool as a nominal Result alias, not a VM scalar.
+                bool_dispatch_to_outer_true() -> i64 {
+                    bool_dispatch_to_outer(true)
+                }
+                bool_dispatch_to_outer_false() -> i64 {
+                    bool_dispatch_to_outer(false)
+                }
+                bool_dispatch_returns_false() -> i64 {
+                    bool_dispatch_returns(false)
+                }
+                bool_dispatch_mixed_true() -> i64 {
+                    bool_dispatch_mixed(true)
+                }
+                bool_dispatch_mixed_false() -> i64 {
+                    bool_dispatch_mixed(false)
+                }
+                integer_dispatch_returns(value: u64) -> i64 {
+                    match(value) { 0 => 77, _ => 88 }
+                }
+                integer_dispatch_mixed(value: u64) -> i64 {
+                    @outer: i64 {
+                        match(value) {
+                            0 => @outer(103),
+                            _ => 104
+                        }
+                    }
+                }
+                main() { () }
+            "#;
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("labels-input.glorious");
+            let output = directory.path().join("labels-output.grbc");
+            fs::write(&input, source).unwrap();
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            drop(phases);
+
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        output.clone().into_os_string(),
+                        input.into_os_string(),
+                    ]),
+                )
+                .unwrap()
+                .run(entry, vec![])
+                .unwrap(),
+                Value::Unit,
+                "the self-host compiler must emit a label program"
             );
 
-            let native_output = directory.path().join("native.grbc");
-            let native = Command::new(&executable)
-                .arg(&native_output)
-                .arg(&input)
-                .output()
-                .unwrap();
+            let bytes = fs::read(output).unwrap();
+            let artifact = Artifact::decode(&bytes).expect("label artifact must decode");
+            load_verified(&bytes).expect("label artifact must pass VM verification");
             assert!(
-                native.status.success(),
-                "native self-host compiler failed: {:?}\n{}",
-                native.status,
-                String::from_utf8_lossy(&native.stderr)
+                artifact
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::LabelPush { .. })),
+                "the emitted program must preserve protected label entry"
             );
-            let native_bytes = fs::read(&native_output).unwrap();
-            assert_eq!(native_bytes, vm_bytes, "VM and LLVM hosts must agree");
-            assert_compiled_artifact(&native_bytes);
+            assert!(
+                artifact
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::LabelPop { .. })),
+                "the normal label edge must pop its protected destination"
+            );
+            assert!(
+                artifact
+                    .code
+                    .iter()
+                    .any(|instruction| matches!(instruction, Instruction::Leave { .. })),
+                "the nested outer transfer must remain a VM Leave"
+            );
+
+            let verified = load_verified(&bytes).unwrap();
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(function_id(&artifact, "normal_label"), vec![])
+                    .unwrap(),
+                Value::I64(7)
+            );
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(function_id(&artifact, "nested_leave"), vec![])
+                    .unwrap(),
+                Value::I64(42)
+            );
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_to_outer_true"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(11)
+            );
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_to_outer_false"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(22)
+            );
+            assert_eq!(
+                Vm::new(verified.clone())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_to_outer"),
+                        vec![Value::U64(0)]
+                    )
+                    .unwrap(),
+                Value::I64(33)
+            );
+            assert_eq!(
+                Vm::new(verified)
+                    .run(
+                        function_id(&artifact, "integer_dispatch_to_outer"),
+                        vec![Value::U64(9)]
+                    )
+                    .unwrap(),
+                Value::I64(44)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_returns_false"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(66)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_returns"),
+                        vec![Value::U64(0)]
+                    )
+                    .unwrap(),
+                Value::I64(77)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_returns"),
+                        vec![Value::U64(9)]
+                    )
+                    .unwrap(),
+                Value::I64(88)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_mixed_true"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(101)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "bool_dispatch_mixed_false"),
+                        vec![]
+                    )
+                    .unwrap(),
+                Value::I64(102)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_mixed"),
+                        vec![Value::U64(0)]
+                    )
+                    .unwrap(),
+                Value::I64(103)
+            );
+            assert_eq!(
+                Vm::new(load_verified(&bytes).unwrap())
+                    .run(
+                        function_id(&artifact, "integer_dispatch_mixed"),
+                        vec![Value::U64(9)]
+                    )
+                    .unwrap(),
+                Value::I64(104)
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn bootstrap_self_host_bytecode_prunes_dead_constants_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let mut used = vec![false; phases.artifact.constants.len()];
+            for instruction in &phases.artifact.code {
+                match instruction {
+                    Instruction::Const { constant, .. } => used[*constant as usize] = true,
+                    Instruction::Switch { cases, .. } => {
+                        for (constant, _) in cases {
+                            used[*constant as usize] = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                used.into_iter().all(|used| used),
+                "O2 bootstrap bytecode must not retain constants removed by peepholes"
+            );
+
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text("\"".into())])
+                .unwrap(),
+                Value::U64(1),
+                "the compacted bootstrap artifact must execute in the VM"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_hosted_prelude_bool_alias_resolves_before_literal_fallback_in_release_vm() {
+    // The production prelude models Bool as Result<(), ()> and then exports
+    // `true` as a global factory alias. Resolution must use that alias when
+    // present; otherwise elaboration treats the identifier as the focused
+    // probe's private scalar Bool and rejects the declared result type.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "enum Result<T, E> { Ok(T), Err(E) } \
+                type Option<T> = Result<T, ()>; \
+                type Bool = Option<()>; \
+                make_true() -> Bool { Result::Ok(()) } \
+                let true = make_true(); \
+                use_true() -> Bool { true }";
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap(),
+                Value::U64(0),
+                "a source Bool factory alias must override bare-literal fallback"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn self_hosted_generic_alias_enum_construction_reaches_backend_in_release_vm() {
+    // A constructor through nested aliases must adopt the expected nominal
+    // application.  This is the small form of the compiler prelude's Bool
+    // constructors (`Bool = Option<()> = Result<(), ()>`).
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "enum Result<T, E> { Ok(T), Err(E) } \
+                type Option<T> = Result<T, ()>; \
+                type Bool = Option<()>; \
+                make_true() -> Bool { Result::Ok(()) }";
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
+            assert_eq!(
+                Vm::with_host(
+                    compiler,
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap(),
+                Value::U64(0),
+                "generic enum construction through a nested alias must compile"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release regression gate: compile and verify the complete production self-host bundle"]
+fn full_self_host_bundle_compiles_to_a_verified_artifact_in_release() {
+    // Keep this deliberately before executing stage one: this is the smallest
+    // gate for lowering regressions in the production self-host compiler.  In
+    // particular, all-terminal nested dispatches must not leave untyped dead
+    // registers behind in the encoded artifact.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &production_self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O3,
+                },
+            )
+            .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
+            let bytes = phases.artifact.encode();
+            decode_and_verify_full_self_host_artifact(&bytes);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive release differential: native Stage1 must compile the production monolith exactly as the VM does"]
+fn production_stage1_native_matches_vm_on_canonical_monolith_in_release() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let bundle = production_self_host_bundle();
+            let program = modules::parse_bundle(&bundle).expect("production bundle must parse");
+            let resolved = modules::resolve_program(&bundle, program)
+                .expect("production bundle must resolve");
+            let source = modules::monolithic_source(&bundle, &resolved.resolution)
+                .expect("production bundle must have one canonical source");
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &bundle,
+                CompileOptions { optimization_level: OptimizationLevel::O3 },
+            ).expect("bootstrap must compile production Stage1");
+            let entry = phases.artifact.entry_function.expect("Stage1 entry");
+            let bytes = phases.artifact.encode();
+            let vm_stage1 = load_verified(&bytes).expect("Stage1 must verify");
+            let trace = retained_native_cli_trace_directory();
+            let input = trace.join("canonical.glorious");
+            let vm_output = trace.join("vm-stage2.grbc");
+            let native_output = trace.join("native-stage2.grbc");
+            let executable = trace.join("stage1-native");
+            fs::write(&input, source.as_bytes()).unwrap();
+            let vm_bytes = authoritative_vm_stage2(
+                &bytes,
+                vm_stage1,
+                entry,
+                source.as_bytes(),
+                &input,
+                &vm_output,
+            );
+            compile_release_grc_native_cli(&bundle, &executable, &trace);
+            run_native_cli_self_host(&executable, &input, &native_output, &trace);
+            assert_eq!(
+                fs::read(&native_output).unwrap(),
+                vm_bytes,
+                "native and VM Stage2 must be byte-identical; retained {}",
+                trace.display(),
+            );
+        }).unwrap().join().unwrap();
+}
+
+#[test]
+#[ignore = "expensive release iteration route: compile canonical self-host monolith through grc O3/Wild with a private durable native cache"]
+fn canonical_self_host_native_cli_uses_private_incremental_cache_in_release() {
+    // This is intentionally distinct from the VM convergence gates below. It
+    // exercises the production CLI path, which partitions native
+    // functions and restores only manifest-valid objects from this worktree's
+    // durable cache before Wild links the current executable.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source_bundle = production_self_host_bundle();
+            let source_program = modules::parse_bundle(&source_bundle)
+                .expect("self-host source must parse before CLI emission");
+            let source_resolution = modules::resolve_program(&source_bundle, source_program)
+                .expect("self-host source must resolve before CLI emission");
+            let monolithic_source = modules::monolithic_source(
+                &source_bundle,
+                &source_resolution.resolution,
+            )
+            .expect("self-host source must have a canonical monolithic form");
+
+            let trace = retained_native_cli_trace_directory();
+            let input = trace.join("canonical-self-host.glorious");
+            let executable = trace.join("bootstrap-self-host-native-cli");
+            let stage2 = trace.join("native-stage2.grbc");
+            let cache = trace.join("native-incremental-cache");
+            fs::write(&input, monolithic_source.as_bytes()).unwrap();
+            compile_release_grc_native_cli(&source_bundle, &executable, &trace);
+            run_native_cli_self_host(&executable, &input, &stage2, &trace);
+            let bytes = fs::read(&stage2).unwrap_or_else(|error| {
+                panic!(
+                    "native CLI Stage1 did not write {}: {error}; retained {}",
+                    stage2.display(),
+                    trace.display(),
+                )
+            });
+            let decoded = Artifact::decode(&bytes).unwrap_or_else(|error| {
+                panic!(
+                    "native CLI Stage2 did not decode: {error}; retained {}",
+                    trace.display(),
+                )
+            });
+            assert_eq!(decoded.encode(), bytes, "native CLI Stage2 must be canonical");
+            load_verified(&bytes).unwrap_or_else(|errors| {
+                panic!(
+                    "native CLI Stage2 did not verify: {errors:#?}; retained {}",
+                    trace.display(),
+                )
+            });
+            eprintln!(
+                "retained canonical native CLI iteration trace: {} (private cache {})",
+                trace.display(),
+                cache.display(),
+            );
         })
         .unwrap()
         .join()
@@ -1635,7 +2963,7 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &source_bundle,
                 CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
+                    optimization_level: OptimizationLevel::O3,
                 },
             )
             .unwrap_or_else(|errors| panic!("bootstrap compilation failed: {errors:#?}"));
@@ -1701,143 +3029,81 @@ fn self_hosted_compiler_compiles_itself_to_a_byte_identical_fixed_point() {
         .unwrap();
 }
 
-
 #[test]
-fn self_hosted_enum_const_expr_discriminants_match_rust() {
+#[ignore = "expensive release regression: verify zero-initialized native enums let canonical Stage1 emit Stage2"]
+fn canonical_self_host_native_emits_stage2_after_enum_zero_initialization() {
+    // This remains a named regression gate for enum aggregate initialization,
+    // but it now uses the same cached CLI/Wild executable route as normal
+    // native iteration instead of a hand-linked LLVM module.
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            // Positive/negative const-expr discriminant cases drawn directly from
-            // the bootstrap `enum_declaration_tags` semantics:
-            //   - integer arithmetic with precedence and parentheses
-            //   - `=` path references to a previous variant (implicit or explicit)
-            //   - running-discriminator continuation
-            //   - non-tag const values (negation, quantity, unresolved/multi-segment
-            //     path, division by zero, overflow) falling back to continuation
-            //   - the reserved u32::MAX sentinel and grammar errors rejected
-            // Each source is referenced so the emitter keeps the enum type.
-            let cases: &[(&str, &str, bool)] = &[
-                // (source, enum name, expected-accepted)
-                ("enum E { A = 1 + 2, B, C } main() -> { () }", "E", true),
-                ("enum E { A = 1 + 2 * 3, B } main() -> { () }", "E", true),
-                ("enum E { A = (1 + 2) * 3, B } main() -> { () }", "E", true),
-                ("enum E { A = 10 / 2 - 10 % 3, B } main() -> { () }", "E", true),
-                ("enum E { A = 1, B = A + 1, C } main() -> { () }", "E", true),
-                ("enum E { A, B = A + 1 } main() -> { () }", "E", true),
-                ("enum E { A = 3, B, C = 10 } main() -> { () }", "E", true),
-                ("enum E { A = -5, B } main() -> { () }", "E", true),
-                ("enum E { A = 999999999, B } main() -> { () }", "E", true),
-                ("enum E { A = Missing, B } main() -> { () }", "E", true),
-                ("enum E { A = 1 / 0, B } main() -> { () }", "E", true),
-                ("enum E { A = [1, 2], B } main() -> { () }", "E", true),
-                ("enum E { A = M::N, B } main() -> { () }", "E", true),
-                ("enum E { A = 2147483647 + 2147483648 + 1 } main() -> { () }", "E", true),
-                ("enum E { A, B = 5, C } main() -> { () }", "E", true),
-                ("enum E { A, B } main() -> { () }", "E", true),
-                ("enum E { A = 4294967295 } main() -> { () }", "E", false),
-                ("enum E { A = 2147483647 + 2147483648 } main() -> { () }", "E", false),
-                ("enum E { A = 1 + } main() -> { () }", "E", false),
-                ("enum E { A = \"x\" } main() -> { () }", "E", false),
-                ("enum E { A = } main() -> { () }", "E", false),
-            ];
+            let source_bundle = production_self_host_bundle();
+            let source_program = modules::parse_bundle(&source_bundle)
+                .unwrap_or_else(|errors| panic!("self-host source did not parse: {errors:#?}"));
+            let source_resolution = modules::resolve_program(&source_bundle, source_program)
+                .unwrap_or_else(|errors| panic!("self-host source did not resolve: {errors:#?}"));
+            let monolithic_source =
+                modules::monolithic_source(&source_bundle, &source_resolution.resolution)
+                    .expect("the self-host module graph must have a canonical one-file form");
+            let trace = retained_native_cli_trace_directory();
+            let input = trace.join("canonical-self-host.glorious");
+            let native_output = trace.join("native-stage2.grbc");
+            let executable = trace.join("bootstrap-self-host-enum-zero");
+            fs::write(&input, monolithic_source.as_bytes()).unwrap();
+            compile_release_grc_native_cli(&source_bundle, &executable, &trace);
+            run_native_cli_self_host(&executable, &input, &native_output, &trace);
+            let stage2 = fs::read(&native_output).unwrap_or_else(|error| {
+                panic!(
+                    "the zero-initialized native compiler did not emit {}: {error}; retained {}",
+                    native_output.display(),
+                    trace.display(),
+                )
+            });
+            decode_and_verify_full_self_host_artifact(&stage2);
+            eprintln!(
+                "retained zero-initialized native Stage1 output: {}",
+                trace.display()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
 
-            let bundle = self_host_bundle();
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &bundle,
-                CompileOptions { optimization_level: OptimizationLevel::O2 },
+#[test]
+#[ignore = "diagnostic release gate: replay a captured stage-one compiler in the VM"]
+fn self_hosted_stage_one_replay_emits_stage_two_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let stage_one = PathBuf::from(
+                std::env::var_os("G1_SELF_HOST_REPLAY_STAGE1")
+                    .expect("G1_SELF_HOST_REPLAY_STAGE1 must name a stage-one artifact"),
+            );
+            let input = PathBuf::from(
+                std::env::var_os("G1_SELF_HOST_REPLAY_INPUT")
+                    .expect("G1_SELF_HOST_REPLAY_INPUT must name self-host source"),
+            );
+            let compiler = load_verified(&fs::read(&stage_one).unwrap())
+                .expect("the captured stage-one artifact must verify");
+            let entry = compiler
+                .entry_function()
+                .expect("the captured stage-one artifact must have an entry function");
+            let directory = tempfile::tempdir().unwrap();
+            let output = directory.path().join("stage2-replay.grbc");
+            let vm = Vm::with_host(
+                compiler,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.as_os_str().to_owned(),
+                    input.into_os_string(),
+                ]),
             )
             .unwrap();
-            let compiler_entry = phases.artifact.entry_function.unwrap();
-            let compiler_bytes = phases.artifact.encode();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
-            let compiler = load_verified(&compiler_bytes).unwrap();
-            let directory = tempfile::tempdir().unwrap();
-
-            for (case_index, (source, enum_name, oracle_expected)) in cases.iter().enumerate() {
-                // Reference the enum so both compilers emit its type.
-                let referenced = format!("{source} probe_use() -> {enum_name} {{ {enum_name}::A }}");
-
-                // Rust bootstrap oracle.
-                let oracle_ok = grandiose::compile_source_to_bytecode("p.glorious", &referenced).is_ok();
-                assert_eq!(oracle_ok, *oracle_expected, "oracle invariant case {case_index}: {source:?}");
-                let oracle_tags = if oracle_ok {
-                    grandiose::compile_source_to_bytecode("p.glorious", &referenced)
-                        .ok()
-                        .and_then(|art| {
-                            art.types.iter().find_map(|d| match d.representation() {
-                                Type::Enum { name, variants, .. } if name == *enum_name => {
-                                    Some(variants.iter().map(|v| v.tag).collect::<Vec<_>>())
-                                }
-                                _ => None,
-                            })
-                        })
-                        .unwrap_or_default()
-                } else {
-                    vec![]
-                };
-
-                // Self-host accept/reject.
-                let vm = Vm::with_host(
-                    compiler.clone(),
-                    ["process.args", "fs.read", "fs.write", "diagnostic"],
-                    SystemHost::new(Vec::<std::ffi::OsString>::new()),
-                )
-                .unwrap();
-                let Value::U64(self_host_class) = vm
-                    .run(classify, vec![Value::Text(referenced.clone().into())])
-                    .unwrap()
-                else {
-                    panic!("classify failed case {case_index}: {source:?}");
-                };
-                let self_host_ok = self_host_class == 0;
-                assert_eq!(
-                    oracle_ok, self_host_ok,
-                    "accept/reject divergence case {case_index}: {source:?} \
-                     (oracle={oracle_ok}, self-host phase={self_host_class})"
-                );
-
-                if oracle_ok {
-                    let input = directory.path().join(format!("in{case_index}.glorious"));
-                    let output = directory.path().join(format!("out{case_index}.grbc"));
-                    fs::write(&input, &referenced).unwrap();
-                    let vm = Vm::with_host(
-                        compiler.clone(),
-                        ["process.args", "fs.read", "fs.write", "diagnostic"],
-                        SystemHost::new(vec![
-                            output.clone().into_os_string(),
-                            input.clone().into_os_string(),
-                        ]),
-                    )
-                    .unwrap();
-                    assert_eq!(vm.run(compiler_entry, vec![]).unwrap(), Value::Unit);
-                    let art = Artifact::decode(&fs::read(&output).unwrap()).unwrap();
-                    let self_host_names: Vec<String> = art
-                        .types
-                        .iter()
-                        .filter_map(|d| match d.representation() {
-                            Type::Enum { name, .. } => Some(name.to_owned()),
-                            _ => None,
-                        })
-                        .collect();
-                    let self_host_tags = art
-                        .types
-                        .iter()
-                        .find_map(|d| match d.representation() {
-                            Type::Enum { name, variants, .. } if name == *enum_name => {
-                                Some(variants.iter().map(|v| v.tag).collect::<Vec<_>>())
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| panic!(
-                            "self-hosted artifact missing enum {enum_name} case {case_index}: \
-                             available enums {self_host_names:?}; source {source:?}"
-                        ));
-                    assert_eq!(
-                        oracle_tags, self_host_tags,
-                        "tag divergence case {case_index}: {source:?}"
-                    );
-                }
-            }
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            let bytes = fs::read(output).expect("stage one must emit a stage-two artifact");
+            load_verified(&bytes).expect("the replayed stage-two artifact must verify");
         })
         .unwrap()
         .join()

@@ -1757,6 +1757,9 @@ pub(crate) fn parse_bundle_incremental(
     bundle: &SourceBundle,
     cache: &mut crate::frontend_cache::IncrementalFrontendCache,
 ) -> Result<Program, Vec<Diagnostic>> {
+    if let Some(parsed) = cache.parse_distributed_bundle_with_cached_standard_ast(bundle) {
+        return parsed;
+    }
     let tokens = cache.lex_bundle(bundle).map_err(|error| vec![error])?;
     parse_bundle_tokens(bundle, tokens)
 }

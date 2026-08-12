@@ -1,0 +1,8 @@
+// The first argument binds T. The Fn constraint then supplies the concrete
+// expected callable type needed to specialize `$constraint_identity`.
+constraint_identity<T>(value: T) -> T { value }
+
+apply<T, F>(value: T, callable: F) -> T
+where F: Fn<(T), Output=T> { callable(value) }
+
+main() -> { apply(7, $constraint_identity); () }

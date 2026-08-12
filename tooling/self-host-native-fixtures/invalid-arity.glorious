@@ -1,0 +1,4 @@
+// Bootstrap corpus rejection: direct calls must provide the declared arity.
+identity(value: i64) -> i64 { value }
+answer() -> i64 { identity() }
+main() -> { () }

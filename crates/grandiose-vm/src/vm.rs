@@ -202,16 +202,7 @@ pub struct Vm {
     imports: Result<Vec<ResolvedImport>, HostLinkError>,
     slots: SlotStore,
     last_location: Cell<Option<(u32, u32)>>,
-    /// Per-type enumeration tag tables (variant index -> runtime tag),
-    /// Per-type runtime tag tables, resolved eagerly at construction from the
-    /// artifact image. EnumTag dispatch is then a borrow-free table lookup:
-    /// `tables[ty][variant_index]` returns the emitted runtime tag.
-    enum_tag_tables: Vec<Box<[u32]>>,
-    /// Per-constant resolved `Value` cache, built lazily on the first
-    /// Const/Switch dispatch for each constant index. Resolving once turns
-    /// the per-dispatch `Rc::from(text)` allocation of text constants into a
-    /// refcount bump and skips the bounds-checked constant lookup entirely.
-    constant_cache: RefCell<Vec<Option<Value>>>,
+    diagnostics_configured: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -267,6 +258,27 @@ enum CapturePruning {
 
 const DEFAULT_MEMORY_PROFILE_STEPS: u64 = 1_000_000;
 
+/// Diagnostic controls are process configuration captured when constructing a
+/// VM. This keeps the ordinary `run` path free of repeated environment probes
+/// while preserving every configured diagnostic's existing per-run state.
+fn diagnostics_configured() -> bool {
+    diagnostics_configured_with(|name| std::env::var_os(name).is_some())
+}
+
+fn diagnostics_configured_with(mut present: impl FnMut(&str) -> bool) -> bool {
+    [
+        "G1_VM_ERROR_TRACE",
+        "G1_VM_FUNCTION",
+        "G1_VM_BREAKPOINT",
+        "G1_VM_MEMORY_PROFILE_MIB",
+        "G1_VM_PROGRESS_STEPS",
+        "G1_VM_HOT_FUNCTION_SAMPLE_STEPS",
+        "G1_VM_OPCODE_PROFILE",
+    ]
+    .into_iter()
+    .any(&mut present)
+}
+
 struct VmProgressTrace {
     interval: u64,
     countdown: u64,
@@ -287,6 +299,104 @@ struct VmHotFunctions {
     report_countdown: u64,
     steps: u64,
     samples: Vec<u64>,
+}
+
+/// Exact opcode-category accounting for a single VM run.  This is intentionally
+/// opt-in because incrementing a category counter on every dispatch perturbs
+/// throughput; it is for choosing VM optimization work, not measuring a final
+/// benchmark number.  `G1_VM_OPCODE_PROFILE=1` prints one stable summary when
+/// the run ends, including runs that terminate with a runtime error.
+struct VmOpcodeProfile {
+    started: Instant,
+    categories: [u64; 9],
+}
+
+impl VmOpcodeProfile {
+    fn from_env() -> Option<Self> {
+        std::env::var_os("G1_VM_OPCODE_PROFILE").map(|_| Self {
+            started: Instant::now(),
+            categories: [0; 9],
+        })
+    }
+
+    fn observe(&mut self, instruction: &Instruction) {
+        let category = match instruction {
+            Instruction::Nop
+            | Instruction::Jump { .. }
+            | Instruction::Switch { .. }
+            | Instruction::Return { .. }
+            | Instruction::Abort { .. }
+            | Instruction::Unreachable => 0,
+            Instruction::Const { .. } | Instruction::Move { .. } | Instruction::Copy { .. } => 1,
+            Instruction::Primitive { .. } => 2,
+            Instruction::Call { .. }
+            | Instruction::TailCall { .. }
+            | Instruction::CallSelf { .. }
+            | Instruction::TailCallSelf { .. }
+            | Instruction::CallKnownReceiver { .. }
+            | Instruction::TailCallKnownReceiver { .. }
+            | Instruction::CallIndirect { .. }
+            | Instruction::TailCallIndirect { .. }
+            | Instruction::HostCall { .. } => 3,
+            Instruction::Construct { .. }
+            | Instruction::ProjectMove { .. }
+            | Instruction::ProjectCopy { .. }
+            | Instruction::EnumTag { .. }
+            | Instruction::Deconstruct { .. }
+            | Instruction::MakeCallable { .. }
+            | Instruction::MakeBindingPack { .. } => 4,
+            Instruction::BorrowShared { .. }
+            | Instruction::BorrowUnique { .. }
+            | Instruction::ReborrowShared { .. }
+            | Instruction::ReborrowUnique { .. }
+            | Instruction::DerefCopy { .. }
+            | Instruction::DerefReborrowShared { .. }
+            | Instruction::DerefReborrowUnique { .. }
+            | Instruction::DerefMove { .. }
+            | Instruction::DerefStore { .. }
+            | Instruction::EndBorrow { .. }
+            | Instruction::ProjectBorrowShared { .. }
+            | Instruction::ProjectBorrowUnique { .. } => 5,
+            Instruction::Drop { .. } => 6,
+            Instruction::MakeHandler { .. }
+            | Instruction::MakeHandlerShared { .. }
+            | Instruction::Handle { .. }
+            | Instruction::Perform { .. }
+            | Instruction::Resume { .. }
+            | Instruction::TailResume { .. }
+            | Instruction::Cancel { .. } => 7,
+            Instruction::LabelPush { .. } | Instruction::LabelPop { .. } | Instruction::Leave { .. } => 8,
+        };
+        self.categories[category] = self.categories[category].saturating_add(1);
+    }
+}
+
+impl Drop for VmOpcodeProfile {
+    fn drop(&mut self) {
+        const NAMES: [&str; 9] = [
+            "control",
+            "register",
+            "primitive",
+            "call",
+            "aggregate",
+            "reference",
+            "cleanup",
+            "effect",
+            "label",
+        ];
+        let total = self.categories.iter().sum::<u64>();
+        let categories = NAMES
+            .into_iter()
+            .zip(self.categories)
+            .filter(|(_, count)| *count != 0)
+            .map(|(name, count)| format!("{name}={count}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "g1-vm-opcode-profile instructions={total} elapsed={:.3}s categories=[{categories}]",
+            self.started.elapsed().as_secs_f64(),
+        );
+    }
 }
 
 impl VmHotFunctions {
@@ -806,8 +916,7 @@ impl Vm {
             imports,
             slots: SlotStore::default(),
             last_location: Cell::new(None),
-            enum_tag_tables,
-            constant_cache,
+            diagnostics_configured: diagnostics_configured(),
         }
     }
     pub fn from_artifact(artifact: Artifact) -> Result<Self, VerifyError> {
@@ -846,15 +955,15 @@ impl Vm {
             imports: Ok(imports),
             slots: SlotStore::default(),
             last_location: Cell::new(None),
-            enum_tag_tables,
-            constant_cache,
+            diagnostics_configured: diagnostics_configured(),
         })
     }
 
     pub fn run(&self, function: u32, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let scope = ReclamationScope::begin();
         scope.track_values(&args);
-        let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        let trace_errors = self.diagnostics_configured
+            && std::env::var_os("G1_VM_ERROR_TRACE").is_some();
         if trace_errors {
             self.last_location.set(None);
         }
@@ -890,42 +999,42 @@ impl Vm {
             .map_err(|error| RuntimeError::HostLink(error.clone()))?;
         let a = self.artifact.image();
         let mut stack = vec![make_frame(a, function, args, Value::Unit, None)?];
-        let mut memory_profile = VmMemoryProfile::from_env();
-        let mut progress_trace = VmProgressTrace::from_env();
-        let mut hot_functions = VmHotFunctions::from_env(a.functions.len());
-        let breakpoint = VmBreakpoint::from_env();
-        let traced_function = std::env::var("G1_VM_FUNCTION").ok();
-        let trace_errors = std::env::var_os("G1_VM_ERROR_TRACE").is_some();
-        let mut instruction_profile = InstructionProfile::from_env();
-        let instruction_profile_enabled = instruction_profile.is_some();
-        // Cache the current function's descriptor and lazily-decoded
-        // instruction slice so per-step dispatch does not re-resolve the
-        // function or re-check bounds on every instruction. Refreshed only
-        // when a call/return changes the active frame's function.
-        let artifact_ref = &self.artifact;
-        let mut cached_function: Option<(u32, &crate::bytecode::Function, &[Instruction])> = None;
-        if instruction_profile_enabled {
-            eprintln!(
-                "g1-vm-tables drop_glue={} types={} cleanups={} functions={}",
-                a.drop_glue.len(),
-                a.types.len(),
-                a.cleanups.len(),
-                a.functions.len()
-            );
-        }
-        // Hot-loop optimization: when no diagnostics/tracing/profiling tool is
-        // active, all per-instruction `if let Some(...)` guards are loop
-        // invariant, so gate them behind a single precomputed branch. The
-        // inner checks then run only when at least one tool is enabled,
-        // preserving their exact behavior.
-        let diagnostics_active = memory_profile.is_some()
-            || progress_trace.is_some()
-            || hot_functions.is_some()
-            || breakpoint.is_some()
-            || trace_errors
-            || traced_function.is_some()
-            || instruction_profile_enabled;
-        let mut stack_depth = 0usize;
+        // A direct zero-argument call is common in lowered compiler code. Its
+        // callee frame has no incoming values to preserve, so return its
+        // register storage to this run-local cache when it becomes empty.
+        // Keeping the cache local makes separate and re-entrant `Vm::run`
+        // calls independent while avoiding allocator traffic for sequential
+        // leaf calls.
+        let mut recycled_zero_argument_registers = None;
+        let mut memory_profile = self
+            .diagnostics_configured
+            .then(VmMemoryProfile::from_env)
+            .flatten();
+        let mut progress_trace = self
+            .diagnostics_configured
+            .then(VmProgressTrace::from_env)
+            .flatten();
+        let mut hot_functions = self
+            .diagnostics_configured
+            .then(|| VmHotFunctions::from_env(a.functions.len()))
+            .flatten();
+        let mut opcode_profile = self
+            .diagnostics_configured
+            .then(VmOpcodeProfile::from_env)
+            .flatten();
+        let breakpoint = self
+            .diagnostics_configured
+            .then(VmBreakpoint::from_env)
+            .flatten();
+        let traced_function = self
+            .diagnostics_configured
+            .then(|| std::env::var("G1_VM_FUNCTION").ok())
+            .flatten();
+        let trace_errors = self.diagnostics_configured
+            && std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        let mut cached_function = None;
+        let mut cached_descriptor = None;
+        let mut cached_instructions = None;
         loop {
             if diagnostics_active {
                 if let Some(profile) = &mut memory_profile {
@@ -946,20 +1055,23 @@ impl Vm {
                     profile.observe(frame.function, a);
                 }
             }
-            let (fun, decoded) = match cached_function {
-                Some((cached_id, fun, decoded)) if cached_id == frame.function => (fun, decoded),
-                _ => {
-                    let verified_fun = artifact_ref
-                        .function(frame.function)
-                        .ok_or(RuntimeError::InvalidFunction(frame.function))?;
-                    let fun = verified_fun.descriptor();
-                    let decoded = verified_fun.decoded_instructions();
-                    cached_function = Some((frame.function, fun, decoded));
-                    (fun, decoded)
-                }
-            };
-            if frame.pc >= fun.code_len {
-                return Err(RuntimeError::TypeConfusion);
+            if cached_function != Some(frame.function) {
+                let verified = self.artifact.function(frame.function)
+                    .ok_or(RuntimeError::InvalidFunction(frame.function))?;
+                cached_function = Some(frame.function);
+                cached_descriptor = Some(verified.descriptor());
+                cached_instructions = Some(verified.instructions());
+            }
+            let fun = cached_descriptor.expect("cached verified function descriptor");
+            let ins = cached_instructions
+                .expect("cached verified function instructions")
+                .get(frame.pc as usize)
+                .ok_or(RuntimeError::TypeConfusion)?;
+            if let Some(profile) = &mut opcode_profile {
+                profile.observe(ins);
+            }
+            if let Some(trace) = &mut progress_trace {
+                trace.observe(frame.function, &fun.name, frame.pc, stack_depth);
             }
             // SAFETY: `frame.pc < fun.code_len == decoded.len()` was checked
             // above, and `decoded` is this function's immutable, verifier-built
@@ -1013,7 +1125,7 @@ impl Vm {
                 Instruction::Copy { dst, src } => {
                     let (dst, src) = (*dst, *src);
                     let v = copy_register(a, frame, src, fun.register_types[src as usize])?;
-                    unsafe { put_unchecked(frame, dst, v) };
+                    put(frame, dst, v)?;
                     frame.pc += 1;
                 }
                 Instruction::BorrowShared { dst, src } => {
@@ -1055,15 +1167,7 @@ impl Vm {
                 }
                 Instruction::DerefCopy { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let (referent_type, target) = match get(frame, src)? {
-                        Value::Reference {
-                            referent_type,
-                            target,
-                            ..
-                        } => (referent_type, target),
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    let value = copy_reference_target(a, referent_type, &target)?;
+                    let value = copy_reference_register(a, frame, src)?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
@@ -1071,22 +1175,8 @@ impl Vm {
                 | Instruction::DerefReborrowUnique { dst, src } => {
                     let (dst, src) = (*dst, *src);
                     let requested_unique = matches!(ins, Instruction::DerefReborrowUnique { .. });
-                    let (outer_unique, outer_target) = match get(frame, src)? {
-                        Value::Reference { unique, target, .. } => (unique, target),
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    let Value::Reference {
-                        referent_type,
-                        unique: inner_unique,
-                        target,
-                        ..
-                    } = observe_reference_target(&outer_target)?
-                    else {
-                        return Err(RuntimeError::TypeConfusion);
-                    };
-                    if requested_unique && (!outer_unique || !inner_unique) {
-                        return Err(RuntimeError::TypeConfusion);
-                    }
+                    let (referent_type, target) =
+                        reborrow_dereferenced_register(frame, src, requested_unique)?;
                     put(
                         frame,
                         dst,
@@ -1100,30 +1190,14 @@ impl Vm {
                 }
                 Instruction::DerefMove { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let target = match get(frame, src)? {
-                        Value::Reference {
-                            unique: true,
-                            target,
-                            ..
-                        } => target,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    let value = take_reference_target(&target)?;
+                    let value = move_reference_register(frame, src)?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
                 Instruction::DerefStore { dst, src } => {
                     let (dst, src) = (*dst, *src);
-                    let target = match get(frame, dst)? {
-                        Value::Reference {
-                            unique: true,
-                            target,
-                            ..
-                        } => target,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
                     let value = take(frame, src)?;
-                    store_reference_target(&target, value)?;
+                    store_reference_register(frame, dst, value)?;
                     frame.pc += 1;
                 }
                 Instruction::Construct {
@@ -1133,44 +1207,46 @@ impl Vm {
                     fields,
                 } => {
                     let (dst, ty, variant) = (*dst, *ty, *variant);
-                    let values = fields
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    // Small two-field products dominate the compiler's AST,
+                    // typed core, and MIR records. Build their final aggregate
+                    // slots directly instead of allocating an intermediate
+                    // operand vector and then a second field vector.
+                    let value = match fields.as_slice() {
+                        [first, second] => Value::aggregate_with_variant(
+                            ty,
+                            variant,
+                            [take(frame, *first)?, take(frame, *second)?],
+                        ),
+                        _ => {
+                            let values = fields
+                                .iter()
+                                .map(|r| take(frame, *r))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Value::aggregate_with_variant(ty, variant, values)
+                        }
+                    };
                     put(
                         frame,
                         dst,
-                        Value::aggregate_with_variant(ty, variant, values),
+                        value,
                     )?;
                     frame.pc += 1;
                 }
                 Instruction::ProjectMove { dst, src, field } => {
                     let (dst, src, field) = (*dst, *src, *field);
-                    let value = get(frame, src)?;
-                    let aggregate = aggregate_place(&value, true)?;
-                    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
-                    let value = aggregate
-                        .borrow_mut()
-                        .fields
-                        .get_mut(field)
-                        .and_then(Option::take)
-                        .ok_or(RuntimeError::TypeConfusion)?;
+                    let value = move_project_register(a, frame, src, field)?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
                 Instruction::ProjectCopy { dst, src, field } => {
                     let (dst, src, field) = (*dst, *src, *field);
-                    let value = get(frame, src)?;
-                    let aggregate = aggregate_place(&value, false)?;
-                    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
-                    let field_value = aggregate
-                        .borrow()
-                        .fields
-                        .get(field)
-                        .and_then(Option::as_ref)
-                        .ok_or(RuntimeError::TypeConfusion)?
-                        .clone();
-                    let value = copy_value(a, fun.register_types[dst as usize], &field_value)?;
+                    let value = copy_project_register(
+                        a,
+                        frame,
+                        src,
+                        field,
+                        fun.register_types[dst as usize],
+                    )?;
                     put(frame, dst, value)?;
                     frame.pc += 1;
                 }
@@ -1220,57 +1296,21 @@ impl Vm {
                 | Instruction::ProjectBorrowUnique { dst, src, field } => {
                     let (dst, src, field) = (*dst, *src, *field);
                     let unique = matches!(ins, Instruction::ProjectBorrowUnique { .. });
-                    let value = get(frame, src)?;
-                    let aggregate = aggregate_place(&value, unique)?;
-                    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
-                    if aggregate
-                        .borrow()
-                        .fields
-                        .get(field)
-                        .ok_or(RuntimeError::TypeConfusion)?
-                        .is_none()
-                    {
-                        return Err(RuntimeError::TypeConfusion);
-                    }
-                    let referent_type = match a
-                        .checked_type(fun.register_types[dst as usize])
-                        .ok_or(RuntimeError::TypeConfusion)?
-                        .representation()
-                    {
-                        Type::RefShared { referent } if !unique => *referent,
-                        Type::RefUnique { referent } if unique => *referent,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    // A callable environment may store a reference handle as
-                    // a field. Borrowing that field with a destination whose
-                    // referent is the stored handle's referent is a per-call
-                    // reborrow of the captured target, not a borrow of the
-                    // handle slot itself. The verifier admits this flattened
-                    // form only for shared reborrows, or for a unique reborrow
-                    // through an originally unique captured handle.
-                    let flattened = {
-                        let aggregate = aggregate.borrow();
-                        match aggregate.fields.get(field).and_then(Option::as_ref) {
-                            Some(Value::Reference {
-                                referent_type: captured_referent,
-                                unique: captured_unique,
-                                target,
-                            }) if *captured_referent == referent_type
-                                && (!unique || *captured_unique) =>
-                            {
-                                Some(target.clone())
-                            }
-                            _ => None,
-                        }
-                    };
+                    let (referent_type, target) = borrow_project_register(
+                        a,
+                        frame,
+                        src,
+                        field,
+                        unique,
+                        fun.register_types[dst as usize],
+                    )?;
                     put(
                         frame,
                         dst,
                         Value::Reference {
                             referent_type,
                             unique,
-                            target: flattened
-                                .unwrap_or(ReferenceTarget::AggregateField { aggregate, field }),
+                            target,
                         },
                     )?;
                     frame.pc += 1;
@@ -1362,21 +1402,147 @@ impl Vm {
                 }
                 Instruction::Primitive { dst, op, args } => {
                     let (dst, op) = (*dst, *op);
-                    let arg_types = args
-                        .iter()
-                        .map(|register| fun.register_types[*register as usize])
-                        .collect::<Vec<_>>();
-                    let values = args
-                        .iter()
-                        .map(|r| take(frame, *r))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let v = primitive_typed(
-                        a,
-                        fun.register_types[dst as usize],
-                        op,
-                        &arg_types,
-                        &values,
-                    )?;
+                    // Primitive implementations only inspect the first
+                    // argument type for numeric operations; every other
+                    // primitive dispatches solely on values and result type.
+                    // Avoid materializing a short-lived type vector for each
+                    // VM primitive in the self-host compiler's hot loops.
+                    let first_arg_type = args
+                        .first()
+                        .map(|register| fun.register_types[*register as usize]);
+                    let result_type = fun.register_types[dst as usize];
+                    // Nearly every compiler primitive is unary or binary.
+                    // Keep those operands in registers/stack slots instead
+                    // of building an iterator state machine and heap Vec on
+                    // every dispatch. Variable-arity array and byte helpers
+                    // retain the exact old left-to-right collection path.
+                    let v = match args.as_slice() {
+                        // The self-hosted compiler spends much of its time in
+                        // checked machine-word arithmetic.  Verification has
+                        // already fixed both operand and result
+                        // representations, so keep this common case out of
+                        // the generic integer dispatcher (which must support
+                        // every width, signedness, conversion, and operation).
+                        [first, second]
+                            if op == Primitive::IntCheckedAdd
+                                && first_arg_type == Some(I64)
+                                && result_type == I64 =>
+                        {
+                            let (Value::I64(first), Value::I64(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            Value::I64(
+                                first
+                                    .checked_add(second)
+                                    .ok_or(RuntimeError::ArithmeticOverflow)?,
+                            )
+                        }
+                        [first, second]
+                            if first_arg_type == Some(I64)
+                                && matches!(
+                                    op,
+                                    Primitive::IntCheckedSub
+                                        | Primitive::IntCheckedMul
+                                        | Primitive::IntWrappingAdd
+                                        | Primitive::IntWrappingSub
+                                        | Primitive::IntWrappingMul
+                                        | Primitive::IntBitAnd
+                                        | Primitive::IntBitOr
+                                        | Primitive::IntBitXor
+                                )
+                                && result_type == I64 =>
+                        {
+                            let (Value::I64(first), Value::I64(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            let value = match op {
+                                Primitive::IntCheckedSub => first.checked_sub(second),
+                                Primitive::IntCheckedMul => first.checked_mul(second),
+                                Primitive::IntWrappingAdd => Some(first.wrapping_add(second)),
+                                Primitive::IntWrappingSub => Some(first.wrapping_sub(second)),
+                                Primitive::IntWrappingMul => Some(first.wrapping_mul(second)),
+                                Primitive::IntBitAnd => Some(first & second),
+                                Primitive::IntBitOr => Some(first | second),
+                                Primitive::IntBitXor => Some(first ^ second),
+                                _ => unreachable!("guarded I64 primitive"),
+                            };
+                            Value::I64(value.ok_or(RuntimeError::ArithmeticOverflow)?)
+                        }
+                        [first, second]
+                            if first_arg_type == Some(I64)
+                                && matches!(
+                                    op,
+                                    Primitive::IntEq
+                                        | Primitive::IntNe
+                                        | Primitive::IntLt
+                                        | Primitive::IntLe
+                                        | Primitive::IntGt
+                                        | Primitive::IntGe
+                                )
+                                && result_type == U32 =>
+                        {
+                            let (Value::I64(first), Value::I64(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            let value = match op {
+                                Primitive::IntEq => first == second,
+                                Primitive::IntNe => first != second,
+                                Primitive::IntLt => first < second,
+                                Primitive::IntLe => first <= second,
+                                Primitive::IntGt => first > second,
+                                Primitive::IntGe => first >= second,
+                                _ => unreachable!("guarded I64 comparison"),
+                            };
+                            Value::U64(u64::from(value))
+                        }
+                        [first, second]
+                            if op == Primitive::TextEq
+                                && first_arg_type == Some(TEXT)
+                                && result_type == U32 =>
+                        {
+                            let (Value::Text(first), Value::Text(second)) =
+                                (take(frame, *first)?, take(frame, *second)?)
+                            else {
+                                return Err(RuntimeError::TypeConfusion);
+                            };
+                            Value::U64(u64::from(Rc::ptr_eq(&first, &second) || first == second))
+                        }
+                        [] => primitive_typed_first_type(a, result_type, op, first_arg_type, &[])?,
+                        [first] => {
+                            let first = take(frame, *first)?;
+                            primitive_typed_first_type(
+                                a,
+                                result_type,
+                                op,
+                                first_arg_type,
+                                &[first],
+                            )?
+                        }
+                        [first, second] => {
+                            let first = take(frame, *first)?;
+                            let second = take(frame, *second)?;
+                            primitive_typed_first_type(
+                                a,
+                                result_type,
+                                op,
+                                first_arg_type,
+                                &[first, second],
+                            )?
+                        }
+                        _ => {
+                            let values = args
+                                .iter()
+                                .map(|register| take(frame, *register))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            primitive_typed_first_type(a, result_type, op, first_arg_type, &values)?
+                        }
+                    };
                     put(frame, dst, v)?;
                     frame.pc += 1;
                 }
@@ -1418,22 +1584,48 @@ impl Vm {
                     args,
                 } => {
                     let (dst, function) = (*dst, *function);
-                    let callee =
-                        make_callee_frame_from_registers(a, function, args, Value::Unit, dst, frame)?;
+                    let callee = match args.as_slice() {
+                        [] => make_verified_zero_argument_frame(
+                            a,
+                            function,
+                            dst,
+                            Some(&mut recycled_zero_argument_registers),
+                        )?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a, function, frame, argument, Value::Unit, dst,
+                        )?,
+                        &[first, second] => make_verified_two_argument_frame(
+                            a, function, frame, first, second, Value::Unit, dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
+                            a, function, frame, args, Value::Unit, dst,
+                        )?,
+                    };
                     frame.pc += 1;
                     stack.push(callee);
                 }
                 Instruction::TailCall { function, args } => {
                     let function = *function;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_callee_frame_from_registers(
-                        a,
-                        function,
-                        args,
-                        Value::Unit,
-                        return_dst,
-                        frame,
-                    )?;
+                    let mut replacement = match args.as_slice() {
+                        [] => make_verified_zero_argument_frame(
+                            a,
+                            function,
+                            return_dst,
+                            None,
+                        )?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a,
+                            function,
+                            frame,
+                            argument,
+                            Value::Unit,
+                            return_dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
+                            a, function, frame, args, Value::Unit, return_dst,
+                        )?,
+                    };
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -1449,9 +1641,9 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     }
                     let function = frame.function;
-                    let receiver = get(frame, 0)?.clone();
-                    let callee =
-                        make_callee_frame_from_registers(a, function, args, receiver, dst, frame)?;
+                    let callee = make_verified_self_frame_from_arguments(
+                        a, function, frame, args, dst, false,
+                    )?;
                     frame.pc += 1;
                     stack.push(callee);
                 }
@@ -1459,16 +1651,10 @@ impl Vm {
                     if fun.receiver_mode.is_none() {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let receiver = take(frame, 0)?;
                     let function = frame.function;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_callee_frame_from_registers(
-                        a,
-                        function,
-                        args,
-                        receiver,
-                        return_dst,
-                        frame,
+                    let mut replacement = make_verified_self_frame_from_arguments(
+                        a, function, frame, args, return_dst, true,
                     )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
@@ -1493,14 +1679,9 @@ impl Vm {
                     if callee.receiver_mode != Some(0) {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let receiver = get(frame, receiver)?.clone();
-                    let callee = make_callee_frame_from_registers(
-                        a,
-                        function,
-                        args,
-                        receiver,
-                        dst,
-                        frame,
+                    let receiver = get(frame, receiver)?;
+                    let callee = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, dst,
                     )?;
                     frame.pc += 1;
                     stack.push(callee);
@@ -1518,15 +1699,10 @@ impl Vm {
                     if callee.receiver_mode != Some(0) {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let receiver = get(frame, receiver)?.clone();
+                    let receiver = get(frame, receiver)?;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_callee_frame_from_registers(
-                        a,
-                        function,
-                        args,
-                        receiver,
-                        return_dst,
-                        frame,
+                    let mut replacement = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, return_dst,
                     )?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
@@ -1554,17 +1730,13 @@ impl Vm {
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
-                    let values = captures
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let capture = if *capture_type == crate::bytecode::UNIT {
-                        if !values.is_empty() {
+                        if !captures.is_empty() {
                             return Err(RuntimeError::TypeConfusion);
                         }
                         Value::Unit
                     } else {
-                        Value::aggregate(*capture_type, values)
+                        take_aggregate_from_registers(frame, *capture_type, captures)?
                     };
                     put(
                         frame,
@@ -1653,17 +1825,13 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     };
                     let environment_type = *environment_type;
-                    let values = captures
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let environment = if environment_type == crate::bytecode::UNIT {
-                        if !values.is_empty() {
+                        if !captures.is_empty() {
                             return Err(RuntimeError::TypeConfusion);
                         }
                         Value::Unit
                     } else {
-                        Value::aggregate(environment_type, values)
+                        take_aggregate_from_registers(frame, environment_type, captures)?
                     };
                     let shared = ArenaObject::new_tracked(Some(environment));
                     let clauses = functions
@@ -1695,11 +1863,8 @@ impl Vm {
                     payloads,
                 } => {
                     let (dst, binding_type) = (*dst, *binding_type);
-                    let values = payloads
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    put(frame, dst, Value::aggregate(binding_type, values))?;
+                    let aggregate = take_aggregate_from_registers(frame, binding_type, payloads)?;
+                    put(frame, dst, aggregate)?;
                     frame.pc += 1;
                 }
                 Instruction::CallIndirect {
@@ -1711,8 +1876,18 @@ impl Vm {
                     let (dst, callable, receiver_mode) = (*dst, *callable, *receiver_mode);
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
-                    let mut callee =
-                        make_callee_frame_from_registers(a, function, args, receiver, dst, frame)?;
+                    let mut callee = match args.as_slice() {
+                        [] => make_verified_zero_argument_receiver_frame(a, function, receiver, dst)?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a, function, frame, argument, receiver, dst,
+                        )?,
+                        &[first, second] => make_verified_two_argument_frame(
+                            a, function, frame, first, second, receiver, dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
+                            a, function, frame, args, receiver, dst,
+                        )?,
+                    };
                     frame.pc += 1;
                     if let Some(guard) = guard {
                         callee.guards.push(guard);
@@ -1728,14 +1903,20 @@ impl Vm {
                     let (function, receiver, guard) =
                         callable_receiver(a, frame, callable, receiver_mode)?;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_callee_frame_from_registers(
-                        a,
-                        function,
-                        args,
-                        receiver,
-                        return_dst,
-                        frame,
-                    )?;
+                    let mut replacement = match args.as_slice() {
+                        [] => make_verified_zero_argument_receiver_frame(
+                            a, function, receiver, return_dst,
+                        )?,
+                        &[argument] => make_verified_one_argument_frame(
+                            a, function, frame, argument, receiver, return_dst,
+                        )?,
+                        &[first, second] => make_verified_two_argument_frame(
+                            a, function, frame, first, second, receiver, return_dst,
+                        )?,
+                        _ => make_verified_frame_from_arguments(
+                            a, function, frame, args, receiver, return_dst,
+                        )?,
+                    };
                     if let Some(guard) = guard {
                         replacement.guards.push(guard);
                     }
@@ -1758,8 +1939,9 @@ impl Vm {
                     let handler = take(frame, handler)?;
                     let body = take(frame, body)?;
                     let (function, receiver) = owned_callable_receiver(a, body, 2)?;
-                    let mut body_frame =
-                        make_callee_frame_from_registers(a, function, args, receiver, Some(dst), frame)?;
+                    let mut body_frame = make_verified_frame_from_arguments(
+                        a, function, frame, args, receiver, Some(dst),
+                    )?;
                     frame.pc += 1;
                     body_frame.delimiter = Some(handler);
                     stack.push(body_frame);
@@ -1771,18 +1953,24 @@ impl Vm {
                     payloads,
                 } => {
                     let (protocol, operation) = (*protocol, *operation);
-                    let values = payloads
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
                     let selected = select_handler_clause(a, &mut stack, protocol, operation)?;
                     let delimiter = selected.delimiter;
                     let return_dst = stack[delimiter].return_dst;
-                    let deferred_frames = stack.split_off(delimiter);
                     let (function, receiver) =
                         owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
-                    let mut clause =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                    // A non-resuming operation passes its payloads directly
+                    // to the selected clause. Once selection determines that
+                    // clause's register layout, relocate the payloads there
+                    // instead of staging them in a short-lived Vec.
+                    let mut clause = {
+                        let caller = stack
+                            .last_mut()
+                            .expect("perform executes with a current frame");
+                        make_verified_frame_from_arguments(
+                            a, function, caller, payloads, receiver, return_dst,
+                        )?
+                    };
+                    let deferred_frames = stack.split_off(delimiter);
                     clause.guards.push(selected.handler_guard);
                     clause.deferred_frames = deferred_frames;
                     stack.push(clause);
@@ -1794,14 +1982,23 @@ impl Vm {
                     payloads,
                 } => {
                     let (protocol, operation) = (*protocol, *operation);
-                    let mut values = payloads
-                        .iter()
-                        .map(|register| take(frame, *register))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    frame.pc += 1;
                     let selected = select_handler_clause(a, &mut stack, protocol, operation)?;
                     let delimiter = selected.delimiter;
                     let return_dst = stack[delimiter].return_dst;
+                    let Value::Callable(callable) = &selected.callable else {
+                        return Err(RuntimeError::TypeConfusion);
+                    };
+                    let function = callable.function();
+                    let mut clause = {
+                        let caller = stack
+                            .last_mut()
+                            .expect("perform executes with a current frame");
+                        let clause = prepare_verified_frame_from_arguments(
+                            a, function, caller, payloads, return_dst, 1,
+                        )?;
+                        caller.pc += 1;
+                        clause
+                    };
                     let mut frames = stack.split_off(delimiter);
                     let resumption_type = selected
                         .resumption_type
@@ -1833,16 +2030,17 @@ impl Vm {
                             )?;
                         }
                     }
-                    values.push(Value::Resumption(ControlHandle::new(Some(
-                        ResumptionValue {
+                    let (_function, receiver) =
+                        owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
+                    put(&mut clause, 0, receiver)?;
+                    put(
+                        &mut clause,
+                        payloads.len() as u32 + 1,
+                        Value::Resumption(ControlHandle::new(Some(ResumptionValue {
                             resumption_type,
                             frames,
-                        },
-                    ))));
-                    let (function, receiver) =
-                        owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
-                    let mut clause =
-                        make_verified_frame(a, function, values, receiver, return_dst)?;
+                        }))),
+                    )?;
                     clause.guards.push(selected.handler_guard);
                     stack.push(clause);
                 }
@@ -1869,30 +2067,20 @@ impl Vm {
                     {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let resumption_value = if receiver_mode == 2 {
-                        take(frame, resumption)?
-                    } else {
-                        get(frame, resumption)?.clone()
-                    };
-                    let Value::Resumption(resumption) = resumption_value else {
-                        return Err(RuntimeError::TypeConfusion);
-                    };
-                    let value = take(frame, value)?;
                     let mut captured = if receiver_mode == 2 {
+                        let resumption_value = take(frame, resumption)?;
+                        let Value::Resumption(resumption) = resumption_value else {
+                            return Err(RuntimeError::TypeConfusion);
+                        };
                         resumption
                             .try_borrow_mut()
                             .map_err(|_| RuntimeError::TypeConfusion)?
                             .take()
                             .ok_or(RuntimeError::TypeConfusion)?
                     } else {
-                        let stored = resumption
-                            .try_borrow()
-                            .map_err(|_| RuntimeError::TypeConfusion)?;
-                        clone_resumption_snapshot(
-                            a,
-                            stored.as_ref().ok_or(RuntimeError::TypeConfusion)?,
-                        )?
+                        clone_resumption_register(a, frame, resumption)?
                     };
+                    let value = take(frame, value)?;
                     if captured.resumption_type != expected_resumption_type {
                         return Err(RuntimeError::TypeConfusion);
                     }
@@ -1940,30 +2128,20 @@ impl Vm {
                     {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let resumption_value = if receiver_mode == 2 {
-                        take(frame, resumption)?
-                    } else {
-                        get(frame, resumption)?.clone()
-                    };
-                    let Value::Resumption(resumption) = resumption_value else {
-                        return Err(RuntimeError::TypeConfusion);
-                    };
-                    let value = take(frame, value)?;
                     let mut captured = if receiver_mode == 2 {
+                        let resumption_value = take(frame, resumption)?;
+                        let Value::Resumption(resumption) = resumption_value else {
+                            return Err(RuntimeError::TypeConfusion);
+                        };
                         resumption
                             .try_borrow_mut()
                             .map_err(|_| RuntimeError::TypeConfusion)?
                             .take()
                             .ok_or(RuntimeError::TypeConfusion)?
                     } else {
-                        let stored = resumption
-                            .try_borrow()
-                            .map_err(|_| RuntimeError::TypeConfusion)?;
-                        clone_resumption_snapshot(
-                            a,
-                            stored.as_ref().ok_or(RuntimeError::TypeConfusion)?,
-                        )?
+                        clone_resumption_register(a, frame, resumption)?
                     };
+                    let value = take(frame, value)?;
                     if captured.resumption_type != expected_resumption_type {
                         return Err(RuntimeError::TypeConfusion);
                     }
@@ -2050,6 +2228,17 @@ impl Vm {
                         None => Value::Unit,
                     };
                     let dst = frame.return_dst;
+                    // Only a direct zero-argument call has the unit receiver
+                    // and no parameter registers. Once every local has been
+                    // consumed, its register allocation can be used by the
+                    // next such call in this execution.
+                    let recycle_zero_argument_registers = fun.params.is_empty()
+                        && frame.delimiter.is_none()
+                        && frame.guards.is_empty()
+                        && frame.deferred_frames.is_empty()
+                        && frame.labels.is_empty()
+                        && matches!(frame.registers.first(), Some(Some(Value::Unit)))
+                        && frame.registers[1..].iter().all(Option::is_none);
                     if let Some(handler) = frame.delimiter.take() {
                         self.destroy_runtime_typed(handler)?;
                     }
@@ -2059,8 +2248,10 @@ impl Vm {
                     for deferred in frame.deferred_frames.drain(..).rev() {
                         self.destroy_frame(deferred)?;
                     }
-                    let returned = stack.pop().expect("execution stack non-empty before return pop");
-                    pool_frame(returned);
+                    let completed = stack.pop().expect("return executes with a current frame");
+                    if recycle_zero_argument_registers {
+                        recycled_zero_argument_registers = Some(completed.registers);
+                    }
                     match stack.last_mut() {
                         Some(caller) => {
                             if let Some(dst) = dst {
@@ -2338,16 +2529,193 @@ fn make_frame(
     ))
 }
 
-/// Construct a frame from values already produced by verified bytecode.
-///
-/// Public VM entry and host results are checked at their trust boundaries.
-/// Re-walking complete arrays and aggregates at every internal call would
-/// redundantly re-prove the verifier's call signature and can turn recursive
-/// accumulation into quadratic execution.
-fn make_verified_frame(
+/// Move an instruction operand list straight into its final aggregate field
+/// storage.  Captures and binding packs previously allocated `Vec<Value>` and
+/// immediately reallocated it into `Vec<Option<Value>>` in `Value::aggregate`.
+#[inline]
+fn take_aggregate_from_registers(
+    frame: &mut Frame,
+    ty: TypeId,
+    registers: &[u32],
+) -> Result<Value, RuntimeError> {
+    let mut fields = Vec::new();
+    reserve_output(&mut fields, registers.len())?;
+    for &register in registers {
+        fields.push(Some(take(frame, register)?));
+    }
+    Ok(Value::Aggregate(ArenaObject::new_tracked(AggregateValue {
+        ty,
+        variant: None,
+        fields,
+    })))
+}
+
+#[inline]
+fn make_verified_zero_argument_frame(
     a: &ExecutionImage,
     function: u32,
-    args: Vec<Value>,
+    return_dst: Option<u32>,
+    recycled_registers: Option<&mut Option<Vec<Option<Value>>>>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if !f.params.is_empty() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 0,
+        });
+    }
+    // The general relocation helper begins with an all-empty register file and
+    // overwrites r0.  Build the known unit receiver first instead, mirroring
+    // the already optimized entry-frame path.
+    let mut registers = recycled_registers
+        .and_then(|registers| registers.take())
+        .filter(|registers| registers.len() == f.register_types.len())
+        .unwrap_or_else(|| Vec::with_capacity(f.register_types.len()));
+    // A cached vector came from a fully returned frame, but clear it here
+    // rather than relying on that fact: this keeps the constructor's frame
+    // invariant explicit and makes the cache robust to future return paths.
+    registers.clear();
+    registers.push(Some(Value::Unit));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Construct a zero-argument closure frame directly with its already-resolved
+/// receiver. Shared closure application is common in compiler traversals; the
+/// generic relocation helper needlessly first creates an all-empty register
+/// file only to overwrite r0.
+#[inline]
+fn make_verified_zero_argument_receiver_frame(
+    a: &ExecutionImage,
+    function: u32,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if !f.params.is_empty() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 0,
+        });
+    }
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+
+/// Construct the common one-argument direct-call frame without setting up a
+/// slice iterator or first materializing an all-empty register file.
+#[inline]
+fn make_verified_one_argument_frame(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    argument: u32,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if f.params.len() != 1 {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 1,
+        });
+    }
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    registers.push(Some(take(caller, argument)?));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Construct the common two-argument direct-call frame without first filling
+/// an all-empty register file. This keeps the two moved arguments in their
+/// final slots and avoids generic slice enumeration in binary helpers.
+#[inline]
+fn make_verified_two_argument_frame(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    first: u32,
+    second: u32,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if f.params.len() != 2 {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: 2,
+        });
+    }
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    // Preserve the generic helper's left-to-right relocation order.
+    registers.push(Some(take(caller, first)?));
+    registers.push(Some(take(caller, second)?));
+    registers.resize_with(f.register_types.len(), || None);
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Construct a verified callee frame while relocating arguments straight from
+/// its caller. Direct calls are abundant in the self-host compiler and do not
+/// need the temporary `Vec<Value>` otherwise used by the more general call
+/// forms that also need to construct or transform their argument list.
+fn make_verified_frame_from_arguments(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    args: &[u32],
     receiver: Value,
     return_dst: Option<u32>,
 ) -> Result<Frame, RuntimeError> {
@@ -2361,9 +2729,106 @@ fn make_verified_frame(
             actual: args.len(),
         });
     }
-    Ok(frame_from_verified_values(
-        f, function, args, receiver, return_dst,
-    ))
+    let mut registers = vec![None; f.register_types.len()];
+    registers[0] = Some(receiver);
+    for (index, argument) in args.iter().copied().enumerate() {
+        registers[index + 1] = Some(take(caller, argument)?);
+    }
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Construct a recursive callee frame by relocating its arguments directly
+/// into the new register file. Self calls consume ordinary arguments before
+/// observing or moving their receiver; retain that order so their ownership
+/// behavior exactly matches the former temporary-Vec path.
+fn make_verified_self_frame_from_arguments(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    args: &[u32],
+    return_dst: Option<u32>,
+    move_receiver: bool,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if args.len() != f.params.len() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: args.len(),
+        });
+    }
+    let mut registers = vec![None; f.register_types.len()];
+    for (index, argument) in args.iter().copied().enumerate() {
+        registers[index + 1] = Some(take(caller, argument)?);
+    }
+    registers[0] = Some(if move_receiver {
+        take(caller, 0)?
+    } else {
+        get(caller, 0)?
+    });
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
+}
+
+/// Prepare a verified callee frame by relocating the leading argument prefix,
+/// while leaving its receiver and trailing synthetic parameters uninitialized.
+/// Resuming operations use this to place payloads directly before their
+/// continuation frame has been captured into the final resumption argument.
+fn prepare_verified_frame_from_arguments(
+    a: &ExecutionImage,
+    function: u32,
+    caller: &mut Frame,
+    args: &[u32],
+    return_dst: Option<u32>,
+    trailing_parameters: usize,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if args
+        .len()
+        .checked_add(trailing_parameters)
+        .is_none_or(|count| count != f.params.len())
+    {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len().saturating_sub(trailing_parameters),
+            actual: args.len(),
+        });
+    }
+    let mut registers = vec![None; f.register_types.len()];
+    for (index, argument) in args.iter().copied().enumerate() {
+        registers[index + 1] = Some(take(caller, argument)?);
+    }
+    Ok(Frame {
+        function,
+        pc: 0,
+        registers,
+        return_dst,
+        delimiter: None,
+        guards: Vec::new(),
+        deferred_frames: Vec::new(),
+        labels: Vec::new(),
+    })
 }
 
 fn frame_from_verified_values(
@@ -2373,11 +2838,13 @@ fn frame_from_verified_values(
     receiver: Value,
     return_dst: Option<u32>,
 ) -> Frame {
-    let mut registers = vec![None; f.register_types.len()];
-    registers[0] = Some(receiver);
-    for (i, v) in args.into_iter().enumerate() {
-        registers[i + 1] = Some(v)
-    }
+    // The verified entry path already owns its receiver and arguments. Build
+    // those initialized slots first, then reserve `None` only for the local
+    // tail instead of zero-filling and immediately overwriting every input.
+    let mut registers = Vec::with_capacity(f.register_types.len());
+    registers.push(Some(receiver));
+    registers.extend(args.into_iter().map(Some));
+    registers.resize_with(f.register_types.len(), || None);
     Frame {
         function,
         pc: 0,
@@ -2641,6 +3108,13 @@ impl Vm {
                 if array.element_type != *element {
                     return Err(RuntimeError::TypeConfusion);
                 }
+                if array.packed_bytes.is_some() {
+                    return if *element == U8 {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::TypeConfusion)
+                    };
+                }
                 while let Some(slot) = array.slots.pop() {
                     if let Some(value) = slot {
                         self.destroy_typed(*element, value)?;
@@ -2756,7 +3230,312 @@ fn get(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
         value => Ok(value.clone()),
     }
 }
-#[inline(always)]
+
+/// Copy a register directly from its storage. `get` intentionally returns an
+/// owned value for ordinary reads, but COPY has already committed to creating
+/// the destination's independent value, so cloning the source first would do
+/// the work twice for text, references, and aggregate handles.
+fn copy_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    ty: TypeId,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| copy_value(a, ty, value))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => copy_value(a, ty, value),
+    }
+}
+
+fn copy_project_value(
+    a: &ExecutionImage,
+    value: &Value,
+    field: u32,
+    field_type: TypeId,
+) -> Result<Value, RuntimeError> {
+    let aggregate = aggregate_place(value, false)?;
+    let aggregate = aggregate.borrow();
+    let field = runtime_field_index(a, &aggregate, field)?;
+    let value = aggregate
+        .fields
+        .get(field)
+        .and_then(Option::as_ref)
+        .ok_or(RuntimeError::TypeConfusion)?;
+    copy_value(a, field_type, value)
+}
+
+/// Like `copy_register`, but borrows the projected source field directly so
+/// PROJECT_COPY materializes only its required typed destination copy.
+fn copy_project_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    field: u32,
+    field_type: TypeId,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| copy_project_value(a, value, field, field_type))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => copy_project_value(a, value, field, field_type),
+    }
+}
+
+fn copy_reference_value(a: &ExecutionImage, value: &Value) -> Result<Value, RuntimeError> {
+    let Value::Reference {
+        referent_type,
+        target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    copy_reference_target(a, *referent_type, target)
+}
+
+/// DEREF_COPY only observes its reference operand, so it can derive the
+/// target copy straight from register storage rather than cloning the
+/// reference handle through `get` first.
+fn copy_reference_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| copy_reference_value(a, value))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => copy_reference_value(a, value),
+    }
+}
+
+fn reborrow_dereferenced_value(
+    value: &Value,
+    requested_unique: bool,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let Value::Reference {
+        unique: outer_unique,
+        target: outer_target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    let Value::Reference {
+        referent_type,
+        unique: inner_unique,
+        target,
+        ..
+    } = observe_reference_target(outer_target)?
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    if requested_unique && (!outer_unique || !inner_unique) {
+        return Err(RuntimeError::TypeConfusion);
+    }
+    Ok((referent_type, target))
+}
+
+/// A dereference reborrow only observes the outer reference. Borrow it from
+/// register storage so the outer target is not cloned just to be inspected.
+fn reborrow_dereferenced_register(
+    f: &Frame,
+    r: u32,
+    requested_unique: bool,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| reborrow_dereferenced_value(value, requested_unique))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => reborrow_dereferenced_value(value, requested_unique),
+    }
+}
+
+fn move_reference_value(value: &Value) -> Result<Value, RuntimeError> {
+    let Value::Reference {
+        unique: true,
+        target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    take_reference_target(target)
+}
+
+/// Move a unique referent directly through an ordinary reference register.
+/// A place-backed reference still takes the detached read path: its target
+/// can alias the same slot store, so the borrow must end before the target is
+/// mutated.
+fn move_reference_register(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => {
+            let value = slot.get().map_err(|_| RuntimeError::EmptyRegister(r))?;
+            move_reference_value(&value)
+        }
+        value => move_reference_value(value),
+    }
+}
+
+fn store_reference_value(value: &Value, replacement: Value) -> Result<(), RuntimeError> {
+    let Value::Reference {
+        unique: true,
+        target,
+        ..
+    } = value
+    else {
+        return Err(RuntimeError::TypeConfusion);
+    };
+    store_reference_target(target, replacement)
+}
+
+/// Store through a unique reference without cloning an ordinary destination
+/// register. Place-backed references still detach their read before storing:
+/// the referent can live in the same slot store. Verified bytecode gives the
+/// reference register and moved referent distinct types, so taking the source
+/// before borrowing this destination preserves their valid execution order.
+fn store_reference_register(
+    f: &Frame,
+    r: u32,
+    replacement: Value,
+) -> Result<(), RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => {
+            let value = slot.get().map_err(|_| RuntimeError::EmptyRegister(r))?;
+            store_reference_value(&value, replacement)
+        }
+        value => store_reference_value(value, replacement),
+    }
+}
+
+fn borrow_project_value(
+    a: &ExecutionImage,
+    value: &Value,
+    field: u32,
+    unique: bool,
+    destination_type: TypeId,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let aggregate = aggregate_place(value, unique)?;
+    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
+    if aggregate
+        .borrow()
+        .fields
+        .get(field)
+        .ok_or(RuntimeError::TypeConfusion)?
+        .is_none()
+    {
+        return Err(RuntimeError::TypeConfusion);
+    }
+    let referent_type = match a
+        .checked_type(destination_type)
+        .ok_or(RuntimeError::TypeConfusion)?
+        .representation()
+    {
+        Type::RefShared { referent } if !unique => *referent,
+        Type::RefUnique { referent } if unique => *referent,
+        _ => return Err(RuntimeError::TypeConfusion),
+    };
+    // A callable environment may store a reference handle as a field.
+    // Borrowing that field with a destination whose referent is the stored
+    // handle's referent is a per-call reborrow of the captured target, not a
+    // borrow of the handle slot itself.
+    let flattened = {
+        let aggregate = aggregate.borrow();
+        match aggregate.fields.get(field).and_then(Option::as_ref) {
+            Some(Value::Reference {
+                referent_type: captured_referent,
+                unique: captured_unique,
+                target,
+            }) if *captured_referent == referent_type && (!unique || *captured_unique) => {
+                Some(target.clone())
+            }
+            _ => None,
+        }
+    };
+    Ok((
+        referent_type,
+        flattened.unwrap_or(ReferenceTarget::AggregateField { aggregate, field }),
+    ))
+}
+
+/// PROJECT_BORROW only observes its source aggregate. Avoid materializing a
+/// cloned source Value before deriving the reference target.
+fn borrow_project_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    field: u32,
+    unique: bool,
+    destination_type: TypeId,
+) -> Result<(TypeId, ReferenceTarget), RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| {
+                borrow_project_value(a, value, field, unique, destination_type)
+            })
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => borrow_project_value(a, value, field, unique, destination_type),
+    }
+}
+
+fn move_project_value(
+    a: &ExecutionImage,
+    value: &Value,
+    field: u32,
+) -> Result<Value, RuntimeError> {
+    let aggregate = aggregate_place(value, true)?;
+    let field = runtime_field_index(a, &aggregate.borrow(), field)?;
+    aggregate
+        .borrow_mut()
+        .fields
+        .get_mut(field)
+        .and_then(Option::take)
+        .ok_or(RuntimeError::TypeConfusion)
+}
+
+/// Move a projected field without first cloning the aggregate's register
+/// value. The aggregate shell is still resolved through `aggregate_place`,
+/// preserving the existing uniqueness and reference checks.
+fn move_project_register(
+    a: &ExecutionImage,
+    f: &Frame,
+    r: u32,
+    field: u32,
+) -> Result<Value, RuntimeError> {
+    let value = f.registers[r as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(r))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| move_project_value(a, value, field))
+            .map_err(|_| RuntimeError::EmptyRegister(r))?,
+        value => move_project_value(a, value, field),
+    }
+}
+
 fn put(f: &mut Frame, r: u32, v: Value) -> Result<(), RuntimeError> {
     if f.registers[r as usize].replace(v).is_some() {
         Err(RuntimeError::TypeConfusion)
@@ -3013,6 +3792,7 @@ fn take_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeError
                 &mut *array,
                 crate::value::ArrayValue {
                     element_type,
+                    packed_bytes: None,
                     slots: Vec::new(),
                     logical_capacity: 0,
                 },
@@ -3225,10 +4005,27 @@ fn callable_receiver(
         };
         callable
     } else {
-        let Value::Callable(callable) = get(frame, register)? else {
-            return Err(RuntimeError::TypeConfusion);
-        };
-        callable.clone()
+        match frame.registers[register as usize]
+            .as_ref()
+            .ok_or(RuntimeError::EmptyRegister(register))?
+        {
+            // Avoid cloning the `Value` wrapper and then cloning its handle
+            // again. Shared indirect calls are frequent in closure-heavy
+            // code, so clone the callable handle directly from its register.
+            Value::Callable(callable) => callable.clone(),
+            // A borrowed whole-register place still owns its value in the
+            // slot. `get` materializes that value once; it is already owned
+            // here, so moving its callable handle avoids a second clone.
+            Value::Place(slot) => {
+                let Value::Callable(callable) =
+                    slot.get().map_err(|_| RuntimeError::EmptyRegister(register))?
+                else {
+                    return Err(RuntimeError::TypeConfusion);
+                };
+                callable
+            }
+            _ => return Err(RuntimeError::TypeConfusion),
+        }
     };
     indirect_callable_receiver(a, callable, receiver_mode)
 }
@@ -3514,6 +4311,9 @@ impl SnapshotValidationContext {
                 if array.element_type != *element {
                     return Err(RuntimeError::TypeConfusion);
                 }
+                if array.packed_bytes.is_some() {
+                    return if *element == U8 { Ok(()) } else { Err(RuntimeError::TypeConfusion) };
+                }
                 for value in array.slots.iter().flatten() {
                     self.validate_value(a, *element, value, true)?;
                 }
@@ -3671,6 +4471,7 @@ impl SnapshotCloneContext {
                     key,
                     ArenaObject::new_tracked(ArrayValue {
                         element_type: source.element_type,
+                        packed_bytes: source.packed_bytes.as_ref().map(|_| Vec::new()),
                         slots: vec![],
                         logical_capacity: source.logical_capacity,
                     }),
@@ -3830,6 +4631,32 @@ impl SnapshotCloneContext {
 /// before any values are copied, so shared references can be remapped to the
 /// corresponding node in each replay. Targets outside the captured graph stay
 /// shared with their external owner. Unique references are never cloneable.
+fn clone_resumption_register(
+    a: &ExecutionImage,
+    frame: &Frame,
+    register: u32,
+) -> Result<ResumptionValue, RuntimeError> {
+    fn clone_value(a: &ExecutionImage, value: &Value) -> Result<ResumptionValue, RuntimeError> {
+        let Value::Resumption(resumption) = value else {
+            return Err(RuntimeError::TypeConfusion);
+        };
+        let stored = resumption
+            .try_borrow()
+            .map_err(|_| RuntimeError::TypeConfusion)?;
+        clone_resumption_snapshot(a, stored.as_ref().ok_or(RuntimeError::TypeConfusion)?)
+    }
+
+    let value = frame.registers[register as usize]
+        .as_ref()
+        .ok_or(RuntimeError::EmptyRegister(register))?;
+    match value {
+        Value::Place(slot) => slot
+            .with_value(|value| clone_value(a, value))
+            .map_err(|_| RuntimeError::EmptyRegister(register))?,
+        value => clone_value(a, value),
+    }
+}
+
 fn clone_resumption_snapshot(
     a: &ExecutionImage,
     source: &ResumptionValue,
@@ -3973,6 +4800,16 @@ fn snapshot_clone_value(
                 let source = array
                     .try_borrow()
                     .map_err(|_| RuntimeError::TypeConfusion)?;
+                if let Some(bytes) = &source.packed_bytes {
+                    let mut copied = Vec::new();
+                    reserve_packed_bytes(&mut copied, bytes.len())?;
+                    copied.extend_from_slice(bytes);
+                    cloned
+                        .try_borrow_mut()
+                        .map_err(|_| RuntimeError::TypeConfusion)?
+                        .packed_bytes = Some(copied);
+                    return Ok(Value::Array(cloned));
+                }
                 let mut slots = Vec::new();
                 reserve_output(&mut slots, source.slots.len())?;
                 for slot in &source.slots {
@@ -4247,6 +5084,9 @@ fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
             .is_some(),
         (Type::Array { element }, Value::Array(array)) => {
             let array = array.borrow();
+            if array.packed_bytes.is_some() {
+                return array.element_type == U8 && *element == U8;
+            }
             array.element_type == *element
                 && array.logical_capacity >= array.slots.len()
                 && array.slots.iter().all(|slot| {
@@ -4474,7 +5314,9 @@ fn primitive_typed(
         | Primitive::IntConvertChecked
         | Primitive::IntConvertWrapping
         | Primitive::IntCheckedNeg
-        | Primitive::IntWrappingNeg => int_primitive(result_type, op, arg_types, v),
+        | Primitive::IntWrappingNeg => {
+            int_primitive(result_type, op, arg_types.first().copied(), v)
+        }
         Primitive::FloatAdd
         | Primitive::FloatSub
         | Primitive::FloatMul
@@ -4491,7 +5333,9 @@ fn primitive_typed(
         | Primitive::IntToFloat
         | Primitive::FloatToIntChecked
         | Primitive::FloatToBits
-        | Primitive::FloatFromBits => float_primitive(result_type, op, arg_types, v),
+        | Primitive::FloatFromBits => {
+            float_primitive(result_type, op, arg_types.first().copied(), v)
+        }
         Primitive::CharFromU32Checked => match v {
             [Value::U64(value)] => u32::try_from(*value)
                 .ok()
@@ -4510,6 +5354,15 @@ fn primitive_typed(
         },
         Primitive::TextConcat => match v {
             [Value::Text(a), Value::Text(b)] => {
+                // Text values are immutable and already owned by this
+                // primitive call.  Preserve that backing when one side is
+                // empty instead of allocating and copying the other string.
+                if a.is_empty() {
+                    return Ok(Value::Text(b.clone()));
+                }
+                if b.is_empty() {
+                    return Ok(Value::Text(a.clone()));
+                }
                 let length = checked_output_len(a.len(), b.len())?;
                 let mut result = String::new();
                 reserve_string_output(&mut result, length)?;
@@ -4520,7 +5373,10 @@ fn primitive_typed(
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::TextEq => match v {
-            [Value::Text(a), Value::Text(b)] => Ok(bool_value(a == b)),
+            // COPY preserves the immutable Rc backing. Parser and symbol
+            // passes regularly compare such aliases, where pointer identity
+            // proves equality without scanning the spelling byte-by-byte.
+            [Value::Text(a), Value::Text(b)] => Ok(bool_value(Rc::ptr_eq(a, b) || a == b)),
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::TextFromUtf8Checked => match v {
@@ -4546,6 +5402,15 @@ fn primitive_typed(
         },
         Primitive::BytesConcat => match v {
             [Value::Bytes(a), Value::Bytes(b)] => {
+                // Immutable byte buffers are already owned by the primitive.
+                // Keep the nonempty backing when concatenating an empty
+                // prefix or suffix instead of reallocating a compiler blob.
+                if a.is_empty() {
+                    return Ok(Value::Bytes(b.clone()));
+                }
+                if b.is_empty() {
+                    return Ok(Value::Bytes(a.clone()));
+                }
                 let length = checked_output_len(a.len(), b.len())?;
                 let mut result = Vec::new();
                 reserve_output(&mut result, length)?;
@@ -4564,17 +5429,34 @@ fn primitive_typed(
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::BytesSlice => match v {
-            [Value::Bytes(bytes), Value::U64(start), Value::U64(end)] => bytes
-                .get(to_index(*start)?..to_index(*end)?)
-                .map(clone_output)
-                .transpose()?
-                .map(|value| Value::Bytes(value.into()))
-                .ok_or(RuntimeError::IndexOutOfBounds),
+            [Value::Bytes(bytes), Value::U64(start), Value::U64(end)] => {
+                let start = to_index(*start)?;
+                let end = to_index(*end)?;
+                if start == 0 && end == bytes.len() {
+                    // A full immutable slice is an identity operation. Keep
+                    // its backing instead of copying an entire compiler blob.
+                    return Ok(Value::Bytes(bytes.clone()));
+                }
+                bytes
+                    .get(start..end)
+                    .map(clone_output)
+                    .transpose()?
+                    .map(|value| Value::Bytes(value.into()))
+                    .ok_or(RuntimeError::IndexOutOfBounds)
+            }
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::BytesFromArrayMove => match v {
             [Value::Array(array)] => {
                 let array = array.borrow();
+                if let Some(slots) = &array.packed_bytes {
+                    let mut bytes = Vec::new();
+                    reserve_output(&mut bytes, slots.len())?;
+                    for slot in slots {
+                        bytes.push(slot.ok_or(RuntimeError::EmptyArraySlot)?);
+                    }
+                    return Ok(Value::Bytes(bytes.into()));
+                }
                 let mut bytes = Vec::new();
                 reserve_output(&mut bytes, array.slots.len())?;
                 for slot in &array.slots {
@@ -4593,13 +5475,17 @@ fn primitive_typed(
         Primitive::BytesToArray => match v {
             [Value::Bytes(bytes)] => {
                 let element_type = array_element_type(a, result_type)?;
-                let mut slots = Vec::new();
-                reserve_output(&mut slots, bytes.len())?;
-                slots.extend(bytes.iter().map(|byte| Some(Value::U64(u64::from(*byte)))));
+                if element_type != U8 {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                let mut packed_bytes = Vec::new();
+                reserve_packed_bytes(&mut packed_bytes, bytes.len())?;
+                packed_bytes.extend(bytes.iter().copied().map(Some));
                 Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
                     element_type,
-                    logical_capacity: slots.len(),
-                    slots,
+                    packed_bytes: Some(packed_bytes),
+                    logical_capacity: bytes.len(),
+                    slots: Vec::new(),
                 })))
             }
             _ => Err(RuntimeError::TypeConfusion),
@@ -4608,6 +5494,21 @@ fn primitive_typed(
             [Value::U64(length), fill] => {
                 let length = to_index(*length)?;
                 let element_type = array_element_type(a, result_type)?;
+                if element_type == U8 {
+                    let Value::U64(byte) = fill else {
+                        return Err(RuntimeError::TypeConfusion);
+                    };
+                    let byte = u8::try_from(*byte).map_err(|_| RuntimeError::TypeConfusion)?;
+                    let mut packed_bytes = Vec::new();
+                    reserve_packed_bytes(&mut packed_bytes, length)?;
+                    packed_bytes.resize(length, Some(byte));
+                    return Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
+                        element_type,
+                        packed_bytes: Some(packed_bytes),
+                        slots: Vec::new(),
+                        logical_capacity: length,
+                    })));
+                }
                 let mut slots = Vec::new();
                 reserve_output(&mut slots, length)?;
                 for _ in 0..length {
@@ -4615,6 +5516,7 @@ fn primitive_typed(
                 }
                 Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
                     element_type,
+                    packed_bytes: None,
                     slots,
                     logical_capacity: length,
                 })))
@@ -4627,7 +5529,7 @@ fn primitive_typed(
         )),
         Primitive::ArrayLen => {
             let array = referenced_array(v, false)?;
-            let length = array.borrow().slots.len();
+            let length = array_len(&array.borrow());
             Ok(Value::U64(length as u64))
         }
         Primitive::ArrayCapacity => {
@@ -4640,6 +5542,13 @@ fn primitive_typed(
                 let array = reference_array(reference, false)?;
                 let index = to_index(*index)?;
                 let array = array.borrow();
+                if let Some(slots) = &array.packed_bytes {
+                    return slots
+                        .get(index)
+                        .ok_or(RuntimeError::IndexOutOfBounds)?
+                        .map(|byte| Value::U64(u64::from(byte)))
+                        .ok_or(RuntimeError::EmptyArraySlot);
+                }
                 let value = array
                     .slots
                     .get(index)
@@ -4654,8 +5563,16 @@ fn primitive_typed(
             [reference, Value::U64(index)] => {
                 let array = reference_array(reference, true)?;
                 let index = to_index(*index)?;
+                let mut array = array.borrow_mut();
+                if let Some(slots) = &mut array.packed_bytes {
+                    return slots
+                        .get_mut(index)
+                        .ok_or(RuntimeError::IndexOutOfBounds)?
+                        .take()
+                        .map(|byte| Value::U64(u64::from(byte)))
+                        .ok_or(RuntimeError::EmptyArraySlot);
+                }
                 array
-                    .borrow_mut()
                     .slots
                     .get_mut(index)
                     .ok_or(RuntimeError::IndexOutOfBounds)?
@@ -4669,6 +5586,7 @@ fn primitive_typed(
                 let unique = op == Primitive::ArrayGetBorrowUnique;
                 let array = reference_array(reference, unique)?;
                 let index = to_index(*index)?;
+                materialize_packed_bytes(&mut array.borrow_mut())?;
                 if array
                     .borrow()
                     .slots
@@ -4696,6 +5614,16 @@ fn primitive_typed(
                 let array = reference_array(reference, true)?;
                 let index = to_index(*index)?;
                 let mut array = array.borrow_mut();
+                if let Some(slots) = &mut array.packed_bytes {
+                    let byte = match value {
+                        Value::U64(value) => u8::try_from(*value).map_err(|_| RuntimeError::TypeConfusion)?,
+                        _ => return Err(RuntimeError::TypeConfusion),
+                    };
+                    let slot = slots.get_mut(index).ok_or(RuntimeError::IndexOutOfBounds)?;
+                    if slot.is_some() { return Err(RuntimeError::ArraySlotAlreadyInitialized); }
+                    *slot = Some(byte);
+                    return Ok(Value::Unit);
+                }
                 let slot = array
                     .slots
                     .get_mut(index)
@@ -4712,6 +5640,16 @@ fn primitive_typed(
             [reference, value] => {
                 let array = reference_array(reference, true)?;
                 let mut array = array.borrow_mut();
+                if array.packed_bytes.is_some() {
+                    let byte = match value {
+                        Value::U64(value) => u8::try_from(*value).map_err(|_| RuntimeError::TypeConfusion)?,
+                        _ => return Err(RuntimeError::TypeConfusion),
+                    };
+                    let required = array_len(&array).checked_add(1).ok_or(RuntimeError::AllocationOverflow)?;
+                    grow_packed_bytes(&mut array, required)?;
+                    array.packed_bytes.as_mut().expect("packed representation was retained").push(Some(byte));
+                    return Ok(Value::Unit);
+                }
                 let required = array
                     .slots
                     .len()
@@ -4725,8 +5663,11 @@ fn primitive_typed(
         },
         Primitive::ArrayPopMove => {
             let array = referenced_array(v, true)?;
+            let mut array = array.borrow_mut();
+            if let Some(slots) = &mut array.packed_bytes {
+                return slots.pop().ok_or(RuntimeError::IndexOutOfBounds)?.map(|byte| Value::U64(u64::from(byte))).ok_or(RuntimeError::EmptyArraySlot);
+            }
             array
-                .borrow_mut()
                 .slots
                 .pop()
                 .ok_or(RuntimeError::IndexOutOfBounds)?
@@ -4737,18 +5678,18 @@ fn primitive_typed(
                 let array = reference_array(reference, true)?;
                 let mut array = array.borrow_mut();
                 let required = array
-                    .slots
-                    .len()
+                    .packed_bytes.as_ref().map_or_else(|| array.slots.len(), Vec::len)
                     .checked_add(to_index(*additional)?)
                     .ok_or(RuntimeError::AllocationOverflow)?;
-                grow_array(&mut array, required)?;
+                if array.packed_bytes.is_some() { grow_packed_bytes(&mut array, required)?; } else { grow_array(&mut array, required)?; }
                 Ok(Value::Unit)
             }
             _ => Err(RuntimeError::TypeConfusion),
         },
         Primitive::ArrayFinishDrained => match v {
             [Value::Array(array)] => {
-                if array.borrow().slots.iter().any(Option::is_some) {
+                let array = array.borrow();
+                if array.packed_bytes.as_ref().map_or_else(|| array.slots.iter().any(Option::is_some), |slots| slots.iter().any(Option::is_some)) {
                     Err(RuntimeError::ArrayNotDrained)
                 } else {
                     Ok(Value::Unit)
@@ -4756,6 +5697,67 @@ fn primitive_typed(
             }
             _ => Err(RuntimeError::TypeConfusion),
         },
+    }
+}
+
+/// Execution fast path for bytecode primitives. The verifier already proves
+/// that all argument registers are in range; numeric primitive semantics only
+/// depend on the first argument's static type, while the remaining primitive
+/// families do not inspect static argument types at all.
+fn primitive_typed_first_type(
+    a: &ExecutionImage,
+    result_type: TypeId,
+    op: Primitive,
+    first_arg_type: Option<TypeId>,
+    values: &[Value],
+) -> Result<Value, RuntimeError> {
+    match op {
+        Primitive::IntCheckedAdd
+        | Primitive::IntCheckedSub
+        | Primitive::IntCheckedMul
+        | Primitive::IntCheckedDiv
+        | Primitive::IntCheckedRem
+        | Primitive::IntWrappingAdd
+        | Primitive::IntWrappingSub
+        | Primitive::IntWrappingMul
+        | Primitive::IntBitAnd
+        | Primitive::IntBitOr
+        | Primitive::IntBitXor
+        | Primitive::IntBitNot
+        | Primitive::IntShl
+        | Primitive::IntShr
+        | Primitive::IntEq
+        | Primitive::IntNe
+        | Primitive::IntLt
+        | Primitive::IntLe
+        | Primitive::IntGt
+        | Primitive::IntGe
+        | Primitive::IntConvertChecked
+        | Primitive::IntConvertWrapping
+        | Primitive::IntCheckedNeg
+        | Primitive::IntWrappingNeg => {
+            int_primitive(result_type, op, first_arg_type, values)
+        }
+        Primitive::FloatAdd
+        | Primitive::FloatSub
+        | Primitive::FloatMul
+        | Primitive::FloatDiv
+        | Primitive::FloatRem
+        | Primitive::FloatEq
+        | Primitive::FloatNe
+        | Primitive::FloatLt
+        | Primitive::FloatLe
+        | Primitive::FloatGt
+        | Primitive::FloatGe
+        | Primitive::FloatConvert
+        | Primitive::FloatNeg
+        | Primitive::IntToFloat
+        | Primitive::FloatToIntChecked
+        | Primitive::FloatToBits
+        | Primitive::FloatFromBits => {
+            float_primitive(result_type, op, first_arg_type, values)
+        }
+        _ => primitive_typed(a, result_type, op, &[], values),
     }
 }
 
@@ -4865,6 +5867,44 @@ fn grow_array(array: &mut ArrayValue, required: usize) -> Result<(), RuntimeErro
             .map_err(|_| RuntimeError::AllocationLimit)?;
     }
     Ok(())
+}
+
+fn array_len(array: &ArrayValue) -> usize {
+    array.packed_bytes.as_ref().map_or_else(|| array.slots.len(), Vec::len)
+}
+
+/// Materialize only at the bytecode-visible reference boundary. Most compiler
+/// emission uses push/reserve/finalize and never pays this representation
+/// expansion.
+fn materialize_packed_bytes(array: &mut ArrayValue) -> Result<(), RuntimeError> {
+    let Some(bytes) = array.packed_bytes.take() else {
+        return Ok(());
+    };
+    let mut slots = Vec::new();
+    reserve_output(&mut slots, bytes.len())?;
+    slots.extend(bytes.into_iter().map(|byte| byte.map(|byte| Value::U64(u64::from(byte)))));
+    array.slots = slots;
+    Ok(())
+}
+
+fn grow_packed_bytes(array: &mut ArrayValue, required: usize) -> Result<(), RuntimeError> {
+    let bytes = array.packed_bytes.as_mut().ok_or(RuntimeError::TypeConfusion)?;
+    if required > array.logical_capacity {
+        let capacity = required.max(4).checked_next_power_of_two().ok_or(RuntimeError::AllocationOverflow)?;
+        checked_output_bytes::<Option<u8>>(capacity)?;
+        if capacity > bytes.capacity() {
+            bytes.try_reserve_exact(capacity.saturating_sub(bytes.len())).map_err(|_| RuntimeError::AllocationLimit)?;
+        }
+        array.logical_capacity = capacity;
+    } else if required > bytes.capacity() {
+        bytes.try_reserve_exact(required.saturating_sub(bytes.len())).map_err(|_| RuntimeError::AllocationLimit)?;
+    }
+    Ok(())
+}
+
+fn reserve_packed_bytes(values: &mut Vec<Option<u8>>, count: usize) -> Result<(), RuntimeError> {
+    checked_output_bytes::<Option<u8>>(count)?;
+    values.try_reserve_exact(count).map_err(|_| RuntimeError::AllocationLimit)
 }
 
 fn bool_value(value: bool) -> Value {
@@ -5058,10 +6098,10 @@ fn make_checked_unsigned(spec: IntSpec, value: Option<u128>) -> Result<Value, Ru
 fn int_primitive(
     result_type: TypeId,
     op: Primitive,
-    arg_types: &[TypeId],
+    source_type: Option<TypeId>,
     values: &[Value],
 ) -> Result<Value, RuntimeError> {
-    let source = int_spec(*arg_types.first().ok_or(RuntimeError::TypeConfusion)?)
+    let source = int_spec(source_type.ok_or(RuntimeError::TypeConfusion)?)
         .ok_or(RuntimeError::TypeConfusion)?;
     let unary = || values.first().ok_or(RuntimeError::TypeConfusion);
     let binary = || match values {
@@ -5219,11 +6259,11 @@ fn int_primitive(
 fn float_primitive(
     result_type: TypeId,
     op: Primitive,
-    arg_types: &[TypeId],
+    source_type: Option<TypeId>,
     values: &[Value],
 ) -> Result<Value, RuntimeError> {
     use Primitive::*;
-    let source_type = *arg_types.first().ok_or(RuntimeError::TypeConfusion)?;
+    let source_type = source_type.ok_or(RuntimeError::TypeConfusion)?;
     if op == FloatToBits {
         return match (source_type, result_type, values) {
             (F32, U32, [Value::F32(value)]) => {
@@ -5381,6 +6421,82 @@ mod tests {
     }
     fn prim(result: TypeId, op: Primitive, values: &[Value]) -> Result<Value, RuntimeError> {
         primitive(&image(Artifact::default()), result, op, values)
+    }
+
+    #[test]
+    fn vm_construction_recognizes_each_diagnostic_control() {
+        for control in [
+            "G1_VM_ERROR_TRACE",
+            "G1_VM_FUNCTION",
+            "G1_VM_BREAKPOINT",
+            "G1_VM_MEMORY_PROFILE_MIB",
+            "G1_VM_PROGRESS_STEPS",
+            "G1_VM_HOT_FUNCTION_SAMPLE_STEPS",
+            "G1_VM_OPCODE_PROFILE",
+        ] {
+            assert!(diagnostics_configured_with(|name| name == control));
+        }
+        assert!(!diagnostics_configured_with(|_| false));
+    }
+
+    #[test]
+    fn opcode_profile_groups_dispatch_categories() {
+        let mut profile = VmOpcodeProfile {
+            started: Instant::now(),
+            categories: [0; 9],
+        };
+        profile.observe(&Instruction::Const {
+            dst: 1,
+            constant: 0,
+        });
+        profile.observe(&Instruction::Primitive {
+            dst: 2,
+            op: Primitive::IntCheckedAdd,
+            args: vec![1, 1],
+        });
+        profile.observe(&Instruction::Call {
+            dst: None,
+            function: 0,
+            args: vec![],
+        });
+        profile.observe(&Instruction::Return { src: None });
+        assert_eq!(profile.categories, [1, 1, 1, 1, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn primitive_first_type_fast_path_matches_typed_dispatch() {
+        let image = image(Artifact::default());
+        let text = [Value::Text("grandiose".into())];
+        // Text primitives do not inspect the static argument type, so the
+        // execution path does not need to allocate a vector for it.
+        assert_eq!(
+            primitive_typed_first_type(
+                &image,
+                USIZE,
+                Primitive::TextByteLen,
+                Some(TEXT),
+                &text,
+            ),
+            primitive_typed(&image, USIZE, Primitive::TextByteLen, &[TEXT], &text),
+        );
+
+        let integers = [Value::I64(2), Value::I64(3)];
+        assert_eq!(
+            primitive_typed_first_type(
+                &image,
+                I64,
+                Primitive::IntWrappingAdd,
+                Some(I64),
+                &integers,
+            ),
+            primitive_typed(
+                &image,
+                I64,
+                Primitive::IntWrappingAdd,
+                &[I64, I64],
+                &integers,
+            ),
+        );
     }
 
     #[test]
@@ -5784,6 +6900,46 @@ mod tests {
         assert_eq!(
             Vm::from_artifact(a).unwrap().run(0, vec![]).unwrap(),
             Value::I64(42)
+        );
+    }
+
+    #[test]
+    fn executes_specialized_i64_scalar_primitives() {
+        let artifact = Artifact {
+            constants: vec![Constant::I64(-5), Constant::I64(2)],
+            functions: vec![Function {
+                flags: 0,
+                name: "main".into(),
+                params: vec![],
+                return_type: U32,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, I64, I64, I64, U32],
+                code_start: 0,
+                code_len: 6,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Const { dst: 1, constant: 0 },
+                Instruction::Const { dst: 2, constant: 1 },
+                Instruction::Primitive {
+                    dst: 3,
+                    op: Primitive::IntCheckedSub,
+                    args: vec![1, 2],
+                },
+                Instruction::Const { dst: 1, constant: 0 },
+                Instruction::Primitive {
+                    dst: 4,
+                    op: Primitive::IntLt,
+                    args: vec![3, 1],
+                },
+                Instruction::Return { src: Some(4) },
+            ],
+            ..Artifact::default()
+        };
+        assert_eq!(
+            Vm::from_artifact(artifact).unwrap().run(0, vec![]),
+            Ok(Value::U64(1))
         );
     }
 
@@ -6480,6 +7636,16 @@ mod tests {
             panic!("TextConcat returned a non-Text value")
         };
         assert!(!Rc::ptr_eq(&left_text, &joined_text));
+        let nonempty_text: Rc<str> = Rc::from("grandiose");
+        let Value::Text(joined_text) = prim(
+            TEXT,
+            Primitive::TextConcat,
+            &[Value::Text(nonempty_text.clone()), Value::Text("".into())],
+        )
+        .unwrap() else {
+            panic!("TextConcat empty suffix returned a non-text value")
+        };
+        assert!(Rc::ptr_eq(&nonempty_text, &joined_text));
         assert_eq!(
             prim(CHAR, Primitive::CharFromU32Checked, &[Value::U64(0x1f600)]),
             Ok(Value::U64(0x1f600))
@@ -6534,6 +7700,20 @@ mod tests {
             ),
             Ok(Value::Bytes(vec![20, 30].into()))
         );
+        let whole_bytes: Rc<[u8]> = vec![10, 20, 30].into();
+        let Value::Bytes(sliced_bytes) = prim(
+            BYTES,
+            Primitive::BytesSlice,
+            &[
+                Value::Bytes(whole_bytes.clone()),
+                Value::U64(0),
+                Value::U64(3),
+            ],
+        )
+        .unwrap() else {
+            panic!("BytesSlice full range returned a non-bytes value")
+        };
+        assert!(Rc::ptr_eq(&whole_bytes, &sliced_bytes));
         let left_bytes: Rc<[u8]> = vec![10, 20].into();
         let Value::Bytes(joined_bytes) = prim(
             BYTES,
@@ -6547,6 +7727,31 @@ mod tests {
             panic!("BytesConcat returned a non-Bytes value")
         };
         assert!(!Rc::ptr_eq(&left_bytes, &joined_bytes));
+        let nonempty_bytes: Rc<[u8]> = vec![10, 20].into();
+        let Value::Bytes(joined_bytes) = prim(
+            BYTES,
+            Primitive::BytesConcat,
+            &[
+                Value::Bytes(Vec::<u8>::new().into()),
+                Value::Bytes(nonempty_bytes.clone()),
+            ],
+        )
+        .unwrap() else {
+            panic!("BytesConcat empty prefix returned a non-bytes value")
+        };
+        assert!(Rc::ptr_eq(&nonempty_bytes, &joined_bytes));
+        let Value::Bytes(joined_bytes) = prim(
+            BYTES,
+            Primitive::BytesConcat,
+            &[
+                Value::Bytes(nonempty_bytes.clone()),
+                Value::Bytes(Vec::<u8>::new().into()),
+            ],
+        )
+        .unwrap() else {
+            panic!("BytesConcat empty suffix returned a non-bytes value")
+        };
+        assert!(Rc::ptr_eq(&nonempty_bytes, &joined_bytes));
         assert_eq!(
             prim(
                 U8,
@@ -7343,7 +8548,20 @@ mod tests {
             panic!("BytesToArray returned a non-Array value")
         };
         assert_eq!(storage.borrow().logical_capacity, 3);
-        storage.borrow_mut().slots[0] = Some(Value::U64(9));
+        assert!(storage.borrow().packed_bytes.is_some());
+        let byte_unique = Value::Reference {
+            referent_type: 22,
+            unique: true,
+            target: ReferenceTarget::Array(storage.clone()),
+        };
+        assert_eq!(
+            primitive(&artifact, U64, Primitive::ArrayGetMove, &[byte_unique.clone(), Value::U64(0)]),
+            Ok(Value::U64(1))
+        );
+        assert_eq!(
+            primitive(&artifact, UNIT, Primitive::ArraySetMove, &[byte_unique, Value::U64(0), Value::U64(9)]),
+            Ok(Value::Unit)
+        );
         assert_eq!(backing.as_ref(), &[1, 2, 3]);
         assert_eq!(
             primitive(
@@ -7354,6 +8572,28 @@ mod tests {
             ),
             Ok(Value::Bytes(vec![9, 2, 3].into()))
         );
+    }
+
+    #[test]
+    fn packed_byte_arrays_keep_large_compiler_artifacts_below_the_value_slot_limit() {
+        let mut types = Type::predefined();
+        types.push(Type::Array { element: U8 });
+        let artifact = image(Artifact {
+            types,
+            ..Artifact::default()
+        });
+        // At this size the former `Vec<Option<Value>>` backing alone exceeds
+        // the VM's 64 MiB per-allocation limit on supported targets. The
+        // compact byte backing remains linear in emitted artifact bytes.
+        let payload: Rc<[u8]> = vec![0x5a; 2_000_000].into();
+        let array = primitive(&artifact, 19, Primitive::BytesToArray, &[Value::Bytes(payload)])
+            .expect("packed byte array must fit below the allocation guard");
+        let Value::Array(array) = array else { panic!("expected array") };
+        let array = array.borrow();
+        assert!(array.packed_bytes.is_some());
+        assert!(array.slots.is_empty());
+        assert_eq!(array_len(&array), 2_000_000);
+        assert!(std::mem::size_of::<Option<Value>>() * 2_000_000 > MAX_PRIMITIVE_ALLOCATION_BYTES);
     }
 
     #[test]
@@ -9814,6 +11054,7 @@ mod tests {
         });
         let array = Value::Array(ArenaObject::new(ArrayValue {
             element_type: I64,
+            packed_bytes: None,
             slots: vec![None, Some(Value::I64(1))],
             logical_capacity: 2,
         }));

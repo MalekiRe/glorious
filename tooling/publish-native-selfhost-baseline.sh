@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Publish a verified, immutable O3/Wild native self-host cache as the baseline
+# for *new* Git worktrees.  This is deliberately a copy publisher, not a
+# shared cache: consumers use seed-native-selfhost-cache.sh to copy its files
+# into their own target directory before doing any work.
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: tooling/publish-native-selfhost-baseline.sh [--worktree DIR] [--output DIR]
+
+Publishes the verified compiler artifact, fingerprint, and any durable
+partitioned `objects/` from WORKTREE as a new read-only baseline. Every
+receiving worktree gets checksummed private copies; runtime ABI/IR keys still
+validate each object before reuse. The output defaults to the Git-common-dir
+baseline path. It refuses to replace an existing baseline. Only an O3,
+Wild-linked native compiler with an exact build fingerprint can be published.
+USAGE
+  exit 2
+}
+
+worktree="$PWD"
+output=''
+while (($#)); do
+  case "$1" in
+    --worktree) shift; (($#)) || usage; worktree="$1" ;;
+    --output) shift; (($#)) || usage; output="$1" ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+  shift
+done
+
+worktree=$(cd -- "$worktree" && pwd -P)
+git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null
+cache="$worktree/target/self-host-native-cache"
+binary="$cache/grandiose-self-host-native"
+fingerprint="$cache/build.fingerprint"
+route_manifest="$cache/native-route.manifest"
+[[ -x "$binary" && -s "$fingerprint" && -f "$route_manifest" ]] || {
+  echo "publish-native-selfhost-baseline: worktree has no complete private native cache" >&2
+  exit 1
+}
+grep -Fxq 'optimization=O3' "$route_manifest" || {
+  echo "publish-native-selfhost-baseline: private cache is not O3" >&2
+  exit 1
+}
+readelf -p .comment "$binary" 2>/dev/null | grep -Eqi 'wild' || {
+  echo "publish-native-selfhost-baseline: native compiler lacks a Wild linker marker" >&2
+  exit 1
+}
+
+common=$(git -C "$worktree" rev-parse --git-common-dir)
+[[ "$common" = /* ]] || common="$worktree/$common"
+common=$(cd -- "$common" && pwd -P)
+if [[ -z "$output" ]]; then
+  output="$common/grandiose-native-selfhost-baseline"
+fi
+[[ "$output" = /* ]] || output="$worktree/$output"
+parent=$(dirname -- "$output")
+mkdir -p "$parent"
+[[ ! -e "$output" ]] || {
+  echo "publish-native-selfhost-baseline: refusing to replace baseline: $output" >&2
+  exit 1
+}
+
+stage=$(mktemp -d "$parent/.grandiose-native-selfhost-baseline.XXXXXX")
+cleanup() { rm -rf -- "$stage"; }
+trap cleanup EXIT
+cp -- "$binary" "$stage/grandiose-self-host-native"
+cp -- "$fingerprint" "$stage/build.fingerprint"
+if [[ -d "$cache/objects" ]]; then
+  while IFS= read -r -d '' source; do
+    relative=${source#"$cache/"}
+    mkdir -p "$stage/$(dirname "$relative")"
+    cp -- "$source" "$stage/$relative"
+  done < <(find "$cache/objects" -type f -print0 | LC_ALL=C sort -z)
+fi
+revision=$(git -C "$worktree" rev-parse HEAD)
+{
+  printf 'schema\t1\n'
+  printf 'revision\t%s\n' "$revision"
+  printf 'optimization\tO3\n'
+  printf 'cache-fingerprint\t%s\n' "$(<"$fingerprint")"
+  files=(grandiose-self-host-native build.fingerprint)
+  if [[ -d "$stage/objects" ]]; then
+    while IFS= read -r -d '' file; do files+=("${file#"$stage/"}"); done < <(find "$stage/objects" -type f -print0 | LC_ALL=C sort -z)
+  fi
+  for file in "${files[@]}"; do
+    printf 'file\t%s\t%s\n' "$file" "$(sha256sum "$stage/$file" | awk '{print $1}')"
+  done
+} > "$stage/manifest.tsv"
+# Consumers only require ordinary file reads.  Remove write bits recursively:
+# the durable object payloads live below `objects/`, and protecting only that
+# directory would still leave its individual files mutable through an already
+# open or accidentally restored writable directory.  A published baseline is
+# a read-only seed, never the mutable cache used by a worktree.
+chmod -R a-w "$stage"
+mv -- "$stage" "$output"
+trap - EXIT
+printf '%s\n' "$output"

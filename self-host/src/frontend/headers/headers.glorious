@@ -2,7 +2,7 @@
 // Ordinary callables and type aliases are the first consumers of the shared
 // generic/type arenas. Bodies remain unparsed.
 
-use super::lexer::{TokenKind, TokenPattern};
+use super::lexer::{Keyword, TokenKind, TokenPattern};
 use super::scanner::ShellId;
 
 pub struct HeaderRangeTag {}
@@ -16,6 +16,8 @@ pub type TypeId = Id<TypeTag>;
 
 pub struct NameUse { name: Id<String>, token: usize }
 
+impl Use<[0, *]> for NameUse {}
+
 pub struct TypeEdge { value: TypeId, position: u32 }
 
 // Regions do not affect runtime type identity, but their source positions are
@@ -28,6 +30,7 @@ enum HeaderTypeKind {
     UniqueReference(Option<NameUse>, TypeId),
     Tuple(HeaderRange),
     Application(TypeId, HeaderRange, HeaderRange, u32),
+    Projection(TypeId, HeaderRange, NameUse),
     Never
 }
 
@@ -46,12 +49,17 @@ pub enum HeaderTypeView<'a> {
     UniqueReference(usize, usize, Option<usize>, TypeId),
     Tuple(usize, usize, Slice<'a, TypeEdge>),
     Application(usize, usize, TypeId, Slice<'a, LifetimeArgument>, Slice<'a, TypeEdge>, u32),
+    Projection(usize, usize, TypeId, Slice<'a, NameUse>, NameUse),
     Never(usize, usize)
 }
 
 impl<'a> Use<[0, *]> for HeaderTypeView<'a> {}
 
-enum GenericParamKind { Type, Lifetime, EffectRow, Const }
+// Const binders are semantically kinded.  Keeping the distinction in the
+// shared header index is necessary for later elaboration to distinguish
+// numeric arguments from resumption-quantity arguments, including under a
+// higher-ranked `for<...>` binder.
+enum GenericParamKind { Type, Lifetime, EffectRow, ConstU32, ConstQuantity }
 
 impl Use<[0, *]> for GenericParamKind {}
 
@@ -278,6 +286,10 @@ pub struct TraitHeader {
     name: Id<String>,
     public: Bool,
     generics: HeaderRange,
+    // Supertrait applications live in the shared type arena.  This keeps
+    // their arguments owned by the trait declaration rather than reducing
+    // them to an unstructured source span before semantic collection.
+    supertraits: HeaderRange,
     methods: HeaderRange,
     tokens: HeaderTokenRange
 }
@@ -286,6 +298,10 @@ pub struct ImplHeader {
     shell: ShellId,
     generics: HeaderRange,
     trait_path: HeaderRange,
+    // Preserve the instantiated trait reference as well as its display path.
+    // Semantic impl collection will need these arguments to connect an impl's
+    // binders to the trait's binders.
+    trait_type: TypeId,
     self_ty: TypeId,
     where_tokens: HeaderTokenRange,
     where_clause: Option<WhereClause>,
@@ -697,11 +713,13 @@ pub impl_at<'a>(value: &'a NominalIndex, index: usize) -> Option<&'a ImplHeader>
 pub trait_name(value: &TraitHeader) -> Id<String> { value.name }
 pub trait_public(value: &TraitHeader) -> Bool { value.public }
 pub trait_generics(value: &TraitHeader) -> &HeaderRange { &value.generics }
+pub trait_supertraits(value: &TraitHeader) -> &HeaderRange { &value.supertraits }
 pub trait_methods(value: &TraitHeader) -> &HeaderRange { &value.methods }
 pub trait_tokens(value: &TraitHeader) -> &HeaderTokenRange { &value.tokens }
 pub impl_generics(value: &ImplHeader) -> &HeaderRange { &value.generics }
 pub impl_trait_path(value: &ImplHeader) -> &HeaderRange { &value.trait_path }
 pub impl_trait_path_count(value: &ImplHeader) -> u32 { value.trait_path.count }
+pub impl_trait_type(value: &ImplHeader) -> TypeId { value.trait_type }
 pub impl_trait_path_name(value: &HeaderIndex, value_impl: &ImplHeader, index: usize) -> Id<String> {
     let ordinal = wrapping_convert_to_usize(value_impl.trait_path.start) + index;
     name_use_name(Vec::index(&value.names, ordinal))
@@ -875,7 +893,19 @@ pub generic_param_kind_code(value: &GenericParam) -> u8 {
         GenericParamKind::Type => 1,
         GenericParamKind::Lifetime => 2,
         GenericParamKind::EffectRow => 3,
-        GenericParamKind::Const => 4
+        GenericParamKind::ConstU32 => 4,
+        GenericParamKind::ConstQuantity => 4
+    }
+}
+
+// Zero means this is not a const binder.  The separate discriminator keeps
+// the established outer generic wire tag stable while preserving the const
+// parameter's actual kind.
+pub generic_param_const_kind_code(value: &GenericParam) -> u8 {
+    handle value.kind {
+        GenericParamKind::ConstU32 => 1,
+        GenericParamKind::ConstQuantity => 2,
+        _ => 0
     }
 }
 
@@ -1050,6 +1080,9 @@ pub header_type_view<'a>(
             lifetime_arguments(value, &lifetimes),
             type_edges(value, &children),
             const_arguments
+        ),
+        HeaderTypeKind::Projection(subject, relation, item) => HeaderTypeView::Projection(
+            token, end, subject, header_slice(&value.names, &relation), item
         ),
         HeaderTypeKind::Never => HeaderTypeView::Never(token, end)
     }
@@ -1746,6 +1779,13 @@ at_ident(value: &Parser, expected: &String) -> Bool {
     } else { false }
 }
 
+at_type_keyword(value: &Parser) -> Bool {
+    if(value.tokens.position < value.tokens.limit) {
+        super::lexer::token_kind_at(&value.source, value.tokens.position)
+            is TokenKind::Keyword(Keyword::Type)
+    } else { false }
+}
+
 next_is_ident(value: &Parser) -> Bool {
     let next = value.tokens.position + 1;
     next < value.tokens.limit
@@ -1793,6 +1833,7 @@ copy_type_kind(
         HeaderTypeKind::Tuple(elements) => HeaderTypeKind::Tuple(elements),
         HeaderTypeKind::Application(constructor, lifetimes, arguments, const_arguments) =>
             HeaderTypeKind::Application(constructor, lifetimes, arguments, const_arguments),
+        HeaderTypeKind::Projection(subject, relation, item) => HeaderTypeKind::Projection(subject, relation, item),
         HeaderTypeKind::Never => HeaderTypeKind::Never
     }
 }
@@ -2136,12 +2177,47 @@ finish_tuple(
 
 parse_type(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
     let start = value.tokens.position;
-    if(eat_token(value, TokenPattern::Amp)) { parse_reference(value, related, start) } else { if(eat_token(value, TokenPattern::LParen)) { parse_tuple(value, related, start) } else { if(eat_token(value, TokenPattern::Bang)) { push_type(
+    if(eat_token(value, TokenPattern::Lt)) { parse_projection(value, related, start) } else { if(eat_token(value, TokenPattern::Amp)) { parse_reference(value, related, start) } else { if(eat_token(value, TokenPattern::LParen)) { parse_tuple(value, related, start) } else { if(eat_token(value, TokenPattern::Bang)) { push_type(
                     value,
                     HeaderTypeKind::Never,
                     start,
                     related
-                ) } else { parse_path(value, related) } } }
+                ) } else { parse_path(value, related) } } } }
+}
+
+parse_projection(value: &mut Parser, related: usize, start: usize) -> Result<TypeId, HeaderError> {
+    let subject = try(parse_type(value, related), @parse_projection);
+    try(expect_projection_as(value, related), @parse_projection);
+    let relation_start = super::syntax::range_mark(&value.output.names);
+    let first = try(ident(value, related), @parse_projection);
+    Vec::push(&mut value.output.names, first);
+    try(parse_projection_relation_tail(value, related), @parse_projection);
+    let relation_end = Vec::len(&value.output.names);
+    try(expect_right_angle(value, related), @parse_projection);
+    try(expect_projection_separator(value, related), @parse_projection);
+    let item = try(ident(value, related), @parse_projection);
+    let projection = try(push_type(value, HeaderTypeKind::Projection(subject, header_range(relation_start, relation_end), item), start, related), @parse_projection);
+    parse_application(value, related, start, projection)
+}
+
+expect_projection_as(value: &mut Parser, related: usize) -> Result<(), HeaderError> {
+    if(at_ident(&*value, &"as")) { value.tokens.position = value.tokens.position + 1; Result::Ok(()) } else {
+        Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related))
+    }
+}
+
+expect_projection_separator(value: &mut Parser, related: usize) -> Result<(), HeaderError> {
+    if(eat_token(value, TokenPattern::DoubleColon)) { Result::Ok(()) } else {
+        Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, related))
+    }
+}
+
+parse_projection_relation_tail(value: &mut Parser, related: usize) -> Result<(), HeaderError> {
+    if(eat_token(value, TokenPattern::DoubleColon)) {
+        let name = try(ident(value, related), @parse_projection_relation_tail);
+        Vec::push(&mut value.output.names, name);
+        parse_projection_relation_tail(value, related)
+    } else { Result::Ok(()) }
 }
 
 parse_generics(value: &mut Parser, related: usize, preserve_duplicates: Bool) -> Result<HeaderRange, HeaderError> {
@@ -2216,10 +2292,21 @@ parse_one_generic(
                 value.tokens.position = value.tokens.position + 1;
                 let name = try(ident(value, related), @parse_one_generic);
                 if(eat_token(value, TokenPattern::Colon)) {
-                    try(parse_type(value, related), @parse_one_generic);
+                    let kind = if(at_ident(&*value, &"u32")) {
+                        value.tokens.position = value.tokens.position + 1;
+                        GenericParamKind::ConstU32
+                    } else { if(at_ident(&*value, &"Quantity")) {
+                        value.tokens.position = value.tokens.position + 1;
+                        GenericParamKind::ConstQuantity
+                    } else { @parse_one_generic(Result::Err(
+                        HeaderError::UnsupportedGenericParameterKind(
+                            value.tokens.position,
+                            related
+                        )
+                    )) } };
                     Result::Ok(GenericParam {
                         name: name.name,
-                        kind: GenericParamKind::Const,
+                        kind: kind,
                         tokens: token_range(token, value.tokens.position)
                     })
                 } else {
@@ -4323,6 +4410,15 @@ parse_relation_path_tail(
     } else { Result::Ok(()) }
 }
 
+trait_path_from_type(value: &Parser, ty: TypeId) -> HeaderRange {
+    handle Arena::index(&value.output.types, ty).kind {
+        HeaderTypeKind::Path(names) => names,
+        HeaderTypeKind::Application(constructor, _, _, _) =>
+            trait_path_from_type(value, constructor),
+        _ => unreachable()
+    }
+}
+
 parse_where_item(
     original: &String,
     value: &mut Parser,
@@ -4829,8 +4925,24 @@ parse_trait_methods(
     if(current < limit) {
         let end = trait_method_semicolon(&*value, current, limit);
         value.tokens.position = current;
-        value.tokens.limit = end;
-        try(parse_callable(original, value, shell, false, true, current), @parse_trait_methods);
+        value.tokens.limit = limit;
+        // Associated item declarations are interface members, not callable
+        // signatures.  Their semantic collection is deliberately a later
+        // stage, but the header pass must preserve their boundary so a trait
+        // containing a GAT can participate in the same declaration scan as
+        // ordinary marker traits.
+        // Operator-named trait requirements (for example `Add`'s `+`) are
+        // declarations, not identifier-named callables.  The current header
+        // arena has no operator-name identity yet, so retain their boundary
+        // for this pass and let interface collection ignore them rather than
+        // misparse the leading symbol as a missing identifier.
+        if(not(at_type_keyword(&*value)) and {
+            not(operator_symbol(&*value, current))
+        }) {
+            value.tokens.position = current;
+            value.tokens.limit = end;
+            try(parse_callable(original, value, shell, false, current), @parse_trait_methods)
+        } else { () };
         parse_trait_methods(original, value, shell, end + 1, limit, start)
     } else { Result::Ok(header_range(start, Vec::len(&value.output.callables))) }
 }
@@ -4853,7 +4965,37 @@ parse_impl_methods(
     start: usize
 ) -> Result<HeaderRange, HeaderError> {
     if(current < limit) {
-        handle impl_method_body_open(&*value, current, limit) {
+        value.tokens.position = current;
+        value.tokens.limit = limit;
+        if(at_type_keyword(&*value)) {
+            // As with trait declarations, retain the top-level item boundary
+            // for an associated-type definition.  This lets generic impl
+            // headers be parsed before associated-item lowering is wired into
+            // the semantic trait database.
+            let end = trait_method_semicolon(&*value, current, limit);
+            if(end == limit) {
+                Result::Err(HeaderError::ExpectedSemicolon(limit, current))
+            } else {
+                parse_impl_methods(
+                    original, declarations, value, shell, end + 1, limit, start
+                )
+            }
+        } else if(operator_symbol(&*value, current)) {
+            // Operator implementations use a symbolic member name.  Keep
+            // their body boundary while the callable arena remains
+            // identifier-named.
+            handle impl_method_body_open(&*value, current, limit) {
+                None => Result::Err(HeaderError::UnexpectedTrailingHeaderToken(current, current)),
+                Option::Some(open) => handle super::syntax::delimiter_partner(
+                    super::scanner::delimiter_map(declarations), open
+                ) {
+                    None => Result::Err(HeaderError::ExpectedRightBrace(open, current)),
+                    Option::Some(close) => parse_impl_methods(
+                        original, declarations, value, shell, close + 1, limit, start
+                    )
+                }
+            }
+        } else { handle impl_method_body_open(&*value, current, limit) {
             None => Result::Err(HeaderError::UnexpectedTrailingHeaderToken(current, current)),
             Option::Some(open) => {
                 value.tokens.position = current;
@@ -4868,7 +5010,7 @@ parse_impl_methods(
                     )
                 }
             }
-        }
+        } }
     } else { Result::Ok(header_range(start, Vec::len(&value.output.callables))) }
 }
 
@@ -4890,6 +5032,53 @@ validate_trait_body_terminator(
     } else { Result::Ok(()) }
 }
 
+// The semantic trait database does not yet consume parent evidence, but
+// retaining ordinary parents keeps declaration/header parity with the
+// bootstrap parser and lets interface scanning continue.
+parse_trait_supertrait(
+    value: &mut Parser,
+    related: usize,
+    header_end: usize
+) -> Result<HeaderRange, HeaderError> {
+    let start = Vec::len(&value.output.type_edges);
+    if(value.tokens.position == header_end) {
+        Result::Ok(header_range(start, start))
+    } else {
+        try(expect_colon(value, related), @parse_trait_supertrait);
+        parse_trait_supertrait_list(value, related, header_end, start, 0)
+    }
+}
+
+parse_trait_supertrait_list(
+    value: &mut Parser,
+    related: usize,
+    header_end: usize,
+    start: usize,
+    position: u32
+) -> Result<HeaderRange, HeaderError> {
+    let parent = try(parse_type(value, related), @parse_trait_supertrait_list);
+    Vec::push(&mut value.output.type_edges, TypeEdge {
+        value: parent, position: position
+    });
+    if(value.tokens.position == header_end) {
+        Result::Ok(header_range(start, Vec::len(&value.output.type_edges)))
+    } else {
+        let token = value.tokens.position;
+        handle super::lexer::token_kind_at(&value.source, token) {
+            TokenKind::Plus => {
+                value.tokens.position = token + 1;
+                parse_trait_supertrait_list(
+                    value, related, header_end, start, position + 1
+                )
+            },
+            _ =>
+            Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
+                token, related
+            ))
+        }
+    }
+}
+
 parse_trait_header(
     original: &String,
     declarations: &super::scanner::DeclarationIndex,
@@ -4909,7 +5098,10 @@ parse_trait_header(
     if(public) { value.tokens.position = value.tokens.position + 1; } else { () };
     value.tokens.position = value.tokens.position + 1;
     let name = try(ident(value, start), @parse_trait_header);
-    let generics = try(parse_generics(value, start, false), @parse_trait_header);
+    let generics = try(parse_generics(value, start), @parse_trait_header);
+    let supertraits = try(
+        parse_trait_supertrait(value, start, header_end), @parse_trait_header
+    );
     if(value.tokens.position == header_end) {
         let method_start = Vec::len(&value.output.callables);
         let methods = try(parse_trait_methods(
@@ -4917,7 +5109,8 @@ parse_trait_header(
         ), @parse_trait_header);
         Vec::push(&mut traits.values, TraitHeader {
             shell: shell, name: name.name, public: public, generics: generics,
-            methods: methods, tokens: token_range(start, whole_end)
+            supertraits: supertraits, methods: methods,
+            tokens: token_range(start, whole_end)
         });
         record_header(order, shell, HeaderOrder::Trait(typed_header_id(Vec::len(&traits.values) - 1)));
         Result::Ok(())
@@ -4937,12 +5130,9 @@ parse_trait_impl_header(
 ) -> Result<(), HeaderError> {
     value.tokens.position = start + 1;
     value.tokens.limit = header_end;
-    let generics = try(parse_generics(value, start, false), @parse_trait_impl_header);
-    let path_start = Vec::len(&value.output.names);
-    let first = try(ident(value, start), @parse_trait_impl_header);
-    Vec::push(&mut value.output.names, first);
-    try(parse_relation_path_tail(value, start), @parse_trait_impl_header);
-    let trait_path = header_range(path_start, Vec::len(&value.output.names));
+    let generics = try(parse_generics(value, start), @parse_trait_impl_header);
+    let trait_type = try(parse_type(value, start), @parse_trait_impl_header);
+    let trait_path = trait_path_from_type(&*value, trait_type);
     if(not(at_ident(&*value, &"for"))) {
         Result::Err(HeaderError::ExpectedIdentifier(value.tokens.position, start))
     } else {
@@ -4955,7 +5145,8 @@ parse_trait_impl_header(
             original, declarations, value, shell, header_end + 1, whole_end - 1, method_start
         ), @parse_trait_impl_header);
         Vec::push(&mut impls.values, ImplHeader {
-            shell: shell, generics: generics, trait_path: trait_path, self_ty: self_ty,
+            shell: shell, generics: generics, trait_path: trait_path,
+            trait_type: trait_type, self_ty: self_ty,
             where_tokens: where_tokens, where_clause: where_clause, methods: methods,
             tokens: token_range(start, whole_end)
         });

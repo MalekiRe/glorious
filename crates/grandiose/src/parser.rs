@@ -43,7 +43,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
     let fixities = collect_fixities(&tokens, &mut diagnostics);
-    Parser {
+    let (mut program, mut diagnostics) = Parser {
         tokens,
         cursor: 0,
         fixities,
@@ -55,7 +55,9 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         handling_scrutinee: false,
         in_whitespace_argument: false,
     }
-    .program(diagnostics)
+    .program(diagnostics);
+    diagnostics.extend(normalize_effect_surface_program(&mut program));
+    (program, diagnostics)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +74,19 @@ pub struct FixityRegion {
 }
 
 pub fn parse_recovering_with_fixity_regions(
+    tokens: Vec<Token>,
+    fixity_regions: Vec<FixityRegion>,
+) -> (Program, Vec<Diagnostic>) {
+    let (mut program, mut diagnostics) =
+        parse_recovering_with_fixity_regions_raw(tokens, fixity_regions);
+    diagnostics.extend(normalize_effect_surface_program(&mut program));
+    (program, diagnostics)
+}
+
+/// Parses declarations without normalizing effect surface syntax.  This is
+/// used only when independently parsed, span-compatible program partitions
+/// will be joined before the one required normalization pass.
+pub(crate) fn parse_recovering_with_fixity_regions_raw(
     tokens: Vec<Token>,
     fixity_regions: Vec<FixityRegion>,
 ) -> (Program, Vec<Diagnostic>) {
@@ -264,7 +279,7 @@ impl Parser {
                 self.recover(declaration_start);
             }
         }
-        let mut program = Program {
+        let program = Program {
             modules: draft.modules,
             imports: draft.imports,
             item_visibilities: draft.item_visibilities,
@@ -285,7 +300,6 @@ impl Parser {
             fixed_array_types: self.fixed_array_types,
             numeric_literals: self.numeric_literals,
         };
-        diagnostics.extend(normalize_effect_surface(&mut program));
         (program, diagnostics)
     }
 
@@ -4099,7 +4113,7 @@ struct SurfaceOperation {
 /// by the existing semantic and MIR pipeline. This deliberately happens only
 /// after the whole program has parsed, so operation calls and handler-pattern
 /// heads are declaration-directed rather than guessed from capitalization.
-fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
+pub(crate) fn normalize_effect_surface_program(program: &mut Program) -> Vec<Diagnostic> {
     let mut operations = program
         .effects
         .iter()

@@ -1,11 +1,13 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    time::Instant,
 };
 
-use grandiose_vm::{Artifact, verify};
+use grandiose_vm::{verify, Artifact};
 use tempfile::tempdir;
 
 fn write(path: &Path, source: &str) {
@@ -16,6 +18,15 @@ fn grc() -> Command {
     Command::new(env!("CARGO_BIN_EXE_grc"))
 }
 
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned()
+}
+
 struct Session {
     child: Child,
     input: ChildStdin,
@@ -24,7 +35,15 @@ struct Session {
 
 impl Session {
     fn start() -> Self {
-        let mut child = grc()
+        Self::start_command(grc())
+    }
+
+    fn start_release(program: &Path) -> Self {
+        Self::start_command(Command::new(program))
+    }
+
+    fn start_command(mut command: Command) -> Self {
+        let mut child = command
             .arg("--serve")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -66,6 +85,911 @@ impl Drop for Session {
             let _ = self.child.wait();
         }
     }
+}
+
+#[test]
+fn persistent_serve_reuses_llvm_ir_and_invalidates_after_a_body_edit() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("cache.glorious");
+    let output = directory.path().join("cache.ll");
+    write(
+        &input,
+        "value() -> i64 { 1 } main() -> { let marker = value(); () }",
+    );
+    let arguments = || {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-ir",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+
+    let first = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(first["status"], 0, "{first}");
+    assert_eq!(first["llvm_ir_cache"], "miss", "{first}");
+    let first_ir = fs::read(&output).unwrap();
+
+    let second = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(second["status"], 0, "{second}");
+    assert_eq!(second["llvm_ir_cache"], "hit", "{second}");
+    assert_eq!(fs::read(&output).unwrap(), first_ir);
+
+    write(
+        &input,
+        "value() -> i64 { 2 } main() -> { let marker = value(); () }",
+    );
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 3,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(edited["llvm_ir_cache"], "miss", "{edited}");
+    assert_ne!(
+        fs::read(&output).unwrap(),
+        first_ir,
+        "an edited body reused stale LLVM IR"
+    );
+}
+
+/// A deterministic release-mode measurement harness for the real JSON-line
+/// server. Run with:
+/// `tooling/ram-gate.sh cargo test --release -p grandiose --test grc_cli \
+/// release_warm_llvm_serve_iteration_records_cache_evidence -- --ignored --exact`
+///
+/// It records cache work rather than imposing unstable wall-clock budgets.
+#[test]
+#[ignore = "release-only warm iteration measurement harness"]
+fn release_warm_llvm_serve_iteration_records_cache_evidence() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("warm.glorious");
+    let output = directory.path().join("warm.ll");
+    let arguments = || {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-ir",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let request = |session: &mut Session, id, arguments: serde_json::Value| {
+        session.request(serde_json::json!({
+            "protocol": 1,
+            "id": id,
+            "method": "compile",
+            "arguments": arguments,
+        }))
+    };
+    let mut session = Session::start();
+
+    write(
+        &input,
+        "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let cold = request(&mut session, 1, arguments());
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["llvm_ir_cache"], "miss", "{cold}");
+    assert_eq!(cold["cache_stats"]["llvm_ir_reused"], 0, "{cold}");
+    assert_eq!(cold["cache_stats"]["llvm_fragments_reused"], 0, "{cold}");
+    let cold_ir = fs::read(&output).unwrap();
+
+    let warm = request(&mut session, 2, arguments());
+    assert_eq!(warm["status"], 0, "{warm}");
+    assert_eq!(warm["llvm_ir_cache"], "hit", "{warm}");
+    assert_eq!(warm["cache_stats"]["llvm_ir_reused"], 1, "{warm}");
+    assert_eq!(warm["cache_stats"]["llvm_fragments_reused"], 0, "{warm}");
+    assert_eq!(fs::read(&output).unwrap(), cold_ir);
+
+    write(
+        &input,
+        "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let body_only = request(&mut session, 3, arguments());
+    assert_eq!(body_only["status"], 0, "{body_only}");
+    assert_eq!(body_only["llvm_ir_cache"], "miss", "{body_only}");
+    assert_eq!(body_only["cache_stats"]["llvm_ir_reused"], 0, "{body_only}");
+    assert_eq!(
+        body_only["cache_stats"]["llvm_fragments_reused"], 2,
+        "a leaf implementation edit must retain caller and entry fragments: {body_only}"
+    );
+    assert_ne!(fs::read(&output).unwrap(), cold_ir);
+
+    write(
+        &input,
+        "leaf(argument: ()) -> i64 { 2 } caller() -> i64 { leaf(()) } main() -> () { caller(); () }",
+    );
+    let interface_changed = request(&mut session, 4, arguments());
+    assert_eq!(interface_changed["status"], 0, "{interface_changed}");
+    assert_eq!(
+        interface_changed["llvm_ir_cache"], "miss",
+        "{interface_changed}"
+    );
+    assert_eq!(interface_changed["cache_stats"]["llvm_ir_reused"], 0);
+    assert_eq!(
+        interface_changed["cache_stats"]["llvm_fragments_reused"], 0,
+        "the current runtime-ABI guard conservatively invalidates every fragment after a leaf ABI edit: {interface_changed}"
+    );
+}
+
+/// A small, repeatable release-mode measurement for the path a developer
+/// actually takes after editing one implementation.  It deliberately uses a
+/// two-input bundle: changing `leaf.glorious` leaves `main.glorious` available
+/// to the persistent frontend cache, while the native object route can retain
+/// the unrelated function and entry objects.
+///
+/// Run with:
+/// `tooling/ram-gate.sh cargo test --release -p grandiose --test grc_cli \
+/// release_native_serve_warm_body_edit_reports_phase_timings -- --ignored --exact --nocapture`
+///
+/// The required release server is built separately so the measurement never
+/// accidentally times a debug `grc` binary:
+/// `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc`.
+#[test]
+#[ignore = "release-only native warm body-edit timing harness"]
+fn release_native_serve_warm_body_edit_reports_phase_timings() {
+    let directory = tempdir().unwrap();
+    let main = directory.path().join("main.glorious");
+    let leaf = directory.path().join("leaf.glorious");
+    let cache = directory.path().join("native-cache");
+    let release_grc = repository_root().join("target/release/grc");
+    assert!(
+        release_grc.is_file(),
+        "release grc is required; run `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
+    );
+    write(
+        &main,
+        "caller() -> i64 { leaf() } unrelated_leaf() -> i64 { 10 } main() -> () { caller(); unrelated_leaf(); () }",
+    );
+    write(&leaf, "leaf() -> i64 { 1 }");
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O3",
+            "--emit",
+            "executable",
+            "--native-incremental-cache",
+            cache.display().to_string(),
+            "--diagnostic-timings",
+            "-o",
+            output.display().to_string(),
+            main.display().to_string(),
+            leaf.display().to_string(),
+        ])
+    };
+    let request = |session: &mut Session, id, arguments: serde_json::Value| {
+        session.request(serde_json::json!({
+            "protocol": 1,
+            "id": id,
+            "method": "compile",
+            "arguments": arguments,
+        }))
+    };
+    let mut session = Session::start_release(&release_grc);
+    let cold_started = Instant::now();
+    let cold = request(
+        &mut session,
+        1,
+        arguments(&directory.path().join("cold-native")),
+    );
+    let cold_elapsed = cold_started.elapsed();
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(
+        cold["native_incremental"]["strategy"],
+        "partitioned-function-objects"
+    );
+    assert!(
+        cold["timings"].is_object(),
+        "missing timing response: {cold}"
+    );
+    let before = durable_object_manifests(&cache);
+    assert!(
+        !before.is_empty(),
+        "cold native request wrote no durable object manifests"
+    );
+
+    write(&leaf, "leaf() -> i64 { 2 }");
+    let edit_started = Instant::now();
+    let edited = request(
+        &mut session,
+        2,
+        arguments(&directory.path().join("edited-native")),
+    );
+    let edit_elapsed = edit_started.elapsed();
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert!(
+        edited["timings"].is_object(),
+        "missing timing response: {edited}"
+    );
+    for phase in [
+        "source_load_ms",
+        "compile_phases_ms",
+        "llvm_module_ms",
+        "llvm_partitions_ms",
+        "native_objects_ms",
+        "native_link_ms",
+        "total_ms",
+    ] {
+        assert!(
+            edited["timings"][phase].is_u64(),
+            "missing `{phase}` from timing response: {edited}"
+        );
+    }
+    assert!(
+        edited["cache_stats"]["bodies_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the body edit did not reuse unchanged source bodies: {edited}"
+    );
+    assert!(
+        edited["cache_stats"]["frontend"]["segments_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the unchanged source segment was not reused: {edited}"
+    );
+    assert!(
+        edited["cache_stats"]["llvm_fragments_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "the body edit did not reuse unchanged LLVM fragments: {edited}"
+    );
+    let after = durable_object_manifests(&cache);
+    let newly_written = after.difference(&before).collect::<Vec<_>>();
+    assert!(
+        newly_written.iter().any(|manifest| fs::read_to_string(cache.join(manifest))
+            .is_ok_and(|contents| contents.contains("role=function;"))),
+        "the body edit did not materialize a changed durable function object: {newly_written:?}"
+    );
+    assert!(directory.path().join("edited-native").is_file());
+
+    let timing = format!(
+        "native warm body-edit timings: cold_wall={cold_elapsed:.2?}, cold_total={}ms, body_edit_wall={edit_elapsed:.2?}, body_edit_total={}ms, body_edit_phases={}ms, partitions={}ms, objects={}ms, link={}ms, speedup={:.2}x",
+        cold["timings"]["total_ms"],
+        edited["timings"]["total_ms"],
+        edited["timings"]["compile_phases_ms"],
+        edited["timings"]["llvm_partitions_ms"],
+        edited["timings"]["native_objects_ms"],
+        edited["timings"]["native_link_ms"],
+        cold_elapsed.as_secs_f64() / edit_elapsed.as_secs_f64(),
+    );
+    eprintln!("{timing}");
+    if let Some(path) = std::env::var_os("G1_NATIVE_WARM_TIMING_FILE") {
+        fs::write(path, timing).unwrap();
+    }
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn copied_production_self_host_inputs(directory: &Path) -> Vec<PathBuf> {
+    let repository = repository_root();
+    let original_root = repository.join("self-host/src");
+    let copied_root = directory.join("self-host-src");
+    copy_tree(&original_root, &copied_root);
+    let listed = Command::new(repository.join("tooling/self-host-production-source.sh"))
+        .arg("inputs")
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "production input enumeration failed: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    String::from_utf8(listed.stdout)
+        .unwrap()
+        .lines()
+        .map(PathBuf::from)
+        .map(|original| {
+            copied_root.join(original.strip_prefix(&original_root).unwrap_or_else(|_| {
+                panic!(
+                    "production input {} escapes {}",
+                    original.display(),
+                    original_root.display()
+                )
+            }))
+        })
+        .collect()
+}
+
+fn durable_object_manifests(cache: &Path) -> BTreeSet<std::ffi::OsString> {
+    fs::read_dir(cache)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            (entry.path().extension().is_some_and(|extension| extension == "manifest"))
+                .then(|| entry.file_name())
+        })
+        .collect()
+}
+
+/// Expensive full-self-host release check. It intentionally exercises the
+/// persistent frontend/type/MIR driver and a private durable object cache at
+/// the same time; cache-work evidence is asserted, never wall-clock time.
+#[test]
+#[ignore = "release-only copied self-host serve warm-edit harness"]
+fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
+    let directory = tempdir().unwrap();
+    let cache = directory.path().join("native-cache");
+    fs::create_dir_all(&cache).unwrap();
+    let inputs = copied_production_self_host_inputs(directory.path());
+    assert!(!inputs.is_empty(), "production closure needs main source");
+    let compiler = directory.path().join("self-host-src/compiler/compiler.glorious");
+    let release_grc = repository_root().join("target/release/grc");
+    assert!(
+        release_grc.is_file(),
+        "release grc is required; run `tooling/ram-gate.sh cargo build --release -p grandiose --bin grc` first"
+    );
+    let arguments = |output: &Path| {
+        let mut arguments = vec![
+            "-O3".to_owned(),
+            "--emit".to_owned(),
+            "executable".to_owned(),
+            "--native-incremental".to_owned(),
+            "--native-incremental-cache".to_owned(),
+            cache.display().to_string(),
+            "--native-allocation-limit".to_owned(),
+            "536870912".to_owned(),
+            "-o".to_owned(),
+            output.display().to_string(),
+        ];
+        arguments.extend(inputs.iter().map(|path| path.display().to_string()));
+        serde_json::Value::Array(arguments.into_iter().map(serde_json::Value::String).collect())
+    };
+    let request = |session: &mut Session, id, arguments: serde_json::Value| {
+        session.request(serde_json::json!({
+            "protocol": 1,
+            "id": id,
+            "method": "compile",
+            "arguments": arguments,
+        }))
+    };
+    let mut session = Session::start_release(&release_grc);
+    let cold_started = Instant::now();
+    let cold = request(&mut session, 1, arguments(&directory.path().join("cold-native")));
+    let cold_elapsed = cold_started.elapsed();
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["strategy"], "partitioned-function-objects");
+    assert!(directory.path().join("cold-native").is_file());
+    let before = durable_object_manifests(&cache);
+    assert!(!before.is_empty(), "cold build wrote no durable object manifests");
+
+    let before_edit = fs::read_to_string(&compiler).unwrap();
+    let original = "usize_from_u32(value: u32) -> usize {\n    wrapping_convert_to_usize(value)\n}";
+    let replacement = "usize_from_u32(value: u32) -> usize {\n    if(value == 0) { 0 } else { wrapping_convert_to_usize(value) }\n}";
+    assert_eq!(
+        before_edit.matches(original).count(),
+        1,
+        "the copied self-host body edit must target exactly one function"
+    );
+    write(&compiler, &before_edit.replacen(original, replacement, 1));
+
+    let edited_started = Instant::now();
+    let edited = request(
+        &mut session,
+        2,
+        arguments(&directory.path().join("edited-native")),
+    );
+    let edited_elapsed = edited_started.elapsed();
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert!(directory.path().join("edited-native").is_file());
+    assert!(
+        edited["cache_stats"]["bodies_reused"].as_u64().unwrap_or_default() > 0,
+        "a one-body edit must reuse self-host body work: {edited}"
+    );
+    assert!(
+        edited["cache_stats"]["frontend"]["segments_reused"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "a one-file self-host body edit must reuse unchanged frontend segments: {edited}"
+    );
+    assert_eq!(
+        edited["cache_stats"]["frontend"]["whole_bundle_fallbacks"], 0,
+        "a one-file self-host body edit must not fall back to whole-bundle frontend work: {edited}"
+    );
+    let after = durable_object_manifests(&cache);
+    let newly_written = after.difference(&before).collect::<Vec<_>>();
+    assert!(
+        !newly_written.is_empty(),
+        "body edit produced no durable native object evidence"
+    );
+    assert!(
+        newly_written.iter().any(|manifest| fs::read_to_string(cache.join(manifest))
+            .is_ok_and(|contents| contents.contains("role=function;"))),
+        "body edit must publish at least one function-object manifest: {newly_written:?}"
+    );
+    let timings = format!(
+        "self-host native serve timings: cold={cold_elapsed:.2?}, body_edit={edited_elapsed:.2?}, speedup={:.2}x",
+        cold_elapsed.as_secs_f64() / edited_elapsed.as_secs_f64(),
+    );
+    eprintln!("{timings}");
+    if let Some(path) = std::env::var_os("G1_SELFHOST_TIMING_FILE") {
+        fs::write(path, timings).unwrap();
+    }
+}
+
+#[test]
+fn persistent_serve_reports_process_local_function_incremental_evidence() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("incremental.glorious");
+    let output = directory.path().join("incremental.ll");
+    let arguments = || {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-ir",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    write(
+        &input,
+        "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let mut session = Session::start();
+    let cold = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["cache_scope"], "serve-process");
+    assert_eq!(cold["native_incremental"]["llvm_fragments_reused"], 0);
+    assert_eq!(cold["native_incremental"]["llvm_fragments_emitted"], 3);
+    assert_eq!(cold["native_incremental"]["native_objects_reused"], 0);
+    assert_eq!(cold["native_incremental"]["native_objects_emitted"], 0);
+    assert_eq!(cold["native_incremental"]["wild_relink"], false);
+
+    write(
+        &input,
+        "leaf() -> i64 { 2 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+    );
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(edited["native_incremental"]["cache_scope"], "serve-process");
+    assert_eq!(edited["native_incremental"]["llvm_fragments_reused"], 2);
+    assert_eq!(edited["native_incremental"]["llvm_fragments_emitted"], 1);
+    assert_eq!(edited["native_incremental"]["wild_relink"], false);
+}
+
+#[test]
+fn persistent_serve_reuses_exact_llvm_object_bytes_at_the_current_output_path() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("cache.glorious");
+    let first_output = directory.path().join("first.o");
+    let second_output = directory.path().join("second.o");
+    write(&input, "main() -> () { () }");
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O0",
+            "--emit",
+            "llvm-object",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+
+    let first = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(&first_output),
+    }));
+    assert_eq!(first["status"], 0, "{first}");
+    assert_eq!(first["native_object_cache"], "miss", "{first}");
+    let first_object = fs::read(&first_output).unwrap();
+
+    let second = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(&second_output),
+    }));
+    assert_eq!(second["status"], 0, "{second}");
+    assert_eq!(second["llvm_ir_cache"], "hit", "{second}");
+    assert_eq!(second["native_object_cache"], "hit", "{second}");
+    assert_eq!(fs::read(&second_output).unwrap(), first_object);
+
+    write(&input, "main() -> () { let marker = (); marker }");
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 3,
+        "method": "compile",
+        "arguments": arguments(&second_output),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(edited["native_object_cache"], "miss", "{edited}");
+    assert_ne!(fs::read(&second_output).unwrap(), first_object);
+}
+
+#[test]
+fn persistent_serve_reuses_partitioned_o3_objects_after_body_edit_and_wild_relinks() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("partitioned.glorious");
+    let first_executable = directory.path().join("partitioned-native-first");
+    let second_executable = directory.path().join("partitioned-native-second");
+    let observed = directory.path().join("observed.bin");
+    let observed_path = serde_json::to_string(observed.to_str().unwrap()).unwrap();
+    let source = |value| {
+        format!(
+            r#"
+                edited_leaf() -> i64 {{ {value} }}
+                unrelated_leaf() -> i64 {{ 10 }}
+                main() -> () {{
+                    let current = edited_leaf();
+                    let unrelated = unrelated_leaf();
+                    if current + unrelated == 11 {{
+                        __g1_fs_write({observed_path}, String::as_bytes(&"one"));
+                    }} else {{
+                        __g1_fs_write({observed_path}, String::as_bytes(&"two"));
+                    }};
+                    ()
+                }}
+            "#
+        )
+    };
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O3",
+            "--emit",
+            "executable",
+            "--native-incremental",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    write(&input, &source(1));
+    let mut session = Session::start();
+    let cold = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(&first_executable),
+    }));
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["wild_relink"], true, "{cold}");
+    assert_eq!(
+        cold["native_incremental"]["strategy"], "partitioned-function-objects",
+        "{cold}"
+    );
+    assert_eq!(
+        cold["native_incremental"]["native_objects_reused"], 0,
+        "{cold}"
+    );
+    assert_eq!(
+        cold["native_incremental"]["function_objects_compiled"],
+        3,
+        "{cold}"
+    );
+    assert!(first_executable.is_file());
+    assert!(Command::new(&first_executable).status().unwrap().success());
+    assert_eq!(fs::read(&observed).unwrap(), b"one");
+
+    write(&input, &source(2));
+    let edited = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(&second_executable),
+    }));
+    assert_eq!(edited["status"], 0, "{edited}");
+    assert_eq!(
+        edited["native_incremental"]["wild_relink"], true,
+        "{edited}"
+    );
+    assert_eq!(
+        edited["native_incremental"]["strategy"], "partitioned-function-objects",
+        "{edited}"
+    );
+    assert_eq!(
+        edited["native_incremental"]["function_objects_reused"],
+        2,
+        "only the unchanged entry and unrelated-leaf objects may be reused after a leaf body edit: {edited}"
+    );
+    assert_eq!(
+        edited["native_incremental"]["function_objects_compiled"], 1,
+        "only the changed leaf may be recompiled after a body-only edit: {edited}"
+    );
+    assert!(second_executable.is_file());
+    assert!(Command::new(&second_executable).status().unwrap().success());
+    assert_eq!(fs::read(&observed).unwrap(), b"two");
+}
+
+#[test]
+fn persistent_serve_reports_durable_exact_link_cache_hit() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("durable-link-cache.glorious");
+    let cache = directory.path().join("native-cache");
+    let first = directory.path().join("first-native");
+    let second = directory.path().join("second-native");
+    write(&input, "main() -> () { () }");
+    let arguments = |output: &Path| {
+        serde_json::json!([
+            "-O3",
+            "--emit",
+            "executable",
+            "--native-incremental-cache",
+            cache.display().to_string(),
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+    let cold = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments(&first),
+    }));
+    assert_eq!(cold["status"], 0, "{cold}");
+    assert_eq!(cold["native_incremental"]["wild_relink"], true, "{cold}");
+
+    let warm = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments(&second),
+    }));
+    assert_eq!(warm["status"], 0, "{warm}");
+    assert_eq!(
+        warm["native_incremental"]["wild_relink"], false,
+        "an exact durable object/link manifest must reuse its executable without a Wild relink: {warm}"
+    );
+    assert_eq!(fs::read(&second).unwrap(), fs::read(&first).unwrap());
+}
+
+#[test]
+fn disk_native_incremental_cache_reuses_sibling_object_across_processes() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("disk-cache.glorious");
+    let cache = directory.path().join("objects");
+    let first = directory.path().join("first-native");
+    let second = directory.path().join("second-native");
+    let source = |value| format!("leaf() -> i64 {{ {value} }} main() -> () {{ leaf(); () }}");
+    write(&input, &source(1));
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&first)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    let object_count = |directory: &Path| {
+        fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "o")
+            })
+            .count()
+    };
+    let cold = object_count(&cache);
+    assert!(cold >= 2);
+    write(&input, &source(2));
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&second)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        object_count(&cache),
+        cold + 1,
+        "only the edited leaf should add an object"
+    );
+    assert!(
+        first.is_file() && second.is_file(),
+        "each invocation must link a fresh executable"
+    );
+    assert!(
+        Command::new(&second).status().unwrap().success(),
+        "a durable native-link cache hit must preserve executable permissions"
+    );
+    let victim = fs::read_dir(&cache)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "o"))
+        .unwrap();
+    let corrupt = b"\x7fELF plausible-but-corrupt";
+    fs::write(&victim, corrupt).unwrap();
+    let recovered = directory.path().join("recovered-native");
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&recovered)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    assert_ne!(
+        fs::read(&victim).unwrap(),
+        corrupt,
+        "digest mismatch must rebuild the cached object"
+    );
+    assert!(recovered.is_file());
+    assert!(
+        Command::new(&recovered).status().unwrap().success(),
+        "a reused durable native executable must remain executable"
+    );
+}
+
+#[test]
+fn disk_native_incremental_cache_rebuilds_only_direct_callers_after_callee_abi_edit() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("disk-cache-abi.glorious");
+    let cache = directory.path().join("objects");
+    let first = directory.path().join("first-native");
+    let second = directory.path().join("second-native");
+    let object_count = |directory: &Path| {
+        fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "o")
+            })
+            .count()
+    };
+    write(
+        &input,
+        r#"
+            leaf() -> i64 { 1 }
+            caller() -> i64 { leaf() }
+            outer() -> i64 { caller() }
+            main() -> () { outer(); () }
+        "#,
+    );
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&first)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    let cold = object_count(&cache);
+    assert_eq!(cold, 5, "one shared object plus four function objects");
+
+    // The leaf and its direct caller change their call ABI. `outer` retains
+    // the caller's ABI, and `main` retains the outer ABI, so their function
+    // objects are valid across this independent compiler process. The shared
+    // declaration unit changes too, yielding exactly three new cache entries.
+    write(
+        &input,
+        r#"
+            leaf(unused: ()) -> i64 { 1 }
+            caller() -> i64 { leaf(()) }
+            outer() -> i64 { caller() }
+            main() -> () { outer(); () }
+        "#,
+    );
+    assert!(grc()
+        .args(["-O3", "--emit", "executable", "--native-incremental-cache"])
+        .arg(&cache)
+        .args(["-o"])
+        .arg(&second)
+        .arg(&input)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        object_count(&cache),
+        cold + 3,
+        "the shared declaration unit, edited leaf, and direct caller must rebuild; outer callers remain reusable"
+    );
+    assert!(
+        Command::new(&second).status().unwrap().success(),
+        "the relinked executable must use both rebuilt and retained objects"
+    );
+}
+
+#[test]
+fn persistent_serve_separates_native_object_cache_entries_by_optimization_level() {
+    let directory = tempdir().unwrap();
+    let input = directory.path().join("cache.glorious");
+    let o0_output = directory.path().join("o0.o");
+    let o3_output = directory.path().join("o3.o");
+    let warm_o3_output = directory.path().join("warm-o3.o");
+    write(
+        &input,
+        "leaf(value: i64) -> i64 { value + 1 } main() -> () { leaf(41); () }",
+    );
+    let arguments = |optimization: &str, output: &Path| {
+        serde_json::json!([
+            optimization,
+            "--emit",
+            "llvm-object",
+            "-o",
+            output.display().to_string(),
+            input.display().to_string(),
+        ])
+    };
+    let mut session = Session::start();
+
+    let cold_o0 = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 1,
+        "method": "compile",
+        "arguments": arguments("-O0", &o0_output),
+    }));
+    assert_eq!(cold_o0["status"], 0, "{cold_o0}");
+    assert_eq!(cold_o0["native_object_cache"], "miss", "{cold_o0}");
+
+    let cold_o3 = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 2,
+        "method": "compile",
+        "arguments": arguments("-O3", &o3_output),
+    }));
+    assert_eq!(cold_o3["status"], 0, "{cold_o3}");
+    assert_eq!(cold_o3["llvm_ir_cache"], "miss", "{cold_o3}");
+    assert_eq!(cold_o3["native_object_cache"], "miss", "{cold_o3}");
+
+    let warm_o3 = session.request(serde_json::json!({
+        "protocol": 1,
+        "id": 3,
+        "method": "compile",
+        "arguments": arguments("-O3", &warm_o3_output),
+    }));
+    assert_eq!(warm_o3["status"], 0, "{warm_o3}");
+    assert_eq!(warm_o3["llvm_ir_cache"], "hit", "{warm_o3}");
+    assert_eq!(warm_o3["native_object_cache"], "hit", "{warm_o3}");
+    assert_eq!(
+        fs::read(&warm_o3_output).unwrap(),
+        fs::read(&o3_output).unwrap()
+    );
 }
 
 #[test]
@@ -731,12 +1655,10 @@ fn session_protocol_errors_and_resource_limits_do_not_poison_the_process() {
         "arguments": ["--phase", "check", input.display().to_string()]
     }));
     assert_eq!(wrong_version["status"], 2);
-    assert!(
-        wrong_version["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("incompatible")
-    );
+    assert!(wrong_version["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("incompatible"));
     let unknown = session.request(serde_json::json!({
         "protocol": 1,
         "id": 3,
@@ -752,21 +1674,17 @@ fn session_protocol_errors_and_resource_limits_do_not_poison_the_process() {
         "arguments": arguments
     }));
     assert_eq!(limited["status"], 2);
-    assert!(
-        limited["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("argument-count")
-    );
+    assert!(limited["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("argument-count"));
 
     let oversized = session.raw(&"x".repeat(1024 * 1024 + 1));
     assert_eq!(oversized["status"], 2);
-    assert!(
-        oversized["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("request exceeds session byte limit")
-    );
+    assert!(oversized["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("request exceeds session byte limit"));
 
     let oversized_source = directory.path().join("oversized.glorious");
     fs::File::create(&oversized_source)
@@ -780,12 +1698,10 @@ fn session_protocol_errors_and_resource_limits_do_not_poison_the_process() {
         "arguments": ["--phase", "lex", oversized_source.display().to_string()]
     }));
     assert_eq!(source_limited["status"], 1);
-    assert!(
-        source_limited["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("source-byte limit exceeded")
-    );
+    assert!(source_limited["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("source-byte limit exceeded"));
 
     let healthy = session.request(serde_json::json!({
         "protocol": 1,
@@ -904,11 +1820,9 @@ fn interface_emission_uses_parser_spans_and_separates_the_standard_library() {
             && declaration["name_start_byte"] == 18
             && declaration["name_end_byte"] == 24
     }));
-    assert!(
-        !declarations
-            .iter()
-            .any(|declaration| declaration["file"] == "<grandiose:std>")
-    );
+    assert!(!declarations
+        .iter()
+        .any(|declaration| declaration["file"] == "<grandiose:std>"));
 
     let standard = grc()
         .args(["--emit", "std-interfaces-json"])
@@ -916,13 +1830,11 @@ fn interface_emission_uses_parser_spans_and_separates_the_standard_library() {
         .unwrap();
     assert!(standard.status.success());
     let declarations: serde_json::Value = serde_json::from_slice(&standard.stdout).unwrap();
-    assert!(
-        declarations
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|declaration| declaration["file"] == "<grandiose:std>")
-    );
+    assert!(declarations
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|declaration| declaration["file"] == "<grandiose:std>"));
 }
 
 #[test]

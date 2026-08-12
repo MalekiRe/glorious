@@ -98,6 +98,20 @@ fn self_host_compiler_pipeline_bundle() -> SourceBundle {
                 }
             }
 
+            // The public native CLI gives compiler::compile_sources an ordered
+            // list of decoded source files. Keep this callable in the
+            // bootstrap-compiled self-host source bundle so the ABI is type-
+            // checked independently of native executable construction.
+            classify_ordered_sources(first: String, second: String) -> u8 {
+                let sources = Vec::new();
+                Vec::push(&mut sources, first);
+                Vec::push(&mut sources, second);
+                handle compiler::compile_sources(&sources) {
+                    Result::Ok(_) => 0,
+                    Result::Err(_) => 1
+                }
+            }
+
             main() { run_compiler_host(diagnostics::application) }
         "#,
     ]
@@ -110,6 +124,19 @@ fn self_host_compiler_pipeline_bundle() -> SourceBundle {
             Segment::new(path.to_string_lossy(), source)
         }),
     )
+}
+
+#[test]
+fn ordered_source_bundle_api_is_wired_into_the_self_host_entrypoint() {
+    let root = repository_root().join("self-host/src");
+    let compiler = fs::read_to_string(root.join("compiler/compiler.glorious")).unwrap();
+    let diagnostics = fs::read_to_string(root.join("diagnostics/diagnostics.glorious")).unwrap();
+
+    assert!(compiler.contains("pub compile_sources(sources: &Vec<String>)"));
+    assert!(compiler.contains("append_ordered_sources(sources, 0"));
+    assert!(diagnostics.contains("<input.glorious>..."));
+    assert!(diagnostics.contains("read_ordered_sources(&arguments, 1"));
+    assert!(diagnostics.contains("compiler::compile_sources(&sources)"));
 }
 
 fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
@@ -266,11 +293,16 @@ fn self_hosted_compiler_pipeline_result_prelude_does_not_mask_unknown_names() {
                 (
                     "result() -> Result<i64, i64> { Result::Ok(7) } main() { () }",
                     true,
+                    Some(0),
                 ),
-                ("unknown() -> DefinitelyMissing { () } main() { () }", false),
+                (
+                    "unknown() -> DefinitelyMissing { () } main() { () }",
+                    false,
+                    None,
+                ),
             ];
 
-            for (source, expected) in corpus {
+            for (source, expected, expected_phase) in corpus {
                 let oracle =
                     grandiose::compile_source_to_bytecode("compiler-prelude.glorious", source)
                         .is_ok();
@@ -288,7 +320,75 @@ fn self_hosted_compiler_pipeline_result_prelude_does_not_mask_unknown_names() {
                     panic!("classify_compile_error did not return u8");
                 };
                 assert_eq!(actual == 0, oracle, "prelude parity: {source:?}");
+                if let Some(expected_phase) = expected_phase {
+                    assert_eq!(actual, expected_phase, "prelude phase: {source:?}");
+                }
             }
+
+            // Unlike the bootstrap compiler, which always supplies its
+            // distributed Result, the self-host accepts an explicit root
+            // declaration. The scanner guard must therefore leave this at
+            // classifier phase zero rather than injecting an ambiguous twin.
+            let explicit_result = "enum Result<T, E> { Ok(T), Err(E) } \
+                explicit_result() -> Result<i64, i64> { Result::Ok(7) } \
+                main() { () }";
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(Vec::<std::ffi::OsString>::new()),
+            )
+            .unwrap();
+            let Value::U64(actual) = vm
+                .run(classify, vec![Value::Text(explicit_result.into())])
+                .unwrap()
+            else {
+                panic!("classify_compile_error did not return u8");
+            };
+            assert_eq!(actual, 0, "explicit Result must reach classifier phase 0");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+// Character syntax is already elaborated as an integer-style scalar constant.
+// Keep the end-to-end VM compiler gate focused on the lowering boundary: the
+// predefined `char` artifact type requires a four-byte payload rather than an
+// unsupported scalar error.
+#[test]
+#[ignore = "baseline-blocked: run through the full self-host compiler RAM gate"]
+fn self_hosted_compiler_pipeline_character_literal_reaches_emission() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let artifact = compile_bundle_to_bytecode_with_options(
+                &self_host_compiler_pipeline_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let classify = function_id(&artifact, "classify_compile_error");
+            let verified = verify(artifact).unwrap();
+            let source = "character() -> char { '🦀' } main() { () }";
+            assert!(
+                grandiose::compile_source_to_bytecode("compiler-character.glorious", source)
+                    .is_ok(),
+                "bootstrap oracle must accept the character literal"
+            );
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(Vec::<std::ffi::OsString>::new()),
+            )
+            .unwrap();
+            let Value::U64(phase) = vm
+                .run(classify, vec![Value::Text(source.into())])
+                .unwrap()
+            else {
+                panic!("classify_compile_error did not return u8");
+            };
+            assert_eq!(phase, 0, "character literal must reach emission");
         })
         .unwrap()
         .join()

@@ -4751,6 +4751,33 @@ pub struct CompileOptions {
     pub optimization_level: mir::OptimizationLevel,
 }
 
+/// A narrowly scoped opt-out used by optimizer differential tests.
+///
+/// This is intentionally separate from [`CompileOptions`], so ordinary
+/// compiler configuration remains stable and existing option literals do not
+/// acquire test-only fields.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestOptimizerSuppression {
+    TerminalHandlerFusion,
+    DirectResumptiveHandlerFusion,
+}
+
+impl TestOptimizerSuppression {
+    fn plan(self) -> mir::optimizer::OptimizationPlan {
+        match self {
+            Self::TerminalHandlerFusion => mir::optimizer::OptimizationPlan {
+                terminal_handler_fusion: false,
+                ..mir::optimizer::OptimizationPlan::default()
+            },
+            Self::DirectResumptiveHandlerFusion => mir::optimizer::OptimizationPlan {
+                direct_resumptive_handler_fusion: false,
+                ..mir::optimizer::OptimizationPlan::default()
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompiledPhases {
     pub artifact: Artifact,
@@ -4885,6 +4912,44 @@ pub fn compile_source_to_phases_with_options(
         })
 }
 
+/// Compile source while suppressing one named optimizer transform for a
+/// differential test. Normal compiler entry points always use the complete
+/// optimizer plan.
+#[doc(hidden)]
+pub fn compile_source_to_phases_with_test_optimizer_suppression(
+    source_name: &str,
+    source: &str,
+    options: CompileOptions,
+    suppression: TestOptimizerSuppression,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    let bundle = SourceBundle::distributed(Segment::new(source_name, source), []);
+    let manifest = if bundle.is_canonical_distribution() {
+        TrustedTraitManifest::trusted_distribution()
+    } else {
+        TrustedTraitManifest::trusted_default()
+    };
+    compile_bundle_to_phases_with_manifest_and_options_and_plan(
+        &bundle,
+        &manifest,
+        options,
+        suppression.plan(),
+    )
+    .map(|mut phases| {
+        phases.diagnostics = phases
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| localize_source_diagnostic(&bundle, source_name, diagnostic))
+            .collect();
+        phases
+    })
+    .map_err(|diagnostics| {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| localize_source_diagnostic(&bundle, source_name, diagnostic))
+            .collect()
+    })
+}
+
 pub fn compile_source_to_phases_with_manifest(
     source_name: &str,
     source: &str,
@@ -4993,6 +5058,29 @@ pub fn compile_bundle_to_phases_with_options(
     compile_bundle_to_phases_with_manifest_and_options(bundle, &manifest, options)
 }
 
+/// Compile a source bundle while suppressing one named optimizer transform for
+/// a differential test. Unlike the source convenience wrapper, this retains
+/// the bundle's distributed-segment identity and selects the same trusted
+/// manifest as ordinary bundle compilation.
+#[doc(hidden)]
+pub fn compile_bundle_to_phases_with_test_optimizer_suppression(
+    bundle: &SourceBundle,
+    options: CompileOptions,
+    suppression: TestOptimizerSuppression,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    let manifest = if bundle.is_canonical_distribution() {
+        TrustedTraitManifest::trusted_distribution()
+    } else {
+        TrustedTraitManifest::trusted_default()
+    };
+    compile_bundle_to_phases_with_manifest_and_options_and_plan(
+        bundle,
+        &manifest,
+        options,
+        suppression.plan(),
+    )
+}
+
 pub fn compile_bundle_to_phases_with_manifest(
     bundle: &SourceBundle,
     manifest: &TrustedTraitManifest,
@@ -5005,6 +5093,20 @@ pub fn compile_bundle_to_phases_with_manifest_and_options(
     manifest: &TrustedTraitManifest,
     options: CompileOptions,
 ) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    compile_bundle_to_phases_with_manifest_and_options_and_plan(
+        bundle,
+        manifest,
+        options,
+        mir::optimizer::OptimizationPlan::default(),
+    )
+}
+
+fn compile_bundle_to_phases_with_manifest_and_options_and_plan(
+    bundle: &SourceBundle,
+    manifest: &TrustedTraitManifest,
+    options: CompileOptions,
+    optimizer_plan: mir::optimizer::OptimizationPlan,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
     let domains = PrivacyDomains::bundle(bundle);
     compile_stream_phases_with_manifest_and_domains(
         bundle,
@@ -5012,6 +5114,7 @@ pub fn compile_bundle_to_phases_with_manifest_and_options(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        optimizer_plan,
         false,
         None,
     )
@@ -5035,6 +5138,7 @@ pub(crate) fn compile_bundle_to_phases_incremental(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        mir::optimizer::OptimizationPlan::default(),
         false,
         Some(session),
     )
@@ -5058,6 +5162,7 @@ pub(crate) fn compile_bundle_to_phases_incremental_with_interfaces(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        mir::optimizer::OptimizationPlan::default(),
         true,
         Some(session),
     )
@@ -5075,6 +5180,7 @@ fn compile_stream_phases_with_manifest_and_domains(
     domains: &PrivacyDomains,
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
+    optimizer_plan: mir::optimizer::OptimizationPlan,
     include_interfaces: bool,
     mut incremental: Option<&mut crate::compiler_session::IncrementalCompilerSession>,
 ) -> Result<
@@ -5133,7 +5239,12 @@ fn compile_stream_phases_with_manifest_and_domains(
             &domains,
             trusted_standard_library_domain,
             options,
-            Some((&mut session.type_cache, fingerprints)),
+            optimizer_plan,
+            Some((
+                &mut session.type_cache,
+                fingerprints,
+                &mut session.trait_db_cache,
+            )),
             Some(&mut session.mir_cache),
         ),
         _ => compile_program_with_phases(
@@ -5142,6 +5253,7 @@ fn compile_stream_phases_with_manifest_and_domains(
             &domains,
             trusted_standard_library_domain,
             options,
+            optimizer_plan,
             None,
             None,
         ),
@@ -6530,15 +6642,169 @@ fn bind_runtime_manifest(
     }
 }
 
+/// Direct source-level callable references for one immutable program snapshot.
+///
+/// Both specialization discovery and final emission reachability need the same
+/// transitive closure, but they have different roots and operate before/after
+/// nominal instantiation.  Record each body's direct edges once per snapshot;
+/// closure expansion below then never needs to revisit expression trees.
+type FunctionDependencyGraph = BTreeMap<String, BTreeSet<String>>;
+
+fn collect_function_dependencies(expression: &Expr, found: &mut BTreeSet<String>) {
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match &expression.kind {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                for statement in statements.iter() {
+                    match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => pending.push(value),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => {
+                            pending.push(value);
+                            if let AssignmentPlaceKind::Dereference { reference, .. } =
+                                &destination.kind
+                            {
+                                pending.push(reference);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
+            ExprKind::Struct { fields, .. } => {
+                pending.extend(fields.iter().map(|(_, value)| value));
+            }
+            ExprKind::Field(subject, _)
+            | ExprKind::Move(subject)
+            | ExprKind::Unary {
+                operand: subject, ..
+            } => pending.push(subject),
+            ExprKind::Call(callee, arguments) => {
+                pending.push(callee);
+                pending.extend(arguments.iter());
+            }
+            ExprKind::Perform { args, .. } => pending.extend(args.iter()),
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                pending.push(computation);
+                pending.extend(clauses.iter().map(|clause| &clause.body));
+            }
+            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                pending.push(body)
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                pending.push(lhs);
+                pending.push(rhs);
+            }
+            ExprKind::LabelDestination { body, .. } => pending.push(body),
+            ExprKind::Is { subject, .. } => pending.push(subject),
+            ExprKind::Variable(path) => {
+                if let [name] = path.as_ref() {
+                    found.insert(name.to_string());
+                }
+            }
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::String(_) => {}
+            ExprKind::LabelReference(_) => {}
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                pending.push(resumption);
+                pending.extend(value.iter().map(AsRef::as_ref));
+            }
+            ExprKind::Cancel { resumption } => pending.push(resumption),
+        }
+    }
+}
+
+fn function_dependency_graph(program: &Program) -> FunctionDependencyGraph {
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            let mut dependencies = BTreeSet::new();
+            collect_function_dependencies(&function.body, &mut dependencies);
+            (function.name.clone(), dependencies)
+        })
+        .collect()
+}
+
+fn close_function_dependencies(
+    names: &mut BTreeSet<String>,
+    dependencies: &FunctionDependencyGraph,
+) {
+    let mut pending = names.iter().cloned().collect::<Vec<_>>();
+    while let Some(name) = pending.pop() {
+        let Some(edges) = dependencies.get(&name) else {
+            continue;
+        };
+        for dependency in edges {
+            if names.insert(dependency.clone()) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+}
+
+fn extend_deferred_trait_families(
+    names: &mut BTreeSet<String>,
+    functions_by_name: &BTreeMap<&str, &Function>,
+) {
+    for deferred in names.clone() {
+        let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
+            continue;
+        };
+        let Some((trait_name, method)) = rest.rsplit_once('$') else {
+            continue;
+        };
+        let prefix = format!("$trait${trait_name}$");
+        let suffix = format!("${method}");
+        names.extend(
+            functions_by_name
+                .keys()
+                .filter(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
+                .map(|name| (*name).to_owned()),
+        );
+    }
+}
+
+/// Build the two ordinal views consumed by Core lowering.  Closure emissions
+/// use the same source expression for both roots, so one traversal provides
+/// both maps.  Named functions may use distinct normalized/discovery trees;
+/// preserve their established independent traversal path.
+fn lowering_expression_ordinal_maps(
+    root: &Expr,
+    discovery_root: &Expr,
+) -> (BTreeMap<usize, u32>, BTreeMap<(usize, usize), u32>) {
+    if std::ptr::eq(root, discovery_root) {
+        specialization::expression_ordinal_maps(root)
+    } else {
+        (
+            specialization::expression_ordinals(root),
+            specialization::expression_ordinal_maps(discovery_root).1,
+        )
+    }
+}
+
 fn compile_program_with_phases(
     program: &Program,
     manifest: &TrustedTraitManifest,
     privacy_domains: &PrivacyDomains,
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
-    incremental: Option<(
+    optimizer_plan: mir::optimizer::OptimizationPlan,
+    mut incremental: Option<(
         &mut typeck::IncrementalTypeCache,
         &crate::compiler_session::IncrementalFingerprints,
+        &mut crate::compiler_session::IncrementalTraitDbCache,
     )>,
     mut incremental_mir: Option<&mut crate::compiler_session::IncrementalMirCache>,
 ) -> Result<CompiledProgramOutput, Vec<Diagnostic>> {
@@ -6574,7 +6840,14 @@ fn compile_program_with_phases(
     // methods, then normalize once more so projections preserved inside the
     // newly generated ordinary callable are solved by the same symbolic
     // function machinery. This avoids a second method-specific trait solver.
-    let initial_trait_db = TraitDb::build_with_manifest(&lifetime_erased_program, manifest)?;
+    let initial_trait_db = match incremental.as_mut() {
+        Some((_, fingerprints, cache)) => cache.build_or_reuse(
+            &lifetime_erased_program,
+            manifest,
+            &fingerprints.trait_db_context,
+        )?,
+        None => TraitDb::build_with_manifest(&lifetime_erased_program, manifest)?,
+    };
     timings.mark("initial-trait-db");
     let source_projection_normalized_program =
         normalize_ground_projections(&lifetime_erased_program, &initial_trait_db)?;
@@ -6637,6 +6910,7 @@ fn compile_program_with_phases(
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect::<BTreeMap<_, _>>();
+    let dependency_graph = function_dependency_graph(program);
     let mut discovery_names = program
         .functions
         .iter()
@@ -6654,44 +6928,9 @@ fn compile_program_with_phases(
     for drop in &program.drops {
         collect_function_dependencies(&drop.body, &mut discovery_names);
     }
-    loop {
-        let before = discovery_names.len();
-        for name in discovery_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut discovery_names);
-            }
-        }
-        if discovery_names.len() == before {
-            break;
-        }
-    }
-    for deferred in discovery_names.clone() {
-        let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
-            continue;
-        };
-        let Some((trait_name, method)) = rest.rsplit_once('$') else {
-            continue;
-        };
-        let prefix = format!("$trait${trait_name}$");
-        let suffix = format!("${method}");
-        discovery_names.extend(
-            functions_by_name
-                .keys()
-                .filter(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
-                .map(|name| (*name).to_owned()),
-        );
-    }
-    loop {
-        let before = discovery_names.len();
-        for name in discovery_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut discovery_names);
-            }
-        }
-        if discovery_names.len() == before {
-            break;
-        }
-    }
+    close_function_dependencies(&mut discovery_names, &dependency_graph);
+    extend_deferred_trait_families(&mut discovery_names, &functions_by_name);
+    close_function_dependencies(&mut discovery_names, &dependency_graph);
     let discovery_roots = discovery_names
         .into_iter()
         .map(typeck::DeclarationKey::Function)
@@ -6758,87 +6997,12 @@ fn compile_program_with_phases(
     timings.mark("instantiate-and-reject-subset");
     let program = &normalized_program;
     timings.mark("normalize-discover");
-    fn collect_function_dependencies(expression: &Expr, found: &mut BTreeSet<String>) {
-        let mut pending = vec![expression];
-        while let Some(expression) = pending.pop() {
-            match &expression.kind {
-                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                    for statement in statements.iter() {
-                        match statement {
-                            Stmt::Let { value, .. }
-                            | Stmt::Deconstruct { value, .. }
-                            | Stmt::Expr(value) => pending.push(value),
-                            Stmt::Assign {
-                                destination, value, ..
-                            } => {
-                                pending.push(value);
-                                if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                    &destination.kind
-                                {
-                                    pending.push(reference);
-                                }
-                            }
-                        }
-                    }
-                }
-                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
-                ExprKind::Struct { fields, .. } => {
-                    pending.extend(fields.iter().map(|(_, value)| value));
-                }
-                ExprKind::Field(subject, _)
-                | ExprKind::Move(subject)
-                | ExprKind::Unary {
-                    operand: subject, ..
-                } => pending.push(subject),
-                ExprKind::Call(callee, arguments) => {
-                    pending.push(callee);
-                    pending.extend(arguments.iter());
-                }
-                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::Handle {
-                    computation,
-                    clauses,
-                } => {
-                    pending.push(computation);
-                    pending.extend(clauses.iter().map(|clause| &clause.body));
-                }
-                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                    pending.push(body)
-                }
-                ExprKind::Binary { lhs, rhs, .. } => {
-                    pending.push(lhs);
-                    pending.push(rhs);
-                }
-                ExprKind::LabelDestination { body, .. } => pending.push(body),
-                ExprKind::Is { subject, .. } => pending.push(subject),
-                ExprKind::Variable(path) => {
-                    if let [name] = path.as_ref() {
-                        found.insert(name.to_string());
-                    }
-                }
-                ExprKind::Unit
-                | ExprKind::Int(_)
-                | ExprKind::Float(_)
-                | ExprKind::Char(_)
-                | ExprKind::Byte(_)
-                | ExprKind::ByteString(_)
-                | ExprKind::String(_) => {}
-                ExprKind::LabelReference(_) => {}
-                ExprKind::Resume { resumption, value }
-                | ExprKind::TailResume { resumption, value } => {
-                    pending.push(resumption);
-                    pending.extend(value.iter().map(AsRef::as_ref));
-                }
-                ExprKind::Cancel { resumption } => pending.push(resumption),
-            }
-        }
-    }
-
     let functions_by_name = program
         .functions
         .iter()
         .map(|function| (function.name.as_str(), function))
         .collect::<BTreeMap<_, _>>();
+    let dependency_graph = function_dependency_graph(program);
     let mut retained_names = program
         .functions
         .iter()
@@ -6859,48 +7023,13 @@ fn compile_program_with_phases(
     for drop in &program.drops {
         collect_function_dependencies(&drop.body, &mut retained_names);
     }
-    loop {
-        let before = retained_names.len();
-        for name in retained_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut retained_names);
-            }
-        }
-        if retained_names.len() == before {
-            break;
-        }
-    }
+    close_function_dependencies(&mut retained_names, &dependency_graph);
     // Deferred generic trait calls become ordinary specialization requests
     // once their enclosing specialization grounds the receiver. Retain the
     // finite coherent implementation family as a fail-closed Core fallback
     // for symbolic or ambiguous sites; reachability alone authorizes no match.
-    for deferred in retained_names.clone() {
-        let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
-            continue;
-        };
-        let Some((trait_name, method)) = rest.rsplit_once('$') else {
-            continue;
-        };
-        let prefix = format!("$trait${trait_name}$");
-        let suffix = format!("${method}");
-        retained_names.extend(
-            functions_by_name
-                .keys()
-                .filter(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
-                .map(|name| (*name).to_owned()),
-        );
-    }
-    loop {
-        let before = retained_names.len();
-        for name in retained_names.clone() {
-            if let Some(function) = functions_by_name.get(name.as_str()) {
-                collect_function_dependencies(&function.body, &mut retained_names);
-            }
-        }
-        if retained_names.len() == before {
-            break;
-        }
-    }
+    extend_deferred_trait_families(&mut retained_names, &functions_by_name);
+    close_function_dependencies(&mut retained_names, &dependency_graph);
     retained_names.retain(|name| functions_by_name.contains_key(name.as_str()));
     let mut retained_sources = retained_names
         .into_iter()
@@ -7143,7 +7272,7 @@ fn compile_program_with_phases(
         .collect();
     timings.mark("resolve-type-tables");
     let provisional = match incremental {
-        Some((cache, fingerprints)) => typeck::type_program_incremental(
+        Some((cache, fingerprints, _)) => typeck::type_program_incremental(
             program,
             &provisional_tables,
             &construction_types,
@@ -9276,10 +9405,7 @@ fn compile_program_with_phases(
                 noncancelling_operations: BTreeSet::new(),
             },
             body_instance.clone(),
-            (
-                specialization::expression_ordinals(root),
-                specialization::expression_ordinal_maps(discovery_root).1,
-            ),
+            lowering_expression_ordinal_maps(root, discovery_root),
             root,
         );
         lowerer.active_reference_return_plan = reference_return_plans.get(&signature.id).cloned();
@@ -9823,13 +9949,16 @@ fn compile_program_with_phases(
             ]
         })?;
     timings.mark("lower-mir");
-    let optimization_result = mir::optimizer::optimize_program_with_control_tables(
-        &mut mir_program,
-        &artifact.types,
-        &artifact.protocols,
-        &artifact.handler_defs,
-        options.optimization_level,
-    );
+    let optimization_result =
+        mir::optimizer::optimize_program_with_control_tables_and_plan_incremental(
+            &mut mir_program,
+            &artifact.types,
+            &artifact.protocols,
+            &artifact.handler_defs,
+            options.optimization_level,
+            optimizer_plan,
+            incremental_mir.as_deref_mut(),
+        );
     let mut optimization_report = optimization_result.map_err(|error| {
         vec![
             Diagnostic::plain(format!(
@@ -9839,6 +9968,28 @@ fn compile_program_with_phases(
         ]
     })?;
     timings.mark("optimize-mir");
+    let emission_prepared = incremental_mir
+        .as_deref_mut()
+        .map(|cache| {
+            mir::optimizer::restore_emission_prepared_bodies(
+                &mut mir_program,
+                &artifact.types,
+                cache,
+            )
+        })
+        .unwrap_or_default();
+    // Keep the exact pre-edge bodies that this request newly prepared. The
+    // durable cache only becomes reusable after the final bytecode verifier
+    // succeeds below; later register-layout lowering intentionally changes
+    // the live MIR body, so this pre-layout identity is the publication key.
+    let emission_prepared_inputs = incremental_mir.as_ref().map(|_| {
+        mir_program
+            .functions
+            .iter()
+            .filter(|function| !emission_prepared.contains(&function.declaration))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     let lowering_work = mir_program
         .functions
         .iter()
@@ -9851,18 +10002,21 @@ fn compile_program_with_phases(
                     .sum::<u64>()
         })
         .sum();
-    let edge_copies_canonicalized = mir::optimizer::canonicalize_dead_edge_copies_for_emission(
-        &mut mir_program,
-        &artifact.types,
-    )
-    .map_err(|error| {
-        vec![
-            Diagnostic::plain(format!(
-                "MIR edge-copy canonicalization rejected its input or output: {error}"
-            ))
-            .with_code("G1OPT999"),
-        ]
-    })?;
+    let edge_copies_canonicalized =
+        mir::optimizer::canonicalize_dead_edge_copies_for_emission_incremental(
+            &mut mir_program,
+            &artifact.types,
+            incremental_mir.as_deref_mut(),
+            &emission_prepared,
+        )
+        .map_err(|error| {
+            vec![
+                Diagnostic::plain(format!(
+                    "MIR edge-copy canonicalization rejected its input or output: {error}"
+                ))
+                .with_code("G1OPT999"),
+            ]
+        })?;
     let _registers_compacted =
         mir::optimizer::compact_live_registers_for_emission(&mut mir_program, &artifact.types)
             .map_err(|error| {
@@ -10072,6 +10226,15 @@ fn compile_program_with_phases(
     } else {
         Vec::new()
     };
+    // Peepholes can erase the last use of a materialized literal (for
+    // example, a constant immediately before a unit return). Constants are
+    // reachable only from Const and Switch instructions, so remove entries
+    // that became dead before final canonical ordering.
+    let unused_constants_pruned = if options.optimization_level >= mir::OptimizationLevel::O2 {
+        prune_unused_constants(&mut artifact)
+    } else {
+        false
+    };
     let peephole_changed = mir_layout_changed || peephole_pc_maps.iter().any(Option::is_some);
     timings.mark("emit-bytecode-and-peephole");
     if artifact.code.iter().any(|instruction| {
@@ -10130,31 +10293,11 @@ fn compile_program_with_phases(
 
     canonicalize_protocols(&mut artifact);
 
-    // Bytecode structurally verifies every encoded switch successor, including
-    // arms the semantic enum-refinement solver can prove impossible, so the
-    // serialized physical CFG solution is compared against that same cleanup
-    // solution. Both serialization and the cross-check consume the same
-    // MIR-derived cleanup lists, so derive them exactly once here rather than
-    // re-running the ownership fixed point in each.
-    let serialization_cleanup_lists =
-        mir::optimizer::derive_program_serialization_cleanup_lists(
-            &mir_program,
-            &artifact.types,
-            None,
-        )
-        .map_err(|error| {
-            vec![
-                Diagnostic::plain(format!(
-                    "failed to derive MIR cleanup lists for serialization: {error}"
-                ))
-                .with_code("G1BC999"),
-            ]
-        })?;
-    artifact.cleanups = serialize_mir_cleanup_plans(
+    let (serialized_cleanups, serialized_cleanup_reused) = serialize_mir_cleanup_plans_incremental(
         &artifact,
         &mir_program,
-        &serialization_cleanup_lists,
         &peephole_pc_maps,
+        incremental_mir.as_deref_mut(),
     )
     .map_err(|error| {
         vec![
@@ -10164,14 +10307,19 @@ fn compile_program_with_phases(
             .with_code("G1BC999"),
         ]
     })?;
+    artifact.cleanups = serialized_cleanups;
     // Validate MIR-derived cleanup identities before the final dense rename:
     // the latter is a representation-only bijection and intentionally has no
     // source-level register identity to compare against.
+    let cleanup_cross_validation_reused = emission_prepared
+        .union(&serialized_cleanup_reused)
+        .copied()
+        .collect::<BTreeSet<_>>();
     cross_validate_cleanup_maps(
         &artifact,
         &mir_program,
-        &serialization_cleanup_lists,
         &peephole_pc_maps,
+        &cleanup_cross_validation_reused,
     )
     .map_err(|error| {
         vec![
@@ -10237,7 +10385,12 @@ fn compile_program_with_phases(
         })?;
     }
     artifact = if has_leave {
-        grandiose_vm::verify::with_compiler_seeded_cleanup_plans_unverified(artifact)
+        grandiose_vm::verify::with_compiler_seeded_cleanup_plans_unverified_with_function_cache(
+            artifact,
+            incremental_mir
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn grandiose_vm::verify::FunctionVerificationCache),
+        )
     } else {
         grandiose_vm::verify::with_generated_cleanup_plans_unverified(artifact)
     }
@@ -10300,6 +10453,7 @@ fn compile_program_with_phases(
             pass: mir::OptimizationPass::LayoutAndPeephole,
             outcome: if peephole_changed
                 || registers_compacted_after_peephole
+                || unused_constants_pruned
                 || artifact.constants != constants_before_canonicalization
             {
                 mir::OptimizationPassOutcome::Changed
@@ -10310,7 +10464,12 @@ fn compile_program_with_phases(
         });
 
     let artifact_for_diagnostics = &artifact;
-    grandiose_vm::verify::verify(artifact.clone()).map_err(|error| {
+    if let Some(cache) = incremental_mir.as_deref_mut() {
+        grandiose_vm::verify::verify_with_function_cache(artifact.clone(), cache)
+    } else {
+        grandiose_vm::verify::verify(artifact.clone())
+    }
+    .map_err(|error| {
             let function = match &error {
                 grandiose_vm::VerifyError::BorrowConflict {
                     function,
@@ -10442,6 +10601,13 @@ fn compile_program_with_phases(
             ]
     })?;
     timings.mark("verify-artifact");
+    if let Some(cache) = incremental_mir.as_deref_mut() {
+        for input in emission_prepared_inputs.as_deref().unwrap_or_default() {
+            cache.verify_emission_prepared(input);
+        }
+        cache.verify_serialized_cleanups();
+        cache.verify_bytecode_verifications();
+    }
     optimization_report
         .passes
         .push(mir::OptimizationPassReport {
@@ -17954,6 +18120,10 @@ fn instantiate_ground_nominals(
             } => {
                 let name = constructor.simple_name()?;
                 generic_heads.contains(name).then_some(())?;
+                // Default lowering appends omitted nominal const arguments to
+                // this application.  The span-indexed Program compatibility
+                // table contains only parser-supplied arguments, so using it
+                // here would construct a shortened runtime nominal identity.
                 let const_by_position = const_arguments
                     .iter()
                     .map(|argument| (argument.position, &argument.value))
@@ -31469,6 +31639,30 @@ impl<'a> CoreLowerer<'a> {
         self.substituted_source_type(result, &substitutions)
     }
 
+    /// A context-block callback can end in a direct helper call whose declared
+    /// result is ground even when specialization does not retain a standalone
+    /// callable signature for that block. Use only that local declaration;
+    /// never infer its type from the enclosing call result.
+    fn ground_direct_source_call_result(&mut self, expression: &Expr) -> Option<TypeId> {
+        let ExprKind::Call(callee, _) = &expression.kind else {
+            return None;
+        };
+        let ExprKind::Variable(path) = &callee.kind else {
+            return None;
+        };
+        let [name] = path.as_ref() else {
+            return None;
+        };
+        let result = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == name.as_ref())?
+            .return_type
+            .as_ref()?
+            .clone();
+        self.substituted_source_type(&result, &BTreeMap::new())
+    }
+
     fn planned_late_generic_type_substitutions(
         &mut self,
         expression: &Expr,
@@ -31738,12 +31932,14 @@ impl<'a> CoreLowerer<'a> {
                 ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
                     let tail = tail_expression(body);
                     self.static_local_expression_type(tail)
+                        .or_else(|| self.ground_direct_source_call_result(tail))
                         .or_else(|| self.provisional_handler_result(body.span))
                         .or_else(|| self.provisional_handler_result(tail.span))
                 }
                 ExprKind::Block(_) | ExprKind::ContextBlock(_) => {
                     let tail = tail_expression(argument);
                     self.static_local_expression_type(tail)
+                        .or_else(|| self.ground_direct_source_call_result(tail))
                         .or_else(|| self.provisional_handler_result(argument.span))
                         .or_else(|| self.provisional_handler_result(tail.span))
                 }
@@ -36408,6 +36604,12 @@ impl<'a> CoreLowerer<'a> {
     fn release_loan(&mut self, origin: core::ReferenceOrigin) {
         if !origin.external {
             self.release_local_loan(origin.root, &origin.path, origin.unique);
+            // A direct loan can have become a reborrow parent while its
+            // temporary handle was transported through a wrapper.  Recompute
+            // its suspension after releasing the direct authority as well as
+            // the explicit parent below; otherwise a stale `suspended` bit
+            // rejects a later owner move after every concrete loan ended.
+            self.refresh_parent_suspension(origin.root);
         }
         if let Some(parent) = origin.parent {
             if origin.external || parent != origin.root {
@@ -37017,12 +37219,6 @@ impl<'a> CoreLowerer<'a> {
                         "uniquely borrowing",
                         true,
                     )?;
-                }
-                if self.suspended.contains(&local.local) {
-                    return Err(self.borrow_error(
-                        operand.span,
-                        format!("reference `{}` is suspended by a live reborrow", path[0]),
-                    ));
                 }
                 let active = self.loans.get(&local.local).copied().unwrap_or_default();
                 if active.unique
@@ -41675,10 +41871,23 @@ impl<'a> CoreLowerer<'a> {
                                 .chain(origin.parent)
                         })
                         .collect::<BTreeSet<_>>();
+                    // `suspended` is a cached view of the active whole and
+                    // projected loans.  A branch can refresh that view while
+                    // another branch merely carries the same pre-existing
+                    // loan through unchanged.  Join the cache
+                    // conservatively in that case; the authoritative loan
+                    // maps below still have to agree exactly.
+                    let same_loan_shape = |local: &core::LocalId| {
+                        positive_loans.get(local) == self.loans.get(local)
+                            && positive_projected_loans.get(local)
+                                == self.projected_loans.get(local)
+                    };
                     let suspended_shape_matches = positive_suspended
                         .symmetric_difference(&self.suspended)
                         .filter(|local| baseline_ids.contains(local))
-                        .all(|local| result_loan_roots.contains(local));
+                        .all(|local| {
+                            result_loan_roots.contains(local) || same_loan_shape(local)
+                        });
                     let unique_result_loan_roots = joined_result_references
                         .values()
                         .filter(|origin| origin.unique)
@@ -41692,7 +41901,9 @@ impl<'a> CoreLowerer<'a> {
                     let unique_suspended_shape_matches = positive_uniquely_suspended
                         .symmetric_difference(&self.uniquely_suspended)
                         .filter(|local| baseline_ids.contains(local))
-                        .all(|local| unique_result_loan_roots.contains(local));
+                        .all(|local| {
+                            unique_result_loan_roots.contains(local) || same_loan_shape(local)
+                        });
                     let ownership_shape_matches = !result_reference_conflict
                         && suspended_shape_matches
                         && unique_suspended_shape_matches
@@ -46711,6 +46922,35 @@ fn mir_successors(terminator: &mir::Terminator) -> Vec<u32> {
     successors
 }
 
+/// Blocks are intentionally retained through MIR layout so diagnostics and
+/// ownership evidence keep their original identities.  Bytecode-only switch
+/// edge transfer blocks are different: they have no MIR identity, and are
+/// appended after every real block.  Materializing one for a dead source
+/// would make an otherwise unreachable edge's stale SSA arguments visible to
+/// the GRBC decoder as uses with no value-flow definition.
+fn reachable_mir_blocks(function: &mir::Function) -> BTreeSet<u32> {
+    let blocks = function
+        .blocks
+        .iter()
+        .map(|block| (block.id, &block.terminator))
+        .collect::<BTreeMap<_, _>>();
+    let mut reached = BTreeSet::new();
+    let mut work = vec![function.entry];
+    while let Some(block) = work.pop() {
+        if !reached.insert(block) {
+            continue;
+        }
+        let Some(terminator) = blocks.get(&block) else {
+            continue;
+        };
+        let mut successors = mir_successors(terminator);
+        // Stable traversal makes synthetic-transfer layout deterministic.
+        successors.sort_unstable_by(|left, right| right.cmp(left));
+        work.extend(successors);
+    }
+    reached
+}
+
 impl MirFlow {
     fn value(self) -> Option<u32> {
         match self {
@@ -49102,6 +49342,93 @@ impl MirLowerer {
         })
     }
 
+    /// Whether `expression` contains an explicit reborrow of precisely this
+    /// Core local.  This is deliberately narrower than a generic capture/use
+    /// query: it gates argument reordering only for the read-after-unique-use
+    /// shape that requires the owning handle to be lowered last.
+    fn contains_reborrow_of_local(expression: &core::Expr, local: core::LocalId) -> bool {
+        use core::ExprKind as Kind;
+        let any = |values: &[core::Expr]| {
+            values
+                .iter()
+                .any(|value| Self::contains_reborrow_of_local(value, local))
+        };
+        match &expression.kind {
+            Kind::Reborrow { source, .. } => *source == local,
+            Kind::TemporaryProjectBorrow { source, .. }
+            | Kind::LabelDestination { body: source, .. }
+            | Kind::Leave { value: source, .. }
+            | Kind::PatternTest {
+                subject: source, ..
+            }
+            | Kind::Project {
+                subject: source, ..
+            }
+            | Kind::Cancel { resumption: source } => {
+                Self::contains_reborrow_of_local(source, local)
+            }
+            Kind::Call { args, .. }
+            | Kind::TailCall { args, .. }
+            | Kind::CallSelf { args }
+            | Kind::TailCallSelf { args }
+            | Kind::ControlContinue { args, .. }
+            | Kind::MakeCallable { captures: args, .. }
+            | Kind::Primitive { args, .. }
+            | Kind::HostCall { args, .. }
+            | Kind::Perform { payloads: args, .. } => any(args),
+            Kind::CallKnownReceiver { receiver, args, .. }
+            | Kind::TailCallKnownReceiver { receiver, args, .. } => {
+                Self::contains_reborrow_of_local(receiver, local) || any(args)
+            }
+            Kind::ControlLoop {
+                initial_args, body, ..
+            } => any(initial_args) || Self::contains_reborrow_of_local(body, local),
+            Kind::CallIndirect { callable, args, .. }
+            | Kind::TailCallIndirect { callable, args, .. } => {
+                Self::contains_reborrow_of_local(callable, local) || any(args)
+            }
+            Kind::RefinementBranch {
+                subject,
+                positive,
+                negative,
+                ..
+            } => {
+                Self::contains_reborrow_of_local(subject, local)
+                    || Self::contains_reborrow_of_local(positive, local)
+                    || Self::contains_reborrow_of_local(negative, local)
+            }
+            Kind::Construct { fields, .. } => fields
+                .iter()
+                .any(|field| Self::contains_reborrow_of_local(&field.value, local)),
+            Kind::Resume {
+                resumption, value, ..
+            }
+            | Kind::TailResume { resumption, value } => {
+                Self::contains_reborrow_of_local(resumption, local)
+                    || Self::contains_reborrow_of_local(value, local)
+            }
+            Kind::Handle {
+                clauses,
+                shared_clause_captures,
+                body_captures,
+                ..
+            } => {
+                clauses.iter().any(|(_, _, captures)| any(captures))
+                    || any(shared_clause_captures)
+                    || any(body_captures)
+            }
+            Kind::Block { statements, tail } => {
+                statements.iter().any(|statement| match statement {
+                    core::Stmt::Let { value, .. }
+                    | core::Stmt::Assign { value, .. }
+                    | core::Stmt::Expr(value) => Self::contains_reborrow_of_local(value, local),
+                    core::Stmt::Deconstruct { .. } | core::Stmt::EndBorrow { .. } => false,
+                }) || Self::contains_reborrow_of_local(tail, local)
+            }
+            _ => false,
+        }
+    }
+
     /// Make `value` the initialized value of `path`, then rebuild every parent
     /// for which all immediate children are available.  A parent may be a
     /// residual aggregate register (some fields still initialized) or may have
@@ -49992,15 +50319,18 @@ impl MirLowerer {
         let baseline_owned = self.owned.clone();
         let baseline_borrowed = self.borrowed.clone();
         let baseline_borrow_parents = self.borrow_parents.clone();
-        let join = self.label();
-        let result = self.allocate(result_type);
+        // A syntactically value-typed arm can still be terminal (for example
+        // by leaving an enclosing label).  Do not create the join parameter
+        // until an arm actually reaches it: otherwise an all-terminal match
+        // leaves an untyped, unreachable block parameter in GRBC.
+        let mut join = None;
         let mut continuations = BTreeMap::new();
         self.lower_match_tree(
             &roots,
             arms,
             &baseline_locals,
             &baseline_owned,
-            join,
+            &mut join,
             span,
             fallback,
             result_type,
@@ -50010,19 +50340,23 @@ impl MirLowerer {
             0,
             &mut continuations,
         );
-        self.mark_with_params(
-            join,
-            vec![mir::BlockParam {
-                register: result,
-                ty: result_type,
-                role: mir::BlockParamRole::ProtectedExitValue,
-            }],
-        );
         self.locals = baseline_locals;
         self.owned.clear();
         self.borrowed.clear();
         self.borrow_parents.clear();
-        MirFlow::Value(Some(result))
+        if let Some((destination, result)) = join {
+            self.mark_with_params(
+                destination,
+                vec![mir::BlockParam {
+                    register: result,
+                    ty: result_type,
+                    role: mir::BlockParamRole::ProtectedExitValue,
+                }],
+            );
+            MirFlow::Value(Some(result))
+        } else {
+            MirFlow::Diverged
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -50032,7 +50366,7 @@ impl MirLowerer {
         arms: &[TypedMatchArm],
         baseline_locals: &BTreeMap<core::LocalId, u32>,
         baseline_owned: &[u32],
-        join: u32,
+        join: &mut Option<(u32, u32)>,
         span: Span,
         fallback: Option<&TypedMatchFallback>,
         match_result: TypeId,
@@ -50118,8 +50452,10 @@ impl MirLowerer {
                             self.transfer_owner(owner);
                         }
                     }
+                    let (destination, _) =
+                        *join.get_or_insert_with(|| (self.label(), self.allocate(match_result)));
                     self.terminate(mir::Terminator::Goto(mir::Edge {
-                        target: join,
+                        target: destination,
                         args: vec![Self::operand(handler_result, mir::UseMode::Move)],
                     }));
                 }
@@ -50159,8 +50495,10 @@ impl MirLowerer {
                     self.transfer_owner(owner);
                 }
             }
+            let (destination, _) =
+                *join.get_or_insert_with(|| (self.label(), self.allocate(match_result)));
             self.terminate(mir::Terminator::Goto(mir::Edge {
-                target: join,
+                target: destination,
                 args: vec![Self::operand(value, mir::UseMode::Move)],
             }));
         }
@@ -50312,6 +50650,27 @@ impl MirLowerer {
                             .then_some((local, parameter.local))
                     })
                     .collect::<Vec<_>>();
+                // A copied initial argument can also be an independently
+                // preserved lexical capture.  It needs its own outer-header
+                // slot: aliasing it to the loop parameter loses the capture
+                // as soon as the iteration consumes that parameter.  A
+                // move-only argument cannot have two owners, so it retains
+                // the ordinary source-to-parameter alias below.
+                let copied_initial_outer_locals = initial_args
+                    .iter()
+                    .filter_map(|argument| match &argument.kind {
+                        core::ExprKind::Local { local, copy: true }
+                            if preserved_outer_locals.contains(&local) =>
+                        {
+                            Some(*local)
+                        }
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                let initial_outer_aliases = initial_outer_aliases
+                    .into_iter()
+                    .filter(|(local, _)| !copied_initial_outer_locals.contains(local))
+                    .collect::<Vec<_>>();
                 let aliased_outer_locals = initial_outer_aliases
                     .iter()
                     .map(|(outer, _)| *outer)
@@ -50330,7 +50689,8 @@ impl MirLowerer {
                             && !parameter_locals.contains(local)
                             && !aliased_outer_locals.contains(local)
                             && self.owned.contains(register)
-                            && !incoming_set.contains(register))
+                            && (!incoming_set.contains(register)
+                                || copied_initial_outer_locals.contains(local)))
                         {
                             return None;
                         }
@@ -52828,6 +53188,20 @@ impl MirLowerer {
                     )
                 });
                 let dst = self.allocate(expression.ty);
+                let active_control_outer = self.active_control_loops.values().any(|context| {
+                    context
+                        .outer_locals
+                        .iter()
+                        .any(|(outer, _)| *outer == canonical)
+                });
+                let unique_reference = self
+                    .unique_reference_types
+                    .values()
+                    .any(|ty| *ty == expression.ty)
+                    || expression
+                        .reference
+                        .as_ref()
+                        .is_some_and(|origin| origin.unique);
                 if *copy {
                     self.push(
                         expression.span,
@@ -52837,6 +53211,22 @@ impl MirLowerer {
                         },
                     );
                     self.copy_borrow_tracking(src, dst);
+                } else if active_control_outer && unique_reference {
+                    // A loop outer is carried across each backedge. Passing a
+                    // unique reference from that environment to a nested call
+                    // must therefore lend a fresh handle, rather than consume
+                    // the carried owner.  This also lets later call arguments
+                    // reborrow the same source during argument evaluation.
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::Reborrow {
+                            dst,
+                            src,
+                            unique: true,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    self.borrow_parents.insert(dst, src);
                 } else {
                     self.push(
                         expression.span,
@@ -53308,12 +53698,23 @@ impl MirLowerer {
                     .iter()
                     .enumerate()
                     .filter_map(|(index, argument)| {
+                        let known_unique_handle = self
+                            .unique_reference_types
+                            .values()
+                            .any(|reference| *reference == argument.ty);
+                        let dependent_unique_reborrow = match &argument.kind {
+                            core::ExprKind::Local { local, copy: false } => {
+                                argument.reference.as_ref().is_some_and(|origin| {
+                                    origin.unique && origin.root == *local && origin.path.is_empty()
+                                }) && args[index + 1..]
+                                    .iter()
+                                    .any(|later| Self::contains_reborrow_of_local(later, *local))
+                            }
+                            _ => false,
+                        };
                         (matches!(argument.kind, core::ExprKind::Local { copy: false, .. })
-                            && self
-                                .unique_reference_types
-                                .values()
-                                .any(|reference| *reference == argument.ty))
-                        .then_some(index)
+                            && (known_unique_handle || dependent_unique_reborrow))
+                            .then_some(index)
                     })
                     .collect::<BTreeSet<_>>();
                 let mut lowered_args = vec![None; args.len()];
@@ -55414,6 +55815,59 @@ fn canonicalize_constants(artifact: &mut Artifact) {
     artifact.canonicalize_constants();
 }
 
+/// Remove constant-pool entries that no instruction can observe after
+/// peephole rewriting, repairing the remaining Const and Switch IDs.
+fn prune_unused_constants(artifact: &mut Artifact) -> bool {
+    let mut used = vec![false; artifact.constants.len()];
+    for instruction in &artifact.code {
+        match instruction {
+            Instruction::Const { constant, .. } => used[*constant as usize] = true,
+            Instruction::Switch { cases, .. } => {
+                for (constant, _) in cases {
+                    used[*constant as usize] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    let old = std::mem::take(&mut artifact.constants);
+    let mut remap = vec![0_u32; old.len()];
+    let mut changed = false;
+    for (old_id, constant) in old.into_iter().enumerate() {
+        if used[old_id] {
+            if let Some(existing) = artifact
+                .constants
+                .iter()
+                // Rust float equality aliases +0/-0 and considers every NaN
+                // unequal. Artifact constants use their frozen encoding as
+                // identity, so pruning must use the same bit-stable key as
+                // lowering and canonicalization.
+                .position(|known| constant_key(known) == constant_key(&constant))
+            {
+                remap[old_id] = existing as u32;
+                changed = true;
+            } else {
+                remap[old_id] = artifact.constants.len() as u32;
+                artifact.constants.push(constant);
+            }
+        } else {
+            changed = true;
+        }
+    }
+    for instruction in &mut artifact.code {
+        match instruction {
+            Instruction::Const { constant, .. } => *constant = remap[*constant as usize],
+            Instruction::Switch { cases, .. } => {
+                for (constant, _) in cases {
+                    *constant = remap[*constant as usize];
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
 /// Put MIR blocks in their final emission order without changing their stable
 /// identities.  Compact G1 MIR does not retain the full lowering-time block
 /// kind, so cleanup and resumption regions are recovered only from exact
@@ -55657,8 +56111,13 @@ fn layout_and_peephole(artifact: &mut Artifact) -> bool {
 /// Like `layout_and_peephole`, but also returns one old-PC-to-new-PC map per
 /// function (`None` when that body was unchanged) so cleanup facts computed
 /// against pre-peephole ordinals can be revalidated afterwards.
+#[derive(serde::Serialize)]
 struct PeepholePcMap {
     ordinals: Vec<u32>,
+    /// Number of instructions after the rewrite. `ordinals` may contain this
+    /// endpoint for an unreferenced removed suffix, so it cannot be inferred
+    /// by indexing that vector.
+    new_code_len: u32,
     /// Register renames visible in the state before each old PC when a
     /// snapshot/consumer chain is folded across independent transfers.
     state_renames: Vec<Vec<(u32, u32)>>,
@@ -55708,7 +56167,7 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
         contains
     }
 
-    fn local(
+    fn local_once(
         code: &[Instruction],
         register_types: &[TypeId],
         types: &[Type],
@@ -55798,6 +56257,139 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
         }
 
         let mut folded = code.to_vec();
+        // Thread chains of unconditional jumps before ordinary ordinal
+        // compaction. A Jump has no register effect, so reaching its final
+        // target is equivalent; doing this before PC-map construction keeps
+        // cleanup serialization and every retained branch target in one map.
+        for pc in 0..folded.len() {
+            let Instruction::Jump { target } = folded[pc] else {
+                continue;
+            };
+            let mut target = target as usize;
+            let mut seen = BTreeSet::new();
+            while target < folded.len() && seen.insert(target) {
+                let Instruction::Jump { target: next } = folded[target] else {
+                    break;
+                };
+                target = next as usize;
+            }
+            if target < folded.len() {
+                folded[pc] = Instruction::Jump {
+                    target: target as u32,
+                };
+            }
+        }
+        // A switch case that reaches its `otherwise` successor cannot change
+        // execution: whether that literal matched or not, control reaches the
+        // same PC.  Drop those redundant comparisons first.  This is useful
+        // after sparse propagation has collapsed only some pattern arms, and
+        // it can expose the all-successors case folded below.
+        for instruction in &mut folded {
+            let Instruction::Switch {
+                cases, otherwise, ..
+            } = instruction
+            else {
+                continue;
+            };
+            cases.retain(|(_, target)| *target != *otherwise);
+        }
+        // A switch whose every successor is the same target observes no
+        // information that can affect execution.  Its discriminator is an
+        // ordinary, non-consuming read, so replacing it with the equivalent
+        // unconditional branch both avoids dynamic tag dispatch and lets the
+        // normal jump-threading/compaction passes remove the branch entirely
+        // when the target is fallthrough.  This also covers empty-case
+        // switches, which always take `otherwise`.
+        for instruction in &mut folded {
+            let Instruction::Switch {
+                cases, otherwise, ..
+            } = instruction
+            else {
+                continue;
+            };
+            if cases.iter().all(|(_, target)| *target == *otherwise) {
+                *instruction = Instruction::Jump { target: *otherwise };
+            }
+        }
+        // Threading can leave a suffix after a terminal instruction with no
+        // remaining incoming edge.  It is important to retire the entire
+        // suffix, not just a dead Jump: edge lowering appends transfers after
+        // the MIR blocks, and an unreachable transfer can mention an SSA
+        // source whose definition was itself removed with an unreachable MIR
+        // block.  Even though that bytecode can never execute, GRBC decoding
+        // infers every register type structurally and must not see the stale
+        // use.  The traversal includes every bytecode control target
+        // (including LabelPush), so replacing an unreached instruction with a
+        // Nop cannot change a reachable path.
+        let mut reachable = vec![false; folded.len()];
+        let mut pending = vec![0_usize];
+        while let Some(pc) = pending.pop() {
+            if pc >= folded.len() || std::mem::replace(&mut reachable[pc], true) {
+                continue;
+            }
+            match &folded[pc] {
+                Instruction::Jump { target } => pending.push(*target as usize),
+                Instruction::Switch {
+                    cases, otherwise, ..
+                } => {
+                    pending.push(*otherwise as usize);
+                    pending.extend(cases.iter().map(|(_, target)| *target as usize));
+                }
+                // A Leave dynamically transfers to this destination after
+                // popping the active label.  LabelPush also falls through to
+                // its body, so both ordinary successors are live.
+                Instruction::LabelPush { target, .. } => {
+                    pending.push(*target as usize);
+                    pending.push(pc + 1);
+                }
+                // These transfer directly to the caller/continuation (or
+                // abort) and therefore have no fallthrough bytecode edge.
+                // Treating them as ordinary instructions preserves stale
+                // cleanup tails, whose registers may have no reachable
+                // defining instruction after control-flow simplification.
+                Instruction::TailCall { .. }
+                | Instruction::TailCallSelf { .. }
+                | Instruction::TailCallKnownReceiver { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::Perform { dst: None, .. }
+                | Instruction::Leave { .. }
+                | Instruction::Return { .. }
+                | Instruction::Abort { .. }
+                | Instruction::Unreachable => {}
+                _ => pending.push(pc + 1),
+            }
+        }
+        for (pc, instruction) in folded.iter_mut().enumerate() {
+            if !reachable[pc] {
+                *instruction = Instruction::Nop;
+            }
+        }
+        // A self-copy cannot change either the register value or its ownership
+        // state. These show up after generic forwarding has been specialized
+        // to an already-selected destination; removing them also lets the
+        // ordinary ordinal compaction reclaim their bytecode slot.
+        for instruction in &mut folded {
+            if matches!(instruction, Instruction::Copy { dst, src } if *dst == *src) {
+                *instruction = Instruction::Nop;
+            }
+        }
+        // A constant immediately followed by a return of another register
+        // cannot be observed. Constants have no runtime effect beyond
+        // defining their destination, and this also remains true when the
+        // constant is a branch target: every path that reaches it returns
+        // immediately.
+        for pc in 0..folded.len().saturating_sub(1) {
+            if matches!(
+                (&folded[pc], &folded[pc + 1]),
+                (
+                    Instruction::Const { dst, .. },
+                    Instruction::Return { src }
+                ) if *src != Some(*dst)
+            ) {
+                folded[pc] = Instruction::Nop;
+            }
+        }
         let mut state_renames = vec![Vec::new(); code.len()];
         // Late edge lowering can leave a constant in a one-use transfer
         // temporary even after MIR sparse propagation has finished. Retarget
@@ -55860,8 +56452,19 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 break;
             }
         }
+        // The snapshot guard below used to scan `folded[..first]` for every
+        // transfer candidate. Self-host compilation produces several very
+        // large functions with long forwarding runs, turning that guard into
+        // a quadratic bytecode-emission cost. A transfer is only rewritten at
+        // its own ordinal (never retrospectively), so this set is exactly the
+        // set of Copy/Move destinations in the already-visited prefix.
+        let mut preceding_transfer_destinations = BTreeSet::new();
         for first in 0..folded.len().saturating_sub(1) {
             if protected[first] {
+                if let Instruction::Copy { dst, .. } | Instruction::Move { dst, .. } = folded[first]
+                {
+                    preceding_transfer_destinations.insert(dst);
+                }
                 continue;
             }
             let (copied, temporary, source) = match &folded[first] {
@@ -55873,13 +56476,8 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             // transfer whose source was itself produced by an earlier
             // transfer changes the register identity at a MIR cleanup
             // boundary even when the final value is equal.
-            if folded[..first].iter().any(|instruction| {
-                matches!(
-                    instruction,
-                    Instruction::Copy { dst, .. } | Instruction::Move { dst, .. }
-                        if *dst == source
-                )
-            }) {
+            if preceding_transfer_destinations.contains(&source) {
+                preceding_transfer_destinations.insert(temporary);
                 continue;
             }
             for second in first + 1..folded.len() {
@@ -55949,6 +56547,9 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
                 folded[second] = Instruction::Nop;
                 break;
             }
+            if let Instruction::Copy { dst, .. } | Instruction::Move { dst, .. } = folded[first] {
+                preceding_transfer_destinations.insert(dst);
+            }
         }
         let mut removed = folded
             .iter()
@@ -55986,6 +56587,20 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             *last = false;
         }
         if !removed.iter().any(|removed| *removed) {
+            // Rewriting a switch's case table does not change instruction
+            // ordinals, but it is still a real bytecode optimization. Keep
+            // the rewritten instruction and provide the identity ordinal map
+            // so the outer fixed-point loop records the change consistently.
+            if folded != code {
+                return (
+                    folded,
+                    Some(PeepholePcMap {
+                        ordinals: (0..code.len() as u32).collect(),
+                        new_code_len: code.len() as u32,
+                        state_renames,
+                    }),
+                );
+            }
             return (code.to_vec(), None);
         }
 
@@ -56034,9 +56649,67 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             rewritten,
             Some(PeepholePcMap {
                 ordinals: old_to_new,
+                new_code_len: retained_count as u32,
                 state_renames,
             }),
         )
+    }
+
+    // Each local rewrite strictly removes at least one instruction. A first
+    // fold can expose a newly adjacent dead Const/Return pair, so iterate a
+    // small bounded number of times and compose the ordinal/rename evidence
+    // back to the original MIR-visible PCs.
+    fn local(
+        code: &[Instruction],
+        register_types: &[TypeId],
+        types: &[Type],
+    ) -> (Vec<Instruction>, Option<PeepholePcMap>) {
+        const MAX_PEEPHOLE_ROUNDS: usize = 4;
+        let mut rewritten = code.to_vec();
+        let mut composed: Option<PeepholePcMap> = None;
+        for _ in 0..MAX_PEEPHOLE_ROUNDS {
+            let (next, map) = local_once(&rewritten, register_types, types);
+            let Some(map) = map else { break };
+            composed = Some(match composed {
+                None => map,
+                Some(previous) => {
+                    let mut ordinals = Vec::with_capacity(previous.ordinals.len());
+                    let mut state_renames = Vec::with_capacity(previous.state_renames.len());
+                    for (old, middle) in previous.ordinals.iter().enumerate() {
+                        let middle = *middle as usize;
+                        // `local_once` deliberately gives an unreferenced
+                        // removed suffix the one-past-the-end ordinal. A
+                        // later fixed-point round has no instruction at that
+                        // ordinal to look up, but the suffix is still past
+                        // the end after this round too. Compose that
+                        // sentinel directly instead of indexing the next
+                        // round's old-PC map.
+                        assert!(
+                            middle <= map.ordinals.len(),
+                            "peephole PC map must map only into the next round or its end"
+                        );
+                        let final_ordinal = if middle == map.ordinals.len() {
+                            map.new_code_len
+                        } else {
+                            map.ordinals[middle]
+                        };
+                        ordinals.push(final_ordinal);
+                        let mut renames = previous.state_renames[old].clone();
+                        if middle < map.state_renames.len() {
+                            renames.extend(map.state_renames[middle].iter().copied());
+                        }
+                        state_renames.push(renames);
+                    }
+                    PeepholePcMap {
+                        ordinals,
+                        new_code_len: map.new_code_len,
+                        state_renames,
+                    }
+                }
+            });
+            rewritten = next;
+        }
+        (rewritten, composed)
     }
 
     let old_code = std::mem::take(&mut artifact.code);
@@ -56392,6 +57065,27 @@ fn compact_artifact_registers_after_peephole(artifact: &mut Artifact) -> bool {
         function.register_types = register_types;
         changed = true;
     }
+    // Register compaction can turn distinct cleanup plans into the same
+    // effective ownership state (most commonly when each plan contained a
+    // different cleanup-only temporary).  Cleanup coverage is required on
+    // the wire, but an adjacent span with the same register list adds no
+    // information: extending the preceding span preserves the state at every
+    // PC while reducing both cleanup records and operand-table entries.
+    let mut coalesced: Vec<grandiose_vm::bytecode::CleanupPlan> =
+        Vec::with_capacity(artifact.cleanups.len());
+    for cleanup in std::mem::take(&mut artifact.cleanups) {
+        if let Some(previous) = coalesced.last_mut()
+            && previous.function == cleanup.function
+            && previous.end_instruction == cleanup.first_instruction
+            && previous.registers == cleanup.registers
+        {
+            previous.end_instruction = cleanup.end_instruction;
+            changed = true;
+        } else {
+            coalesced.push(cleanup);
+        }
+    }
+    artifact.cleanups = coalesced;
     changed
 }
 
@@ -56514,17 +57208,69 @@ fn reverse_edge_cleanup_states(
 /// Serialize the complete cleanup table from MIR ownership states. This owns
 /// edge-transfer temporaries as well as statement/terminator points; the VM is
 /// subsequently only an independent checker of the finished table.
+#[cfg(test)]
 fn serialize_mir_cleanup_plans(
     artifact: &Artifact,
     mir_program: &mir::Program,
     cleanup_lists: &[BTreeMap<u32, Vec<Vec<u32>>>],
     pc_maps: &[Option<PeepholePcMap>],
 ) -> Result<Vec<CleanupPlan>, String> {
+    serialize_mir_cleanup_plans_incremental(artifact, mir_program, pc_maps, None)
+        .map(|(plans, _)| plans)
+}
+
+/// Incremental form of [`serialize_mir_cleanup_plans`]. Exact per-function
+/// cleanup intervals are restored only after a previous whole-artifact VM
+/// verification accepted them; restored functions are also excluded from the
+/// expensive ownership-flow solve that derives the remaining lists.
+fn serialize_mir_cleanup_plans_incremental(
+    artifact: &Artifact,
+    mir_program: &mir::Program,
+    pc_maps: &[Option<PeepholePcMap>],
+    mut cache: Option<&mut crate::compiler_session::IncrementalMirCache>,
+) -> Result<(Vec<CleanupPlan>, BTreeSet<u32>), String> {
     let mut plans = Vec::new();
+    let mut cached = Vec::with_capacity(mir_program.functions.len());
+    let mut already_serialized = BTreeSet::new();
     for (fid, function) in mir_program.functions.iter().enumerate() {
-        let lists = &cleanup_lists[fid];
+        let mut descriptor = artifact.functions[fid].clone();
+        descriptor.code_start = 0;
+        let input = bincode::serialize(&(
+            b"grandiose:mir-cleanup-serialization-v1\0".as_slice(),
+            &artifact.types,
+            function,
+            descriptor,
+            pc_maps.get(fid).and_then(|map| map.as_ref()),
+        ))
+        .ok();
+        let restored = match (cache.as_deref_mut(), input.as_deref()) {
+            (Some(cache), Some(input)) => cache.reuse_serialized_cleanup(input, fid as u32),
+            _ => None,
+        };
+        if restored.is_some() {
+            already_serialized.insert(function.declaration);
+        }
+        cached.push((input, restored));
+    }
+    let cleanup_lists = mir::optimizer::derive_program_serialization_cleanup_lists_except(
+        mir_program,
+        &artifact.types,
+        &already_serialized,
+    )
+    .map_err(|error| error.to_string())?;
+    for (fid, function) in mir_program.functions.iter().enumerate() {
+        let (input, restored) = &cached[fid];
+        if let Some(restored) = restored {
+            plans.extend(restored.clone());
+            continue;
+        }
+        let lists = cleanup_lists[fid]
+            .as_ref()
+            .expect("uncached function must have serialization cleanup lists");
+        let plan_start = plans.len();
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
             .map_err(|error| error.to_string())?;
+        let reachable = reachable_mir_blocks(function);
         let mut offsets = BTreeMap::new();
         let mut old_len = 0_u32;
         for block in &function.blocks {
@@ -56533,6 +57279,9 @@ fn serialize_mir_cleanup_plans(
         }
         let synthetic_start = old_len;
         for block in &function.blocks {
+            if !reachable.contains(&block.id) {
+                continue;
+            }
             if let mir::Terminator::Switch {
                 cases, otherwise, ..
             } = &block.terminator
@@ -56625,6 +57374,9 @@ fn serialize_mir_cleanup_plans(
         let mut synthetic_pc = synthetic_start;
         let mut synthetic = Vec::<(&mir::Edge, usize)>::new();
         for block in &function.blocks {
+            if !reachable.contains(&block.id) {
+                continue;
+            }
             let offset = offsets[&block.id];
             if let Some(points) = lists.get(&block.id) {
                 for (index, state) in points.iter().enumerate() {
@@ -56799,8 +57551,11 @@ fn serialize_mir_cleanup_plans(
                 registers,
             });
         }
+        if let (Some(cache), Some(input)) = (cache.as_deref_mut(), input.clone()) {
+            cache.cache_serialized_cleanup(input, &plans[plan_start..]);
+        }
     }
-    Ok(plans)
+    Ok((plans, already_serialized))
 }
 
 /// Cross-validate the serialized bytecode cleanup maps against the MIR
@@ -56815,9 +57570,22 @@ fn cross_validate_cleanup_maps(
     mir_program: &mir::Program,
     cleanup_lists: &[BTreeMap<u32, Vec<Vec<u32>>>],
     pc_maps: &[Option<PeepholePcMap>],
+    already_prepared: &BTreeSet<u32>,
 ) -> Result<(), String> {
+    // Bytecode structurally verifies every encoded switch successor, including
+    // arms the semantic enum-refinement solver can prove impossible. Compare
+    // serialization against that same physical CFG solution; the refined
+    // ownership solution has already passed its independent MIR validation.
+    let cleanup_lists = mir::optimizer::derive_program_serialization_cleanup_lists_except(
+        mir_program,
+        &artifact.types,
+        already_prepared,
+    )
+    .map_err(|error| error.to_string())?;
     for (fid, function) in mir_program.functions.iter().enumerate() {
-        let lists = &cleanup_lists[fid];
+        let Some(lists) = &cleanup_lists[fid] else {
+            continue;
+        };
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
             .map_err(|error| error.to_string())?;
         let mut label_anchor_registers = BTreeMap::<u32, Vec<u32>>::new();
@@ -56869,21 +57637,32 @@ fn cross_validate_cleanup_maps(
                     let pc = map
                         .and_then(|map| map.ordinals.get(old_pc as usize).copied())
                         .unwrap_or(old_pc);
-                    while plan_cursor < artifact.cleanups.len()
-                        && (artifact.cleanups[plan_cursor].function < fid as u32
-                            || artifact.cleanups[plan_cursor].end_instruction <= pc)
-                    {
-                        plan_cursor += 1;
+                    // `serialize_mir_cleanup_plans` visits old PCs in
+                    // increasing order and therefore deliberately retains
+                    // the latest ownership state when a peephole maps a run
+                    // of removed instructions onto one surviving ordinal.
+                    // Earlier preimages are not executable bytecode states;
+                    // requiring each of them to equal the single serialized
+                    // entry would reject a correct compacted artifact.
+                    let superseded_by_later_old_pc = map.is_some_and(|map| {
+                        map.ordinals
+                            .iter()
+                            .skip(old_pc as usize + 1)
+                            .any(|ordinal| *ordinal == pc)
+                    });
+                    if superseded_by_later_old_pc {
+                        continue;
                     }
-                    let actual = if plan_cursor < artifact.cleanups.len()
-                        && artifact.cleanups[plan_cursor].function == fid as u32
-                        && artifact.cleanups[plan_cursor].first_instruction <= pc
-                        && pc < artifact.cleanups[plan_cursor].end_instruction
-                    {
-                        artifact.cleanups[plan_cursor].registers.as_slice()
-                    } else {
-                        &[]
-                    };
+                    let actual = artifact
+                        .cleanups
+                        .iter()
+                        .find(|plan| {
+                            plan.function == fid as u32
+                                && plan.first_instruction <= pc
+                                && pc < plan.end_instruction
+                        })
+                        .map(|plan| plan.registers.as_slice())
+                        .unwrap_or(&[]);
                     let relocated_pc = |old_pc: u32| {
                         map.and_then(|map| map.ordinals.get(old_pc as usize).copied())
                             .unwrap_or(old_pc)
@@ -56921,7 +57700,22 @@ fn cross_validate_cleanup_maps(
                                     },
                                 )
                         };
-                    let matches = actual == expected.as_slice()
+                    // An `Unreachable` instruction cannot run a cleanup:
+                    // its cleanup-table entry is observationally dead. A
+                    // peephole can relocate the unreachable terminator and
+                    // the first ordinal after it onto one PC; serialization
+                    // deliberately keeps the later predecessor state for
+                    // that collision. Do not require that dead entry to
+                    // match a distinct MIR ownership state.
+                    let relocated_unreachable = peephole_relocated
+                        && matches!(
+                            artifact
+                                .code
+                                .get(artifact.functions[fid].code_start as usize + pc as usize),
+                            Some(Instruction::Unreachable)
+                        );
+                    let matches = relocated_unreachable
+                        || actual == expected.as_slice()
                         || (expected.iter().all(|register| {
                             actual.contains(register)
                                 || folded_unrestricted(register)
@@ -56961,6 +57755,7 @@ fn emit_mir_function(
     constants: &mut Vec<Constant>,
 ) -> Vec<TypeId> {
     let mir_function = function;
+    let reachable = reachable_mir_blocks(mir_function);
 
     fn target_params<'a>(
         function: &'a mir::Function,
@@ -57071,6 +57866,9 @@ fn emit_mir_function(
     let mut switch_offsets = BTreeMap::new();
     let mut synthetic_edges = Vec::new();
     for block in &function.blocks {
+        if !reachable.contains(&block.id) {
+            continue;
+        }
         let mir::Terminator::Switch {
             cases, otherwise, ..
         } = &block.terminator
@@ -57380,7 +58178,8 @@ mod mir_edge_emission_tests {
     use super::{
         Constant, Instruction, MirBuilderItem, MirLowerer, Primitive, Span,
         compact_artifact_registers_after_peephole, constant_key, emit_mir_function,
-        layout_and_peephole, layout_mir_blocks, mir, serialize_mir_cleanup_plans,
+        layout_and_peephole, layout_and_peephole_with_maps, layout_mir_blocks, mir,
+        prune_unused_constants, serialize_mir_cleanup_plans,
     };
 
     #[test]
@@ -57462,6 +58261,47 @@ mod mir_edge_emission_tests {
 
         assert!(compact_artifact_registers_after_peephole(&mut artifact));
         assert_eq!(artifact.functions[0].register_types, [UNIT]);
+        assert!(artifact.cleanups[0].registers.is_empty());
+        let decoded = Artifact::decode(&artifact.encode()).unwrap();
+        verify(decoded).unwrap();
+    }
+
+    #[test]
+    fn post_peephole_compaction_coalesces_identical_cleanup_spans() {
+        let mut artifact = Artifact::default();
+        artifact.code = vec![Instruction::Nop, Instruction::Return { src: None }];
+        artifact.functions.push(BytecodeFunction {
+            name: "coalesce_cleanup_spans".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        });
+        artifact.cleanups = vec![
+            grandiose_vm::bytecode::CleanupPlan {
+                function: 0,
+                first_instruction: 0,
+                end_instruction: 1,
+                registers: vec![1],
+            },
+            grandiose_vm::bytecode::CleanupPlan {
+                function: 0,
+                first_instruction: 1,
+                end_instruction: 2,
+                registers: vec![2],
+            },
+        ];
+
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT]);
+        assert_eq!(artifact.cleanups.len(), 1);
+        assert_eq!(artifact.cleanups[0].first_instruction, 0);
+        assert_eq!(artifact.cleanups[0].end_instruction, 2);
         assert!(artifact.cleanups[0].registers.is_empty());
         let decoded = Artifact::decode(&artifact.encode()).unwrap();
         verify(decoded).unwrap();
@@ -58369,6 +59209,84 @@ mod mir_edge_emission_tests {
     }
 
     #[test]
+    fn unreachable_switch_edges_do_not_emit_orphan_value_transfers() {
+        // MIR layout retains unreachable blocks for diagnostics.  The stale
+        // edge source is deliberately never defined: emitting the synthetic
+        // switch transfer would append `Move { dst: 3, src: 2 }` after the
+        // entry Return, which the GRBC decoder correctly rejects as an
+        // uninferred register use.
+        let dead_switch = function(
+            0,
+            "dead-switch-transfer",
+            UNIT,
+            vec![UNIT, U32, I64, I64],
+            vec![
+                block(0, vec![], vec![], mir::Terminator::Return { value: None }),
+                block(
+                    1,
+                    vec![],
+                    vec![statement(mir::InstructionKind::Const {
+                        dst: 1,
+                        value: Constant::U32(0),
+                    })],
+                    mir::Terminator::Switch {
+                        discr: operand(1, mir::UseMode::Copy),
+                        cases: vec![(
+                            Constant::U32(0),
+                            mir::Edge {
+                                target: 2,
+                                args: vec![operand(2, mir::UseMode::Move)],
+                            },
+                        )],
+                        otherwise: mir::Edge {
+                            target: 3,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    2,
+                    vec![parameter(3, I64, mir::BlockParamRole::Ordinary)],
+                    vec![],
+                    mir::Terminator::Return { value: None },
+                ),
+                block(3, vec![], vec![], mir::Terminator::Return { value: None }),
+            ],
+        );
+        let mut emitted = Artifact::default();
+        let register_types = emit_mir_function(
+            &dead_switch,
+            &std::collections::BTreeMap::new(),
+            &mut emitted.code,
+            &mut emitted.constants,
+        );
+        emitted.functions.push(BytecodeFunction {
+            name: dead_switch.name.clone(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types,
+            code_start: 0,
+            code_len: emitted.code.len() as u32,
+            label_slot_count: 0,
+        });
+        assert!(
+            !emitted
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::Move { dst: 3, src: 2 })),
+            "a dead switch must not append a synthetic edge transfer"
+        );
+        let program = mir::Program {
+            functions: vec![dead_switch],
+        };
+        emitted.cleanups = serialize_mir_cleanup_plans(&emitted, &program, &[]).unwrap();
+        verify(emitted).expect("dead synthetic edge must not leak into GRBC value flow");
+    }
+
+    #[test]
     fn peephole_repatches_forward_backward_switch_and_removed_targets() {
         let mut artifact = Artifact::default();
         artifact.constants.push(Constant::U32(0));
@@ -58395,18 +59313,329 @@ mod mir_edge_emission_tests {
         });
 
         assert!(layout_and_peephole(&mut artifact));
-        assert_eq!(artifact.functions[0].code_len, 2);
+        // Jump threading retains both back-edges: after the first rewrite
+        // each arm of the switch reaches the loop header directly.  Neither
+        // branch is fallthrough, so fixed-point compaction correctly keeps
+        // all three control instructions.
+        assert_eq!(artifact.functions[0].code_len, 3);
         assert_eq!(
             artifact.code,
             vec![
                 Instruction::Switch {
                     discr: 0,
-                    cases: vec![(0, 1)],
+                    cases: vec![(0, 2)],
                     otherwise: 1,
                 },
                 Instruction::Jump { target: 0 },
+                Instruction::Jump { target: 0 },
             ]
         );
+    }
+
+    #[test]
+    fn peephole_replaces_same_successor_switch_with_fallthrough() {
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Switch {
+                    discr: 1,
+                    cases: vec![(0, 1), (1, 1)],
+                    otherwise: 1,
+                },
+                Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "same_successor_switch".into(),
+            flags: 0,
+            params: vec![U32],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, U32],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, [Instruction::Return { src: None }]);
+        assert_eq!(artifact.functions[0].code_len, 1);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let vm = Vm::new(verify(artifact).unwrap());
+        assert_eq!(vm.run(0, vec![Value::U64(0)]).unwrap(), Value::Unit);
+        assert_eq!(vm.run(0, vec![Value::U64(99)]).unwrap(), Value::Unit);
+    }
+
+    #[test]
+    fn peephole_removes_unreachable_edge_transfer_with_undefined_source() {
+        // MIR edge lowering can leave a transfer tail after its sole
+        // predecessor was proven terminal. The tail is unreachable, but the
+        // serialized format still infers types for its source registers; do
+        // not retain a use of a source that no emitted block defines.
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Return { src: None },
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Move { dst: 3, src: 2 },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_edge_transfer".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, [Instruction::Return { src: None }]);
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT]);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let decoded = Artifact::decode(&artifact.encode()).unwrap();
+        verify(decoded).unwrap();
+    }
+
+    #[test]
+    fn peephole_removes_unreachable_cleanup_after_tail_call() {
+        // Tail calls do not return to the next bytecode instruction.  A
+        // cleanup tail retained after one can mention an owner defined only
+        // on a now-dead source path, exactly like the production scalar_max
+        // lowering regression.
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::TailCall {
+                    function: 0,
+                    args: vec![],
+                },
+                Instruction::Drop { register: 2 },
+                Instruction::Return { src: Some(1) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_tail_cleanup".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, UNIT, UNIT],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [Instruction::TailCall {
+                function: 0,
+                args: vec![],
+            }]
+        );
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT]);
+    }
+
+    #[test]
+    fn peephole_prunes_undefined_tail_after_terminal_perform_but_keeps_resumptive_perform() {
+        // A terminal operation has no bytecode fallthrough. MIR still emits
+        // the following synthetic edge before layout can prove the source
+        // block dead, so it can mention registers whose definitions were
+        // retired with that block. Treating `Perform { dst: None }` as a
+        // normal instruction leaves an undecodable artifact. In contrast a
+        // resumptive operation produces `dst: Some(_)` and must retain its
+        // continuation edge.
+        let mut terminal = Artifact {
+            code: vec![
+                Instruction::Perform {
+                    dst: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads: vec![],
+                },
+                Instruction::Drop { register: 3 },
+                Instruction::Move { dst: 2, src: 1 },
+            ],
+            ..Artifact::default()
+        };
+        terminal.functions.push(BytecodeFunction {
+            name: "terminal_perform_dead_edge".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut terminal));
+        assert!(matches!(
+            terminal.code.as_slice(),
+            [Instruction::Perform { dst: None, .. }]
+        ));
+        assert!(compact_artifact_registers_after_peephole(&mut terminal));
+        assert_eq!(terminal.functions[0].register_types, [UNIT]);
+
+        let mut resumptive = Artifact {
+            code: vec![
+                Instruction::Perform {
+                    dst: Some(1),
+                    protocol: 0,
+                    operation: 0,
+                    payloads: vec![],
+                },
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        resumptive.functions.push(BytecodeFunction {
+            name: "resumptive_perform_live_edge".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(!layout_and_peephole(&mut resumptive));
+        assert!(matches!(
+            resumptive.code.as_slice(),
+            [
+                Instruction::Perform { dst: Some(1), .. },
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ]
+        ));
+    }
+
+    #[test]
+    fn peephole_keeps_label_leave_destination_reachable() {
+        // A LabelPush has two successors: the body falls through, while a
+        // Leave transfers to its target.  The target must not be mistaken for
+        // a dead suffix merely because the ordinary body returns first.
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::LabelPush {
+                    slot: 0,
+                    result_register: 1,
+                    target: 3,
+                },
+                Instruction::Return { src: None },
+                Instruction::Nop,
+                Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "label_destination".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, UNIT],
+            code_start: 0,
+            code_len: 4,
+            label_slot_count: 1,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::LabelPush {
+                    slot: 0,
+                    result_register: 1,
+                    target: 2,
+                },
+                Instruction::Return { src: None },
+                Instruction::Return { src: None },
+            ]
+        );
+    }
+
+    #[test]
+    fn peephole_removes_switch_cases_that_match_otherwise() {
+        let mut artifact = Artifact {
+            constants: vec![
+                Constant::U32(0),
+                Constant::U32(1),
+                Constant::I64(42),
+                Constant::I64(9),
+            ],
+            code: vec![
+                Instruction::Switch {
+                    discr: 1,
+                    cases: vec![(0, 1), (1, 3)],
+                    otherwise: 3,
+                },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 2,
+                },
+                Instruction::Return { src: Some(2) },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 3,
+                },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "redundant_switch_case".into(),
+            flags: 0,
+            params: vec![U32],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, U32, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        let encoded_size = |artifact: &Artifact| {
+            let mut canonical = artifact.clone();
+            canonical.canonicalize_constants();
+            grandiose_vm::verify::with_generated_cleanup_plans(canonical)
+                .unwrap()
+                .encode()
+                .len()
+        };
+        let unoptimized_size = encoded_size(&artifact);
+        layout_and_peephole(&mut artifact);
+        assert_eq!(
+            artifact.code[0],
+            Instruction::Switch {
+                discr: 1,
+                cases: vec![(0, 1)],
+                otherwise: 3,
+            }
+        );
+        assert!(encoded_size(&artifact) < unoptimized_size);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let vm = Vm::new(verify(artifact).unwrap());
+        assert_eq!(vm.run(0, vec![Value::U64(0)]).unwrap(), Value::I64(42));
+        assert_eq!(vm.run(0, vec![Value::U64(1)]).unwrap(), Value::I64(9));
+        assert_eq!(vm.run(0, vec![Value::U64(2)]).unwrap(), Value::I64(9));
     }
 
     #[test]
@@ -58438,6 +59667,9 @@ mod mir_edge_emission_tests {
         });
 
         assert!(layout_and_peephole(&mut artifact));
+        // The trailing NOP remains part of this function because `otherwise`
+        // targets it. Keeping it outside the function range would leave a
+        // function-local target equal to `code_len`, which is invalid.
         assert_eq!(artifact.functions[0].code_len, 3);
         assert_eq!(
             artifact.code,
@@ -58468,6 +59700,106 @@ mod mir_edge_emission_tests {
         });
         assert!(!layout_and_peephole(&mut single));
         assert_eq!(single.code, [Instruction::Nop]);
+    }
+
+    #[test]
+    fn peephole_threads_jump_chains_into_removable_fallthroughs() {
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Jump { target: 2 },
+                Instruction::Return { src: None },
+                Instruction::Jump { target: 1 },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "jump_chain".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, vec![Instruction::Return { src: None }]);
+    }
+
+    #[test]
+    fn peephole_fixed_point_removes_constant_exposed_by_transfer_fold() {
+        let mut artifact = Artifact {
+            constants: vec![Constant::I64(7)],
+            code: vec![
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
+                Instruction::Move { dst: 3, src: 2 },
+                Instruction::Return { src: Some(1) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "fixed_point".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, vec![Instruction::Return { src: Some(1) }]);
+        assert_eq!(artifact.functions[0].code_len, 1);
+    }
+
+    #[test]
+    fn peephole_fixed_point_composes_removed_suffix_ordinal() {
+        // Round one retargets the constant through the transfer, and removes
+        // both the transfer and this unreferenced suffix NOP. Round two can
+        // then see the adjacent dead Const/Return pair. The removed suffix
+        // maps to the one-past-the-end ordinal after round one, so composing
+        // round two must retain that sentinel rather than indexing its map.
+        let mut artifact = Artifact {
+            constants: vec![Constant::I64(7)],
+            code: vec![
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
+                Instruction::Move { dst: 3, src: 2 },
+                Instruction::Return { src: Some(1) },
+                Instruction::Nop,
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "fixed_point_suffix".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 4,
+            label_slot_count: 0,
+        });
+
+        let (changed, maps) = layout_and_peephole_with_maps(&mut artifact);
+        assert!(changed);
+        assert_eq!(artifact.code, vec![Instruction::Return { src: Some(1) }]);
+        let map = maps[0].as_ref().unwrap();
+        assert_eq!(map.ordinals, vec![0, 0, 0, 1]);
+        assert_eq!(map.new_code_len, artifact.code.len() as u32);
     }
 
     #[test]
@@ -58547,6 +59879,47 @@ mod mir_edge_emission_tests {
     }
 
     #[test]
+    fn peephole_folds_reference_free_second_stage_snapshot_transfer() {
+        let mut artifact = Artifact {
+            code: vec![
+                Instruction::Move { dst: 2, src: 1 },
+                Instruction::Move { dst: 3, src: 2 },
+                Instruction::Move { dst: 4, src: 3 },
+                Instruction::Return { src: Some(4) },
+            ],
+            ..Artifact::default()
+        };
+        artifact.functions.push(BytecodeFunction {
+            name: "snapshot_chain".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64, I64],
+            code_start: 0,
+            code_len: 4,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Move { dst: 4, src: 1 },
+                Instruction::Return { src: Some(4) },
+            ]
+        );
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(0, vec![Value::I64(42)])
+                .unwrap(),
+            Value::I64(42)
+        );
+    }
+
+    #[test]
     fn peephole_retargets_one_use_constant_pool_temporaries() {
         let mut artifact = Artifact::default();
         artifact.constants.push(Constant::I64(42));
@@ -58612,16 +59985,262 @@ mod mir_edge_emission_tests {
             label_slot_count: 0,
         });
         assert!(layout_and_peephole(&mut targeted));
-        assert!(matches!(
-            targeted.code[0],
-            Instruction::Const { dst: 1, .. }
-        ));
-        assert!(matches!(
-            targeted.code[1],
-            Instruction::Move { dst: 2, src: 1 }
-        ));
+        assert_eq!(
+            targeted.code,
+            [
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(2) },
+            ]
+        );
         let targeted = grandiose_vm::verify::with_generated_cleanup_plans(targeted).unwrap();
-        verify(targeted).unwrap();
+        assert_eq!(
+            Vm::new(verify(targeted).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(42)
+        );
+    }
+
+    #[test]
+    fn peephole_removes_self_copies_and_repatches_targets() {
+        let mut artifact = Artifact::default();
+        artifact.constants.push(Constant::I64(7));
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Jump { target: 3 },
+            Instruction::Copy { dst: 1, src: 1 },
+            Instruction::Copy { dst: 1, src: 1 },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "self_copy".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(1) },
+            ]
+        );
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(7)
+        );
+    }
+
+    #[test]
+    fn prune_unused_constants_coalesces_duplicate_live_const_ids() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(7), Constant::I64(7)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 1,
+            },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "duplicate_constants".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        });
+
+        assert!(prune_unused_constants(&mut artifact));
+        assert_eq!(artifact.constants, vec![Constant::I64(7)]);
+        assert_eq!(
+            artifact.code[0],
+            Instruction::Const {
+                dst: 1,
+                constant: 0
+            }
+        );
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(7)
+        );
+    }
+
+    #[test]
+    fn prune_unused_constants_keeps_signed_zero_constants_distinct() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::F32(0.0), Constant::F32(-0.0)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 2,
+                constant: 1,
+            },
+            Instruction::Return { src: Some(2) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "signed_zero".into(),
+            flags: 0,
+            params: vec![],
+            return_type: grandiose_vm::F32,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, grandiose_vm::F32, grandiose_vm::F32],
+            code_start: 0,
+            code_len: 3,
+            label_slot_count: 0,
+        });
+
+        assert!(!prune_unused_constants(&mut artifact));
+        assert_eq!(artifact.constants.len(), 2);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let Value::F32(result) = Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap() else {
+            panic!("signed-zero function returned a non-f32 value")
+        };
+        assert_eq!(result.to_bits(), (-0.0_f32).to_bits());
+    }
+
+    #[test]
+    fn peephole_removes_constants_dead_before_unit_return_and_repatches_targets() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(1)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Jump { target: 2 },
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Return { src: None },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_unit_constant".into(),
+            flags: 0,
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].code_len, 1);
+        assert_eq!(artifact.code, [Instruction::Return { src: None },]);
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::Unit
+        );
+    }
+
+    #[test]
+    fn peephole_removes_constants_dead_before_other_return_values() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(7)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 2,
+                constant: 0,
+            },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "dead_value_constant".into(),
+            flags: 0,
+            params: vec![I64],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(layout_and_peephole(&mut artifact));
+        assert_eq!(artifact.code, [Instruction::Return { src: Some(1) }]);
+        assert!(prune_unused_constants(&mut artifact));
+        assert!(artifact.constants.is_empty());
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(0, vec![Value::I64(42)])
+                .unwrap(),
+            Value::I64(42)
+        );
+    }
+
+    #[test]
+    fn peephole_keeps_a_constant_returned_from_its_destination() {
+        let mut artifact = Artifact::default();
+        artifact.constants = vec![Constant::I64(7)];
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Return { src: Some(1) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "returned_constant".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: artifact.code.len() as u32,
+            label_slot_count: 0,
+        });
+
+        assert!(!layout_and_peephole(&mut artifact));
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(1) },
+            ]
+        );
+        assert!(!prune_unused_constants(&mut artifact));
+        let artifact = grandiose_vm::verify::with_generated_cleanup_plans(artifact).unwrap();
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap()).run(0, vec![]).unwrap(),
+            Value::I64(7)
+        );
     }
 
     #[test]
@@ -58670,7 +60289,9 @@ mod mir_edge_emission_tests {
             label_slot_count: 0,
         });
 
-        assert!(!layout_and_peephole(&mut artifact));
+        // The protected edge bundle itself must remain intact. The terminal
+        // gap after its Jump is now correctly retired as unreachable.
+        assert!(layout_and_peephole(&mut artifact));
         assert_eq!(
             &artifact.code[2..6],
             &[
@@ -59593,4 +61214,85 @@ fn unsupported(span: Span, title: &str, message: impl Into<String>) -> Diagnosti
 
 fn type_error(span: Span, message: impl Into<String>) -> Diagnostic {
     Diagnostic::error("bytecode subset type error", message, span).with_code(TYPE_CODE)
+}
+
+#[cfg(test)]
+mod reachability_tests {
+    use super::*;
+
+    fn parse_program(source: &str) -> Program {
+        crate::parser::parse(crate::lexer::lex(source).expect("source lexes"))
+            .expect("source parses")
+    }
+
+    #[test]
+    fn dependency_graph_preserves_nested_source_calls_in_the_reachable_set() {
+        let program = parse_program(
+            "entry() -> i64 { let callback = () -> i64 { leaf() }; callback() }\n\
+             leaf() -> i64 { 42 }\n\
+             unused() -> i64 { 0 }",
+        );
+        let graph = function_dependency_graph(&program);
+        let mut reachable = BTreeSet::from(["entry".to_owned()]);
+
+        close_function_dependencies(&mut reachable, &graph);
+        reachable.retain(|name| graph.contains_key(name));
+
+        assert_eq!(
+            reachable,
+            BTreeSet::from(["entry".to_owned(), "leaf".to_owned()])
+        );
+    }
+
+    #[test]
+    fn deferred_trait_family_expansion_keeps_only_the_matching_method_family() {
+        let mut program =
+            parse_program("first() -> () { () }\nsecond() -> () { () }\nthird() -> () { () }");
+        program.functions[0].name = "$trait$Display$show".to_owned();
+        program.functions[1].name = "$trait$Display$debug".to_owned();
+        program.functions[2].name = "$trait$Other$show".to_owned();
+        let functions_by_name = program
+            .functions
+            .iter()
+            .map(|function| (function.name.as_str(), function))
+            .collect::<BTreeMap<_, _>>();
+        let mut reachable = BTreeSet::from(["$trait_deferred$Display$show".to_owned()]);
+
+        extend_deferred_trait_families(&mut reachable, &functions_by_name);
+
+        assert_eq!(
+            reachable,
+            BTreeSet::from([
+                "$trait_deferred$Display$show".to_owned(),
+                "$trait$Display$show".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn ordinal_map_reuse_matches_the_two_walk_lowering_contract() {
+        let program = parse_program(
+            "entry() -> i64 { let callback = () -> i64 { leaf() }; callback() }\n\
+             leaf() -> i64 { 42 }",
+        );
+        let root = &program.functions[0].body;
+        let other_root = &program.functions[1].body;
+
+        let same_root_expected = specialization::expression_ordinal_maps(root);
+        assert_eq!(
+            lowering_expression_ordinal_maps(root, root),
+            same_root_expected,
+            "identical lowering roots reuse the one-pass ordinal maps"
+        );
+
+        let distinct_root_expected = (
+            specialization::expression_ordinals(root),
+            specialization::expression_ordinal_maps(other_root).1,
+        );
+        assert_eq!(
+            lowering_expression_ordinal_maps(root, other_root),
+            distinct_root_expected,
+            "distinct lowering roots retain the legacy independent maps"
+        );
+    }
 }

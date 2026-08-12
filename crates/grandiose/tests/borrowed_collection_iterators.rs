@@ -178,6 +178,7 @@ fn inspect_concrete_iterator_states(artifact: &grandiose_vm::Artifact, vm: &Vm) 
     };
     let array = ArenaObject::new(ArrayValue {
         element_type: grandiose_vm::U64,
+        packed_bytes: None,
         slots: [10, 20, 30]
             .into_iter()
             .map(|value| Some(Value::U64(value)))

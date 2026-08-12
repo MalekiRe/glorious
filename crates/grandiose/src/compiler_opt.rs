@@ -52,7 +52,18 @@ impl OptimizationLevel {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    serde::Deserialize,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+)]
 pub enum MirPhase {
     #[default]
     Raw,
@@ -64,7 +75,7 @@ pub enum MirPhase {
 
 /// Cheap, stable body-property mask. Bits are part of MIR fingerprints, so new
 /// properties must use fresh bits and inference must not depend on hash order.
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct FeatureBits(u32);
 
 impl FeatureBits {
@@ -131,7 +142,9 @@ impl DenseWorklist {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize,
+)]
 pub enum PassId {
     ValidateRawMir,
     ImportAndValidatePlaceFlow,
@@ -142,6 +155,7 @@ pub enum PassId {
     ScalarizeLocals,
     SimplifyCleanup,
     GlobalSimplify,
+    SpecializeDirectCalls,
     ScalarizeCallables,
     SpecializeControl,
     SpecializeCleanup,
@@ -154,7 +168,26 @@ pub enum PassId {
     ValidateFinalArtifact,
 }
 
+/// Internal schedule controls used by compiler diagnostic tests.  This is
+/// deliberately separate from `CompileOptions`: optimization level is part
+/// of the normal compilation contract, whereas selectively suppressing a
+/// transform is only useful for isolating an optimization in a test.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OptimizationPlan {
+    pub(crate) terminal_handler_fusion: bool,
+    pub(crate) direct_resumptive_handler_fusion: bool,
+}
+
+impl Default for OptimizationPlan {
+    fn default() -> Self {
+        Self {
+            terminal_handler_fusion: true,
+            direct_resumptive_handler_fusion: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub enum PassOutcome {
     Unchanged,
     Changed,
@@ -3831,6 +3864,24 @@ fn fold_primitive(
             .then(|| char::from_u32(*value).map(Constant::Char))
             .flatten();
     }
+    match (primitive, result_type, arg_types, args) {
+        (TextByteLen, USIZE, [TEXT], [Constant::Text(value)]) => {
+            return Some(Constant::Usize(value.len() as u64));
+        }
+        (TextEq, U32, [TEXT, TEXT], [Constant::Text(left), Constant::Text(right)]) => {
+            return Some(Constant::U32(u32::from(left == right)));
+        }
+        (BytesLen, USIZE, [BYTES], [Constant::Bytes(value)]) => {
+            return Some(Constant::Usize(value.len() as u64));
+        }
+        (BytesUtf8ValidUpTo, USIZE, [BYTES], [Constant::Bytes(value)]) => {
+            return Some(Constant::Usize(
+                std::str::from_utf8(value).map_or_else(|error| error.valid_up_to(), |_| value.len())
+                    as u64,
+            ));
+        }
+        _ => {}
+    }
     if matches!(
         primitive,
         FloatAdd
@@ -7403,6 +7454,344 @@ fn global_simplify_exact_callables(
     }
 }
 
+#[derive(Clone)]
+enum DirectCallSpecialization {
+    Unit,
+    Forward(u32),
+    Constant(Constant),
+    Primitive {
+        primitive: Primitive,
+        arguments: Vec<DirectPrimitiveArgument>,
+        argument_types: Vec<TypeId>,
+        result_type: TypeId,
+    },
+}
+
+/// A scalar operand of a tiny direct callee.  Keeping callee literals in the
+/// summary lets call specialization partially evaluate functions such as
+/// `add_one(x)` without cloning their body into every caller.
+#[derive(Clone)]
+enum DirectPrimitiveArgument {
+    Parameter(u32),
+    Constant(Constant),
+}
+
+fn scalar_constant_type(ty: TypeId) -> bool {
+    int_spec(ty).is_some() || matches!(ty, F32 | F64 | CHAR)
+}
+
+/// Resolve direct calls to tiny receiverless functions which either forward a
+/// parameter, return unit, or return one literal constant. This is narrower
+/// than inlining: it does not clone a body or consume its budget. A forwarding
+/// argument (or a fresh caller-side constant) becomes the continuation's
+/// implicit call-result edge argument, preserving ownership transfer exactly.
+fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (PassOutcome, u64) {
+    let scan_work = operation_count(program);
+    if scan_work > budget {
+        return (PassOutcome::BudgetExhausted, scan_work);
+    }
+    let forwarding = program
+        .functions
+        .iter()
+        .filter_map(|function| {
+            let entry = function
+                .blocks
+                .iter()
+                .find(|block| block.id == function.entry)?;
+            if function.receiver_mode.is_some()
+                || function.blocks.len() != 1
+                || !function.return_cleanup.is_empty()
+                || !function.outward_protocols.is_empty()
+                || function.no_return
+            {
+                return None;
+            }
+            let specialization = match (&entry.statements[..], &entry.terminator) {
+                ([], Terminator::Return { value: None }) if function.result == UNIT => {
+                    DirectCallSpecialization::Unit
+                }
+                (
+                    [],
+                    Terminator::Return {
+                        value:
+                            Some(Operand {
+                                register,
+                                mode: UseMode::Move,
+                            }),
+                    },
+                ) => register
+                    .checked_sub(1)
+                    .filter(|index| {
+                        function
+                            .params
+                            .get(*index as usize)
+                            .is_some_and(|ty| *ty == function.result)
+                    })
+                    .map(DirectCallSpecialization::Forward)?,
+                (
+                    [
+                        Instruction {
+                            kind: InstructionKind::Const { dst, value },
+                            ..
+                        },
+                    ],
+                    Terminator::Return {
+                        value:
+                            Some(Operand {
+                                register,
+                                mode: UseMode::Move,
+                            }),
+                    },
+                ) if dst == register => DirectCallSpecialization::Constant(value.clone()),
+                (
+                    statements,
+                    Terminator::Return {
+                        value:
+                            Some(Operand {
+                                register,
+                                mode: UseMode::Move,
+                            }),
+                    },
+                ) => {
+                    let (primitive_statement, prefix) = statements.split_last()?;
+                    let InstructionKind::Primitive {
+                        dst,
+                        primitive,
+                        args,
+                    } = &primitive_statement.kind
+                    else {
+                        return None;
+                    };
+                    if *dst != *register
+                        || !prefix.iter().all(|statement| {
+                            matches!(statement.kind, InstructionKind::Const { .. })
+                        })
+                    {
+                        return None;
+                    }
+                    let constants = prefix
+                        .iter()
+                        .filter_map(|statement| match &statement.kind {
+                            InstructionKind::Const { dst, value } => Some((*dst, value)),
+                            _ => None,
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let arguments = args
+                        .iter()
+                        .map(|argument| {
+                            if argument.mode != UseMode::Copy {
+                                return None;
+                            }
+                            if let Some(index) = argument.register.checked_sub(1)
+                                && function.params.get(index as usize).is_some()
+                            {
+                                Some(DirectPrimitiveArgument::Parameter(index))
+                            } else {
+                                constants
+                                    .get(&argument.register)
+                                    .cloned()
+                                    .cloned()
+                                    .map(DirectPrimitiveArgument::Constant)
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let argument_types = arguments
+                        .iter()
+                        .zip(args)
+                        .map(|(argument, operand)| match argument {
+                            DirectPrimitiveArgument::Parameter(index) => {
+                                function.params.get(*index as usize).copied()
+                            }
+                            DirectPrimitiveArgument::Constant(_) => function
+                                .register_types
+                                .get(operand.register as usize)
+                                .copied(),
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    if !argument_types.iter().copied().all(scalar_constant_type)
+                        || function.register_types.get(*dst as usize) != Some(&function.result)
+                    {
+                        return None;
+                    }
+                    DirectCallSpecialization::Primitive {
+                        primitive: *primitive,
+                        arguments,
+                        argument_types,
+                        result_type: function.result,
+                    }
+                }
+                _ => return None,
+            };
+            Some((function.declaration, specialization))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if forwarding.is_empty() {
+        return (PassOutcome::Unchanged, scan_work);
+    }
+
+    let mut changed = false;
+    for caller in &mut program.functions {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
+        let mut caller_changed = false;
+        for block_index in 0..caller.blocks.len() {
+            if let Terminator::TailCall { function, args } =
+                caller.blocks[block_index].terminator.clone()
+            {
+                if matches!(
+                    forwarding.get(&function),
+                    Some(DirectCallSpecialization::Forward(0))
+                ) && args.len() == 1
+                {
+                    caller.blocks[block_index].terminator = Terminator::Return {
+                        value: Some(args[0]),
+                    };
+                    caller_changed = true;
+                }
+                continue;
+            }
+            let Terminator::Call {
+                result,
+                function,
+                args,
+                normal,
+            } = caller.blocks[block_index].terminator.clone()
+            else {
+                continue;
+            };
+            let Some(specialization) = forwarding.get(&function) else {
+                continue;
+            };
+            let replacement = match (specialization, result) {
+                (DirectCallSpecialization::Unit, None) => normal,
+                (DirectCallSpecialization::Forward(index), Some(_)) => {
+                    let Some(value) = args.get(*index as usize).copied() else {
+                        continue;
+                    };
+                    let mut edge_args = Vec::with_capacity(normal.args.len() + 1);
+                    edge_args.push(value);
+                    edge_args.extend(normal.args);
+                    Edge {
+                        target: normal.target,
+                        args: edge_args,
+                    }
+                }
+                (DirectCallSpecialization::Constant(value), Some(result)) => {
+                    let Some(result_type) = caller.register_types.get(result as usize).copied()
+                    else {
+                        continue;
+                    };
+                    let constant_register = caller.register_types.len() as Register;
+                    caller.register_types.push(result_type);
+                    let span = caller.blocks[block_index]
+                        .statements
+                        .last()
+                        .map(|statement| statement.span)
+                        .unwrap_or_default();
+                    caller.blocks[block_index].statements.push(Instruction {
+                        span,
+                        kind: InstructionKind::Const {
+                            dst: constant_register,
+                            value: value.clone(),
+                        },
+                    });
+                    let mut edge_args = Vec::with_capacity(normal.args.len() + 1);
+                    edge_args.push(Operand {
+                        register: constant_register,
+                        mode: UseMode::Move,
+                    });
+                    edge_args.extend(normal.args);
+                    Edge {
+                        target: normal.target,
+                        args: edge_args,
+                    }
+                }
+                (
+                    DirectCallSpecialization::Primitive {
+                        primitive,
+                        arguments,
+                        argument_types,
+                        result_type,
+                    },
+                    Some(result),
+                ) => {
+                    let values = caller.blocks[block_index]
+                        .statements
+                        .iter()
+                        .filter_map(|statement| match &statement.kind {
+                            InstructionKind::Const { dst, value } => Some((*dst, value.clone())),
+                            _ => None,
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    let constants = arguments
+                        .iter()
+                        .map(|argument| match argument {
+                            DirectPrimitiveArgument::Parameter(index) => args
+                                .get(*index as usize)
+                                .and_then(|argument| values.get(&argument.register))
+                                .cloned(),
+                            DirectPrimitiveArgument::Constant(value) => Some(value.clone()),
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    let Some(constants) = constants else {
+                        continue;
+                    };
+                    let Some(value) =
+                        fold_primitive(*result_type, *primitive, argument_types, &constants)
+                    else {
+                        continue;
+                    };
+                    let Some(result_type) = caller.register_types.get(result as usize).copied()
+                    else {
+                        continue;
+                    };
+                    let constant_register = caller.register_types.len() as Register;
+                    caller.register_types.push(result_type);
+                    let span = caller.blocks[block_index]
+                        .statements
+                        .last()
+                        .map(|statement| statement.span)
+                        .unwrap_or_default();
+                    caller.blocks[block_index].statements.push(Instruction {
+                        span,
+                        kind: InstructionKind::Const {
+                            dst: constant_register,
+                            value,
+                        },
+                    });
+                    let mut edge_args = Vec::with_capacity(normal.args.len() + 1);
+                    edge_args.push(Operand {
+                        register: constant_register,
+                        mode: UseMode::Move,
+                    });
+                    edge_args.extend(normal.args);
+                    Edge {
+                        target: normal.target,
+                        args: edge_args,
+                    }
+                }
+                _ => continue,
+            };
+            caller.blocks[block_index].terminator = Terminator::Goto(replacement);
+            caller_changed = true;
+        }
+        if caller_changed {
+            caller.invalid_analyses |= pass_contract(PassId::SpecializeDirectCalls).invalidates;
+            caller.features = infer_feature_bits(caller);
+            changed = true;
+        }
+    }
+    (
+        if changed {
+            PassOutcome::Changed
+        } else {
+            PassOutcome::Unchanged
+        },
+        scan_work,
+    )
+}
+
 const MAX_SCALARIZED_CALLABLE_OPERATIONS: u64 = 4096;
 
 #[derive(Clone)]
@@ -7414,7 +7803,8 @@ struct CallableScalarization {
     captures: Vec<Operand>,
     args: Vec<Operand>,
     result: Option<Register>,
-    normal: Edge,
+    normal: Option<Edge>,
+    tail: bool,
 }
 
 fn remap_register(register: Register, registers: &[Option<Register>]) -> Option<Register> {
@@ -8316,6 +8706,9 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
     }
     let mut candidates = Vec::new();
     for (caller_index, caller) in program.functions.iter().enumerate() {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
         if caller.features.contains(FeatureBits::LOANS)
             || caller.features.contains(FeatureBits::HANDLERS)
             || caller.features.contains(FeatureBits::RESUMPTIONS)
@@ -8363,30 +8756,43 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
                 }
                 final_callable = alias;
             }
-            let Terminator::CallIndirect {
-                result,
-                callable,
-                known_function: Some(known_target),
-                receiver_mode: 2,
-                cleanup_callable: false,
-                args,
-                normal,
-            } = &block.terminator
-            else {
-                continue;
+            let (result, callable, known_target, args, normal, tail) = match &block.terminator {
+                Terminator::CallIndirect {
+                    result,
+                    callable,
+                    known_function: Some(known_target),
+                    receiver_mode: 2,
+                    cleanup_callable: false,
+                    args,
+                    normal,
+                } => (
+                    *result,
+                    callable,
+                    *known_target,
+                    args,
+                    Some(normal.clone()),
+                    false,
+                ),
+                Terminator::TailCallIndirect {
+                    callable,
+                    known_function: Some(known_target),
+                    receiver_mode: 2,
+                    args,
+                } => (None, callable, *known_target, args, None, true),
+                _ => continue,
             };
             if !alias_chain_safe
                 || callable.register != final_callable
                 || callable.mode != UseMode::Move
                 || captures.iter().any(|capture| capture.mode != UseMode::Move)
-                || made_target != known_target
+                || *made_target != known_target
             {
                 continue;
             }
             let Some(target_index) = program
                 .functions
                 .iter()
-                .position(|function| function.declaration == *known_target)
+                .position(|function| function.declaration == known_target)
             else {
                 continue;
             };
@@ -8424,8 +8830,9 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
                 target: target_index,
                 captures: captures.clone(),
                 args: args.clone(),
-                result: *result,
-                normal: normal.clone(),
+                result,
+                normal,
+                tail,
             });
         }
     }
@@ -8479,11 +8886,18 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
         block.statements.truncate(candidate.statement_start);
         let mut direct_args = candidate.captures;
         direct_args.extend(candidate.args);
-        block.terminator = Terminator::Call {
-            result: candidate.result,
-            function: declaration,
-            args: direct_args,
-            normal: candidate.normal,
+        block.terminator = if candidate.tail {
+            Terminator::TailCall {
+                function: declaration,
+                args: direct_args,
+            }
+        } else {
+            Terminator::Call {
+                result: candidate.result,
+                function: declaration,
+                args: direct_args,
+                normal: candidate.normal.expect("non-tail call has a normal edge"),
+            }
         };
     }
     for clone in &mut clones {
@@ -8804,6 +9218,9 @@ fn specialize_terminal_handlers(
     let mut candidates = Vec::new();
 
     for (caller_index, caller) in program.functions.iter().enumerate() {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
         let mut use_counts = BTreeMap::<Register, u32>::new();
         for block in &caller.blocks {
             for register in used_registers(block) {
@@ -9489,6 +9906,9 @@ fn specialize_direct_resumptive_handlers(
     let mut scan_work = 0_u64;
     let mut candidates = Vec::new();
     for (caller_index, caller) in program.functions.iter().enumerate() {
+        if caller.phase == MirPhase::Optimized {
+            continue;
+        }
         let mut use_counts = BTreeMap::<Register, u32>::new();
         for block in &caller.blocks {
             for register in used_registers(block) {
@@ -9763,26 +10183,53 @@ fn specialize_static_handlers(
     protocols: &[Protocol],
     handler_defs: &[HandlerDef],
     budget: u64,
+    terminal_handler_fusion: bool,
+    direct_resumptive_handler_fusion: bool,
 ) -> (PassOutcome, u64) {
     let mut scratch = program.clone();
-    let (terminal, terminal_work) =
-        specialize_terminal_handlers(&mut scratch, types, protocols, handler_defs, budget);
+    let (terminal, terminal_work) = if terminal_handler_fusion {
+        specialize_terminal_handlers(&mut scratch, types, protocols, handler_defs, budget)
+    } else {
+        (PassOutcome::Unchanged, 0)
+    };
     if terminal == PassOutcome::BudgetExhausted {
         return (terminal, terminal_work);
     }
     let remaining = budget.saturating_sub(terminal_work);
-    let (resumptive, resumptive_work) = specialize_direct_resumptive_handlers(
-        &mut scratch,
-        types,
-        protocols,
-        handler_defs,
-        remaining,
-    );
+    let (resumptive, resumptive_work) = if direct_resumptive_handler_fusion {
+        specialize_direct_resumptive_handlers(
+            &mut scratch,
+            types,
+            protocols,
+            handler_defs,
+            remaining,
+        )
+    } else {
+        (PassOutcome::Unchanged, 0)
+    };
     let work = terminal_work.saturating_add(resumptive_work);
     if resumptive == PassOutcome::BudgetExhausted {
         return (resumptive, work);
     }
     let outcome = if terminal == PassOutcome::Changed || resumptive == PassOutcome::Changed {
+        // The scratch transaction may touch a small number of caller bodies,
+        // but its old implementation forced every function through the
+        // ownership fixed point afterward. Preserve the transactional update
+        // while publishing the precise summary-dependency closure instead.
+        let changed = program
+            .functions
+            .iter()
+            .zip(&scratch.functions)
+            .filter_map(|(before, after)| (before != after).then_some(after.declaration))
+            .collect::<BTreeSet<_>>();
+        debug_assert!(!changed.is_empty());
+        let mut affected = ownership_dependents(program, &changed);
+        affected.extend(ownership_dependents(&scratch, &changed));
+        for function in &mut scratch.functions {
+            if affected.contains(&function.declaration) {
+                function.invalid_analyses |= analysis::ALL;
+            }
+        }
         *program = scratch;
         PassOutcome::Changed
     } else {
@@ -9805,6 +10252,48 @@ struct InlinePolicyState {
     cloned_bodies_remaining: u32,
     source_clones: BTreeMap<u32, u32>,
     depths: BTreeMap<u32, u8>,
+}
+
+/// The first O3 inlining round is deliberately more aggressive than O2. The
+/// repeated O3 round exists to consume opportunities exposed by its preceding
+/// control simplification, not to multiply that expansion again. Keep the
+/// second round's admission limits at the O2 envelope while retaining O3's
+/// candidate-cost threshold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InlineAdmissionCaps {
+    ForOptimizationLevel,
+    O2Style,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InlineAdmissionLimits {
+    growth_factor: u64,
+    growth_slack: u64,
+    depth_cap: u8,
+    source_clone_cap: u32,
+}
+
+fn inline_admission_limits(
+    level: OptimizationLevel,
+    admission_caps: InlineAdmissionCaps,
+) -> InlineAdmissionLimits {
+    let use_o3_admission_caps = level == OptimizationLevel::O3
+        && admission_caps == InlineAdmissionCaps::ForOptimizationLevel;
+    if use_o3_admission_caps {
+        InlineAdmissionLimits {
+            growth_factor: 4,
+            growth_slack: 1_024,
+            depth_cap: 16,
+            source_clone_cap: 16,
+        }
+    } else {
+        InlineAdmissionLimits {
+            growth_factor: 2,
+            growth_slack: 256,
+            depth_cap: 8,
+            source_clone_cap: 8,
+        }
+    }
 }
 
 impl Default for InlinePolicyState {
@@ -9947,6 +10436,24 @@ fn inline_weight(function: &Function) -> u64 {
         .sum()
 }
 
+/// Keep the inliner's profitability accounting explicit so accepted clones can
+/// update their caller's weight incrementally. Re-scanning a growing caller
+/// after every accepted clone is quadratic in the hot O3 case.
+fn inline_instruction_weight(statement: &Instruction) -> u64 {
+    match statement.kind {
+        // The compact optimizer does not yet receive the drop-glue table, so
+        // use the custom-cleanup weight conservatively.
+        InstructionKind::Drop { .. } => 12,
+        InstructionKind::MakeHandler { .. } | InstructionKind::MakeHandlerShared { .. } => 20,
+        _ => 1,
+    }
+}
+
+fn inline_replaced_direct_call_weight(current: u64, added: u64) -> u64 {
+    // A direct-call terminator is always weight five.
+    current.saturating_sub(5).saturating_add(added)
+}
+
 fn type_carries_reference(types: &[Type], ty: TypeId) -> bool {
     fn visit(types: &[Type], ty: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
         if !visiting.insert(ty) {
@@ -10054,6 +10561,25 @@ fn inline_leaf_exit_survivors(target: &Function) -> Option<BTreeSet<Register>> {
 fn inline_candidate_depth(depths: &BTreeMap<u32, u8>, target: u32, depth_cap: u8) -> Option<u8> {
     let depth = depths.get(&target).copied().unwrap_or(0).saturating_add(1);
     (depth <= depth_cap).then_some(depth)
+}
+
+/// Borrow two distinct function bodies without cloning the callee merely to
+/// satisfy the borrow checker.  Inlining mutates only its caller, and a
+/// candidate is never permitted to target that same caller, so splitting the
+/// function slice lets large leaf and CFG targets stay borrowed in place.
+fn inline_caller_and_target(
+    functions: &mut [Function],
+    caller_index: usize,
+    target_index: usize,
+) -> (&mut Function, &Function) {
+    debug_assert_ne!(caller_index, target_index);
+    if caller_index < target_index {
+        let (before_target, from_target) = functions.split_at_mut(target_index);
+        (&mut before_target[caller_index], &from_target[0])
+    } else {
+        let (before_caller, from_caller) = functions.split_at_mut(caller_index);
+        (&mut from_caller[0], &before_caller[target_index])
+    }
 }
 
 /// Whether the call's normal continuation is a closed forward region. A fresh
@@ -10445,6 +10971,42 @@ fn inline_by_cost_with_policy(
     budget: u64,
     policy: &mut InlinePolicyState,
 ) -> (PassOutcome, u64) {
+    inline_by_cost_with_admission_caps(
+        program,
+        types,
+        level,
+        budget,
+        policy,
+        InlineAdmissionCaps::ForOptimizationLevel,
+    )
+}
+
+fn inline_by_cost_with_o2_admission_caps(
+    program: &mut Program,
+    types: &[Type],
+    level: OptimizationLevel,
+    budget: u64,
+    policy: &mut InlinePolicyState,
+) -> (PassOutcome, u64) {
+    debug_assert_eq!(level, OptimizationLevel::O3);
+    inline_by_cost_with_admission_caps(
+        program,
+        types,
+        level,
+        budget,
+        policy,
+        InlineAdmissionCaps::O2Style,
+    )
+}
+
+fn inline_by_cost_with_admission_caps(
+    program: &mut Program,
+    types: &[Type],
+    level: OptimizationLevel,
+    budget: u64,
+    policy: &mut InlinePolicyState,
+    admission_caps: InlineAdmissionCaps,
+) -> (PassOutcome, u64) {
     let scan_work = operation_count(program);
     if scan_work > budget {
         return (PassOutcome::BudgetExhausted, scan_work);
@@ -10456,22 +11018,7 @@ fn inline_by_cost_with_policy(
         OptimizationLevel::O2 => 60,
         OptimizationLevel::O3 => 120,
     };
-    let growth_factor = if level == OptimizationLevel::O3 { 4 } else { 2 };
-    let growth_slack = if level == OptimizationLevel::O3 {
-        1_024
-    } else {
-        256
-    };
-    let depth_cap = if level == OptimizationLevel::O3 {
-        16
-    } else {
-        8
-    };
-    let source_clone_cap = if level == OptimizationLevel::O3 {
-        16
-    } else {
-        8
-    };
+    let admission_limits = inline_admission_limits(level, admission_caps);
     let originals = program
         .functions
         .iter()
@@ -10480,6 +11027,9 @@ fn inline_by_cost_with_policy(
     let components = inline_call_graph_sccs(program);
     let mut scratch = program.clone();
     let mut scratch_policy = policy.clone();
+    // Updated exactly for every accepted clone. This lets profitability and
+    // target-threshold checks avoid walking repeatedly-expanded bodies.
+    let mut current_weights = originals.clone();
     let mut work = scan_work;
     let mut changed = false;
     for declaration in originals.keys().copied() {
@@ -10491,7 +11041,8 @@ fn inline_by_cost_with_policy(
             .functions
             .iter()
             .filter(|function| {
-                inline_leaf_legal(function, types) && inline_weight(function) <= threshold
+                inline_leaf_legal(function, types)
+                    && current_weights[&function.declaration] <= threshold
             })
             .map(|function| function.declaration)
             .collect::<BTreeSet<_>>();
@@ -10509,6 +11060,9 @@ fn inline_by_cost_with_policy(
             .collect::<BTreeMap<_, _>>();
         let mut candidates = Vec::new();
         for caller in &scratch.functions {
+            if caller.phase == MirPhase::Optimized {
+                continue;
+            }
             for block in &caller.blocks {
                 let Terminator::Call {
                     function: target,
@@ -10543,9 +11097,11 @@ fn inline_by_cost_with_policy(
         candidates.sort_unstable();
         let mut changed_this_round = false;
         for candidate in candidates {
-            let Some(next_depth) =
-                inline_candidate_depth(&scratch_policy.depths, candidate.target, depth_cap)
-            else {
+            let Some(next_depth) = inline_candidate_depth(
+                &scratch_policy.depths,
+                candidate.target,
+                admission_limits.depth_cap,
+            ) else {
                 continue;
             };
             if scratch_policy
@@ -10553,23 +11109,41 @@ fn inline_by_cost_with_policy(
                 .get(&candidate.target)
                 .copied()
                 .unwrap_or(0)
-                >= source_clone_cap
+                >= admission_limits.source_clone_cap
                 || scratch_policy.cloned_bodies_remaining == 0
             {
                 continue;
             }
-            let Some(target) = scratch
+            let Some(target_index) = scratch
                 .functions
                 .iter()
-                .find(|function| function.declaration == candidate.target)
-                .cloned()
+                .position(|function| function.declaration == candidate.target)
             else {
                 continue;
             };
+            let target = &scratch.functions[target_index];
             let target_block = &target.blocks[0];
             let Terminator::Return { value: returned } = &target_block.terminator else {
                 continue;
             };
+            let added_weight = (target.params.len() as u64)
+                .saturating_add(2) // replacement Goto
+                .saturating_add(
+                    target_block
+                        .statements
+                        .iter()
+                        .map(inline_instruction_weight)
+                        .sum(),
+                );
+            let new_weight = inline_replaced_direct_call_weight(
+                current_weights[&candidate.caller],
+                added_weight,
+            );
+            let original = originals[&candidate.caller];
+            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
+            if new_weight > cap {
+                continue;
+            }
             let Some(caller_index) = scratch
                 .functions
                 .iter()
@@ -10610,54 +11184,62 @@ fn inline_by_cost_with_policy(
             }
 
             let old_caller = scratch.functions[caller_index].clone();
-            let caller = &mut scratch.functions[caller_index];
-            let mut registers = vec![None; target.register_types.len()];
-            for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
-                let new = caller.register_types.len() as Register;
-                caller.register_types.push(ty);
-                registers[old] = Some(new);
-            }
-            let block = &mut caller.blocks[block_index];
-            let span = block
-                .statements
-                .last()
-                .map(|statement| statement.span)
-                .unwrap_or_default();
-            for (index, argument) in args.into_iter().enumerate() {
-                block.statements.push(Instruction {
-                    span,
-                    kind: InstructionKind::Move {
-                        dst: registers[index + 1].expect("callee ABI register was mapped"),
-                        src: argument,
-                    },
+            let accepted = {
+                let (caller, target) =
+                    inline_caller_and_target(&mut scratch.functions, caller_index, target_index);
+                let target_block = &target.blocks[0];
+                let Terminator::Return { value: returned } = &target_block.terminator else {
+                    unreachable!("inlining target was checked before mutation");
+                };
+                let mut registers = vec![None; target.register_types.len()];
+                for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
+                    let new = caller.register_types.len() as Register;
+                    caller.register_types.push(ty);
+                    registers[old] = Some(new);
+                }
+                let block = &mut caller.blocks[block_index];
+                let span = block
+                    .statements
+                    .last()
+                    .map(|statement| statement.span)
+                    .unwrap_or_default();
+                for (index, argument) in args.into_iter().enumerate() {
+                    block.statements.push(Instruction {
+                        span,
+                        kind: InstructionKind::Move {
+                            dst: registers[index + 1].expect("callee ABI register was mapped"),
+                            src: argument,
+                        },
+                    });
+                }
+                for mut statement in target_block.statements.clone() {
+                    remap_instruction(&mut statement.kind, &registers)
+                        .expect("legal leaf has a complete non-receiver register map");
+                    block.statements.push(statement);
+                }
+                let mut edge_args =
+                    Vec::with_capacity(normal.args.len() + usize::from(result.is_some()));
+                if let Some(mut value) = *returned {
+                    remap_operand(&mut value, &registers)
+                        .expect("legal leaf return does not reference receiver r0");
+                    edge_args.push(value);
+                }
+                edge_args.extend(normal.args);
+                block.terminator = Terminator::Goto(Edge {
+                    target: normal.target,
+                    args: edge_args,
                 });
-            }
-            for mut statement in target_block.statements.clone() {
-                remap_instruction(&mut statement.kind, &registers)
-                    .expect("legal leaf has a complete non-receiver register map");
-                block.statements.push(statement);
-            }
-            let mut edge_args =
-                Vec::with_capacity(normal.args.len() + usize::from(result.is_some()));
-            if let Some(mut value) = *returned {
-                remap_operand(&mut value, &registers)
-                    .expect("legal leaf return does not reference receiver r0");
-                edge_args.push(value);
-            }
-            edge_args.extend(normal.args);
-            block.terminator = Terminator::Goto(Edge {
-                target: normal.target,
-                args: edge_args,
-            });
-            caller.features = infer_feature_bits(caller);
-
-            let original = originals[&candidate.caller];
-            let cap = growth_factor * original + growth_slack;
-            if inline_weight(caller) > cap {
+                caller.features = infer_feature_bits(caller);
+                debug_assert_eq!(inline_weight(caller), new_weight);
+                true
+            };
+            if !accepted {
                 scratch.functions[caller_index] = old_caller;
                 continue;
             }
+            let caller = &mut scratch.functions[caller_index];
             caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
+            current_weights.insert(candidate.caller, new_weight);
             scratch_policy
                 .depths
                 .entry(candidate.caller)
@@ -10684,7 +11266,8 @@ fn inline_by_cost_with_policy(
             .functions
             .iter()
             .filter(|function| {
-                inline_multiblock_legal(function, types) && inline_weight(function) <= threshold
+                inline_multiblock_legal(function, types)
+                    && current_weights[&function.declaration] <= threshold
             })
             .map(|function| function.declaration)
             .collect::<BTreeSet<_>>();
@@ -10702,6 +11285,9 @@ fn inline_by_cost_with_policy(
             .collect::<BTreeMap<_, _>>();
         let mut candidates = Vec::new();
         for caller in &scratch.functions {
+            if caller.phase == MirPhase::Optimized {
+                continue;
+            }
             for block in &caller.blocks {
                 let Terminator::Call {
                     function: target,
@@ -10736,9 +11322,11 @@ fn inline_by_cost_with_policy(
         candidates.sort_unstable();
         let mut changed_this_round = false;
         for candidate in candidates {
-            let Some(next_depth) =
-                inline_candidate_depth(&scratch_policy.depths, candidate.target, depth_cap)
-            else {
+            let Some(next_depth) = inline_candidate_depth(
+                &scratch_policy.depths,
+                candidate.target,
+                admission_limits.depth_cap,
+            ) else {
                 continue;
             };
             if scratch_policy
@@ -10746,19 +11334,38 @@ fn inline_by_cost_with_policy(
                 .get(&candidate.target)
                 .copied()
                 .unwrap_or(0)
-                >= source_clone_cap
+                >= admission_limits.source_clone_cap
                 || scratch_policy.cloned_bodies_remaining == 0
             {
                 continue;
             }
-            let Some(target) = scratch
+            let Some(target_index) = scratch
                 .functions
                 .iter()
-                .find(|function| function.declaration == candidate.target)
-                .cloned()
+                .position(|function| function.declaration == candidate.target)
             else {
                 continue;
             };
+            let target = &scratch.functions[target_index];
+            let added_weight = (target.params.len() as u64)
+                .saturating_add(2) // replacement Goto
+                .saturating_add(current_weights[&candidate.target])
+                .saturating_add(
+                    target
+                        .blocks
+                        .iter()
+                        .filter(|block| matches!(block.terminator, Terminator::Return { .. }))
+                        .count() as u64,
+                );
+            let new_weight = inline_replaced_direct_call_weight(
+                current_weights[&candidate.caller],
+                added_weight,
+            );
+            let original = originals[&candidate.caller];
+            let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
+            if new_weight > cap {
+                continue;
+            }
             let Some(caller_index) = scratch
                 .functions
                 .iter()
@@ -10805,129 +11412,92 @@ fn inline_by_cost_with_policy(
             }
 
             let old_caller = scratch.functions[caller_index].clone();
-            let caller = &mut scratch.functions[caller_index];
-            let mut registers = vec![None; target.register_types.len()];
-            for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
-                let new = caller.register_types.len() as Register;
-                caller.register_types.push(ty);
-                registers[old] = Some(new);
-            }
-            let Some(block_count) = u32::try_from(target.blocks.len()).ok() else {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            };
-            let caller_max_block = caller
-                .blocks
-                .iter()
-                .map(|block| block.id)
-                .max()
-                .unwrap_or(0);
-            if caller_max_block.checked_add(block_count).is_none() {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            }
-            let mut blocks = BTreeMap::new();
-            for (offset, block) in target.blocks.iter().enumerate() {
-                blocks.insert(block.id, caller_max_block + 1 + offset as u32);
-            }
-            let Some(&cloned_entry) = blocks.get(&target.entry) else {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            };
-            let Some(arenas) = append_inline_arenas(caller, &target, &registers, &blocks) else {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            };
+            let accepted = (|| {
+                let (caller, target) =
+                    inline_caller_and_target(&mut scratch.functions, caller_index, target_index);
+                let mut registers = vec![None; target.register_types.len()];
+                for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
+                    let new = caller.register_types.len() as Register;
+                    caller.register_types.push(ty);
+                    registers[old] = Some(new);
+                }
+                let block_count = u32::try_from(target.blocks.len()).ok()?;
+                let caller_max_block = caller
+                    .blocks
+                    .iter()
+                    .map(|block| block.id)
+                    .max()
+                    .unwrap_or(0);
+                caller_max_block.checked_add(block_count)?;
+                let mut blocks = BTreeMap::new();
+                for (offset, block) in target.blocks.iter().enumerate() {
+                    blocks.insert(block.id, caller_max_block + 1 + offset as u32);
+                }
+                let cloned_entry = *blocks.get(&target.entry)?;
+                let arenas = append_inline_arenas(caller, target, &registers, &blocks)?;
 
-            let span = caller.blocks[block_index]
-                .statements
-                .last()
-                .map(|statement| statement.span)
-                .unwrap_or_default();
-            for (index, argument) in args.into_iter().enumerate() {
-                caller.blocks[block_index].statements.push(Instruction {
-                    span,
-                    kind: InstructionKind::Move {
-                        dst: registers[index + 1].expect("callee ABI register was mapped"),
-                        src: argument,
-                    },
+                let span = caller.blocks[block_index]
+                    .statements
+                    .last()
+                    .map(|statement| statement.span)
+                    .unwrap_or_default();
+                for (index, argument) in args.into_iter().enumerate() {
+                    caller.blocks[block_index].statements.push(Instruction {
+                        span,
+                        kind: InstructionKind::Move {
+                            dst: registers[index + 1].expect("callee ABI register was mapped"),
+                            src: argument,
+                        },
+                    });
+                }
+                caller.blocks[block_index].terminator = Terminator::Goto(Edge {
+                    target: cloned_entry,
+                    args: vec![],
                 });
-            }
-            caller.blocks[block_index].terminator = Terminator::Goto(Edge {
-                target: cloned_entry,
-                args: vec![],
-            });
 
-            let mut cloned = Vec::with_capacity(target.blocks.len());
-            let mut remap_failed = false;
-            for mut block in target.blocks.clone() {
-                block.id = blocks[&block.id];
-                for parameter in &mut block.params {
-                    let Some(mapped) = remap_register(parameter.register, &registers) else {
-                        remap_failed = true;
-                        break;
-                    };
-                    parameter.register = mapped;
-                }
-                if remap_failed {
-                    break;
-                }
-                for statement in &mut block.statements {
-                    if remap_instruction(&mut statement.kind, &registers).is_none() {
-                        remap_failed = true;
-                        break;
+                let mut cloned = Vec::with_capacity(target.blocks.len());
+                for mut block in target.blocks.clone() {
+                    block.id = blocks[&block.id];
+                    for parameter in &mut block.params {
+                        parameter.register = remap_register(parameter.register, &registers)?;
                     }
-                    if remap_cloned_control_identities(&mut statement.kind, &arenas, &blocks)
-                        .is_none()
-                    {
-                        remap_failed = true;
-                        break;
+                    for statement in &mut block.statements {
+                        remap_instruction(&mut statement.kind, &registers)?;
+                        remap_cloned_control_identities(&mut statement.kind, &arenas, &blocks)?;
                     }
-                }
-                if remap_failed || remap_terminator(&mut block.terminator, &registers).is_none() {
-                    remap_failed = true;
-                    break;
-                }
-                if remap_cloned_terminator_identities(&mut block.terminator, &arenas).is_none() {
-                    remap_failed = true;
-                    break;
-                }
-                match block.terminator.clone() {
-                    Terminator::Return { value } => {
-                        let mut edge_args =
-                            Vec::with_capacity(normal.args.len() + usize::from(value.is_some()));
-                        if let Some(value) = value {
-                            edge_args.push(value);
+                    remap_terminator(&mut block.terminator, &registers)?;
+                    remap_cloned_terminator_identities(&mut block.terminator, &arenas)?;
+                    match block.terminator.clone() {
+                        Terminator::Return { value } => {
+                            let mut edge_args = Vec::with_capacity(
+                                normal.args.len() + usize::from(value.is_some()),
+                            );
+                            if let Some(value) = value {
+                                edge_args.push(value);
+                            }
+                            edge_args.extend(normal.args.clone());
+                            block.terminator = Terminator::Goto(Edge {
+                                target: normal.target,
+                                args: edge_args,
+                            });
                         }
-                        edge_args.extend(normal.args.clone());
-                        block.terminator = Terminator::Goto(Edge {
-                            target: normal.target,
-                            args: edge_args,
-                        });
+                        _ => remap_cloned_cfg_targets(&mut block.terminator, &blocks)?,
                     }
-                    _ => {
-                        if remap_cloned_cfg_targets(&mut block.terminator, &blocks).is_none() {
-                            remap_failed = true;
-                            break;
-                        }
-                    }
+                    cloned.push(block);
                 }
-                cloned.push(block);
-            }
-            if remap_failed {
+                caller.blocks.extend(cloned);
+                caller.features = infer_feature_bits(caller);
+                debug_assert_eq!(inline_weight(caller), new_weight);
+                Some(())
+            })()
+            .is_some();
+            if !accepted {
                 scratch.functions[caller_index] = old_caller;
                 continue;
             }
-            caller.blocks.extend(cloned);
-            caller.features = infer_feature_bits(caller);
+            let caller = &mut scratch.functions[caller_index];
             caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
-
-            let original = originals[&candidate.caller];
-            let cap = growth_factor * original + growth_slack;
-            if inline_weight(caller) > cap {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            }
+            current_weights.insert(candidate.caller, new_weight);
             scratch_policy
                 .depths
                 .entry(candidate.caller)
@@ -10953,21 +11523,67 @@ fn inline_by_cost_with_policy(
     }
 }
 
+/// One complete body result from a transactional local pass.  Future
+/// incremental scheduling may retain these snapshots only at the *same* pass
+/// and body slot that produced them; replaying an entire prefix at once would
+/// change the shared optimizer work-budget ordering.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct TransactionalPassBodySnapshot {
+    pub(crate) input: Function,
+    pub(crate) output: Function,
+    pub(crate) outcome: PassOutcome,
+    pub(crate) work_units: u64,
+}
+
+/// Optional process-local storage for exact body snapshots. This deliberately
+/// has no filesystem authority and is not wired into O3 yet. The dispatcher
+/// verifies the exact input and budget before accepting a restored snapshot;
+/// a cache miss always executes the ordinary cold transformation.
+pub(crate) trait TransactionalPassBodyCache {
+    fn restore(
+        &mut self,
+        pass: PassId,
+        input: &Function,
+        work_limit: u64,
+    ) -> Option<TransactionalPassBodySnapshot>;
+
+    fn record(&mut self, pass: PassId, snapshot: TransactionalPassBodySnapshot);
+}
+
+#[cfg(test)]
 fn run_transactional_pass(
     program: &mut Program,
     pass: PassId,
     types: &[Type],
     global_remaining: &mut u64,
 ) -> PassReport {
+    run_transactional_pass_with_body_cache(program, pass, types, global_remaining, None)
+}
+
+fn run_transactional_pass_with_body_cache(
+    program: &mut Program,
+    pass: PassId,
+    types: &[Type],
+    global_remaining: &mut u64,
+    mut body_cache: Option<&mut (dyn TransactionalPassBodyCache + '_)>,
+) -> PassReport {
     // Direct custom-hook identity is distinct from structural destruction,
     // but cleanup simplification must still see those hooks recursively when
-    // deciding whether an otherwise scalar-only container is observable.
-    let direct_custom_drop_types = program
-        .functions
-        .iter()
-        .flat_map(|function| &function.flow.locals)
-        .filter_map(|fact| (fact.drop_glue == DropGlueKind::Custom).then_some(fact.ty))
-        .collect::<BTreeSet<_>>();
+    // deciding whether an otherwise scalar-only container is observable. Most
+    // local passes do not consume this set, so avoid repeatedly walking every
+    // function's ownership facts during a whole-program optimization run.
+    let direct_custom_drop_types = matches!(
+        pass,
+        PassId::SimplifyCleanup | PassId::FormTailCallsAndHoist
+    )
+    .then(|| {
+        program
+            .functions
+            .iter()
+            .flat_map(|function| &function.flow.locals)
+            .filter_map(|fact| (fact.drop_glue == DropGlueKind::Custom).then_some(fact.ty))
+            .collect::<BTreeSet<_>>()
+    });
     let mut outcome = PassOutcome::Unchanged;
     let mut total_work = 0_u64;
     // Tail formation is the final stack-safety opportunity after proof
@@ -10976,27 +11592,70 @@ fn run_transactional_pass(
     // safety depend on declaration order.
     let fair_per_function_budget = pass == PassId::FormTailCallsAndHoist;
     for function in &mut program.functions {
+        if function.phase == MirPhase::Optimized {
+            continue;
+        }
         let local_limit = (100_000_u64).max(32 * body_size(function));
         let limit = if fair_per_function_budget {
             local_limit
         } else {
             local_limit.min(*global_remaining)
         };
+        let input = body_cache.as_ref().map(|_| function.clone());
+        let restored = body_cache.as_deref_mut().and_then(|cache| {
+            let input = input.as_ref().expect("cache input was cloned");
+            cache.restore(pass, input, limit).filter(|snapshot| {
+                snapshot.input == *input
+                    && snapshot.work_units <= limit
+                    && snapshot.outcome != PassOutcome::BudgetExhausted
+            })
+        });
         let invalidated_before = function.invalid_analyses;
-        let (body_outcome, work) = match pass {
-            PassId::NormalizeCfg => normalize_cfg(function, limit),
-            PassId::SparseSimplify => sparse_simplify(function, types, limit),
-            PassId::ScalarizeLocals => scalarize_locals(function, types, limit),
-            PassId::SimplifyCleanup => {
-                simplify_cleanup(function, types, &direct_custom_drop_types, limit)
+        let (body_outcome, work) = if let Some(snapshot) = restored {
+            *function = snapshot.output;
+            (snapshot.outcome, snapshot.work_units)
+        } else {
+            let (outcome, work) = match pass {
+                PassId::NormalizeCfg => normalize_cfg(function, limit),
+                PassId::SparseSimplify => sparse_simplify(function, types, limit),
+                PassId::ScalarizeLocals => scalarize_locals(function, types, limit),
+                PassId::SimplifyCleanup => simplify_cleanup(
+                    function,
+                    types,
+                    direct_custom_drop_types
+                        .as_ref()
+                        .expect("cleanup simplification prepared custom-drop types"),
+                    limit,
+                ),
+                PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
+                PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
+                PassId::EraseLoanProofsAndScalarizedReferences => {
+                    erase_loan_proofs(function, limit)
+                }
+                PassId::FormTailCallsAndHoist => form_tail_calls_and_hoist(
+                    function,
+                    types,
+                    direct_custom_drop_types
+                        .as_ref()
+                        .expect("tail formation prepared custom-drop types"),
+                    limit,
+                ),
+                _ => (PassOutcome::SkippedUnavailable, 0),
+            };
+            if let (Some(cache), Some(input)) = (body_cache.as_deref_mut(), input) {
+                if outcome != PassOutcome::BudgetExhausted {
+                    cache.record(
+                        pass,
+                        TransactionalPassBodySnapshot {
+                            input,
+                            output: function.clone(),
+                            outcome,
+                            work_units: work,
+                        },
+                    );
+                }
             }
-            PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
-            PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
-            PassId::EraseLoanProofsAndScalarizedReferences => erase_loan_proofs(function, limit),
-            PassId::FormTailCallsAndHoist => {
-                form_tail_calls_and_hoist(function, types, &direct_custom_drop_types, limit)
-            }
-            _ => (PassOutcome::SkippedUnavailable, 0),
+            (outcome, work)
         };
         if body_outcome == PassOutcome::Changed {
             // Passes may publish a narrower, mutation-specific mask. Fall
@@ -11030,27 +11689,18 @@ fn run_transactional_pass(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InvalidationScope {
-    ChangedBodies,
-    WholeProgram,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PassContract {
     invalidates: u8,
-    scope: InvalidationScope,
 }
 
 fn pass_contract(pass: PassId) -> PassContract {
-    let changed = |invalidates| PassContract {
-        invalidates,
-        scope: InvalidationScope::ChangedBodies,
-    };
+    let changed = |invalidates| PassContract { invalidates };
     match pass {
         PassId::NormalizeCfg
         | PassId::SparseSimplify
         | PassId::SimplifyCleanup
         | PassId::GlobalSimplify
+        | PassId::SpecializeDirectCalls
         | PassId::SpecializeCleanup
         | PassId::FormTailCallsAndHoist => changed(analysis::ALL),
         // These preserve the block graph while rewriting definitions and
@@ -11059,14 +11709,12 @@ fn pass_contract(pass: PassId) -> PassContract {
             analysis::USES | analysis::FLOW | analysis::EFFECTS | analysis::VALUES | analysis::COST,
         ),
         // Callable scalarization and inlining mark each rewritten/new body as
-        // they commit it. Handler specialization currently rewrites through a
-        // whole-program scratch transaction, so it retains the conservative
-        // program-wide checkpoint contract.
+        // they commit it. Handler specialization also commits through a
+        // scratch program, but records its rewritten bodies and their direct
+        // callers before publishing. Those are the only cleanup summaries
+        // whose ownership facts can observe the new control body.
         PassId::ScalarizeCallables | PassId::InlineByCost => changed(analysis::ALL),
-        PassId::SpecializeControl => PassContract {
-            invalidates: analysis::ALL,
-            scope: InvalidationScope::WholeProgram,
-        },
+        PassId::SpecializeControl => changed(analysis::ALL),
         PassId::ValidateRawMir
         | PassId::ImportAndValidatePlaceFlow
         | PassId::ElaborateCleanup
@@ -11085,20 +11733,47 @@ struct WholeProgramPassTables<'a> {
     handler_defs: &'a [HandlerDef],
 }
 
-/// Whether a whole-program pass mutated the MIR-relevant part of a function
-/// (the pieces the ownership/cleanup analyses read). ``flow`` is deliberately
-/// excluded: untouched bodies carry their still-valid facts forward verbatim,
-/// and touched bodies are invalidated by this predicate so the next refresh
-/// re-derives their flow.
-fn body_mutated_since(after: &Function, before: &Function) -> bool {
-    after.blocks != before.blocks
-        || after.register_types != before.register_types
-        || after.entry != before.entry
-        || after.params != before.params
-        || after.result != before.result
-        || after.no_return != before.no_return
-        || after.receiver_mode != before.receiver_mode
-        || after.receiver_type != before.receiver_type
+/// Direct callers whose ownership cleanup may depend on a changed callee's
+/// summary.  The closure deliberately matches the direct-call shapes consumed
+/// by `cleanup_dependency_fingerprint`: unresolved indirect and receiver
+/// calls carry no reusable summary and therefore cannot authorize a narrow
+/// invalidation boundary.
+fn ownership_dependents(program: &Program, roots: &BTreeSet<u32>) -> BTreeSet<u32> {
+    let mut callers = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for function in &program.functions {
+        for block in &function.blocks {
+            let target = match &block.terminator {
+                Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                    Some(*function)
+                }
+                Terminator::CallIndirect {
+                    known_function: Some(function),
+                    ..
+                }
+                | Terminator::TailCallIndirect {
+                    known_function: Some(function),
+                    ..
+                } => Some(*function),
+                _ => None,
+            };
+            if let Some(target) = target {
+                callers
+                    .entry(target)
+                    .or_default()
+                    .insert(function.declaration);
+            }
+        }
+    }
+    let mut affected = roots.clone();
+    let mut pending = roots.iter().copied().collect::<VecDeque<_>>();
+    while let Some(callee) = pending.pop_front() {
+        for caller in callers.get(&callee).into_iter().flatten() {
+            if affected.insert(*caller) {
+                pending.push_back(*caller);
+            }
+        }
+    }
+    affected
 }
 
 fn run_transactional_whole_program_pass(
@@ -11108,6 +11783,7 @@ fn run_transactional_whole_program_pass(
     level: OptimizationLevel,
     global_remaining: &mut u64,
     inline_policy: &mut InlinePolicyState,
+    plan: OptimizationPlan,
 ) -> PassReport {
     // Whole-program scratch passes commit a full program swap
     // (``*program = scratch``) and cannot report per-body change sets. Diff
@@ -11122,6 +11798,9 @@ fn run_transactional_whole_program_pass(
         None
     };
     let (outcome, work_units) = match pass {
+        PassId::SpecializeDirectCalls => {
+            specialize_forwarding_direct_calls(program, *global_remaining)
+        }
         PassId::ScalarizeCallables => scalarize_callables(program, tables.types, *global_remaining),
         PassId::SpecializeControl => specialize_static_handlers(
             program,
@@ -11129,6 +11808,8 @@ fn run_transactional_whole_program_pass(
             tables.protocols,
             tables.handler_defs,
             *global_remaining,
+            plan.terminal_handler_fusion,
+            plan.direct_resumptive_handler_fusion,
         ),
         PassId::InlineByCost => inline_by_cost_with_policy(
             program,
@@ -11141,29 +11822,13 @@ fn run_transactional_whole_program_pass(
     };
     if outcome == PassOutcome::Changed {
         let contract = pass_contract(pass);
-        match contract.scope {
-            InvalidationScope::WholeProgram => {
-                let before = before.expect("whole-program clone prepared above");
-                for (after, before_function) in program
-                    .functions
-                    .iter_mut()
-                    .zip(&before.functions)
-                {
-                    if body_mutated_since(after, before_function) {
-                        after.invalid_analyses |= contract.invalidates;
-                    }
-                }
-            }
-            InvalidationScope::ChangedBodies => {
-                debug_assert!(
-                    program
-                        .functions
-                        .iter()
-                        .any(|function| function.invalid_analyses & contract.invalidates != 0),
-                    "{pass:?} changed MIR without publishing its body invalidation"
-                );
-            }
-        }
+        debug_assert!(
+            program
+                .functions
+                .iter()
+                .any(|function| function.invalid_analyses & contract.invalidates != 0),
+            "{pass:?} changed MIR without publishing its body invalidation"
+        );
     }
     *global_remaining = global_remaining.saturating_sub(work_units.min(*global_remaining));
     PassReport {
@@ -11173,10 +11838,47 @@ fn run_transactional_whole_program_pass(
     }
 }
 
+/// Run the repeated O3 inline round with its intentionally narrower admission
+/// envelope. This is separate from the normal dispatcher so every other
+/// InlineByCost invocation retains the optimization level's native policy.
+fn run_transactional_o3_followup_inline_pass(
+    program: &mut Program,
+    tables: WholeProgramPassTables<'_>,
+    global_remaining: &mut u64,
+    inline_policy: &mut InlinePolicyState,
+) -> PassReport {
+    let (outcome, work_units) = inline_by_cost_with_o2_admission_caps(
+        program,
+        tables.types,
+        OptimizationLevel::O3,
+        *global_remaining,
+        inline_policy,
+    );
+    if outcome == PassOutcome::Changed {
+        let contract = pass_contract(PassId::InlineByCost);
+        debug_assert!(
+            program
+                .functions
+                .iter()
+                .any(|function| function.invalid_analyses & contract.invalidates != 0),
+            "O3 follow-up InlineByCost changed MIR without publishing body invalidation"
+        );
+    }
+    *global_remaining = global_remaining.saturating_sub(work_units.min(*global_remaining));
+    PassReport {
+        pass: PassId::InlineByCost,
+        outcome,
+        work_units,
+    }
+}
+
 fn run_mandatory_normalize(program: &mut Program) -> PassReport {
     let mut outcome = PassOutcome::Unchanged;
     let mut work_units = 0_u64;
     for function in &mut program.functions {
+        if function.phase == MirPhase::Optimized {
+            continue;
+        }
         let (body_outcome, work) = normalize_cfg(function, u64::MAX);
         work_units += work;
         if body_outcome == PassOutcome::Changed {
@@ -11195,6 +11897,9 @@ fn run_mandatory_loan_erasure(program: &mut Program) -> PassReport {
     let mut outcome = PassOutcome::Unchanged;
     let mut work_units = 0_u64;
     for function in &mut program.functions {
+        if function.phase == MirPhase::Optimized {
+            continue;
+        }
         let (body_outcome, work) = erase_loan_proofs(function, u64::MAX);
         work_units = work_units.saturating_add(work);
         if body_outcome == PassOutcome::Changed {
@@ -11628,6 +12333,19 @@ fn derive_cleanup_elaboration_with_array_calls(
     types: &[Type],
     array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
 ) -> Result<CleanupElaboration, ValidationError> {
+    derive_cleanup_elaboration_and_state_with_array_calls(function, types, array_calls)
+        .map(|(elaboration, _)| elaboration)
+}
+
+/// Derive cleanup plans and the ownership lists consumed by bytecode-input
+/// validation from one ownership solve. The final optimized-MIR checkpoint
+/// needs both products; keeping them together avoids solving every function
+/// twice merely to rediscover the same fixed point.
+fn derive_cleanup_elaboration_and_state_with_array_calls(
+    function: &Function,
+    types: &[Type],
+    array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Result<(CleanupElaboration, CleanupStateAnalysis), ValidationError> {
     let locals = bridged_locals(function, types);
     let context = regions::FlowContext {
         function,
@@ -11902,7 +12620,12 @@ fn derive_cleanup_elaboration_with_array_calls(
             protected,
         });
     }
-    Ok(elaboration)
+    let reachable = solution.entries.keys().copied().collect();
+    let state = CleanupStateAnalysis {
+        lists: solution.cleanup_lists,
+        reachable,
+    };
+    Ok((elaboration, state))
 }
 
 /// Apply one elaboration to a body; true when anything changed.
@@ -11944,6 +12667,9 @@ fn import_and_validate_place_flow(
     let mut work = 0_u64;
     let mut changed = false;
     for function in &mut program.functions {
+        if function.phase == MirPhase::Cleanup {
+            continue;
+        }
         work = work.saturating_add(body_size(function));
         if strict_flow(function) {
             validate_exported_facts(function, types)?;
@@ -12001,6 +12727,9 @@ fn elaborate_cleanup(program: &mut Program, types: &[Type]) -> Result<PassReport
     let mut changed = false;
     let array_calls = regions::array_call_summaries(program, types);
     for function in &mut program.functions {
+        if function.phase == MirPhase::Cleanup {
+            continue;
+        }
         work = work.saturating_add(body_size(function));
         let elaboration =
             derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
@@ -12024,60 +12753,85 @@ fn elaborate_cleanup(program: &mut Program, types: &[Type]) -> Result<PassReport
 /// fresh elaboration exactly, and require protected values to survive their
 /// own cleanup chains.
 fn validate_flow_and_cleanup(program: &Program, types: &[Type]) -> Result<(), ValidationError> {
-    if validation_disabled() {
-        return Ok(());
-    }
+    validate_flow_and_cleanup_except(program, types, &BTreeSet::new())
+}
+
+/// Validate the fresh ownership/cleanup boundary of an incremental compile.
+/// Bodies named in `already_validated` were restored only after matching their
+/// exact raw-MIR cache entry and complete array-call dependency fingerprint.
+/// Re-solving them here would discard the value of the cleanup cache. Debug
+/// checkpoints and non-incremental compilation continue to use the complete
+/// validation path above.
+fn validate_flow_and_cleanup_except(
+    program: &Program,
+    types: &[Type],
+    already_validated: &BTreeSet<u32>,
+) -> Result<(), ValidationError> {
     let array_calls = regions::array_call_summaries(program, types);
     for function in &program.functions {
+        if already_validated.contains(&function.declaration) {
+            continue;
+        }
         let elaboration =
             derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
-        if elaboration.plans != function.flow.cleanup_plans {
+        validate_cleanup_elaboration(function, &elaboration)?;
+    }
+    Ok(())
+}
+
+/// Check that the recorded cleanup metadata exactly matches a fresh ownership
+/// derivation. Kept separate so bytecode-input validation can share its solve
+/// with the structural cleanup-list checks.
+fn validate_cleanup_elaboration(
+    function: &Function,
+    elaboration: &CleanupElaboration,
+) -> Result<(), ValidationError> {
+    if elaboration.plans != function.flow.cleanup_plans {
+        return Err(error(
+            function,
+            None,
+            "cleanup plans are stale: a pass mutated ownership-relevant MIR without \
+                 re-elaborating its cleanup facts",
+        ));
+    }
+    for site in &function.flow.performs {
+        if !site.resumptive
+            && site.frame_cleanup != elaboration.perform_plans.get(&site.block).copied()
+        {
             return Err(error(
                 function,
-                None,
-                "cleanup plans are stale: a pass mutated ownership-relevant MIR without \
-                 re-elaborating its cleanup facts",
+                Some(site.block),
+                "terminal perform site lacks its frame cleanup plan",
             ));
         }
-        for site in &function.flow.performs {
-            if !site.resumptive
-                && site.frame_cleanup != elaboration.perform_plans.get(&site.block).copied()
+    }
+    for site in &function.flow.resumptions {
+        if site.cancel
+            && site.cancellation_cleanup != elaboration.cancel_plans.get(&site.block).copied()
+        {
+            return Err(error(
+                function,
+                Some(site.block),
+                "cancellation site lacks its cleanup plan",
+            ));
+        }
+    }
+    for plan in &function.flow.cleanup_plans {
+        for action in &plan.actions {
+            let destroyed = match action {
+                CleanupAction::Destroy(local)
+                | CleanupAction::DestroyResidual { local, .. }
+                | CleanupAction::DestroyIf { local, .. } => Some(*local),
+                CleanupAction::EndBorrow(_) => None,
+            };
+            if let Some(local) = destroyed
+                && plan.protected.contains(&local)
             {
                 return Err(error(
                     function,
-                    Some(site.block),
-                    "terminal perform site lacks its frame cleanup plan",
+                    None,
+                    format!("cleanup plan destroys r{local}, which is protected on its edge"),
                 ));
-            }
-        }
-        for site in &function.flow.resumptions {
-            if site.cancel
-                && site.cancellation_cleanup != elaboration.cancel_plans.get(&site.block).copied()
-            {
-                return Err(error(
-                    function,
-                    Some(site.block),
-                    "cancellation site lacks its cleanup plan",
-                ));
-            }
-        }
-        for plan in &function.flow.cleanup_plans {
-            for action in &plan.actions {
-                let destroyed = match action {
-                    CleanupAction::Destroy(local)
-                    | CleanupAction::DestroyResidual { local, .. }
-                    | CleanupAction::DestroyIf { local, .. } => Some(*local),
-                    CleanupAction::EndBorrow(_) => None,
-                };
-                if let Some(local) = destroyed
-                    && plan.protected.contains(&local)
-                {
-                    return Err(error(
-                        function,
-                        None,
-                        format!("cleanup plan destroys r{local}, which is protected on its edge"),
-                    ));
-                }
             }
         }
     }
@@ -12108,10 +12862,57 @@ pub(crate) fn derive_cleanup_lists(
 /// leaves an extra initialized source register that is absent from the
 /// destination's cleanup state. Canonicalizing before emission makes the MIR
 /// ownership facts and the verifier-visible transfer agree.
+///
+/// Restore representation-prepared bodies before the edge pass. Each entry is
+/// checked against the exact O3 MIR body and current interprocedural ownership
+/// summaries, so this remains a per-function cache boundary.
+pub(crate) fn restore_emission_prepared_bodies(
+    program: &mut Program,
+    types: &[Type],
+    cache: &mut crate::compiler_session::IncrementalMirCache,
+) -> BTreeSet<u32> {
+    let summaries = regions::array_call_summaries(program, types);
+    let mut restored = BTreeSet::new();
+    for function in &mut program.functions {
+        let Some(dependency) = cleanup_dependency_fingerprint(function, &summaries) else {
+            continue;
+        };
+        if let Some(output) = cache.reuse_emission_prepared(function, dependency) {
+            restored.insert(function.declaration);
+            *function = output;
+        }
+    }
+    restored
+}
+
+#[cfg(test)]
 pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     program: &mut Program,
     types: &[Type],
 ) -> Result<u64, ValidationError> {
+    canonicalize_dead_edge_copies_for_emission_incremental(program, types, None, &BTreeSet::new())
+}
+
+/// Incremental variant of edge-copy canonicalization. Bodies restored by
+/// `restore_emission_prepared_bodies` have already completed this exact
+/// representation lowering and are excluded from both cleanup-solver rounds.
+pub(crate) fn canonicalize_dead_edge_copies_for_emission_incremental(
+    program: &mut Program,
+    types: &[Type],
+    cache: Option<&mut crate::compiler_session::IncrementalMirCache>,
+    already_prepared: &BTreeSet<u32>,
+) -> Result<u64, ValidationError> {
+    let cache_inputs = cache.as_ref().map(|_| {
+        program
+            .functions
+            .iter()
+            .filter(|function| !already_prepared.contains(&function.declaration))
+            .map(|function| (function.declaration, function.clone()))
+            .collect::<BTreeMap<_, _>>()
+    });
+    let cache_dependencies = cache
+        .as_ref()
+        .map(|_| regions::array_call_summaries(program, types));
     let mir_snapshot_path = std::env::var_os("G1_PRE_EDGE_MIR");
     if let Some(path) = &mir_snapshot_path {
         std::fs::write(&path, program.canonical_text()).map_err(|write_error| ValidationError {
@@ -12124,12 +12925,10 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
         })?;
     }
     let mut changed = 0_u64;
-    // Functions mutated since the first serialization-mode cleanup solve must
-    // be re-validated after the final transfer canonicalization; functions
-    // that never changed solve identically on the second pass (deterministic
-    // engine), so this mask lets the trailing validation skip them.
-    let mut changed_mask = vec![false; program.functions.len()];
-    for (function_index, function) in program.functions.iter_mut().enumerate() {
+    for function in &mut program.functions {
+        if already_prepared.contains(&function.declaration) {
+            continue;
+        }
         let changed_before = changed;
         let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
             .is_some_and(|filter| function.name.contains(&filter.to_string_lossy().as_ref()));
@@ -12207,10 +13006,12 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     // an edge.
     // Keeping this as an ordinary MIR cleanup block means every later phase,
     // including move-path and loan verification, observes the retirement.
-    let cleanup_lists = derive_program_serialization_cleanup_lists(program, types, None)?;
-    for (function_index, (function, lists)) in
-        program.functions.iter_mut().zip(cleanup_lists).enumerate()
-    {
+    let cleanup_lists =
+        derive_program_serialization_cleanup_lists_except(program, types, already_prepared)?;
+    for (function, lists) in program.functions.iter_mut().zip(cleanup_lists) {
+        let Some(lists) = lists else {
+            continue;
+        };
         let function_name = function.name.clone();
         let trace_edge_copies = std::env::var_os("G1_EDGE_COPY_TRACE")
             .is_some_and(|filter| function_name.contains(filter.to_string_lossy().as_ref()));
@@ -12591,10 +13392,21 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
     }
     refresh_invalidated_flow(program, types)?;
     // No emission-only assumption bypasses the ordinary ownership, loan, or
-    // physical-switch checks. Functions unchanged since the serialization
-    // solve above are deterministic: re-solving them cannot change the
-    // outcome, so only the ones this pass actually mutated are re-validated.
-    derive_program_serialization_cleanup_lists(program, types, Some(&changed_mask))?;
+    // physical-switch checks.
+    derive_program_serialization_cleanup_lists_except(program, types, already_prepared)?;
+    if let (Some(cache), Some(inputs), Some(dependencies)) =
+        (cache, cache_inputs, cache_dependencies)
+    {
+        for function in &program.functions {
+            let Some(input) = inputs.get(&function.declaration) else {
+                continue;
+            };
+            let Some(dependency) = cleanup_dependency_fingerprint(input, &dependencies) else {
+                continue;
+            };
+            cache.cache_emission_prepared(input, function, dependency);
+        }
+    }
     if let Some(path) = mir_snapshot_path {
         let mut post_path = path;
         post_path.push(".post");
@@ -12616,28 +13428,34 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission(
 /// ownership validation may prune a statically impossible enum-switch arm;
 /// the bytecode verifier still structurally checks that encoded target, so
 /// serialization follows every arm without applying tag refinement.
+#[cfg(test)]
 pub(crate) fn derive_program_serialization_cleanup_lists(
     program: &Program,
     types: &[Type],
     change_mask: Option<&[bool]>,
 ) -> Result<Vec<BTreeMap<u32, Vec<Vec<Register>>>>, ValidationError> {
-    let _ps = std::time::Instant::now();
+    derive_program_serialization_cleanup_lists_except(program, types, &BTreeSet::new()).map(
+        |lists| {
+            lists
+                .into_iter()
+                .map(|lists| lists.expect("an empty exclusion set returns every cleanup list"))
+                .collect()
+        },
+    )
+}
+
+pub(crate) fn derive_program_serialization_cleanup_lists_except(
+    program: &Program,
+    types: &[Type],
+    already_prepared: &BTreeSet<u32>,
+) -> Result<Vec<Option<BTreeMap<u32, Vec<Vec<Register>>>>>, ValidationError> {
     let array_calls = regions::array_call_summaries(program, types);
     program
         .functions
         .iter()
-        .enumerate()
-        .map(|(function_index, function)| {
-            // A change mask limits re-validation to functions whose MIR
-            // changed since the previous serialization-mode solve. Unchanged
-            // functions solve identically (the engine is deterministic), so
-            // skipping them preserves the validation outcome exactly while
-            // avoiding a redundant whole-program ownership pass. The caller
-            // must supply a superset of functions mutated since that solve.
-            if change_mask.is_some_and(|mask| {
-                function_index >= mask.len() || !mask[function_index]
-            }) {
-                return Ok(BTreeMap::new());
+        .map(|function| {
+            if already_prepared.contains(&function.declaration) {
+                return Ok(None);
             }
             let locals = bridged_locals(function, types);
             let context = regions::FlowContext {
@@ -12649,9 +13467,11 @@ pub(crate) fn derive_program_serialization_cleanup_lists(
                 strict: strict_flow(function),
                 refine_enum_switches: false,
             };
-            Ok(regions::solve(&context, "serialization_lists")
-                .map_err(|error| flow_to_validation(function, error))?
-                .cleanup_lists)
+            Ok(Some(
+                regions::solve(&context)
+                    .map_err(|error| flow_to_validation(function, error))?
+                    .cleanup_lists,
+            ))
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|lists| {
@@ -12687,22 +13507,8 @@ fn derive_cleanup_state_analysis_with_array_calls(
     types: &[Type],
     array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
 ) -> Result<CleanupStateAnalysis, ValidationError> {
-    let locals = bridged_locals(function, types);
-    let context = regions::FlowContext {
-        function,
-        types,
-        locals: &locals,
-        loans: regions::loan_table(function, types),
-        array_calls,
-        strict: strict_flow(function),
-        refine_enum_switches: true,
-    };
-    let solution = regions::solve(&context, "derive_state_analysis").map_err(|error| flow_to_validation(function, error))?;
-    let reachable = solution.entries.keys().copied().collect();
-    Ok(CleanupStateAnalysis {
-        lists: solution.cleanup_lists,
-        reachable,
-    })
+    derive_cleanup_elaboration_and_state_with_array_calls(function, types, array_calls)
+        .map(|(_, state)| state)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -12931,14 +13737,31 @@ pub(crate) fn derive_leave_cleanup_anchors(
 fn validate_bytecode_input_checkpoint(
     program: &Program,
     types: &[Type],
+    mut final_validation_cache: Option<&mut crate::compiler_session::IncrementalMirCache>,
 ) -> Result<PassReport, ValidationError> {
     validate_program(program, types, MirPhase::Optimized)?;
-    validate_flow_and_cleanup(program, types)?;
     let array_calls = regions::array_call_summaries(program, types);
     let mut work = 0_u64;
     for function in &program.functions {
-        let cleanup =
-            derive_cleanup_state_analysis_with_array_calls(function, types, &array_calls)?;
+        // The final checkpoint is the dominant warm-build ownership cost. A
+        // prior successful checkpoint is equally strong evidence when both
+        // its complete optimized body and the summaries it can consume still
+        // match. Keep debug builds exhaustive, but let release builds recover
+        // independently validated generated/handler bodies as well as normal
+        // source functions.
+        let dependency = cleanup_dependency_fingerprint(function, &array_calls);
+        let reused = !cfg!(debug_assertions)
+            && dependency.is_some_and(|fingerprint| {
+                final_validation_cache
+                    .as_deref_mut()
+                    .is_some_and(|cache| cache.reuse_final_validation(function, fingerprint))
+            });
+        if reused {
+            continue;
+        }
+        let (elaboration, cleanup) =
+            derive_cleanup_elaboration_and_state_with_array_calls(function, types, &array_calls)?;
+        validate_cleanup_elaboration(function, &elaboration)?;
         let lists = &cleanup.lists;
         for block in &function.blocks {
             let Some(points) = lists.get(&block.id) else {
@@ -13040,6 +13863,11 @@ fn validate_bytecode_input_checkpoint(
         }
         let boundaries = derive_leave_cleanup_boundaries(function, lists)?;
         work = work.saturating_add(boundaries.len() as u64);
+        if let Some(fingerprint) = dependency
+            && let Some(cache) = final_validation_cache.as_deref_mut()
+        {
+            cache.cache_final_validation(function, fingerprint);
+        }
     }
     Ok(PassReport {
         pass: PassId::ValidateBytecodeInput,
@@ -13053,9 +13881,14 @@ fn validate_bytecode_input_checkpoint(
 /// change ORs the invalidation mask, and this refresh is the only way the
 /// facts become trusted again.
 fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(), ValidationError> {
-    let _riff = std::time::Instant::now();
-    let array_calls = regions::array_call_summaries(program, types);
-    let mut _riff_n = 0usize;
+    // Most optimizer checkpoints follow an unchanged pass, or a pass that
+    // invalidated only ephemeral metadata. Avoid deriving whole-program array
+    // call summaries in those cases: the summaries are needed solely by the
+    // ownership/cleanup rebuild below.
+    let requires_flow_rebuild = program.functions.iter().any(|function| {
+        function.invalid_analyses & (analysis::CFG | analysis::USES | analysis::FLOW) != 0
+    });
+    let array_calls = requires_flow_rebuild.then(|| regions::array_call_summaries(program, types));
     for function in &mut program.functions {
         let invalidated = function.invalid_analyses;
         if invalidated == 0 {
@@ -13074,8 +13907,13 @@ fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(),
         let locals = bridged_locals(function, types);
         function.flow.locals = locals;
         function.flow.move_paths = derive_move_paths(function);
-        let elaboration =
-            derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
+        let elaboration = derive_cleanup_elaboration_with_array_calls(
+            function,
+            types,
+            array_calls
+                .as_ref()
+                .expect("flow rebuild prepared array-call summaries"),
+        )?;
         apply_cleanup_elaboration(function, elaboration);
         function.invalid_analyses = 0;
     }
@@ -13137,7 +13975,18 @@ fn push_checked(
     types: &[Type],
 ) -> Result<(), ValidationError> {
     let pass = report.pass;
+    let changed = report.outcome == PassOutcome::Changed;
     passes.push(report);
+
+    // Every optimizer transform is transactional: an Unchanged, skipped, or
+    // budget-exhausted report has not published MIR mutations.  In release
+    // builds, repeatedly walking every function to rediscover that there are
+    // no invalidated ownership facts becomes noticeable in O3's bounded
+    // fixed-point tails.  A changed report is still refreshed immediately;
+    // debug builds retain the unconditional checkpoint as a contract check.
+    if !changed && !cfg!(debug_assertions) {
+        return Ok(());
+    }
     validate_cleanup_checkpoint(program, types).map_err(|mut error| {
         if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
             eprintln!(
@@ -13180,18 +14029,110 @@ fn run_fixed_point(
     pass: PassId,
     types: &[Type],
     global_remaining: &mut u64,
+    mut body_cache: Option<&mut (dyn TransactionalPassBodyCache + '_)>,
 ) -> Result<(), ValidationError> {
     for _ in 0..FIXED_POINT_ROUNDS {
         if *global_remaining == 0 {
             break;
         }
-        let report = run_transactional_pass(program, pass, types, global_remaining);
+        let report = run_transactional_pass_with_body_cache(
+            program,
+            pass,
+            types,
+            global_remaining,
+            body_cache.as_deref_mut(),
+        );
         let stop = matches!(
             report.outcome,
             PassOutcome::Unchanged | PassOutcome::BudgetExhausted
         );
         push_checked(passes, report, program, types)?;
         if stop {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Run a whole-program transform to the same bounded fixed point as local
+/// passes. Direct-call specialization discovers candidates across function
+/// bodies, so it must use the whole-program dispatcher rather than the local
+/// pass entry point.
+fn run_whole_program_fixed_point(
+    passes: &mut Vec<PassReport>,
+    program: &mut Program,
+    pass: PassId,
+    tables: WholeProgramPassTables<'_>,
+    level: OptimizationLevel,
+    types: &[Type],
+    global_remaining: &mut u64,
+    inline_policy: &mut InlinePolicyState,
+    plan: OptimizationPlan,
+) -> Result<(), ValidationError> {
+    for _ in 0..FIXED_POINT_ROUNDS {
+        if *global_remaining == 0 {
+            break;
+        }
+        let report = run_transactional_whole_program_pass(
+            program,
+            pass,
+            tables,
+            level,
+            global_remaining,
+            inline_policy,
+            plan,
+        );
+        let stop = matches!(
+            report.outcome,
+            PassOutcome::Unchanged | PassOutcome::BudgetExhausted,
+        );
+        push_checked(passes, report, program, types)?;
+        if stop {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Complete the post-inline cleanup cycle. Sparse simplification performs
+/// propagation and local DCE; CFG normalization then deletes the newly dead
+/// arms and trivial joins. Either rewrite can expose work for the other, so
+/// alternate them under the same deterministic cap and global work budget.
+fn run_post_inline_cleanup_fixed_point(
+    passes: &mut Vec<PassReport>,
+    program: &mut Program,
+    types: &[Type],
+    global_remaining: &mut u64,
+    mut body_cache: Option<&mut (dyn TransactionalPassBodyCache + '_)>,
+) -> Result<(), ValidationError> {
+    for _ in 0..FIXED_POINT_ROUNDS {
+        if *global_remaining == 0 {
+            break;
+        }
+        let normalize = run_transactional_pass_with_body_cache(
+            program,
+            PassId::NormalizeCfg,
+            types,
+            global_remaining,
+            body_cache.as_deref_mut(),
+        );
+        let normalize_stop = matches!(normalize.outcome, PassOutcome::Unchanged);
+        let normalize_exhausted = matches!(normalize.outcome, PassOutcome::BudgetExhausted);
+        push_checked(passes, normalize, program, types)?;
+        if *global_remaining == 0 || normalize_exhausted {
+            break;
+        }
+        let sparse = run_transactional_pass_with_body_cache(
+            program,
+            PassId::SparseSimplify,
+            types,
+            global_remaining,
+            body_cache.as_deref_mut(),
+        );
+        let sparse_stop = matches!(sparse.outcome, PassOutcome::Unchanged);
+        let sparse_exhausted = matches!(sparse.outcome, PassOutcome::BudgetExhausted);
+        push_checked(passes, sparse, program, types)?;
+        if sparse_exhausted || (normalize_stop && sparse_stop) {
             break;
         }
     }
@@ -13211,37 +14152,7 @@ pub(crate) fn optimize_program(
     optimize_program_with_control_tables(program, types, &[], &[], level)
 }
 
-struct OptTimings {
-    enabled: bool,
-    started: Instant,
-    checkpoint: Instant,
-}
-
-impl OptTimings {
-    fn from_environment() -> Self {
-        let now = Instant::now();
-        Self {
-            enabled: std::env::var_os("G1_OPT_TIMINGS").is_some(),
-            started: now,
-            checkpoint: now,
-        }
-    }
-
-    fn mark(&mut self, phase: &str) {
-        if self.enabled {
-            let now = Instant::now();
-            eprintln!(
-                "g1-opt {phase}: phase={:.3}s total={:.3}s solve={:.3}s({} calls)",
-                now.duration_since(self.checkpoint).as_secs_f64(),
-                now.duration_since(self.started).as_secs_f64(),
-                regions::solve_cumulative_micros() as f64 / 1e6,
-                regions::solve_calls()
-            );
-            self.checkpoint = now;
-        }
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn optimize_program_with_control_tables(
     program: &mut Program,
     types: &[Type],
@@ -13249,7 +14160,49 @@ pub(crate) fn optimize_program_with_control_tables(
     handler_defs: &[HandlerDef],
     level: OptimizationLevel,
 ) -> Result<OptimizationReport, ValidationError> {
-    let mut timings = OptTimings::from_environment();
+    optimize_program_with_control_tables_and_plan(
+        program,
+        types,
+        protocols,
+        handler_defs,
+        level,
+        OptimizationPlan::default(),
+    )
+}
+
+pub(crate) fn optimize_program_with_control_tables_and_plan(
+    program: &mut Program,
+    types: &[Type],
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+    level: OptimizationLevel,
+    plan: OptimizationPlan,
+) -> Result<OptimizationReport, ValidationError> {
+    optimize_program_with_control_tables_and_plan_incremental(
+        program,
+        types,
+        protocols,
+        handler_defs,
+        level,
+        plan,
+        None,
+    )
+}
+
+/// The incremental entry point may reuse bodies which have already crossed
+/// the raw-MIR ownership/cleanup boundary, plus exact snapshots at individual
+/// local O3 pass slots. Whole-program specialization and inlining deliberately
+/// remain fresh transactions: they own cross-body decisions and inlining
+/// policy, while every local replay still proves its exact input and budget.
+pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
+    program: &mut Program,
+    types: &[Type],
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+    level: OptimizationLevel,
+    plan: OptimizationPlan,
+    mut incremental_cleanup: Option<&mut crate::compiler_session::IncrementalMirCache>,
+) -> Result<OptimizationReport, ValidationError> {
     validate_program(program, types, MirPhase::Raw)?;
     let initial_operations = operation_count(program);
     let mut passes = Vec::new();
@@ -13259,20 +14212,69 @@ pub(crate) fn optimize_program_with_control_tables(
         PassOutcome::Unchanged,
         initial_operations,
     );
+    let cleanup_dependencies = regions::array_call_summaries(program, types);
+    // Cleanup elaboration mutates a body's control flow.  Its cache key must
+    // therefore be taken at the raw-MIR boundary, where reuse is checked,
+    // rather than recomputed from the transformed cleanup body below.
+    let cleanup_input_fingerprints = program
+        .functions
+        .iter()
+        .map(|function| {
+            (
+                function.declaration,
+                cleanup_raw_dependency_fingerprint(function, &cleanup_dependencies),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut reused_cleanup_bodies = BTreeSet::new();
+    if let Some(cache) = incremental_cleanup.as_mut() {
+        for function in &mut program.functions {
+            let fingerprint = cleanup_input_fingerprints
+                .get(&function.declaration)
+                .copied()
+                .flatten();
+            if let Some(cleanup) = cache.reuse_cleanup(function, fingerprint, |cached| {
+                cleanup_dependency_fingerprint_v1(function, &cleanup_dependencies) == cached
+                    || cleanup_dependency_fingerprint_v1_strict(function, &cleanup_dependencies)
+                        == Some(cached)
+            }) {
+                reused_cleanup_bodies.insert(function.declaration);
+                *function = cleanup;
+            }
+        }
+    }
     let import = import_and_validate_place_flow(program, types)?;
     timings.mark("validate-raw");
     passes.push(import);
-    validate_program(program, types, MirPhase::Owned)?;
+    // Reused bodies are already Cleanup while freshly lowered bodies are now
+    // Owned. Validate the latter under the complete declaration universe;
+    // this clone never mutates cached cleanup facts.
+    let mut owned_view = program.clone();
+    for function in &mut owned_view.functions {
+        if function.phase == MirPhase::Cleanup {
+            function.phase = MirPhase::Owned;
+        }
+    }
+    validate_program(&owned_view, types, MirPhase::Owned)?;
     let cleanup = elaborate_cleanup(program, types)?;
     passes.push(cleanup);
     validate_program(program, types, MirPhase::Cleanup)?;
-    // elaborate_cleanup just re-derived and stored fresh cleanup plans for
-    // every function, and nothing between here and the Cleanup validation
-    // mutates the program, so a whole-program validate_flow_and_cleanup right
-    // now would re-solve every function only to re-discover the plans we just
-    // stored. The ownership contract is instead enforced at the later
-    // incremental checkpoints and the trailing final validation.
-    timings.mark("cleanup+validate");
+    if cfg!(debug_assertions) || reused_cleanup_bodies.is_empty() {
+        validate_flow_and_cleanup(program, types)?;
+    } else {
+        validate_flow_and_cleanup_except(program, types, &reused_cleanup_bodies)?;
+    }
+    if let Some(cache) = incremental_cleanup.as_mut() {
+        for function in &program.functions {
+            cache.cache_cleanup(
+                function,
+                cleanup_input_fingerprints
+                    .get(&function.declaration)
+                    .copied()
+                    .flatten(),
+            );
+        }
+    }
     record(
         &mut passes,
         PassId::ValidateCleanupMir,
@@ -13280,6 +14282,62 @@ pub(crate) fn optimize_program_with_control_tables(
         initial_operations,
     );
 
+    // The durable final-O3 cache freezes only functions whose complete direct
+    // dependency closure is unchanged.  Those bodies have already survived
+    // the entire O3 schedule, including all caller re-optimization caused by
+    // prior specialization/inlining, so running the schedule over them again
+    // merely repeats ownership fixed-point work. Functions outside this set
+    // remain ordinary cleanup MIR and are optimized normally.
+    let optimized_namespace = optimized_mir_namespace_fingerprint(program, protocols, handler_defs);
+    let optimized_cache_plan = optimized_mir_cache_plan(program);
+    if level == OptimizationLevel::O3 {
+        if let Some(cache) = incremental_cleanup.as_mut() {
+            for group in &optimized_cache_plan.recursive_groups {
+                let inputs = group
+                    .declarations
+                    .iter()
+                    .filter_map(|declaration| {
+                        program
+                            .functions
+                            .iter()
+                            .find(|function| function.declaration == *declaration)
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>();
+                if inputs.len() != group.declarations.len() {
+                    continue;
+                }
+                if let Some(outputs) = cache.reuse_recursive_optimized(
+                    &inputs,
+                    group.dependency_fingerprint,
+                    optimized_namespace,
+                ) {
+                    let outputs = outputs
+                        .into_iter()
+                        .map(|function| (function.declaration, function))
+                        .collect::<BTreeMap<_, _>>();
+                    for function in &mut program.functions {
+                        if let Some(output) = outputs.get(&function.declaration) {
+                            *function = output.clone();
+                        }
+                    }
+                }
+            }
+            for function in &mut program.functions {
+                let Some(dependency) = optimized_cache_plan
+                    .individual_dependencies
+                    .get(&function.declaration)
+                else {
+                    continue;
+                };
+                if let Some(output) =
+                    cache.reuse_optimized(function, *dependency, optimized_namespace)
+                {
+                    *function = output;
+                }
+            }
+        }
+    }
     let normalize = run_mandatory_normalize(program);
     push_checked(&mut passes, normalize, program, types)?;
     timings.mark("normalize");
@@ -13298,34 +14356,58 @@ pub(crate) fn optimize_program_with_control_tables(
             PassId::SparseSimplify,
             types,
             &mut global_remaining,
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         )?;
         timings.mark("sparse-o1");
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::ScalarizeLocals,
                 types,
                 &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::SimplifyCleanup,
                 types,
                 &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
+            );
+            push_checked(&mut passes, report, program, types)?;
+        }
+        if global_remaining != 0 {
+            let report = run_transactional_whole_program_pass(
+                program,
+                PassId::SpecializeDirectCalls,
+                whole_program_tables,
+                level,
+                &mut global_remaining,
+                &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
     }
     if level.at_least(OptimizationLevel::O2) {
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::GlobalSimplify,
                 types,
                 &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13338,6 +14420,7 @@ pub(crate) fn optimize_program_with_control_tables(
                 level,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13350,16 +14433,20 @@ pub(crate) fn optimize_program_with_control_tables(
                 level,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
         timings.mark("specialize-control");
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::SpecializeCleanup,
                 types,
                 &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13372,6 +14459,7 @@ pub(crate) fn optimize_program_with_control_tables(
                 level,
                 &mut global_remaining,
                 &mut inline_policy,
+                plan,
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13381,6 +14469,9 @@ pub(crate) fn optimize_program_with_control_tables(
             PassId::SparseSimplify,
             types,
             &mut global_remaining,
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         )?;
         timings.mark("inline-by-cost-o2");
         // O3 repeats the devirtualization/control/inlining family, then gives
@@ -13388,11 +14479,14 @@ pub(crate) fn optimize_program_with_control_tables(
         // must happen before proof erasure and tail formation.
         if level == OptimizationLevel::O3 {
             if global_remaining != 0 {
-                let report = run_transactional_pass(
+                let report = run_transactional_pass_with_body_cache(
                     program,
                     PassId::GlobalSimplify,
                     types,
                     &mut global_remaining,
+                    incremental_cleanup
+                        .as_deref_mut()
+                        .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
                 );
                 push_checked(&mut passes, report, program, types)?;
             }
@@ -13404,15 +14498,14 @@ pub(crate) fn optimize_program_with_control_tables(
                     level,
                     &mut global_remaining,
                     &mut inline_policy,
+                    plan,
                 );
                 push_checked(&mut passes, report, program, types)?;
             }
             if global_remaining != 0 {
-                let report = run_transactional_whole_program_pass(
+                let report = run_transactional_o3_followup_inline_pass(
                     program,
-                    PassId::InlineByCost,
                     whole_program_tables,
-                    level,
                     &mut global_remaining,
                     &mut inline_policy,
                 );
@@ -13424,6 +14517,56 @@ pub(crate) fn optimize_program_with_control_tables(
                 PassId::SparseSimplify,
                 types,
                 &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
+            )?;
+        }
+    }
+
+    // Sparse/global simplification and inlining can turn a Switch into a
+    // Goto or expose an unreachable continuation after the mandatory early
+    // normalization has run. Alternate propagation/DCE with checked CFG
+    // cleanup before representation lowering.
+    if level.at_least(OptimizationLevel::O1) {
+        run_post_inline_cleanup_fixed_point(
+            &mut passes,
+            program,
+            types,
+            &mut global_remaining,
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
+        )?;
+        if level.at_least(OptimizationLevel::O2) {
+            // The first direct-call pass can turn an ordinary wrapper into a
+            // forwarding function only after its call continuation has been
+            // normalized away. Inlining can expose the same shape in a caller.
+            // Revisit direct-call specialization after that cleanup so callers do
+            // not retain a dynamic VM call merely because their target became
+            // trivial during this optimization run. The bounded pass fixed point
+            // also handles short chains of such newly-forwarding wrappers.
+            run_whole_program_fixed_point(
+                &mut passes,
+                program,
+                PassId::SpecializeDirectCalls,
+                whole_program_tables,
+                level,
+                types,
+                &mut global_remaining,
+                &mut inline_policy,
+                plan,
+            )?;
+            // Re-specialization produces Gotos and can expose another trivial
+            // join, so give its result the same checked CFG/local cleanup cycle.
+            run_post_inline_cleanup_fixed_point(
+                &mut passes,
+                program,
+                types,
+                &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             )?;
         }
     }
@@ -13434,11 +14577,14 @@ pub(crate) fn optimize_program_with_control_tables(
     push_checked(&mut passes, erasure, program, types)?;
     timings.mark("erasure");
     if level.at_least(OptimizationLevel::O2) {
-        let report = run_transactional_pass(
+        let report = run_transactional_pass_with_body_cache(
             program,
             PassId::FormTailCallsAndHoist,
             types,
             &mut global_remaining,
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         );
         push_checked(&mut passes, report, program, types)?;
     }
@@ -13448,19 +14594,637 @@ pub(crate) fn optimize_program_with_control_tables(
         function.phase = MirPhase::Optimized;
         function.features = infer_feature_bits(function);
     }
-    validate_program(program, types, MirPhase::Optimized)?;
-    // validate_bytecode_input_checkpoint immediately re-runs the same
-    // whole-program validate_flow_and_cleanup (plus the cleanup-state
-    // analysis) with nothing mutating in between, so the explicit call here
-    // would re-solve every function a redundant second time.
-    passes.push(validate_bytecode_input_checkpoint(program, types)?);
-    timings.mark("final-validations");
+    // The bytecode-input checkpoint below performs these same optimized-MIR
+    // and cleanup validations before deriving representation facts. Nothing
+    // mutates the program between the phase/feature update and that checkpoint,
+    // so let the checkpoint be the single final validation traversal.
+    passes.push(validate_bytecode_input_checkpoint(
+        program,
+        types,
+        incremental_cleanup.as_deref_mut(),
+    )?);
+    if level == OptimizationLevel::O3 {
+        if let Some(cache) = incremental_cleanup.as_mut() {
+            let base_declarations = optimized_cache_plan
+                .individual_dependencies
+                .keys()
+                .copied()
+                .chain(
+                    optimized_cache_plan
+                        .recursive_groups
+                        .iter()
+                        .flat_map(|group| group.declarations.iter().copied()),
+                )
+                .collect::<BTreeSet<_>>();
+            for function in &program.functions {
+                let Some(dependency) = optimized_cache_plan
+                    .individual_dependencies
+                    .get(&function.declaration)
+                else {
+                    continue;
+                };
+                if optimized_mir_output_is_stable(function, &base_declarations) {
+                    cache.cache_optimized(function, *dependency, optimized_namespace);
+                }
+            }
+            for group in &optimized_cache_plan.recursive_groups {
+                let outputs = group
+                    .declarations
+                    .iter()
+                    .filter_map(|declaration| {
+                        program
+                            .functions
+                            .iter()
+                            .find(|function| function.declaration == *declaration)
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>();
+                if outputs.len() == group.declarations.len()
+                    && outputs.iter().all(|function| {
+                        optimized_mir_output_is_stable(function, &base_declarations)
+                    })
+                {
+                    cache.cache_recursive_optimized(
+                        &outputs,
+                        group.dependency_fingerprint,
+                        optimized_namespace,
+                    );
+                }
+            }
+        }
+    }
     Ok(OptimizationReport {
         level,
         initial_operations,
         final_operations: operation_count(program),
         passes,
     })
+}
+
+/// A lightweight, deterministic input hash for durable optimized-body keys.
+/// It is never used as the sole reuse authority: the cache also compares the
+/// complete input MIR body byte-for-byte through `PartialEq`.
+fn optimized_mir_hash(mut state: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x100_0000_01b3);
+    }
+    state
+}
+
+/// Namespace layout controls the function declaration IDs used by MIR. Body
+/// edits deliberately do not participate, while adding/removing/reordering a
+/// declaration makes every cached output conservative-cache-miss.
+fn optimized_mir_namespace_fingerprint(
+    program: &Program,
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+) -> u64 {
+    let mut state = optimized_mir_hash(0xcbf2_9ce4_8422_2325, b"grandiose:o3-namespace-v1\0");
+    for function in &program.functions {
+        state = optimized_mir_hash(state, &function.declaration.to_le_bytes());
+        state = optimized_mir_hash(state, function.name.as_bytes());
+        state = optimized_mir_hash(
+            state,
+            format!(
+                "{:?}{:?}{:?}{:?}{:?}{:?}",
+                function.params,
+                function.result,
+                function.receiver_mode,
+                function.receiver_type,
+                function.no_return,
+                function.outward_protocols,
+            )
+            .as_bytes(),
+        );
+    }
+    // Handler/control specialization reads these definitions even when a
+    // body itself has no direct call edge. Retaining their structural form in
+    // the namespace makes per-body O3 reuse exact across an effect-surface
+    // change without coupling it to unrelated callable-body edits.
+    state = optimized_mir_hash(state, format!("{protocols:?}{handler_defs:?}").as_bytes());
+    state
+}
+
+/// Return every statically named function which can influence this body's O3
+/// result. Dynamic handler/control operations have no body dependency of
+/// their own; their definitions are guarded by the namespace fingerprint.
+/// This keeps handler-heavy source bodies independently cacheable whenever
+/// their named targets remain in the stable source declaration namespace.
+fn optimized_mir_direct_dependencies(function: &Function) -> Option<BTreeSet<u32>> {
+    let mut dependencies = BTreeSet::new();
+    for block in &function.blocks {
+        for statement in &block.statements {
+            match &statement.kind {
+                InstructionKind::MakeCallable { function, .. } => {
+                    dependencies.insert(*function);
+                }
+                InstructionKind::MakeHandlerShared { functions, .. } => {
+                    dependencies.extend(functions.iter().copied());
+                }
+                InstructionKind::MakeHandler { .. } | _ => {}
+            }
+        }
+        match block.terminator {
+            Terminator::Call { function, .. }
+            | Terminator::TailCall { function, .. }
+            | Terminator::CallKnownReceiver { function, .. }
+            | Terminator::TailCallKnownReceiver { function, .. } => {
+                dependencies.insert(function);
+            }
+            Terminator::CallSelf { .. } | Terminator::TailCallSelf { .. } => {
+                dependencies.insert(function.declaration);
+            }
+            Terminator::CallIndirect {
+                known_function: Some(function),
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: Some(function),
+                ..
+            } => {
+                dependencies.insert(function);
+            }
+            Terminator::Abort { .. }
+            | Terminator::Cancel { .. }
+            | Terminator::Goto(_)
+            | Terminator::HostCall { .. }
+            | Terminator::Handle { .. }
+            | Terminator::Leave { .. }
+            | Terminator::Perform { .. }
+            | Terminator::Return { .. }
+            | Terminator::Resume { .. }
+            | Terminator::Switch { .. }
+            | Terminator::TailResume { .. }
+            | Terminator::Unreachable => {}
+            Terminator::CallIndirect {
+                known_function: None,
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: None,
+                ..
+            } => return None,
+        }
+    }
+    Some(dependencies)
+}
+
+/// Fingerprint the full transitive direct-call input of every cacheable body.
+/// A changed callee therefore forces its callers through O3 again, preserving
+/// the post-specialization/inlining re-optimization contract.
+fn optimized_mir_dependency_fingerprints(program: &Program) -> BTreeMap<u32, u64> {
+    let functions = program
+        .functions
+        .iter()
+        .map(|function| (function.declaration, function))
+        .collect::<BTreeMap<_, _>>();
+    fn visit(
+        declaration: u32,
+        functions: &BTreeMap<u32, &Function>,
+        memo: &mut BTreeMap<u32, Option<u64>>,
+        visiting: &mut BTreeSet<u32>,
+    ) -> Option<u64> {
+        if let Some(fingerprint) = memo.get(&declaration) {
+            return *fingerprint;
+        }
+        // A recursive SCC is correct to optimize, but an individual cached
+        // output cannot prove the fixed point without retaining the complete
+        // component. Keep such bodies on the ordinary schedule for now.
+        if !visiting.insert(declaration) {
+            return None;
+        }
+        let fingerprint = (|| {
+            let function = functions.get(&declaration)?;
+            let dependencies = optimized_mir_direct_dependencies(function)?;
+            let mut state =
+                optimized_mir_hash(0xcbf2_9ce4_8422_2325, b"grandiose:o3-direct-closure-v1\0");
+            state = optimized_mir_hash(state, format!("{function:?}").as_bytes());
+            for dependency in dependencies {
+                if dependency == declaration {
+                    return None;
+                }
+                let dependency_fingerprint = visit(dependency, functions, memo, visiting)?;
+                state = optimized_mir_hash(state, &dependency.to_le_bytes());
+                state = optimized_mir_hash(state, &dependency_fingerprint.to_le_bytes());
+            }
+            Some(state)
+        })();
+        visiting.remove(&declaration);
+        memo.insert(declaration, fingerprint);
+        fingerprint
+    }
+
+    let mut memo = BTreeMap::new();
+    for declaration in functions.keys().copied().collect::<Vec<_>>() {
+        let _ = visit(declaration, &functions, &mut memo, &mut BTreeSet::new());
+    }
+    memo.into_iter()
+        .filter_map(|(declaration, fingerprint)| {
+            fingerprint.map(|fingerprint| (declaration, fingerprint))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct RecursiveOptimizedMirGroup {
+    declarations: Vec<u32>,
+    dependency_fingerprint: u64,
+}
+
+#[derive(Default)]
+struct OptimizedMirCachePlan {
+    /// Preserves the existing v1 individual-body keys whenever possible, so
+    /// adding SCC support never discards the durable per-function cache.
+    individual_dependencies: BTreeMap<u32, u64>,
+    recursive_groups: Vec<RecursiveOptimizedMirGroup>,
+}
+
+/// Compute a cache plan over the SCC-condensed direct-call graph. A cyclic
+/// component is reusable only as one atomic O3 fixed point; acyclic callers
+/// of that component become independently cacheable again through the
+/// component's recursive closure fingerprint.
+fn optimized_mir_cache_plan(program: &Program) -> OptimizedMirCachePlan {
+    let functions = program
+        .functions
+        .iter()
+        .map(|function| (function.declaration, function))
+        .collect::<BTreeMap<_, _>>();
+    let dependencies = functions
+        .iter()
+        .map(|(declaration, function)| {
+            (
+                *declaration,
+                optimized_mir_direct_dependencies(function).and_then(|dependencies| {
+                    dependencies
+                        .iter()
+                        .all(|dependency| functions.contains_key(dependency))
+                        .then_some(dependencies)
+                }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    fn visit_scc(
+        declaration: u32,
+        dependencies: &BTreeMap<u32, Option<BTreeSet<u32>>>,
+        index: &mut usize,
+        indices: &mut BTreeMap<u32, usize>,
+        lowlinks: &mut BTreeMap<u32, usize>,
+        stack: &mut Vec<u32>,
+        on_stack: &mut BTreeSet<u32>,
+        components: &mut Vec<Vec<u32>>,
+    ) {
+        indices.insert(declaration, *index);
+        lowlinks.insert(declaration, *index);
+        *index += 1;
+        stack.push(declaration);
+        on_stack.insert(declaration);
+        if let Some(Some(edges)) = dependencies.get(&declaration) {
+            for dependency in edges {
+                if !indices.contains_key(dependency) {
+                    visit_scc(
+                        *dependency,
+                        dependencies,
+                        index,
+                        indices,
+                        lowlinks,
+                        stack,
+                        on_stack,
+                        components,
+                    );
+                    let dependency_lowlink = lowlinks[dependency];
+                    let lowlink = lowlinks
+                        .get_mut(&declaration)
+                        .expect("current Tarjan node has a lowlink");
+                    *lowlink = (*lowlink).min(dependency_lowlink);
+                } else if on_stack.contains(dependency) {
+                    let dependency_index = indices[dependency];
+                    let lowlink = lowlinks
+                        .get_mut(&declaration)
+                        .expect("current Tarjan node has a lowlink");
+                    *lowlink = (*lowlink).min(dependency_index);
+                }
+            }
+        }
+        if lowlinks[&declaration] == indices[&declaration] {
+            let mut component = Vec::new();
+            loop {
+                let member = stack.pop().expect("Tarjan root has a stack entry");
+                on_stack.remove(&member);
+                component.push(member);
+                if member == declaration {
+                    break;
+                }
+            }
+            component.sort_unstable();
+            components.push(component);
+        }
+    }
+
+    let mut components = Vec::new();
+    let mut index = 0;
+    let mut indices = BTreeMap::new();
+    let mut lowlinks = BTreeMap::new();
+    let mut stack = Vec::new();
+    let mut on_stack = BTreeSet::new();
+    for declaration in dependencies.keys().copied() {
+        if !indices.contains_key(&declaration) {
+            visit_scc(
+                declaration,
+                &dependencies,
+                &mut index,
+                &mut indices,
+                &mut lowlinks,
+                &mut stack,
+                &mut on_stack,
+                &mut components,
+            );
+        }
+    }
+    components.sort_by_key(|component| component.first().copied().unwrap_or_default());
+    let component_for_declaration = components
+        .iter()
+        .enumerate()
+        .flat_map(|(component, declarations)| {
+            declarations
+                .iter()
+                .copied()
+                .map(move |declaration| (declaration, component))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let component_dependencies = components
+        .iter()
+        .enumerate()
+        .map(|(component, declarations)| {
+            let mut valid = true;
+            let mut external = BTreeSet::new();
+            for declaration in declarations {
+                let Some(Some(direct)) = dependencies.get(declaration) else {
+                    valid = false;
+                    continue;
+                };
+                for dependency in direct {
+                    let Some(dependency_component) = component_for_declaration.get(dependency)
+                    else {
+                        valid = false;
+                        continue;
+                    };
+                    if *dependency_component != component {
+                        external.insert(*dependency_component);
+                    }
+                }
+            }
+            (valid, external)
+        })
+        .collect::<Vec<_>>();
+    fn component_fingerprint(
+        component: usize,
+        components: &[Vec<u32>],
+        component_dependencies: &[(bool, BTreeSet<usize>)],
+        functions: &BTreeMap<u32, &Function>,
+        memo: &mut BTreeMap<usize, Option<u64>>,
+        visiting: &mut BTreeSet<usize>,
+    ) -> Option<u64> {
+        if let Some(fingerprint) = memo.get(&component) {
+            return *fingerprint;
+        }
+        if !component_dependencies[component].0 || !visiting.insert(component) {
+            memo.insert(component, None);
+            return None;
+        }
+        let fingerprint = (|| {
+            let mut state =
+                optimized_mir_hash(0xcbf2_9ce4_8422_2325, b"grandiose:o3-scc-closure-v1\0");
+            for declaration in &components[component] {
+                let function = functions.get(declaration)?;
+                state = optimized_mir_hash(state, &declaration.to_le_bytes());
+                state = optimized_mir_hash(state, format!("{function:?}").as_bytes());
+            }
+            for dependency in &component_dependencies[component].1 {
+                let dependency_fingerprint = component_fingerprint(
+                    *dependency,
+                    components,
+                    component_dependencies,
+                    functions,
+                    memo,
+                    visiting,
+                )?;
+                for declaration in &components[*dependency] {
+                    state = optimized_mir_hash(state, &declaration.to_le_bytes());
+                }
+                state = optimized_mir_hash(state, &dependency_fingerprint.to_le_bytes());
+            }
+            Some(state)
+        })();
+        visiting.remove(&component);
+        memo.insert(component, fingerprint);
+        fingerprint
+    }
+
+    let legacy_individual = optimized_mir_dependency_fingerprints(program);
+    let mut plan = OptimizedMirCachePlan {
+        individual_dependencies: legacy_individual.clone(),
+        recursive_groups: Vec::new(),
+    };
+    let mut memo = BTreeMap::new();
+    for component in 0..components.len() {
+        let Some(fingerprint) = component_fingerprint(
+            component,
+            &components,
+            &component_dependencies,
+            &functions,
+            &mut memo,
+            &mut BTreeSet::new(),
+        ) else {
+            continue;
+        };
+        let declarations = &components[component];
+        let self_recursive = declarations.len() == 1
+            && dependencies
+                .get(&declarations[0])
+                .and_then(Option::as_ref)
+                .is_some_and(|dependencies| dependencies.contains(&declarations[0]));
+        if declarations.len() > 1 || self_recursive {
+            plan.recursive_groups.push(RecursiveOptimizedMirGroup {
+                declarations: declarations.clone(),
+                dependency_fingerprint: fingerprint,
+            });
+        } else if !legacy_individual.contains_key(&declarations[0]) {
+            plan.individual_dependencies
+                .insert(declarations[0], fingerprint);
+        }
+    }
+    plan
+}
+
+/// Never recover an output that mentions a scalarized clone or fresh control
+/// declaration. Such IDs are assigned from whole-program candidate order;
+/// keeping only original declarations makes independent body reuse exact.
+fn optimized_mir_output_is_stable(function: &Function, base_declarations: &BTreeSet<u32>) -> bool {
+    if function.phase != MirPhase::Optimized
+        || !optimized_mir_direct_dependencies(function).is_some()
+    {
+        return false;
+    }
+    function.blocks.iter().all(|block| {
+        block
+            .statements
+            .iter()
+            .all(|statement| match &statement.kind {
+                InstructionKind::MakeCallable { function, .. } => {
+                    base_declarations.contains(function)
+                }
+                InstructionKind::MakeHandlerShared { functions, .. } => functions
+                    .iter()
+                    .all(|function| base_declarations.contains(function)),
+                _ => true,
+            })
+            && match block.terminator {
+                Terminator::Call { function, .. }
+                | Terminator::TailCall { function, .. }
+                | Terminator::CallKnownReceiver { function, .. }
+                | Terminator::TailCallKnownReceiver { function, .. } => {
+                    base_declarations.contains(&function)
+                }
+                Terminator::CallIndirect {
+                    known_function: Some(function),
+                    ..
+                }
+                | Terminator::TailCallIndirect {
+                    known_function: Some(function),
+                    ..
+                } => base_declarations.contains(&function),
+                _ => true,
+            }
+    })
+}
+
+/// Fingerprint the interprocedural ownership facts consumed by an optimized
+/// body. This v1 representation is a durable final-validation key; it must
+/// stay stable so existing independently proven O3 bodies remain reusable.
+pub(crate) fn cleanup_dependency_fingerprint(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Option<u64> {
+    cleanup_dependency_fingerprint_with_header(
+        function,
+        summaries,
+        b"grandiose:cleanup-array-summary-v1\0",
+    )
+}
+
+/// Fingerprint raw MIR at the cleanup-cache boundary. Cleanup elaboration
+/// changes the body it produces, so this deliberately uses a separate key
+/// namespace from the final-validation fingerprint above.
+fn cleanup_raw_dependency_fingerprint(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Option<u64> {
+    cleanup_dependency_fingerprint_with_header(
+        function,
+        summaries,
+        b"grandiose:cleanup-array-summary-v2-raw-mir\0",
+    )
+}
+
+/// Retain the v1 raw-boundary calculation solely to migrate validated entries
+/// already on disk. New cleanup entries use the raw-MIR v2 key above.
+fn cleanup_dependency_fingerprint_v1(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> u64 {
+    cleanup_dependency_fingerprint(function, summaries)
+        .expect("the v1 direct-call fingerprint is total")
+}
+
+fn cleanup_dependency_fingerprint_with_header(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+    header: &[u8],
+) -> Option<u64> {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    let mut write = |bytes: &[u8]| {
+        for byte in bytes {
+            state ^= u64::from(*byte);
+            state = state.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    write(header);
+    write(&function.declaration.to_le_bytes());
+    for block in &function.blocks {
+        let target = match &block.terminator {
+            Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                Some(*function)
+            }
+            _ => None,
+        };
+        let Some(target) = target else { continue };
+        write(&target.to_le_bytes());
+        match summaries.get(&target) {
+            Some(summary) => {
+                // Array summaries contain only ordered vectors and scalar
+                // fields; the derived Debug text is deterministic and avoids
+                // a second hand-rolled serialization schema for this
+                // conservative cache guard.
+                write(format!("{summary:?}").as_bytes());
+            }
+            None => write(&[0]),
+        }
+    }
+    Some(state)
+}
+
+/// The first durable cleanup-cache implementation treated known indirect
+/// calls as direct summary dependencies and declined to cache unresolved
+/// calls.  This conservative v1 form is accepted only while upgrading an
+/// existing exact raw-body entry to v2.
+fn cleanup_dependency_fingerprint_v1_strict(
+    function: &Function,
+    summaries: &BTreeMap<u32, regions::ArrayCallSummary>,
+) -> Option<u64> {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    let mut write = |bytes: &[u8]| {
+        for byte in bytes {
+            state ^= u64::from(*byte);
+            state = state.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    write(b"grandiose:cleanup-array-summary-v1\0");
+    write(&function.declaration.to_le_bytes());
+    for block in &function.blocks {
+        let target = match &block.terminator {
+            Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                Some(*function)
+            }
+            Terminator::CallIndirect {
+                known_function: Some(function),
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: Some(function),
+                ..
+            } => Some(*function),
+            Terminator::CallIndirect {
+                known_function: None,
+                ..
+            }
+            | Terminator::TailCallIndirect {
+                known_function: None,
+                ..
+            }
+            | Terminator::CallSelf { .. }
+            | Terminator::TailCallSelf { .. }
+            | Terminator::CallKnownReceiver { .. }
+            | Terminator::TailCallKnownReceiver { .. } => return None,
+            _ => None,
+        };
+        let Some(target) = target else { continue };
+        let summary = summaries.get(&target)?;
+        write(&target.to_le_bytes());
+        write(format!("{summary:?}").as_bytes());
+    }
+    Some(state)
 }
 
 #[cfg(test)]
@@ -13519,6 +15283,36 @@ mod tests {
     }
 
     #[test]
+    fn o3_cache_plan_reuses_recursive_components_and_their_acyclic_callers() {
+        let direct = |declaration, callee| {
+            let mut function = function(
+                vec![block(
+                    0,
+                    Terminator::TailCall {
+                        function: callee,
+                        args: vec![],
+                    },
+                )],
+                vec![],
+            );
+            function.declaration = declaration;
+            function
+        };
+        let program = Program {
+            functions: vec![direct(0, 1), direct(1, 0), direct(2, 0)],
+        };
+
+        let plan = optimized_mir_cache_plan(&program);
+
+        assert_eq!(plan.recursive_groups.len(), 1);
+        assert_eq!(plan.recursive_groups[0].declarations, vec![0, 1]);
+        assert!(
+            plan.individual_dependencies.contains_key(&2),
+            "an acyclic caller should depend on the recursive component rather than be excluded"
+        );
+    }
+
+    #[test]
     fn structural_use_facts_count_leave_arguments_once() {
         let body = function(
             vec![
@@ -13541,6 +15335,34 @@ mod tests {
         assert_eq!(
             terminator_register_use_count(&body.blocks[0].terminator, 1),
             1
+        );
+    }
+
+    #[test]
+    fn o3_dependency_tracking_keeps_control_terms_independently_cacheable() {
+        let body = function(
+            vec![block(
+                0,
+                Terminator::Perform {
+                    result: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads: vec![],
+                    capture: ContinuationCapture {
+                        captured_owners: vec![],
+                        captured_references: vec![],
+                        captured_residuals: vec![],
+                        cancellation_safe: true,
+                    },
+                    resume: None,
+                },
+            )],
+            vec![UNIT],
+        );
+
+        assert_eq!(
+            optimized_mir_direct_dependencies(&body),
+            Some(std::collections::BTreeSet::new())
         );
     }
 
@@ -14899,10 +16721,22 @@ mod tests {
         let report = optimize_program(&mut program, &types, OptimizationLevel::O1).unwrap();
         let body = &program.functions[0];
         assert!(!body.features.contains(FeatureBits::SWITCHES));
+        assert_eq!(
+            body.blocks.len(),
+            1,
+            "dead switch arm and trivial surviving join must be removed"
+        );
         assert!(body.blocks.iter().all(|block| block.statements.is_empty()));
         assert!(report.passes.iter().any(
             |pass| pass.pass == PassId::SparseSimplify && pass.outcome == PassOutcome::Changed
         ));
+        assert!(
+            report
+                .passes
+                .iter()
+                .any(|pass| pass.pass == PassId::NormalizeCfg
+                    && pass.outcome == PassOutcome::Changed)
+        );
     }
 
     #[test]
@@ -15985,6 +17819,43 @@ mod tests {
         assert_eq!(
             fold_primitive(I64, FloatToIntChecked, &[F64], &[Constant::F64(1.0)],),
             None,
+        );
+    }
+
+    #[test]
+    fn sparse_folds_allocation_free_text_and_byte_literals() {
+        use Primitive::*;
+
+        assert_eq!(
+            fold_primitive(
+                USIZE,
+                TextByteLen,
+                &[TEXT],
+                &[Constant::Text("grandiose".into())],
+            ),
+            Some(Constant::Usize(9)),
+        );
+        assert_eq!(
+            fold_primitive(
+                U32,
+                TextEq,
+                &[TEXT, TEXT],
+                &[Constant::Text("same".into()), Constant::Text("same".into())],
+            ),
+            Some(Constant::U32(1)),
+        );
+        assert_eq!(
+            fold_primitive(USIZE, BytesLen, &[BYTES], &[Constant::Bytes(vec![0, 1, 2])],),
+            Some(Constant::Usize(3)),
+        );
+        assert_eq!(
+            fold_primitive(
+                USIZE,
+                BytesUtf8ValidUpTo,
+                &[BYTES],
+                &[Constant::Bytes(b"a\xc2".to_vec())],
+            ),
+            Some(Constant::Usize(1)),
         );
     }
 
@@ -17399,7 +19270,7 @@ mod tests {
         ));
         let original = candidate.clone();
         assert_eq!(
-            specialize_static_handlers(&mut candidate, &types, &[], &[], 0),
+            specialize_static_handlers(&mut candidate, &types, &[], &[], 0, true, true,),
             (PassOutcome::BudgetExhausted, 0)
         );
         assert_eq!(candidate, original);
@@ -17648,7 +19519,6 @@ mod tests {
 
         let report = optimize_program(&mut program, &types, OptimizationLevel::O1).unwrap();
         let body = &program.functions[0];
-        assert_eq!(body.blocks.len(), 2);
         assert_eq!(
             body.blocks
                 .iter()
@@ -17664,7 +19534,26 @@ mod tests {
         else {
             panic!("unknown discriminator must retain the switch");
         };
-        assert_eq!(cases[0].1.target, otherwise.target);
+        // Normalization now retains a distinct empty adapter for each incoming
+        // edge. Both adapters must converge on the one shared dynamic Drop;
+        // they cannot be counted as a second cleanup action.
+        let shared_target = |edge: &Edge| {
+            let adapter = body
+                .blocks
+                .iter()
+                .find(|block| block.id == edge.target)
+                .expect("switch target adapter remains in the CFG");
+            let Terminator::Goto(next) = &adapter.terminator else {
+                panic!("switch target must be an empty cleanup adapter")
+            };
+            assert!(adapter.statements.is_empty());
+            next.target
+        };
+        assert_eq!(
+            shared_target(&cases[0].1),
+            shared_target(otherwise),
+            "both dynamic paths must reach the same retained Drop"
+        );
         assert!(report.passes.iter().any(|pass| {
             pass.pass == PassId::SimplifyCleanup && pass.outcome == PassOutcome::Changed
         }));
@@ -18191,6 +20080,204 @@ mod tests {
     }
 
     #[test]
+    fn forwarding_direct_call_specialization_reuses_the_moved_argument() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.blocks[0].statements.clear();
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+
+        assert_eq!(
+            specialize_forwarding_direct_calls(&mut candidate, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        let caller = &candidate.functions[0];
+        assert_eq!(caller.blocks[0].statements.len(), 3);
+        assert_eq!(
+            caller.blocks[0].terminator,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![move_operand(1), move_operand(4)],
+            })
+        );
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
+    fn o1_specializes_forwarding_direct_calls_without_inlining() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.blocks[0].statements.clear();
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+
+        let report = optimize_program(&mut candidate, &types, OptimizationLevel::O1).unwrap();
+        assert!(matches!(
+            candidate.functions[0].blocks[0].terminator,
+            Terminator::Goto(_)
+        ));
+        assert!(report.passes.iter().any(|pass| {
+            pass.pass == PassId::SpecializeDirectCalls && pass.outcome == PassOutcome::Changed
+        }));
+    }
+
+    #[test]
+    fn o1_specializes_constant_returning_direct_calls() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.params.clear();
+        callee.register_types = vec![UNIT, I64];
+        callee.blocks[0].statements = vec![instruction(InstructionKind::Const {
+            dst: 1,
+            value: Constant::I64(42),
+        })];
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+        let Terminator::Call { args, .. } = &mut candidate.functions[0].blocks[0].terminator else {
+            unreachable!()
+        };
+        args.clear();
+
+        let report = optimize_program(&mut candidate, &types, OptimizationLevel::O1).unwrap();
+        let caller = &candidate.functions[0];
+        assert!(matches!(
+            caller.blocks[0]
+                .statements
+                .last()
+                .map(|statement| &statement.kind),
+            Some(InstructionKind::Const {
+                dst: 6,
+                value: Constant::I64(42),
+            })
+        ));
+        assert_eq!(
+            caller.blocks[0].terminator,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![move_operand(6), move_operand(4)],
+            })
+        );
+        assert!(report.passes.iter().any(|pass| {
+            pass.pass == PassId::SpecializeDirectCalls && pass.outcome == PassOutcome::Changed
+        }));
+    }
+
+    #[test]
+    fn specializes_constant_arguments_through_direct_primitive_call() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.blocks[0].statements = vec![instruction(InstructionKind::Primitive {
+            dst: 3,
+            primitive: Primitive::IntCheckedAdd,
+            args: vec![operand(1), operand(2)],
+        })];
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(3)),
+        };
+
+        assert_eq!(
+            specialize_forwarding_direct_calls(&mut candidate, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        let caller = &candidate.functions[0];
+        assert!(matches!(
+            caller.blocks[0]
+                .statements
+                .last()
+                .map(|statement| &statement.kind),
+            Some(InstructionKind::Const {
+                dst: 6,
+                value: Constant::I64(42),
+            })
+        ));
+        assert_eq!(
+            caller.blocks[0].terminator,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![move_operand(6), move_operand(4)],
+            })
+        );
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
+    fn specializes_constant_argument_through_direct_primitive_with_callee_literal() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let callee = &mut candidate.functions[1];
+        callee.params = vec![I64];
+        callee.register_types = vec![UNIT, I64, I64, I64];
+        callee.blocks[0].statements = vec![
+            instruction(InstructionKind::Const {
+                dst: 2,
+                value: Constant::I64(1),
+            }),
+            instruction(InstructionKind::Primitive {
+                dst: 3,
+                primitive: Primitive::IntCheckedAdd,
+                args: vec![operand(1), operand(2)],
+            }),
+        ];
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(3)),
+        };
+        let Terminator::Call { args, .. } = &mut candidate.functions[0].blocks[0].terminator else {
+            unreachable!()
+        };
+        args.truncate(1);
+
+        assert_eq!(
+            specialize_forwarding_direct_calls(&mut candidate, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        let caller = &candidate.functions[0];
+        assert!(matches!(
+            caller.blocks[0]
+                .statements
+                .last()
+                .map(|statement| &statement.kind),
+            Some(InstructionKind::Const {
+                dst: 6,
+                value: Constant::I64(41),
+            })
+        ));
+        assert!(matches!(caller.blocks[0].terminator, Terminator::Goto(_)));
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
+    fn specializes_single_argument_forwarding_tail_call() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let caller = &mut candidate.functions[0];
+        caller.blocks.truncate(1);
+        caller.blocks[0].terminator = Terminator::TailCall {
+            function: 1,
+            args: vec![move_operand(1)],
+        };
+        let callee = &mut candidate.functions[1];
+        callee.params = vec![I64];
+        callee.register_types = vec![UNIT, I64];
+        callee.blocks[0].statements.clear();
+        callee.blocks[0].terminator = Terminator::Return {
+            value: Some(move_operand(1)),
+        };
+
+        assert_eq!(
+            specialize_forwarding_direct_calls(&mut candidate, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        assert_eq!(
+            candidate.functions[0].blocks[0].terminator,
+            Terminator::Return {
+                value: Some(move_operand(1)),
+            }
+        );
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
     fn whole_program_inlining_only_invalidates_rewritten_bodies() {
         let (mut candidate, types) = inline_leaf_fixture();
         let mut remaining = u64::MAX;
@@ -18206,6 +20293,7 @@ mod tests {
             OptimizationLevel::O2,
             &mut remaining,
             &mut policy,
+            OptimizationPlan::default(),
         );
 
         assert_eq!(report.outcome, PassOutcome::Changed);
@@ -18222,15 +20310,27 @@ mod tests {
             PassId::EraseLoanProofsAndScalarizedReferences,
         ] {
             assert_eq!(pass_contract(pass).invalidates, body_only);
-            assert_eq!(pass_contract(pass).scope, InvalidationScope::ChangedBodies);
         }
         assert_eq!(
-            pass_contract(PassId::InlineByCost).scope,
-            InvalidationScope::ChangedBodies
+            pass_contract(PassId::InlineByCost).invalidates,
+            analysis::ALL
         );
         assert_eq!(
-            pass_contract(PassId::SpecializeControl).scope,
-            InvalidationScope::WholeProgram
+            pass_contract(PassId::SpecializeControl).invalidates,
+            analysis::ALL
+        );
+    }
+
+    #[test]
+    fn ownership_dependents_follow_the_reverse_direct_call_closure() {
+        let (program, _) = inline_leaf_fixture();
+        assert_eq!(
+            ownership_dependents(&program, &BTreeSet::from([1])),
+            BTreeSet::from([0, 1])
+        );
+        assert_eq!(
+            ownership_dependents(&program, &BTreeSet::from([0])),
+            BTreeSet::from([0])
         );
     }
 
@@ -18754,6 +20854,60 @@ mod tests {
     }
 
     #[test]
+    fn o3_followup_inline_round_uses_o2_admission_caps_without_lowering_o3_costs() {
+        assert_eq!(
+            inline_admission_limits(
+                OptimizationLevel::O3,
+                InlineAdmissionCaps::ForOptimizationLevel,
+            ),
+            InlineAdmissionLimits {
+                growth_factor: 4,
+                growth_slack: 1_024,
+                depth_cap: 16,
+                source_clone_cap: 16,
+            }
+        );
+        assert_eq!(
+            inline_admission_limits(OptimizationLevel::O3, InlineAdmissionCaps::O2Style),
+            inline_admission_limits(
+                OptimizationLevel::O2,
+                InlineAdmissionCaps::ForOptimizationLevel,
+            )
+        );
+
+        let types = Type::predefined();
+        let mut first_round = inline_many_callers(20);
+        let mut first_policy = InlinePolicyState::default();
+        assert_eq!(
+            inline_by_cost_with_policy(
+                &mut first_round,
+                &types,
+                OptimizationLevel::O3,
+                u64::MAX,
+                &mut first_policy,
+            )
+            .0,
+            PassOutcome::Changed
+        );
+        assert_eq!(inlined_callers(&first_round).len(), 16);
+
+        let mut followup_round = inline_many_callers(20);
+        let mut followup_policy = InlinePolicyState::default();
+        assert_eq!(
+            inline_by_cost_with_o2_admission_caps(
+                &mut followup_round,
+                &types,
+                OptimizationLevel::O3,
+                u64::MAX,
+                &mut followup_policy,
+            )
+            .0,
+            PassOutcome::Changed
+        );
+        assert_eq!(inlined_callers(&followup_round).len(), 8);
+    }
+
+    #[test]
     fn inline_source_and_program_clone_caps_are_deterministic() {
         for (level, cap) in [(OptimizationLevel::O2, 8), (OptimizationLevel::O3, 16)] {
             let mut ordered = inline_many_callers(20);
@@ -19111,6 +21265,42 @@ mod tests {
             }));
             validate_program(&o2, &types, MirPhase::Optimized).unwrap();
         }
+    }
+
+    #[test]
+    fn scalarizes_immediate_owned_callable_tail_call() {
+        let (mut program, types) = owned_callable_scalarization_fixture(true);
+        let caller = &mut program.functions[0];
+        caller.blocks.truncate(1);
+        caller.blocks[0].terminator = Terminator::TailCallIndirect {
+            callable: move_operand(4),
+            known_function: Some(1),
+            receiver_mode: 2,
+            args: vec![move_operand(2)],
+        };
+
+        assert_eq!(
+            scalarize_callables(&mut program, &types, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        let caller = &program.functions[0];
+        assert!(
+            caller.blocks[0]
+                .statements
+                .iter()
+                .all(|statement| !matches!(
+                    statement.kind,
+                    InstructionKind::MakeCallable { .. } | InstructionKind::Move { dst: 4, .. }
+                ))
+        );
+        assert!(matches!(
+            caller.blocks[0].terminator,
+            Terminator::TailCall {
+                function: 2,
+                ref args,
+            } if args == &vec![move_operand(1), move_operand(2)]
+        ));
+        validate_program(&program, &types, MirPhase::Raw).unwrap();
     }
 
     #[test]
@@ -19989,7 +22179,14 @@ mod tests {
             ValidateCleanupMir,
             NormalizeCfg,
         ];
-        let o1 = [SparseSimplify, ScalarizeLocals, SimplifyCleanup];
+        let o1 = [
+            SparseSimplify,
+            ScalarizeLocals,
+            SimplifyCleanup,
+            SpecializeDirectCalls,
+        ];
+        let post_simplify = [NormalizeCfg, SparseSimplify];
+        let post_specialization = [SpecializeDirectCalls];
         let o2 = [
             GlobalSimplify,
             ScalarizeCallables,
@@ -20028,6 +22225,7 @@ mod tests {
             mandatory
                 .into_iter()
                 .chain(o1)
+                .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(bytecode_input)
                 .collect::<Vec<_>>()
@@ -20038,6 +22236,9 @@ mod tests {
                 .into_iter()
                 .chain(o1)
                 .chain(o2)
+                .chain(post_simplify)
+                .chain(post_specialization)
+                .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(tail)
                 .chain(bytecode_input)
@@ -20050,6 +22251,9 @@ mod tests {
                 .chain(o1)
                 .chain(o2)
                 .chain(o3_second)
+                .chain(post_simplify)
+                .chain(post_specialization)
+                .chain(post_simplify)
                 .chain(proof_erasure)
                 .chain(tail)
                 .chain(bytecode_input)
@@ -20130,11 +22334,27 @@ mod tests {
             .filter(|entry| entry.pass == PassId::SparseSimplify)
             .map(|entry| entry.outcome)
             .collect::<Vec<_>>();
-        assert_eq!(sparse, [PassOutcome::Changed, PassOutcome::Unchanged]);
+        // The initial O1 sparse fixed point stabilizes after its second run.
+        // Later `Unchanged` entries are deliberately scheduled after CFG
+        // normalization in the post-inline cleanup cycle; they are not extra
+        // iterations of the initial fixed point.
+        assert!(
+            sparse.starts_with(&[PassOutcome::Changed, PassOutcome::Unchanged]),
+            "initial sparse fixed point must stop at its first stabilization: {sparse:?}"
+        );
+        assert!(
+            sparse[2..]
+                .iter()
+                .all(|outcome| *outcome == PassOutcome::Unchanged),
+            "post-normalization sparse checks must not report a new rewrite: {sparse:?}"
+        );
         assert!(candidate.functions[0].blocks[0].statements.is_empty());
+        // Post-inline CFG normalization now removes the old switch entry
+        // entirely once both arms are equivalent. The surviving entry is the
+        // selected return block, which is stronger than retaining a Goto.
         assert!(matches!(
             candidate.functions[0].blocks[0].terminator,
-            Terminator::Goto(Edge { target: 1, .. })
+            Terminator::Return { value: None }
         ));
     }
 
@@ -21200,6 +23420,110 @@ mod tests {
         assert_eq!(program.canonical_text(), before);
         assert_eq!(program.fingerprint(), fingerprint);
         assert_eq!(program.functions[0].invalid_analyses, 0);
+    }
+
+    #[derive(Default)]
+    struct TestTransactionalBodyCache {
+        entries: Vec<(PassId, TransactionalPassBodySnapshot)>,
+        restores: usize,
+        records: usize,
+    }
+
+    impl TransactionalPassBodyCache for TestTransactionalBodyCache {
+        fn restore(
+            &mut self,
+            pass: PassId,
+            input: &Function,
+            work_limit: u64,
+        ) -> Option<TransactionalPassBodySnapshot> {
+            let snapshot = self
+                .entries
+                .iter()
+                .find(|(cached_pass, snapshot)| {
+                    *cached_pass == pass
+                        && snapshot.input == *input
+                        && snapshot.work_units <= work_limit
+                })?
+                .1
+                .clone();
+            self.restores += 1;
+            Some(snapshot)
+        }
+
+        fn record(&mut self, pass: PassId, snapshot: TransactionalPassBodySnapshot) {
+            self.records += 1;
+            self.entries.push((pass, snapshot));
+        }
+    }
+
+    fn cache_hook_program() -> Program {
+        let mut body = function(
+            vec![
+                block(
+                    0,
+                    Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![],
+                    }),
+                ),
+                block(1, Terminator::Return { value: None }),
+            ],
+            vec![UNIT],
+        );
+        body.phase = MirPhase::Cleanup;
+        body.features = infer_feature_bits(&body);
+        program(body)
+    }
+
+    #[test]
+    fn transactional_body_cache_hook_disabled_is_cold_equivalent_in_release() {
+        let types = Type::predefined();
+        let mut cold = cache_hook_program();
+        let mut disabled = cold.clone();
+        let mut cold_budget = 100_000;
+        let mut disabled_budget = cold_budget;
+        let cold_report =
+            run_transactional_pass(&mut cold, PassId::NormalizeCfg, &types, &mut cold_budget);
+        let disabled_report = run_transactional_pass_with_body_cache(
+            &mut disabled,
+            PassId::NormalizeCfg,
+            &types,
+            &mut disabled_budget,
+            None,
+        );
+        assert_eq!(disabled, cold);
+        assert_eq!(disabled_report, cold_report);
+        assert_eq!(disabled_budget, cold_budget);
+    }
+
+    #[test]
+    fn transactional_body_cache_replays_exact_snapshot_at_same_pass_slot() {
+        let types = Type::predefined();
+        let mut cache = TestTransactionalBodyCache::default();
+        let mut first = cache_hook_program();
+        let mut first_budget = 100_000;
+        let first_report = run_transactional_pass_with_body_cache(
+            &mut first,
+            PassId::NormalizeCfg,
+            &types,
+            &mut first_budget,
+            Some(&mut cache),
+        );
+        assert_eq!(cache.records, 1);
+
+        let mut replay = cache_hook_program();
+        let mut replay_budget = 100_000;
+        let replay_report = run_transactional_pass_with_body_cache(
+            &mut replay,
+            PassId::NormalizeCfg,
+            &types,
+            &mut replay_budget,
+            Some(&mut cache),
+        );
+        assert_eq!(cache.restores, 1);
+        assert_eq!(replay, first);
+        assert_eq!(replay_report, first_report);
+        assert_eq!(replay_budget, first_budget);
     }
 
     #[test]

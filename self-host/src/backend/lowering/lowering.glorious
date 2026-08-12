@@ -15,6 +15,7 @@ use super::super::frontend::elaboration::CoreValueTag;
 use super::super::frontend::elaboration::ConstructionField;
 use super::super::frontend::elaboration::ConstructionFlavor;
 use super::super::frontend::elaboration::IntegerConstantId;
+use super::super::frontend::elaboration::LabelDestinationId;
 use super::super::frontend::elaboration::CallableInstanceTag;
 use super::super::frontend::elaboration::InterfaceCallableId;
 use super::super::frontend::elaboration::InterfaceNominalView;
@@ -108,8 +109,21 @@ pub enum MirInstruction {
     Abort,
     Unreachable,
     Jump(MirBlockId),
+    // Dynamic activation is deliberately distinct from a transfer. `target`
+    // is the block entered by a later Leave, while normal execution continues
+    // at the next MIR instruction.
+    LabelPush(u32, RegisterId, MirBlockId),
+    LabelPop(u32),
+    // This is terminal for its current MIR block. The VM unwinds to the
+    // active LabelPush slot and installs `value` in its result register.
+    Leave(u32, RegisterId),
     Switch(RegisterId, MirSwitchPackId, MirBlockId),
     Call(Option<RegisterId>, MirFunctionId, RegisterPackId),
+    // The lifted closure scheduler owns choosing `function`. This MIR form is
+    // deliberately available to that later phase, but Core lowering continues
+    // to reject closures until such a schedule exists.
+    MakeCallable(RegisterId, ArtifactTypeId, MirFunctionId, RegisterPackId),
+    CallIndirect(Option<RegisterId>, RegisterId, u32, RegisterPackId),
     MakeHandler(
         RegisterId,
         MirHandlerDefinitionId,
@@ -165,7 +179,8 @@ pub enum MirTypeKind {
     UniqueReference,
     Struct,
     Enum,
-    Resumption
+    Resumption,
+    Callable
 }
 
 impl Use<[0, *]> for MirTypeKind {}
@@ -179,7 +194,9 @@ pub struct MirType {
     copy_flag: u32,
     effect_signature: MirSignature,
     resumption_lower: u32,
-    resumption_upper: Option<u32>
+    resumption_upper: Option<u32>,
+    callable_receiver_mode: u32,
+    callable_zero_use_allowed: Bool
 }
 
 struct MirTypeFacts {
@@ -294,6 +311,8 @@ pub struct MirFunction {
     parameters: Vec<ArtifactTypeId>,
     result: ArtifactTypeId,
     outward_protocols: Vec<u32>,
+    receiver_mode: Option<u32>,
+    receiver_type: ArtifactTypeId,
     register_count: u32,
     instructions: Vec<MirInstruction>,
     cleanups: Vec<MirCleanup>,
@@ -415,6 +434,11 @@ F: Use<[0, 0]> {
         },
         MirInstruction::Abort => (),
         MirInstruction::Unreachable => (),
+        MirInstruction::LabelPush(_, result, _) =>
+            visitor(instruction, result, MirPlaceRole::Read, stop),
+        MirInstruction::LabelPop(_) => (),
+        MirInstruction::Leave(_, payload) =>
+            visitor(instruction, payload, MirPlaceRole::Transfer, stop),
         MirInstruction::Switch(register, _, _) =>
             visitor(instruction, register, MirPlaceRole::Read, stop),
         MirInstruction::Call(target, _, pack) => {
@@ -433,6 +457,19 @@ F: Use<[0, 0]> {
                 stop,
                 visitor
             )
+        },
+        MirInstruction::MakeCallable(target, _, _, captures) => {
+            visitor(instruction, target, MirPlaceRole::Definition, stop);
+            __g1_walk_mir_register_pack(function, instruction, captures,
+                MirPlaceRole::Transfer, 0, stop, visitor)
+        },
+        MirInstruction::CallIndirect(target, callable, _, pack) => {
+            handle target { None => (), Option::Some(found) => visitor(
+                instruction, found, MirPlaceRole::Definition, stop
+            ) };
+            visitor(instruction, callable, MirPlaceRole::Transfer, stop);
+            __g1_walk_mir_register_pack(function, instruction, pack,
+                MirPlaceRole::Transfer, 0, stop, visitor)
         },
         MirInstruction::MakeHandler(target, _, clauses) => {
             visitor(instruction, target, MirPlaceRole::Definition, stop);
@@ -718,9 +755,16 @@ pub enum LoweringError {
     InvalidMirRegisterPack(RegisterPackId),
     InvalidMirSwitchPack(MirSwitchPackId),
     InvalidMirFunction(MirFunctionId),
+    // Label Core needs CFG and cleanup construction before it can become this
+    // MIR. Keep the unsupported state explicit rather than serializing an
+    // ordinary jump or call with different cleanup semantics.
+    LabelControlNotLowered(CoreComputationId),
     // Typed Core can retain effect control before MIR learns its one-shot
     // cleanup semantics. Reject it here rather than emitting ordinary calls.
-    EffectControlNotLowered(CoreComputationId)
+    EffectControlNotLowered(CoreComputationId),
+    // Callable Core is intentionally modeled before the MIR callable ABI is
+    // available. Keep this rejection explicit; it is not a fallback lowering.
+    CallableNotLowered(CoreValueId)
 }
 
 invalid_mir_register_result(
@@ -829,6 +873,19 @@ struct MirBuilder<'a> {
     register_packs: Arena<RegisterPackTag, RegisterPack>,
     blocks: Arena<MirBlockTag, Option<u32>>,
     switch_packs: Arena<MirSwitchPackTag, MirSwitchPack>,
+    // This is a compile-time lexical stack, not a runtime replacement for
+    // the VM's label stack.  It proves that every Core Leave is lowered only
+    // while its generative destination is active, and keeps nested same-name
+    // labels distinct by their Core identity.
+    active_labels: Vec<LabelDestinationId>,
+    // Parallel to `active_labels`: a Leave cleanup replaces its transferred
+    // payload with this protected destination register at the join anchor.
+    active_label_results: Vec<RegisterId>,
+    // A body which only exits through Leave still reaches its destination at
+    // runtime.  Remember those transfers so the destination joins with its
+    // dynamically-installed result register rather than being mistaken for
+    // an unreachable terminal computation.
+    leaving_labels: Vec<LabelDestinationId>,
     register_count: u32
 }
 
@@ -950,6 +1007,16 @@ pub mir_handler_definition(
 }
 
 pub mir_protocols() -> Arena<MirProtocolTag, MirProtocol> { Arena::new() }
+
+pub alloc_mir_protocol(
+    value: &mut Arena<MirProtocolTag, MirProtocol>,
+    protocol: MirProtocol
+) -> MirProtocolId {
+    handle Arena::alloc(value, protocol) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
 
 pub mir_handler_definitions()
     -> Arena<MirHandlerDefinitionTag, MirHandlerDefinition> {
@@ -1104,7 +1171,9 @@ pub reserve_mir_type(value: &mut MirTypes) -> MirTypeId {
             Vec::new(), artifact_type_id(0), Vec::new()
         ),
         resumption_lower: 0,
-        resumption_upper: Option::Some(0)
+        resumption_upper: Option::Some(0),
+        callable_receiver_mode: 0,
+        callable_zero_use_allowed: false
     })
 }
 
@@ -1130,6 +1199,8 @@ set_mir_type(
     );
     (*slot).resumption_lower = 0;
     (*slot).resumption_upper = Option::Some(0);
+    (*slot).callable_receiver_mode = 0;
+    (*slot).callable_zero_use_allowed = false;
     ()
 }
 
@@ -1157,7 +1228,54 @@ pub set_resumption_type(
     (*slot).effect_signature = effect_signature;
     (*slot).resumption_lower = lower_uses;
     (*slot).resumption_upper = upper_uses;
+    (*slot).callable_receiver_mode = 0;
+    (*slot).callable_zero_use_allowed = false;
     ()
+}
+
+// Callable metadata is intentionally a single opaque descriptor. Its
+// `fields[0]` is the aggregate capture layout and its effect signature is the
+// exact call signature. The scheduler supplies the matching receiver ABI.
+pub set_callable_type(
+    value: &mut MirTypes,
+    id: MirTypeId,
+    identity_name_index: u32,
+    capture_type: ArtifactTypeId,
+    signature: MirSignature,
+    receiver_mode: u32,
+    copy_flag: u32,
+    zero_use_allowed: Bool
+) {
+    let fields = Vec::new();
+    Vec::push(&mut fields, capture_type);
+    let slot = Arena::index_mut(&mut *value, id);
+    (*slot).kind = MirTypeKind::Callable;
+    (*slot).name_index = identity_name_index;
+    (*slot).field_names = Vec::new();
+    (*slot).fields = fields;
+    (*slot).variants = Vec::new();
+    (*slot).copy_flag = copy_flag;
+    (*slot).effect_signature = signature;
+    (*slot).resumption_lower = 0;
+    (*slot).resumption_upper = Option::Some(0);
+    (*slot).callable_receiver_mode = receiver_mode;
+    (*slot).callable_zero_use_allowed = zero_use_allowed;
+    ()
+}
+
+pub push_callable_type(
+    value: &mut MirTypes,
+    identity_name_index: u32,
+    capture_type: ArtifactTypeId,
+    signature: MirSignature,
+    receiver_mode: u32,
+    copy_flag: u32,
+    zero_use_allowed: Bool
+) -> MirTypeId {
+    let id = reserve_mir_type(value);
+    set_callable_type(value, id, identity_name_index, capture_type, signature,
+        receiver_mode, copy_flag, zero_use_allowed);
+    id
 }
 
 pub set_tuple_type(
@@ -1402,6 +1520,37 @@ pub mir_program_resumption_upper(
     Arena::index(&value.types, id).resumption_upper
 }
 
+pub mir_program_callable_identity_name(
+    value: &MirProgram,
+    id: MirTypeId
+) -> u32 { Arena::index(&value.types, id).name_index }
+
+pub mir_program_callable_capture_type(
+    value: &MirProgram,
+    id: MirTypeId
+) -> ArtifactTypeId {
+    let found = Arena::index(&value.types, id);
+    *Vec::index(&found.fields, 0)
+}
+
+pub mir_program_callable_signature<'a>(
+    value: &'a MirProgram,
+    id: MirTypeId
+) -> &'a MirSignature {
+    let found = Arena::index(&value.types, id);
+    &found.effect_signature
+}
+
+pub mir_program_callable_receiver_mode(
+    value: &MirProgram,
+    id: MirTypeId
+) -> u32 { Arena::index(&value.types, id).callable_receiver_mode }
+
+pub mir_program_callable_zero_use_allowed(
+    value: &MirProgram,
+    id: MirTypeId
+) -> Bool { Arena::index(&value.types, id).callable_zero_use_allowed }
+
 pub mir_program_type_copy_flag(value: &MirProgram, id: MirTypeId) -> u32 {
     Arena::index(&value.types, id).copy_flag
 }
@@ -1468,6 +1617,33 @@ pub mir_function_outward_protocol_at(
 
 pub mir_function_register_count(value: &MirFunction) -> u32 {
     value.register_count
+}
+
+// GRBC records the label namespace bound independently of the number of
+// currently active labels.  Core destination ids are stable per body but may
+// be sparse after nested lowering, so derive the exact `max(slot) + 1` bound
+// from the final MIR instead of conflating it with lexical nesting depth.
+mir_function_label_slot_count_at(
+    value: &MirFunction,
+    index: usize,
+    bound: u32
+) -> u32 {
+    if(index < Vec::len(&value.instructions)) {
+        let instruction = Vec::index(&value.instructions, index);
+        let candidate = if(*instruction is MirInstruction::LabelPush(slot, _, _)) {
+            slot + 1
+        } else if(*instruction is MirInstruction::LabelPop(slot)) {
+            slot + 1
+        } else if(*instruction is MirInstruction::Leave(slot, _)) {
+            slot + 1
+        } else { 0 };
+        let next = if(candidate > bound) { candidate } else { bound };
+        mir_function_label_slot_count_at(value, index + 1, next)
+    } else { bound }
+}
+
+pub mir_function_label_slot_count(value: &MirFunction) -> u32 {
+    mir_function_label_slot_count_at(value, 0, 0)
 }
 
 pub mir_function_instruction_count(value: &MirFunction) -> usize {
@@ -1757,6 +1933,10 @@ scalar_width(type_id: u32) -> Option<usize> {
         11 => Option::Some(16),
         12 => Option::Some(8),
         13 => Option::Some(8),
+        // `char` is encoded as its Unicode scalar value, matching the
+        // four-byte representation used by the VM artifact's predefined
+        // character type.
+        16 => Option::Some(4),
         _ => None
     }
 }
@@ -1803,6 +1983,28 @@ u32_constant_key(value: u32) -> Bytes {
         &mut output,
         wrapping_convert_to_u8(value / 16777216)
     );
+    Bytes::from_vec(output)
+}
+
+append_literal_bytes(
+    output: &mut Vec<u8>,
+    bytes: &Bytes,
+    index: usize
+) {
+    if(index < Bytes::len(bytes)) {
+        let byte = handle Bytes::get(bytes, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        Vec::push(output, byte);
+        append_literal_bytes(output, bytes, index + 1)
+    } else { () }
+}
+
+literal_constant_key(tag: u8, bytes: &Bytes) -> Bytes {
+    let output = Vec::new();
+    Vec::push(&mut output, tag);
+    append_literal_bytes(&mut output, bytes, 0);
     Bytes::from_vec(output)
 }
 
@@ -1898,6 +2100,22 @@ analyze_value(
                 output,
                 allow_transfer
             ),
+        CoreValueView::Closure(_, site) => {
+            let descriptor = super::super::frontend::elaboration::
+                closure_site_at(body, site);
+            Slice::for_each(
+                super::super::frontend::elaboration::closure_site_captures(
+                    body, descriptor
+                ),
+                { capture => analyze_value(
+                    body,
+                    super::super::frontend::elaboration::
+                        core_closure_capture_value(capture),
+                    output,
+                    allow_transfer
+                ) }
+            )
+        },
         _ => ()
     }
 }
@@ -2000,13 +2218,44 @@ analyze_match_arms<'a>(
         );
         remove_match_bindings(body, arm, output);
         union_liveness(joined, &output.live);
-        analyze_match_arms(
+analyze_match_arms(
             body,
             arms,
             live_out,
             joined,
             ordinal + 1,
             output
+        )
+    } else { () }
+}
+
+// Integer-dispatch arms do not introduce payload locals, but their bodies
+// still form control-flow branches. Keep their backwards liveness join
+// identical to enum-match arms so later scalar lowering can restore the same
+// pre-dispatch state on every edge.
+analyze_integer_arms<'a>(
+    body: &super::super::frontend::elaboration::TypedBody,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
+    live_out: &Vec<Bool>,
+    joined: &mut Vec<Bool>,
+    ordinal: usize,
+    output: &mut PlaceFlowAnalysis
+) {
+    if(ordinal < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, ordinal) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        let arm_live = copy_liveness(live_out);
+        output.live = arm_live;
+        analyze_computation(
+            body,
+            super::super::frontend::elaboration::core_integer_arm_body(arm),
+            output,
+            false
+        );
+        union_liveness(joined, &output.live);
+        analyze_integer_arms(
+            body, arms, live_out, joined, ordinal + 1, output
         )
     } else { () }
 }
@@ -2034,6 +2283,16 @@ analyze_computation(
                 output,
                 allow_transfer
             ),
+        CoreComputationView::CallIndirect(_, callee, _, operands) => {
+            analyze_values_reverse(
+                body,
+                operands,
+                Slice::len(operands),
+                output,
+                allow_transfer
+            );
+            analyze_value(body, callee, output, allow_transfer)
+        },
         CoreComputationView::Primitive(_, _, operands) =>
             analyze_values_reverse(
                 body,
@@ -2068,11 +2327,56 @@ analyze_computation(
             output.live = joined;
             analyze_value(body, subject, output, allow_transfer)
         },
-        // No source elaboration produces these yet. Keeping this explicit
-        // makes place-flow non-authoritative until effect MIR lowering exists.
-        CoreComputationView::Perform(_, _, _) => unreachable(),
-        CoreComputationView::Resume(_, _, _) => unreachable(),
-        CoreComputationView::Handle(_, _, _) => unreachable()
+        CoreComputationView::IntegerDispatch(_, subject, arms) => {
+            let live_out = copy_liveness(&output.live);
+            Vec::push(&mut output.facts.matches, MatchFlow {
+                computation: id,
+                live_out: copy_liveness(&live_out)
+            });
+            let joined = copy_liveness(&live_out);
+            analyze_integer_arms(
+                body, arms, &live_out, &mut joined, 0, output
+            );
+            output.live = joined;
+            analyze_value(body, subject, output, allow_transfer)
+        },
+        // Like effects, labels are already valid Typed Core even while the
+        // backend has not built their CFG/cleanup edges. Traverse both shapes
+        // here so lowering reports the explicit diagnostic below rather than
+        // failing during place-flow.
+        CoreComputationView::LabelDestination(_, _, child) =>
+            analyze_computation(body, child, output, allow_transfer),
+        CoreComputationView::Leave(_, _, payload) =>
+            analyze_value(body, payload, output, allow_transfer),
+        // Effect control is deliberately rejected by `lower_computation`, but
+        // source elaboration already produces these Core shapes.  Place-flow
+        // runs before that rejection, so it must still be a total traversal:
+        // otherwise a valid source program aborts instead of receiving the
+        // promised `EffectControlNotLowered` diagnostic.
+        CoreComputationView::Perform(_, _, _, operands) =>
+            analyze_values_reverse(
+                body,
+                operands,
+                Slice::len(operands),
+                output,
+                allow_transfer
+            ),
+        CoreComputationView::Resume(_, resumption, result) => {
+            analyze_value(body, result, output, allow_transfer);
+            analyze_value(body, resumption, output, allow_transfer)
+        },
+        CoreComputationView::Handle(_, handled, clauses) => {
+            analyze_computation(body, handled, output, allow_transfer);
+            Slice::for_each(clauses, { clause =>
+                analyze_computation(
+                    body,
+                    super::super::frontend::elaboration::
+                        core_handler_clause_body(clause),
+                    output,
+                    allow_transfer
+                )
+            })
+        }
     }
 }
 
@@ -2142,6 +2446,44 @@ record_cleanup<'a>(value: &mut MirBuilder<'a>) {
         &mut registers,
         Vec::len(&value.live_order)
     );
+    Vec::push(&mut value.cleanups, MirCleanup {
+        first_instruction: instruction,
+        end_instruction: instruction + 1,
+        registers: registers
+    })
+}
+
+replace_cleanup_register(
+    registers: &mut Vec<RegisterId>,
+    source: RegisterId,
+    target: RegisterId,
+    index: usize
+) {
+    if(index < Vec::len(registers)) {
+        if(*Vec::index(registers, index) == source) {
+            *Vec::index_mut(registers, index) = target;
+        } else { () };
+        replace_cleanup_register(registers, source, target, index + 1)
+    } else { () }
+}
+
+record_leave_cleanup<'a>(
+    value: &mut MirBuilder<'a>,
+    payload: RegisterId,
+    protected_result: RegisterId
+) {
+    let instruction = checked_u32(Vec::len(&value.instructions));
+    let registers = Vec::new();
+    reverse_registers(
+        &value.live_order,
+        &mut registers,
+        Vec::len(&value.live_order)
+    );
+    // The VM transfers `payload` into `protected_result` before entering the
+    // label target, so the seeded source anchor must already name the target
+    // register.  That makes its suffix equal to the destination cleanup while
+    // preserving the ownership substitution for verifier and runtime.
+    replace_cleanup_register(&mut registers, payload, protected_result, 0);
     Vec::push(&mut value.cleanups, MirCleanup {
         first_instruction: instruction,
         end_instruction: instruction + 1,
@@ -2381,9 +2723,130 @@ emit_host_call<'a>(
     }
 }
 
+// The callable value owns its receiver for this first direct-call slice.
+// The frontend's place-flow pass has already selected move versus copy when
+// materializing `callable`; receiver mode 2 is the owned callable ABI used by
+// the bytecode verifier and by `MakeCallable`.
+emit_call_indirect<'a>(
+    value: &mut MirBuilder<'a>,
+    target: Option<RegisterId>,
+    callable: RegisterId,
+    arguments: Vec<RegisterId>
+) {
+    record_cleanup(value);
+    consume_live(value, callable);
+    consume_arguments(value, &arguments, 0);
+    let pack = alloc_register_pack(value, arguments);
+    Vec::push(&mut value.instructions, MirInstruction::CallIndirect(
+        target, callable, 2, pack
+    ));
+    handle target {
+        None => (),
+        Option::Some(found) => Vec::push(&mut value.live_order, found)
+    }
+}
+
+emit_make_callable<'a>(
+    value: &mut MirBuilder<'a>,
+    target: RegisterId,
+    callable_type: ArtifactTypeId,
+    function: MirFunctionId
+) {
+    record_cleanup(value);
+    let captures = alloc_register_pack(value, Vec::new());
+    Vec::push(&mut value.instructions, MirInstruction::MakeCallable(
+        target, callable_type, function, captures
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
+// A terminal perform consumes its payloads and never returns to this block.
+// Perform itself is the MIR block terminator: emission validates that a
+// terminal operation has no destination and is the final instruction.
+emit_terminal_perform<'a>(
+    value: &mut MirBuilder<'a>,
+    protocol: MirProtocolId,
+    operation: u32,
+    payloads: Vec<RegisterId>
+) {
+    record_cleanup(value);
+    consume_arguments(value, &payloads, 0);
+    let pack = alloc_register_pack(value, payloads);
+    Vec::push(&mut value.instructions, MirInstruction::Perform(
+        None, protocol, operation, pack
+    ))
+}
+
 emit_jump<'a>(value: &mut MirBuilder<'a>, target: MirBlockId) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, MirInstruction::Jump(target))
+}
+
+emit_label_push<'a>(
+    value: &mut MirBuilder<'a>,
+    slot: u32,
+    result: RegisterId,
+    target: MirBlockId
+) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, MirInstruction::LabelPush(
+        slot, result, target
+    ))
+}
+
+emit_label_pop<'a>(value: &mut MirBuilder<'a>, slot: u32) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, MirInstruction::LabelPop(slot))
+}
+
+emit_leave<'a>(
+    value: &mut MirBuilder<'a>,
+    slot: u32,
+    payload: RegisterId,
+    protected_result: RegisterId
+) {
+    record_leave_cleanup(value, payload, protected_result);
+    // Leave transfers its payload atomically to the protected result
+    // register.  It is terminal in this block, so it must consume the local
+    // ownership token exactly like every other transfer instruction.
+    consume_live(value, payload);
+    Vec::push(&mut value.instructions, MirInstruction::Leave(slot, payload))
+}
+
+active_label_contains(
+    labels: &Vec<LabelDestinationId>,
+    target: LabelDestinationId,
+    index: usize
+) -> Bool {
+    if(index < Vec::len(labels)) {
+        if(Id::to_u32(*Vec::index(labels, index)) == Id::to_u32(target)) {
+            true
+        } else { active_label_contains(labels, target, index + 1) }
+    } else { false }
+}
+
+label_was_left(
+    labels: &Vec<LabelDestinationId>,
+    target: LabelDestinationId,
+    index: usize
+) -> Bool {
+    active_label_contains(labels, target, index)
+}
+
+active_label_result(
+    labels: &Vec<LabelDestinationId>,
+    results: &Vec<RegisterId>,
+    target: LabelDestinationId,
+    index: usize
+) -> Option<RegisterId> {
+    if(index < Vec::len(labels)) {
+        let current = Vec::len(labels) - index - 1;
+        if(Id::to_u32(*Vec::index(labels, current)) == Id::to_u32(target)) {
+            Option::Some(*Vec::index(results, current))
+        } else {
+            active_label_result(labels, results, target, index + 1)
+        }
+    } else { None }
 }
 
 emit_switch<'a>(
@@ -2484,6 +2947,16 @@ lower_value<'a>(
             emit_const(value, target, key);
             Result::Ok(Option::Some(target))
         },
+        CoreValueView::Text(_, bytes) => {
+            let target = alloc_register(value);
+            emit_const(value, target, literal_constant_key(17, &bytes));
+            Result::Ok(Option::Some(target))
+        },
+        CoreValueView::Bytes(_, bytes) => {
+            let target = alloc_register(value);
+            emit_const(value, target, literal_constant_key(18, &bytes));
+            Result::Ok(Option::Some(target))
+        },
         CoreValueView::Local(type_id, local, _, _) => {
             type_id;
             let transfer = *IndexVec::index(
@@ -2529,7 +3002,39 @@ lower_value<'a>(
             }
         },
         CoreValueView::Embedded(_, computation) =>
-            lower_computation(interfaces, body, value, computation)
+            lower_computation(interfaces, body, value, computation),
+        CoreValueView::Closure(type_id, site) => {
+            let descriptor = super::super::frontend::elaboration::
+                closure_site_at(body, site);
+            if(Slice::len(super::super::frontend::elaboration::
+                closure_site_captures(body, descriptor)) != 0) {
+                @lower_value(Result::Err(LoweringError::CallableNotLowered(id)))
+            } else {
+                let instance = handle super::super::frontend::elaboration::
+                    closure_site_target(descriptor) {
+                    None => @lower_value(Result::Err(
+                        LoweringError::CallableNotLowered(id)
+                    )),
+                    Option::Some(found) => found
+                };
+                let callable_type = handle mapped_artifact_type(
+                    value.type_map, type_id
+                ) {
+                    None => @lower_value(Result::Err(
+                        LoweringError::CallableNotLowered(id)
+                    )),
+                    Option::Some(found) => found
+                };
+                let target = alloc_register(value);
+                emit_make_callable(
+                    value,
+                    target,
+                    callable_type,
+                    mir_function_id_from_u32(Id::to_u32(instance))
+                );
+                Result::Ok(Option::Some(target))
+            }
+        }
     }
 }
 
@@ -2901,7 +3406,7 @@ lower_match_arms<'a>(
     blocks: &Vec<MirBlockId>,
     subject: RegisterId,
     tag: RegisterId,
-    result: Option<RegisterId>,
+    result: &mut Option<RegisterId>,
     join: MirBlockId,
     baseline_locals: &Vec<Option<RegisterId>>,
     baseline_live: &Vec<RegisterId>,
@@ -2988,12 +3493,6 @@ lower_match_arms<'a>(
                 index + 1
             ),
             Result::Ok(branch_result) => {
-                let result_register = handle result {
-                    None => @lower_match_arms(Result::Err(
-                        LoweringError::MissingMatchResult(arm_computation)
-                    )),
-                    Option::Some(found) => found
-                };
                 drop_match_locals_reverse(
                     value,
                     bindings,
@@ -3005,6 +3504,19 @@ lower_match_arms<'a>(
                     match_live_out,
                     0
                 );
+                // A well-typed arm can still lower to `None` when it exits
+                // through an enclosing label.  Allocate the shared result
+                // only after the first arm that actually falls through with
+                // a value, avoiding untyped dead registers for an
+                // all-terminal dispatch.
+                let result_register = handle *result {
+                    None => {
+                        let found = alloc_register(value);
+                        *result = Option::Some(found);
+                        found
+                    },
+                    Option::Some(found) => found
+                };
                 emit_move(value, result_register, branch_result);
                 emit_jump(value, join);
                 if(*canonical_set) {
@@ -3080,29 +3592,6 @@ lower_match_arms<'a>(
     } else { Result::Ok(()) }
 }
 
-match_has_returning_arm<'a>(
-    body: &super::super::frontend::elaboration::TypedBody,
-    arms: Slice<'a, CoreMatchArm>,
-    index: usize
-) -> Bool {
-    if(index < Slice::len(arms)) {
-        let arm = handle Slice::get(arms, index) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
-        let computation = super::super::frontend::elaboration::
-            core_match_arm_body(arm);
-        if(Id::to_u32(
-            super::super::frontend::elaboration::
-                typed_body_computation_type(body, computation)
-        ) == 1) {
-            match_has_returning_arm(body, arms, index + 1)
-        } else {
-            true
-        }
-    } else { false }
-}
-
 lower_match<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
@@ -3139,11 +3628,7 @@ lower_match<'a>(
             } else {
                 let tag = alloc_register(value);
                 emit_enum_tag(value, tag, subject_register);
-                let result = if(match_has_returning_arm(body, arms, 0)) {
-                    Option::Some(alloc_register(value))
-                } else {
-                    None
-                };
+                let result = None;
                 let blocks = Vec::new();
                 alloc_match_blocks(
                     value,
@@ -3180,7 +3665,7 @@ lower_match<'a>(
                     &blocks,
                     subject_register,
                     tag,
-                    result,
+                    &mut result,
                     join,
                     &baseline_locals,
                     &baseline_live,
@@ -3212,6 +3697,216 @@ lower_match<'a>(
             }
         }
     }
+}
+
+build_integer_switch_cases<'a>(
+    body: &super::super::frontend::elaboration::TypedBody,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
+    blocks: &Vec<MirBlockId>,
+    index: usize,
+    output: &mut Vec<MirSwitchCase>
+) -> Result<(), LoweringError> {
+    if(index + 1 < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        let constant = handle super::super::frontend::elaboration::
+            core_integer_arm_constant(arm) {
+            None => @build_integer_switch_cases(Result::Err(
+                LoweringError::MatchStateMismatch
+            )),
+            Option::Some(found) => found
+        };
+        let key = handle constant_key(body, Id::from_u32(4), constant) {
+            Result::Err(error) => @build_integer_switch_cases(Result::Err(
+                move error
+            )),
+            Result::Ok(found) => found
+        };
+        if(integer_switch_has_key(&*output, &key, 0)) {
+            @build_integer_switch_cases(Result::Err(
+                LoweringError::MatchStateMismatch
+            ))
+        } else { () };
+        Vec::push(&mut *output, MirSwitchCase {
+            key: key, target: *Vec::index(blocks, index)
+        });
+        build_integer_switch_cases(body, arms, blocks, index + 1, output)
+    } else { Result::Ok(()) }
+}
+
+integer_switch_has_key(
+    cases: &Vec<MirSwitchCase>,
+    key: &Bytes,
+    index: usize
+) -> Bool {
+    if(index < Vec::len(cases)) {
+        if(Eq::eq(mir_switch_case_key(Vec::index(cases, index)), key)) {
+            true
+        } else { integer_switch_has_key(cases, key, index + 1) }
+    } else { false }
+}
+
+lower_integer_arms<'a>(
+    interfaces: &super::super::frontend::elaboration::TypedInterfaces,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>,
+    blocks: &Vec<MirBlockId>,
+    subject: RegisterId,
+    result: &mut Option<RegisterId>,
+    join: MirBlockId,
+    baseline_locals: &Vec<Option<RegisterId>>,
+    baseline_live: &Vec<RegisterId>,
+    dispatch_live_out: &Vec<Bool>,
+    canonical_locals: &mut Vec<Option<RegisterId>>,
+    canonical_live: &mut Vec<RegisterId>,
+    canonical_set: &mut Bool,
+    index: usize
+) -> Result<(), LoweringError> {
+    if(index < Slice::len(arms)) {
+        restore_match_state(value, baseline_locals, baseline_live);
+        bind_block(value, *Vec::index(blocks, index));
+        emit_drop(value, subject);
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        let computation = super::super::frontend::elaboration::
+            core_integer_arm_body(arm);
+        let lowered = handle lower_computation(
+            interfaces, body, value, computation
+        ) {
+            Result::Err(error) => @lower_integer_arms(Result::Err(move error)),
+            Result::Ok(found) => found
+        };
+        handle lowered {
+            None => lower_integer_arms(
+                interfaces, body, value, arms, blocks, subject, result, join,
+                baseline_locals, baseline_live, dispatch_live_out,
+                canonical_locals, canonical_live, canonical_set, index + 1
+            ),
+            Option::Some(branch_result) => {
+                retire_dead_match_locals(
+                    value, baseline_locals, dispatch_live_out, 0
+                );
+                // See variant dispatch: only a branch that actually reaches
+                // the join needs a shared result register.  Typed terminal
+                // arms may lower through an enclosing label instead.
+                let result_register = handle *result {
+                    None => {
+                        let found = alloc_register(value);
+                        *result = Option::Some(found);
+                        found
+                    },
+                    Option::Some(found) => found
+                };
+                emit_move(value, result_register, branch_result);
+                emit_jump(value, join);
+                if(*canonical_set) {
+                    let locals_match = optional_registers_equal(
+                        &value.locals, canonical_locals, 0
+                    );
+                    let live_match = if(locals_match) {
+                        registers_equal(&value.live_order, canonical_live, 0)
+                    } else { false };
+                    if(live_match) {
+                        lower_integer_arms(
+                            interfaces, body, value, arms, blocks, subject,
+                            result, join, baseline_locals, baseline_live,
+                            dispatch_live_out, canonical_locals, canonical_live,
+                            canonical_set, index + 1
+                        )
+                    } else { Result::Err(LoweringError::MatchStateMismatch) }
+                } else {
+                    Vec::clear(canonical_locals);
+                    append_optional_registers(
+                        &value.locals, canonical_locals, 0
+                    );
+                    Vec::clear(canonical_live);
+                    append_registers(&value.live_order, canonical_live, 0);
+                    *canonical_set = true;
+                    lower_integer_arms(
+                        interfaces, body, value, arms, blocks, subject, result,
+                        join, baseline_locals, baseline_live, dispatch_live_out,
+                        canonical_locals, canonical_live, canonical_set, index + 1
+                    )
+                }
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+lower_integer_dispatch<'a>(
+    interfaces: &super::super::frontend::elaboration::TypedInterfaces,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
+    computation: CoreComputationId,
+    subject: CoreValueId,
+    arms: Slice<'a, super::super::frontend::elaboration::CoreIntegerArm>
+) -> Result<Option<RegisterId>, LoweringError> {
+    let flow_index = handle match_flow_index(&value.place_flow, computation, 0) {
+        None => @lower_integer_dispatch(Result::Err(
+            LoweringError::MissingMatchFlow(computation)
+        )),
+        Option::Some(found) => found
+    };
+    let flow = Vec::index(&value.place_flow.matches, flow_index);
+    let dispatch_live = copy_liveness(&flow.live_out);
+    if(Slice::len(arms) == 0) {
+        @lower_integer_dispatch(Result::Err(LoweringError::MatchStateMismatch))
+    } else { () };
+    let final_arm = handle Slice::get(arms, Slice::len(arms) - 1) {
+        Result::Err(_) => unreachable(), Result::Ok(found) => found
+    };
+    if(Option::is_none(&super::super::frontend::elaboration::
+        core_integer_arm_constant(final_arm))) { () } else {
+        @lower_integer_dispatch(Result::Err(LoweringError::MatchStateMismatch))
+    };
+    let lowered_subject = handle lower_value(
+        interfaces, body, value, subject
+    ) {
+        Result::Err(error) => @lower_integer_dispatch(Result::Err(move error)),
+        Result::Ok(found) => found
+    };
+    let subject_register = handle lowered_subject {
+        None => @lower_integer_dispatch(Result::Err(
+            LoweringError::MissingMatchSubject(subject)
+        )),
+        Option::Some(found) => found
+    };
+    let result = None;
+    let blocks = Vec::new();
+    alloc_match_blocks(value, Slice::len(arms), 0, &mut blocks);
+    let cases = Vec::new();
+    handle build_integer_switch_cases(body, arms, &blocks, 0, &mut cases) {
+        Result::Err(error) => @lower_integer_dispatch(Result::Err(move error)),
+        Result::Ok(_) => ()
+    };
+    emit_switch(
+        value,
+        subject_register,
+        cases,
+        *Vec::index(&blocks, Slice::len(arms) - 1)
+    );
+    let baseline_locals = snapshot_locals(&*value);
+    let baseline_live = snapshot_live(&*value);
+    let canonical_locals = Vec::new();
+    let canonical_live = Vec::new();
+    let canonical_set = false;
+    let join = alloc_block(value);
+    handle lower_integer_arms(
+        interfaces, body, value, arms, &blocks, subject_register, &mut result, join,
+        &baseline_locals, &baseline_live, &dispatch_live,
+        &mut canonical_locals, &mut canonical_live, &mut canonical_set, 0
+    ) {
+        Result::Err(error) => @lower_integer_dispatch(Result::Err(move error)),
+        Result::Ok(_) => ()
+    };
+    if(canonical_set) {
+        restore_match_state(value, &canonical_locals, &canonical_live)
+    } else { restore_match_state(value, &baseline_locals, &baseline_live) };
+    bind_block(value, join);
+    if(canonical_set) { Result::Ok(result) } else { Result::Ok(None) }
 }
 
 lower_nominal_construct<'a>(
@@ -3266,6 +3961,56 @@ lower_nominal_construct<'a>(
                 ordinal
             )) }
         }
+    }
+}
+
+// A label that cannot complete normally and has no transfer addressed to it
+// never installs a value in its result register.  The GRBC format recovers
+// register types from value flow, so allocating a protected destination for
+// that dead region leaves an uninferred register even though the label can
+// never be selected at runtime.  Keep this predicate deliberately
+// conservative: anything beyond the simple control shapes below retains its
+// runtime label until its reachability is modeled explicitly.
+label_body_may_leave_to(
+    body: &super::super::frontend::elaboration::TypedBody,
+    id: CoreComputationId,
+    destination: LabelDestinationId
+) -> Bool {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body, id
+    ) {
+        CoreComputationView::Let(_, _, initializer, remainder) =>
+            label_body_may_leave_to(body, initializer, destination)
+                or { label_body_may_leave_to(body, remainder, destination) },
+        CoreComputationView::LabelDestination(_, _, child) =>
+            label_body_may_leave_to(body, child, destination),
+        CoreComputationView::Leave(_, target, _) =>
+            Id::to_u32(target) == Id::to_u32(destination),
+        // A pure value cannot contain control at this lowering boundary.
+        CoreComputationView::Pure(_, _) => false,
+        // Do not erase a label through a shape whose nested control has not
+        // been inspected here.  This preserves the lexical VM destination in
+        // the face of future embedded computations, dispatches, and handlers.
+        _ => true
+    }
+}
+
+label_body_is_terminal_leave(
+    body: &super::super::frontend::elaboration::TypedBody,
+    id: CoreComputationId
+) -> Bool {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body, id
+    ) {
+        CoreComputationView::Let(_, _, initializer, remainder) => {
+            if(label_body_is_terminal_leave(body, initializer)) {
+                true
+            } else { label_body_is_terminal_leave(body, remainder) }
+        },
+        CoreComputationView::LabelDestination(_, _, child) =>
+            label_body_is_terminal_leave(body, child),
+        CoreComputationView::Leave(_, _, _) => true,
+        _ => false
     }
 }
 
@@ -3333,6 +4078,30 @@ lower_computation<'a>(
                     } else { () };
                     Result::Ok(target)
             } else { Result::Err(LoweringError::UnknownCallable(shell)) }
+        },
+        CoreComputationView::CallIndirect(type_id, callee, _, operands) => {
+            let callable = try(
+                lower_value(interfaces, body, value, callee),
+                @lower_computation
+            );
+            let callable_register = handle callable {
+                None => @lower_computation(Result::Err(
+                    LoweringError::CallableNotLowered(callee)
+                )),
+                Option::Some(found) => found
+            };
+            let arguments = Vec::new();
+            try(lower_arguments(
+                interfaces, body, value, operands, &mut arguments
+            ), @lower_computation);
+            let target = if(Id::to_u32(type_id) == 1) {
+                None
+            } else { Option::Some(alloc_register(value)) };
+            emit_call_indirect(value, target, callable_register, arguments);
+            if(Id::to_u32(type_id) == 1) {
+                emit_unreachable(value)
+            } else { () };
+            Result::Ok(target)
         },
         CoreComputationView::Primitive(_, primitive, operands) => {
             let arguments = Vec::new();
@@ -3437,8 +4206,122 @@ lower_computation<'a>(
         },
         CoreComputationView::VariantDispatch(_, subject, arms) =>
             lower_match(interfaces, body, value, id, subject, arms),
-        CoreComputationView::Perform(_, _, _) =>
-            Result::Err(LoweringError::EffectControlNotLowered(id)),
+        CoreComputationView::IntegerDispatch(_, subject, arms) =>
+            lower_integer_dispatch(interfaces, body, value, id, subject, arms),
+        CoreComputationView::LabelDestination(_, destination, child) => {
+            // If this lexical destination only contains a transfer to an
+            // enclosing label, it can never receive a normal or dynamic
+            // result of its own.  Erase that inert runtime frame rather than
+            // allocating a GRBC result register with no possible type flow.
+            let needs_runtime_label = if(
+                label_body_is_terminal_leave(body, child)
+            ) {
+                if(label_body_may_leave_to(body, child, destination)) {
+                    true
+                } else { false }
+            } else { true };
+            if(needs_runtime_label) {
+            // The join is a protected CFG root: normal completion takes the
+            // explicit LabelPop/Jump path, whereas a nested Leave is routed
+            // there by the VM after it restores this result register.
+            let result = alloc_register(value);
+            let join = alloc_block(value);
+            let slot = Id::to_u32(destination);
+            emit_label_push(value, slot, result, join);
+            Vec::push(&mut value.active_labels, destination);
+            Vec::push(&mut value.active_label_results, result);
+            let lowered = lower_computation(interfaces, body, value, child);
+            // Lexical lowering has now exited this destination even if its
+            // runtime body diverges through Leave.
+            handle Vec::pop(&mut value.active_labels) {
+                Result::Ok(_) => (), Result::Err(_) => unreachable()
+            };
+            handle Vec::pop(&mut value.active_label_results) {
+                Result::Ok(_) => (), Result::Err(_) => unreachable()
+            };
+            let was_left = label_was_left(&value.leaving_labels, destination, 0);
+            handle lowered {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(normal) => {
+                    handle normal {
+                        None => (),
+                        Option::Some(found) => {
+                            emit_move(value, result, found);
+                            emit_label_pop(value, slot);
+                            emit_jump(value, join)
+                        }
+                    };
+                    bind_block(value, join);
+                    handle normal {
+                        None => if(was_left) {
+                            // No fallthrough value exists, but the VM writes
+                            // the protected result before entering this join.
+                            Vec::push(&mut value.live_order, result);
+                            Result::Ok(Option::Some(result))
+                        } else { Result::Ok(None) },
+                        Option::Some(_) => Result::Ok(Option::Some(result))
+                    }
+                }
+            }
+            } else {
+                lower_computation(interfaces, body, value, child)
+            }
+        },
+        CoreComputationView::Leave(_, destination, payload) => {
+            if(active_label_contains(&value.active_labels, destination, 0)) {
+                let lowered = try(
+                    lower_value(interfaces, body, value, payload),
+                    @lower_computation
+                );
+                handle lowered {
+                    None => Result::Err(LoweringError::MissingValue(payload)),
+                    Option::Some(found) => {
+                        handle active_label_result(
+                            &value.active_labels,
+                            &value.active_label_results,
+                            destination,
+                            0
+                        ) {
+                            None => Result::Err(
+                                LoweringError::LabelControlNotLowered(id)
+                            ),
+                            Option::Some(result) => {
+                                emit_leave(
+                                    value,
+                                    Id::to_u32(destination),
+                                    found,
+                                    result
+                                );
+                                Vec::push(
+                                    &mut value.leaving_labels,
+                                    destination
+                                );
+                                Result::Ok(None)
+                            }
+                        }
+                    }
+                }
+            } else { Result::Err(LoweringError::LabelControlNotLowered(id)) }
+        },
+        CoreComputationView::Perform(_, instance, operation, operands) => {
+            let payloads = Vec::new();
+            try(lower_arguments(
+                interfaces, body, value, operands, &mut payloads
+            ), @lower_computation);
+            if(super::super::frontend::elaboration::
+                interface_effect_operation_is_terminal(interfaces, operation)) {
+                let owner = super::super::frontend::elaboration::
+                    interface_effect_instance_effect(interfaces, instance);
+                emit_terminal_perform(
+                    value,
+                    Id::from_u32(Id::to_u32(owner)),
+                    super::super::frontend::elaboration::
+                        interface_effect_operation_ordinal(interfaces, operation),
+                    payloads
+                );
+                Result::Ok(None)
+            } else { Result::Err(LoweringError::EffectControlNotLowered(id)) }
+        },
         CoreComputationView::Resume(_, _, _) =>
             Result::Err(LoweringError::EffectControlNotLowered(id)),
         CoreComputationView::Handle(_, _, _) =>
@@ -3494,24 +4377,38 @@ lower_product_fields<'a>(
     fields: Slice<'a, ConstructionField>,
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
-    Slice::try_for_each(fields, { entry => {
+    lower_product_fields_at(interfaces, body, value, fields, 0, output)
+}
+
+lower_product_fields_at<'a>(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &'a super::super::frontend::elaboration::TypedBody,
+    value: &mut MirBuilder<'a>,
+    fields: Slice<'a, ConstructionField>,
+    ordinal: usize,
+    output: &mut Vec<RegisterId>
+) -> Result<(), LoweringError> {
+    if(ordinal < Slice::len(fields)) {
+        let entry = Slice::index(fields, ordinal);
         let field =
             super::super::frontend::elaboration::
-                construction_field_ordinal(entry);
+                construction_field_ordinal(&entry);
         let operand =
             super::super::frontend::elaboration::
-                construction_field_value(entry);
+                construction_field_value(&entry);
         if(field == checked_u32(Vec::len(output))) {
-            let lowered = try(
-                lower_value(interfaces, body, value, operand),
-                @lower_product_fields
-            );
-            handle lowered {
-                Result::Err(_) =>
-                    Result::Err(LoweringError::MissingValue(operand)),
-                Result::Ok(register) => {
-                    Vec::push(&mut *output, register);
-                    Result::Ok(())
+            handle lower_value(interfaces, body, value, operand) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(lowered) => handle lowered {
+                    Result::Err(_) =>
+                        Result::Err(LoweringError::MissingValue(operand)),
+                    Result::Ok(register) => {
+                        Vec::push(&mut *output, register);
+                        lower_product_fields_at(
+                            interfaces, body, value, fields, ordinal + 1, output
+                        )
+                    }
                 }
             }
         } else {
@@ -3520,7 +4417,7 @@ lower_product_fields<'a>(
                 field
             ))
         }
-    } })
+    } else { Result::Ok(()) }
 }
 
 parameter_types(
@@ -3724,6 +4621,13 @@ validate_mir_instruction<'a>(
         Result::Ok(())
     } else if(*instruction is MirInstruction::Unreachable) {
         Result::Ok(())
+    } else if(*instruction is MirInstruction::LabelPush(_, result, target)) {
+        try(validate_mir_register(value, result), @validate_mir_instruction);
+        validate_mir_block(value, target)
+    } else if(*instruction is MirInstruction::LabelPop(_)) {
+        Result::Ok(())
+    } else if(*instruction is MirInstruction::Leave(_, payload)) {
+        validate_mir_register(value, payload)
     } else if(*instruction is MirInstruction::Jump(block)) {
         validate_mir_block(value, block)
     } else if(*instruction is MirInstruction::Switch(
@@ -3758,6 +4662,16 @@ validate_mir_instruction<'a>(
         } else {
             Result::Err(LoweringError::InvalidMirFunction(function))
         }
+    } else if(*instruction is MirInstruction::Perform(target, _, _, pack)) {
+        // Protocol/operation metadata is validated by emission against the
+        // completed program. At this builder stage validate the only local
+        // invariants: an optional result register and every transferred
+        // payload register. Terminal lowering supplies `None` here.
+        try(validate_optional_mir_register(
+            value,
+            target
+        ), @validate_mir_instruction);
+        validate_mir_register_pack(value, pack, 0)
     } else if(*instruction is MirInstruction::Return(source)) {
         validate_optional_mir_register(value, source)
     } else {
@@ -3859,6 +4773,27 @@ validate_mir_builder<'a>(
     }
 }
 
+callable_effect_protocols(
+    interfaces: &super::super::frontend::elaboration::TypedInterfaces,
+    callable: InterfaceCallableId,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) {
+    if(ordinal < super::super::frontend::elaboration::
+        interface_callable_effect_count(interfaces, callable)) {
+        let ty = handle super::super::frontend::elaboration::
+            interface_callable_effect_at(interfaces, callable, ordinal) {
+            None => unreachable(), Option::Some(found) => found
+        };
+        handle super::super::frontend::elaboration::
+            interface_effect_for_type(interfaces, ty) {
+            None => unreachable(),
+            Option::Some(protocol) => Vec::push(&mut *output, Id::to_u32(protocol))
+        };
+        callable_effect_protocols(interfaces, callable, ordinal + 1, output)
+    } else { () }
+}
+
 pub lower_function<'a>(
     name: String,
     interfaces:
@@ -3892,6 +4827,9 @@ pub lower_function<'a>(
         register_packs: Arena::new(),
         blocks: Arena::new(),
         switch_packs: Arena::new(),
+        active_labels: Vec::new(),
+        active_label_results: Vec::new(),
+        leaving_labels: Vec::new(),
         register_count: parameter_count + 1
     };
     push_parameter_locals(
@@ -3918,6 +4856,10 @@ pub lower_function<'a>(
         None => unreachable(),
         Option::Some(found) => found
     };
+    let callable = super::super::frontend::elaboration::
+        callable_instance_callable(interfaces, instance);
+    let outward_protocols = Vec::new();
+    callable_effect_protocols(interfaces, callable, 0, &mut outward_protocols);
     handle result {
         Result::Err(_) => {
             try(validate_mir_builder(
@@ -3928,7 +4870,13 @@ pub lower_function<'a>(
                 name: name,
                 parameters: parameters,
                 result: result_type,
-                outward_protocols: Vec::new(),
+                outward_protocols: outward_protocols,
+                // Register zero is the VM's hidden receiver slot. Ordinary
+                // direct calls already supply Unit there, so pure functions
+                // can also serve as deterministic captureless callable
+                // targets without an adapter frame.
+                receiver_mode: Option::Some(2),
+                receiver_type: artifact_type_id(0),
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
@@ -3952,7 +4900,9 @@ pub lower_function<'a>(
                 name: name,
                 parameters: parameters,
                 result: result_type,
-                outward_protocols: Vec::new(),
+                outward_protocols: outward_protocols,
+                receiver_mode: Option::Some(2),
+                receiver_type: artifact_type_id(0),
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
@@ -4002,6 +4952,9 @@ pub lower_primitive_function<'a>(
         register_packs: Arena::new(),
         blocks: Arena::new(),
         switch_packs: Arena::new(),
+        active_labels: Vec::new(),
+        active_label_results: Vec::new(),
+        leaving_labels: Vec::new(),
         register_count: parameter_count + 1
     };
     push_parameter_locals(
@@ -4035,6 +4988,8 @@ pub lower_primitive_function<'a>(
             Option::Some(found) => found
         },
         outward_protocols: Vec::new(),
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: builder.register_count,
         instructions: builder.instructions,
         cleanups: builder.cleanups,
@@ -4084,6 +5039,8 @@ pub lower_abort_function(
             Option::Some(found) => found
         },
         outward_protocols: Vec::new(),
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: parameter_count + 1,
         instructions: instructions,
         cleanups: Vec::new(),
@@ -4136,6 +5093,9 @@ pub lower_host_function<'a>(
         register_packs: Arena::new(),
         blocks: Arena::new(),
         switch_packs: Arena::new(),
+        active_labels: Vec::new(),
+        active_label_results: Vec::new(),
+        leaving_labels: Vec::new(),
         register_count: parameter_count + 1
     };
     push_parameter_locals(
@@ -4167,6 +5127,8 @@ pub lower_host_function<'a>(
             Option::Some(found) => found
         },
         outward_protocols: Vec::new(),
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: builder.register_count,
         instructions: builder.instructions,
         cleanups: builder.cleanups,
@@ -4395,6 +5357,10 @@ derive_type_facts(
         MirTypeKind::Resumption => MirTypeFacts {
             zero_sized: false,
             permits_zero_use: mir_type.resumption_lower == 0
+        },
+        MirTypeKind::Callable => MirTypeFacts {
+            zero_sized: false,
+            permits_zero_use: mir_type.callable_zero_use_allowed
         }
     }
 }
@@ -4527,6 +5493,8 @@ pub new_mir_function(
         parameters: parameters,
         result: result,
         outward_protocols: outward_protocols,
+        receiver_mode: None,
+        receiver_type: artifact_type_id(0),
         register_count: register_count,
         instructions: Vec::new(),
         cleanups: Vec::new(),
@@ -4535,6 +5503,34 @@ pub new_mir_function(
         blocks: Arena::new(),
         switch_packs: Arena::new()
     }
+}
+
+// Only manually scheduled/lifted closure bodies use this constructor. Ordinary
+// Core functions retain `None`, preventing `MakeCallable` from targeting one
+// accidentally.
+pub new_mir_callable_function(
+    name: String,
+    parameters: Vec<ArtifactTypeId>,
+    result: ArtifactTypeId,
+    outward_protocols: Vec<u32>,
+    receiver_mode: u32,
+    receiver_type: ArtifactTypeId,
+    register_count: u32
+) -> MirFunction {
+    let value = new_mir_function(
+        name, parameters, result, outward_protocols, register_count
+    );
+    value.receiver_mode = Option::Some(receiver_mode);
+    value.receiver_type = receiver_type;
+    value
+}
+
+pub mir_function_receiver_mode(value: &MirFunction) -> Option<u32> {
+    value.receiver_mode
+}
+
+pub mir_function_receiver_type(value: &MirFunction) -> ArtifactTypeId {
+    value.receiver_type
 }
 
 pub alloc_mir_register_pack(

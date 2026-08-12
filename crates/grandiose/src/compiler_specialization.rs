@@ -771,17 +771,39 @@ fn symbolic_type(
         TypeSyntaxKind::Application {
             constructor,
             arguments,
-            ..
+            lifetime_arguments,
+            const_arguments,
         } => {
             let name = constructor.simple_name()?;
             if generics.contains_key(name) {
                 return None;
             }
+            let const_by_position = const_arguments
+                .iter()
+                .map(|argument| (argument.position, &argument.value))
+                .collect::<BTreeMap<_, _>>();
+            let lifetime_positions = lifetime_arguments
+                .iter()
+                .map(|argument| argument.position)
+                .collect::<BTreeSet<_>>();
+            let mut source_types = arguments.iter();
+            let total = arguments.len() + const_arguments.len() + lifetime_arguments.len();
             Some(ProvisionalType::Nominal(NominalInstanceKey {
                 declaration: NominalKey(name.to_owned()),
-                arguments: arguments
-                    .iter()
-                    .map(|argument| symbolic_type(argument, generics, callable_constraints))
+                arguments: (0..total)
+                    .filter(|position| !lifetime_positions.contains(position))
+                    .map(|position| {
+                        const_by_position.get(&position).map_or_else(
+                            || {
+                                symbolic_type(
+                                    source_types.next()?,
+                                    generics,
+                                    callable_constraints,
+                                )
+                            },
+                            |value| const_identity(value, generics),
+                        )
+                    })
                     .collect::<Option<Vec<_>>>()?,
             }))
         }
@@ -897,8 +919,7 @@ fn const_identity(
     Some(ProvisionalType::Const(value))
 }
 
-/// Enrich the compatibility type/lifetime application tree with structural const
-/// identities retained in `Program`'s span-keyed side table.
+/// Recursively preserve structural const identities for a type application.
 fn symbolic_type_in(
     program: &Program,
     syntax: &TypeSyntax,

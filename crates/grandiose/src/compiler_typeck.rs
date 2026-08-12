@@ -4,7 +4,7 @@
 //! runtime descriptor allocation.  Its keys and types are suitable for discovering
 //! requirements before numeric bytecode identifiers exist.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
@@ -398,7 +398,7 @@ pub(crate) fn type_lifetime_variance(
     found
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) enum ProvisionalConst {
     U32(u32),
     Quantity { lower: u32, upper: Option<u32> },
@@ -445,7 +445,7 @@ impl ProvisionalConst {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) enum ProvisionalType {
     Predefined(String),
     Const(ProvisionalConst),
@@ -695,10 +695,10 @@ fn provisional_type_any_with(
         }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct NominalKey(pub(crate) String);
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct NominalInstanceKey {
     pub(crate) declaration: NominalKey,
     pub(crate) arguments: Vec<ProvisionalType>,
@@ -713,19 +713,19 @@ impl NominalInstanceKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) enum DeclarationKey {
     Function(String),
     Global(String),
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct GenericParamKey {
     pub(crate) owner: DeclarationKey,
     pub(crate) ordinal: u32,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct CallableShape {
     pub(crate) params: Vec<ProvisionalType>,
     pub(crate) result: ProvisionalType,
@@ -741,16 +741,16 @@ pub(crate) struct CallableShape {
     pub(crate) infer_effects: bool,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct CallableEffect {
     pub(crate) declaration: ProtocolKey,
     pub(crate) arguments: Vec<ProvisionalType>,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct ProtocolKey(pub(crate) String);
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct LocalKey {
     pub(crate) owner: DeclarationKey,
     pub(crate) ordinal: u32,
@@ -796,13 +796,13 @@ pub(crate) struct TypedProgram {
     assignment_reference_requirements: BTreeSet<ProvisionalType>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct IncrementalTypeStats {
     pub(crate) elaborated_bodies: usize,
     pub(crate) reused_bodies: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct CachedTypedBody {
     fingerprint: u64,
     body: TypedExpr,
@@ -811,20 +811,78 @@ struct CachedTypedBody {
     assignment_reference_requirements: BTreeSet<ProvisionalType>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub(crate) struct IncrementalTypeCache {
+    /// The currently compiling context is diagnostic state only. Cached
+    /// bodies are keyed by their own exact context so a structural edit never
+    /// destroys entries belonging to unaffected prior revisions.
     context_fingerprint: Option<u64>,
-    bodies: BTreeMap<DeclarationKey, CachedTypedBody>,
+    /// Bounded revision retention avoids letting unusual header-edit sessions
+    /// grow forever, while eviction removes only one old context at a time.
+    context_lru: VecDeque<u64>,
+    bodies: BTreeMap<(u64, DeclarationKey), CachedTypedBody>,
     pub(crate) stats: IncrementalTypeStats,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+const INCREMENTAL_TYPE_CONTEXT_CAPACITY: usize = 4;
+
+impl IncrementalTypeCache {
+    /// Binary persistence is intentionally limited to exact body evidence.
+    /// The caller binds this payload to a compiler-cache schema before it is
+    /// written to disk; a decode failure simply behaves as a cache miss.
+    pub(crate) fn encode_persistent(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    pub(crate) fn decode_persistent(bytes: &[u8]) -> Option<Self> {
+        let mut cache = bincode::deserialize::<Self>(bytes).ok()?;
+        cache.stats = IncrementalTypeStats::default();
+        (cache.context_lru.len() <= INCREMENTAL_TYPE_CONTEXT_CAPACITY).then_some(cache)
+    }
+
+    /// Merge a cache published by another compiler process while keeping this
+    /// process's freshly elaborated bodies authoritative.  The bounded LRU
+    /// is retained as a union rather than replacing the entire disk payload,
+    /// so concurrent warm compilations cannot erase unrelated body evidence.
+    pub(crate) fn merge_persistent(&mut self, other: Self) {
+        let mut retained_contexts = self.context_lru.clone();
+        for context in other.context_lru {
+            if !retained_contexts.contains(&context) {
+                retained_contexts.push_back(context);
+            }
+        }
+        retained_contexts.truncate(INCREMENTAL_TYPE_CONTEXT_CAPACITY);
+
+        for ((context, declaration), body) in other.bodies {
+            if retained_contexts.contains(&context) {
+                self.bodies.entry((context, declaration)).or_insert(body);
+            }
+        }
+        self.context_lru = retained_contexts;
+        self.bodies
+            .retain(|(context, _), _| self.context_lru.contains(context));
+    }
+
+    fn select_context(&mut self, context: u64) {
+        self.context_fingerprint = Some(context);
+        if let Some(position) = self.context_lru.iter().position(|known| *known == context) {
+            self.context_lru.remove(position);
+        }
+        self.context_lru.push_front(context);
+        while self.context_lru.len() > INCREMENTAL_TYPE_CONTEXT_CAPACITY {
+            let evicted = self.context_lru.pop_back().expect("length was checked");
+            self.bodies.retain(|(cached_context, _), _| *cached_context != evicted);
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct RefinementBrand {
     pub(crate) owner: DeclarationKey,
     pub(crate) expression_ordinal: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct RefinementBinding {
     pub(crate) name: String,
     pub(crate) ty: ProvisionalType,
@@ -832,13 +890,13 @@ pub(crate) struct RefinementBinding {
     pub(crate) span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct VariantExclusion {
     pub(crate) nominal: NominalInstanceKey,
     pub(crate) variant: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct RefinementEvidence {
     pub(crate) brand: RefinementBrand,
     pub(crate) span: Span,
@@ -852,7 +910,7 @@ pub(crate) struct RefinementEvidence {
     pub(crate) projection_safe: bool,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub(crate) struct LabelBrand {
     pub(crate) owner: DeclarationKey,
     pub(crate) ordinal: u32,
@@ -886,7 +944,7 @@ pub(crate) fn label_payload_type(ty: &ProvisionalType) -> Option<&ProvisionalTyp
         .then(|| &instance.arguments[0])
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct LabelEvidence {
     pub(crate) brand: LabelBrand,
     pub(crate) name: String,
@@ -900,7 +958,7 @@ pub(crate) struct LabelEvidence {
     pub(crate) leaves: Vec<LabelLeaveEvidence>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct LabelLeaveEvidence {
     pub(crate) span: Span,
     pub(crate) value_span: Option<Span>,
@@ -910,14 +968,14 @@ pub(crate) struct LabelLeaveEvidence {
     pub(crate) result_contains_references: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct TypedExpr {
     pub(crate) ty: Option<ProvisionalType>,
     pub(crate) span: Span,
     pub(crate) kind: TypedExprKind,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) enum TypedExprKind {
     Leaf,
     Local(LocalKey),
@@ -1954,10 +2012,7 @@ pub(crate) fn type_program_incremental(
     let mut incremental = incremental;
     if let Some((cache, context_fingerprint, _)) = incremental.as_mut() {
         cache.stats = IncrementalTypeStats::default();
-        if cache.context_fingerprint != Some(*context_fingerprint) {
-            cache.context_fingerprint = Some(*context_fingerprint);
-            cache.bodies.clear();
-        }
+        cache.select_context(*context_fingerprint);
     }
     let mut tables = tables.clone();
     let mut bodies = BTreeMap::new();
@@ -2043,9 +2098,11 @@ pub(crate) fn type_program_incremental(
             .as_ref()
             .and_then(|(_, _, fingerprints)| fingerprints.get(&shape.declaration))
             .copied();
-        if let Some((cache, _, _)) = incremental.as_mut()
+        if let Some((cache, context_fingerprint, _)) = incremental.as_mut()
             && let Some(fingerprint) = fingerprint
-            && let Some(cached) = cache.bodies.get(&shape.declaration)
+            && let Some(cached) = cache
+                .bodies
+                .get(&(*context_fingerprint, shape.declaration.clone()))
             && cached.fingerprint == fingerprint
         {
             apply_label_results(&mut labels, &shape.declaration, &cached.label_results);
@@ -2074,11 +2131,11 @@ pub(crate) fn type_program_incremental(
         assignment_reference_requirements.extend(body_requirements.iter().cloned());
         refinements.insert(shape.declaration.clone(), body_refinements.clone());
         bodies.insert(shape.declaration.clone(), body.clone());
-        if let Some((cache, _, _)) = incremental.as_mut()
+        if let Some((cache, context_fingerprint, _)) = incremental.as_mut()
             && let Some(fingerprint) = fingerprint
         {
             cache.bodies.insert(
-                shape.declaration.clone(),
+                (*context_fingerprint, shape.declaration.clone()),
                 CachedTypedBody {
                     fingerprint,
                     body,

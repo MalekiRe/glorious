@@ -7,7 +7,7 @@ use std::{sync::atomic::{AtomicUsize, Ordering},
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel,
+    CompileOptions, OptimizationLevel,
     ast::{
         BinaryOp, Expr, ExprKind, FixityKind, Pattern, PatternKind, Program, Stmt, TypeSyntax,
         TypeSyntaxKind, UnaryOp,
@@ -16,13 +16,8 @@ use grandiose::{
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
 
-
-// The corpus source is parsed as the final segment of a bundle that also
-// carries the distributed standard library (which supplies prelude operator
-// fixity semantics).  The oracle encodes grouping spans relative to the corpus
-// segment; this cell records that segment's global start so encoded spans match
-// the self-host's local numbering while source slicing still uses global ranges.
-static CORPUS_OFFSET: AtomicUsize = AtomicUsize::new(0);
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -179,7 +174,20 @@ fn encode_statement(
             output.push(2);
             encode_expression(output, program, source, expression)
         }
-        Stmt::Deconstruct { .. } | Stmt::Assign { .. } => Err(()),
+        Stmt::Assign {
+            destination,
+            value,
+            ..
+        } => match &destination.kind {
+            grandiose::ast::AssignmentPlaceKind::Local { name, fields }
+                if fields.is_empty() => {
+                    output.push(3);
+                    push_string(output, name);
+                    encode_expression(output, program, source, value)
+                }
+            _ => Err(()),
+        },
+        Stmt::Deconstruct { .. } => Err(()),
     }
 }
 
@@ -634,6 +642,13 @@ fn encode_expression(
             }
             encode_expression(output, program, source, body)?;
         }
+        ExprKind::List(elements) => {
+            output.push(23);
+            push_u32(output, elements.len().try_into().map_err(|_| ())?);
+            for element in elements.iter() {
+                encode_expression(output, program, source, element)?;
+            }
+        }
         ExprKind::Tuple(elements) => {
             output.push(9);
             push_u32(output, elements.len().try_into().map_err(|_| ())?);
@@ -809,20 +824,11 @@ fn self_host_body_parser_arbitrary_sources_terminate() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM arbitrary body corpus diverged");
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-body-arbitrary.ll");
-            let executable = directory.path().join("self-host-body-arbitrary");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "self-host-body-arbitrary",
+            );
             let native_path = directory.path().join("native.bin");
             let native = Command::new(&executable)
                 .arg(&native_path)
@@ -891,6 +897,10 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "effect Stop { stop() -> ! } \
          probe_simple_effect_path() -> i64 { \
              handle perform Stop::stop() { Stop::stop() => 42 } \
+         }",
+        "effect Ask { [1,1] ask(value: i64) -> i64 } \
+         probe_handler_resumption(value: i64) -> i64 { \
+             handle perform Ask::ask(value) { Ask::ask(found) with resume => resume(found) } \
          }",
         "effect Fail<E> { fail(error: E) -> ! } \
          invoke<E, F>(error: E, body: F) -> ! / {Fail<E>} \
@@ -1070,6 +1080,16 @@ fn self_host_body_direct_perform_handlers_match_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_body_direct_local_assignment_matches_bootstrap_ast() {
+    // This is intentionally the narrow, address-free assignment slice. Field
+    // and dereference destinations require the later place/loan frontend.
+    let source = "answer() -> i64 { let value = 1; value = 7; value } main() { () }";
+    let mut expected = Vec::new();
+    encode_rust_grouping(&mut expected, source);
+    assert_eq!(self_host_body_output(&[source]), expected);
+}
+
+#[test]
 fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
     // The component probe carries the complete scalar-pattern wire contract.
     // Keep VM and native outputs byte-for-byte identical.
@@ -1109,23 +1129,10 @@ fn self_host_body_scalar_literal_patterns_match_bootstrap_ast() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&vm_path).unwrap(), expected);
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("scalar-patterns.ll");
-            let executable = directory.path().join("scalar-patterns");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "scalar-patterns",
             );
             let native = Command::new(&executable)
                 .arg(&directory.path().join("native.bin"))
@@ -1197,6 +1204,113 @@ fn self_host_body_numeric_source_payloads_match_bootstrap_ast() {
 }
 
 #[test]
+fn self_host_body_list_syntax_matches_bootstrap_ast_before_semantic_lowering() {
+    // Lists are a bootstrap parser feature even though the bootstrap semantic
+    // pipeline still rejects collection literals. This is intentionally an
+    // AST/probe gate: it makes the self-host frontend preserve the same list
+    // shape and trailing-comma behavior without claiming array MIR support.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = "main() { [1, pair(2, 3), [4,],] }";
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+            assert_eq!(self_host_body_output(&[source]), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Keep the scalar `is` refinement path independently runnable in the VM;
+/// unlike the broader recursive-pattern oracle this deliberately has no
+/// native/LLVM stage.
+#[test]
+fn self_host_is_refinement_scalar_pattern_matches_bootstrap_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("is-refinement.glorious");
+            let output = directory.path().join("is-refinement-vm.bin");
+            let source = "main() { value is 42 }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// Float syntax is a frontend contract even though Typed Core does not yet
+/// lower float constants. Keep this VM-only probe focused on the self-host
+/// lexer/body parser's exact AST payloads, including exponent notation.
+#[test]
+fn self_host_float_syntax_matches_bootstrap_ast_in_release_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let input = directory.path().join("float-syntax.glorious");
+            let output = directory.path().join("float-syntax-vm.bin");
+            let source = "fixed() -> f64 { 2.5 } exponent() -> f32 { 1.25e2 } \
+                signed_exponent() -> f64 { 3E-4 } main() -> { () }";
+            fs::write(&input, source).unwrap();
+
+            let mut expected = Vec::new();
+            push_u32(&mut expected, 1);
+            encode_rust_grouping(&mut expected, source);
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle("probe::bodies::application"),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let vm = Vm::with_host(
+                verify(phases.artifact).unwrap(),
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vec![
+                    output.clone().into_os_string(),
+                    input.into_os_string(),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(fs::read(output).unwrap(), expected);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn self_host_body_contextual_blocks_match_bootstrap_ast() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
@@ -1235,23 +1349,10 @@ fn self_host_body_contextual_blocks_match_bootstrap_ast() {
             expected_one.extend(&expected);
             assert_eq!(fs::read(&vm_output).unwrap(), expected_one);
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("contextual-blocks.ll");
-            let executable = directory.path().join("contextual-blocks");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "contextual-blocks",
             );
             let native = Command::new(&executable)
                 .arg(&native_output)
@@ -1268,6 +1369,18 @@ fn self_host_body_contextual_blocks_match_bootstrap_ast() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn self_host_body_lazy_if_float_conditionals_match_bootstrap_ast() {
+    // `if` and `else` stay contextual identifiers in the lexer. The body
+    // parser must nevertheless accept both braced arms, including a
+    // floating-point condition payload. The bootstrap body wire oracle has no
+    // lazy-if encoding yet, so its status-3 sentinel cannot stand in for the
+    // self-host parser acceptance assertion here.
+    let source = "select(condition: Bool, value: f32) -> f32 { if(condition) { value } else { 0.0 } }";
+    let output = self_host_body_output(&[source]);
+    assert_eq!(&output[..5], &[1, 0, 0, 0, 0], "{output:?}");
 }
 
 #[test]
@@ -1392,45 +1505,10 @@ fn self_hosted_effect_path_syntax_and_body_grouping_match_rust_in_vm_and_native_
                 "VM body grouping diverged"
             );
 
-            let asan = std::env::var_os("G1_SELF_HOST_BODY_GROUPING_ASAN").is_some();
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let debug_directory = repository_root().join("target/self-host-body-grouping-debug");
-            if asan {
-                fs::create_dir_all(&debug_directory).unwrap();
-                let functions = phases
-                    .mir
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, function)| format!("{index}\t{}\n", function.name))
-                    .collect::<String>();
-                fs::write(debug_directory.join("functions.txt"), functions).unwrap();
-            }
-            let llvm = if asan {
-                debug_directory.join("self-host-body-grouping.ll")
-            } else {
-                directory.path().join("self-host-body-grouping.ll")
-            };
-            let executable = if asan {
-                debug_directory.join("self-host-body-grouping")
-            } else {
-                directory.path().join("self-host-body-grouping")
-            };
-            fs::write(&llvm, module.ir).unwrap();
-            let mut clang_command = Command::new("clang");
-            clang_command
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0");
-            if asan {
-                clang_command.args(["-fsanitize=address", "-fno-omit-frame-pointer", "-g"]);
-            }
-            let clang = clang_command.arg("-o").arg(&executable).output().unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "self-host-body-grouping",
             );
 
             let native_all_path = directory.path().join("native-all.bin");
@@ -1627,20 +1705,11 @@ fn self_host_body_labels_match_bootstrap_ast() {
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&output_path).unwrap(), expected);
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("labels.ll");
-            let executable = directory.path().join("labels");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "labels",
+            );
             let native_output = directory.path().join("native.bin");
             let native = Command::new(&executable)
                 .arg(&native_output)
@@ -1819,20 +1888,11 @@ fn self_host_body_is_patterns_match_bootstrap_ast() {
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
             assert_eq!(fs::read(&output).unwrap(), expected, "VM body AST diverged");
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("probe.ll");
-            let executable = directory.path().join("probe");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(clang.status.success(), "{}", String::from_utf8_lossy(&clang.stderr));
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle("probe::bodies::application"),
+                directory.path(),
+                "probe",
+            );
             let native_output = directory.path().join("native.bin");
             let native = Command::new(&executable)
                 .arg(&native_output)
@@ -2100,212 +2160,4 @@ fn self_host_parser_conformance_syntax_core_matches_rust_oracle() {
 #[test]
 fn self_host_source_numeric_literals_syntax_core_match_rust_oracle() {
     self_host_body_numeric_source_payloads_match_bootstrap_ast();
-}
-
-
-/// Ports the native `surface_call_redesign` corpus (syntax_frontend family) to
-/// self-host body/span parity: the self-host body parser must reproduce the
-/// Rust bootstrap parser's AST and exact spans for every source in the file.
-fn surface_call_redesign_body_corpus(directory: &Path) -> Vec<PathBuf> {
-    let focused = [
-        // hyphenated_whitespace_calls_compile_and_execute
-        r#"sum-three(first: i64, second: i64, third: i64) -> i64 {
-            first + second + third
-        }
-
-        nested(value: i64) -> i64 { value + 1 }
-
-        selected() -> i64 {
-            sum-three 10, 20, nested(11)
-        }
-
-        main() -> () { () }"#,
-        // dollar_references_produce_first_class_callables
-        r#"sum-three(first: i64, second: i64, third: i64) -> i64 {
-            first + second + third
-        }
-
-        apply<F>(callable: F) -> i64
-        where F: Fn<(i64, i64, i64), Output = i64> {
-            callable(10, 20, 12)
-        }
-
-        selected() -> i64 { apply($sum-three) }
-        main() -> () { () }"#,
-        // symbolic_add_is_an_ordinary_trait_method
-        r#"struct Wrapped { value: i64 }
-
-        impl Add for Wrapped {
-            +(self: Wrapped, other: Wrapped) -> Wrapped {
-                self;
-                other
-            }
-        }
-
-        selected() -> i64 {
-            let result = Wrapped { value: 10 } + Wrapped { value: 42 };
-            result.value
-        }
-
-        main() -> () { () }"#,
-    ];
-    focused
-        .into_iter()
-        .enumerate()
-        .map(|(index, source)| {
-            let path = directory.join(format!("surface-call-redesign-{index}.glorious"));
-            fs::write(&path, source).unwrap();
-            path
-        })
-        .collect()
-}
-
-#[test]
-fn self_host_body_surface_call_redesign_matches_bootstrap_ast() {
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let directory = tempfile::tempdir().unwrap();
-            let corpus = surface_call_redesign_body_corpus(directory.path());
-            let mut expected = Vec::new();
-            push_u32(&mut expected, corpus.len().try_into().unwrap());
-            for path in &corpus {
-                encode_rust_grouping(&mut expected, &fs::read_to_string(path).unwrap());
-            }
-
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle("probe::bodies::application"),
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
-                },
-            )
-            .unwrap();
-            let entry = phases.artifact.entry_function.unwrap();
-            let verified = verify(phases.artifact.clone()).unwrap();
-            let output_path = directory.path().join("output.bin");
-            let vm = Vm::with_host(
-                verified,
-                ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(
-                    std::iter::once(output_path.clone().into_os_string())
-                        .chain(corpus.iter().map(|path| path.clone().into_os_string()))
-                        .collect::<Vec<_>>(),
-                ),
-            )
-            .unwrap();
-            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            assert_eq!(fs::read(output_path).unwrap(), expected);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-/// Ports the body-parity core of the native `surface_simplifications`
-/// corpus (syntax_frontend family) that the shared parse oracle accepts on
-/// both sides. The self-host body parser reproduces the Rust bootstrap
-/// parser's grouped AST and exact spans for nested-call/struct-projection
-/// bodies and for loop-combinator bodies with closures, labels, `break`, and
-/// `continue`.
-fn surface_simplifications_body_corpus(directory: &Path) -> Vec<PathBuf> {
-    let focused = [
-        // owned_values_move_implicitly_without_surface_move_noise
-        r#"struct Token { value: i64 }
-        unwrap(token: Token) -> i64 { token.value }
-        answer() -> i64 {
-            let token = Token { value: 42 };
-            unwrap(token)
-        }
-        main() -> { () }"#,
-        // source_defined_loop_combinators_handle_break_and_continue
-        r#"answer() -> i64 {
-            while({ => 0 });
-            until({ => 0 });
-            @outer: { loop({ => { break() } }) };
-            times(3, { => { continue() } });
-            times(10, { => { break() } });
-            42
-        }
-        main() -> { () }"#,
-        // library_match_syntax_elaborates_to_source_defined_refinement_calls
-        r#"make() -> Result<i64, ()> { Result::Ok(42) }
-        answer() -> i64 {
-            match(make()) {
-                Result::Ok(answer) => answer,
-                Result::Err(_) => 0
-            }
-        }
-        main() -> { () }"#,
-        // match_moves_noncopy_payloads_out_of_its_subject
-        r#"struct Token { value: i64 }
-        impl Use<[0,1]> for Token {}
-        enum Choice { Some(Token), None }
-        make() -> Choice { Choice::Some(Token { value: 42 }) }
-        answer() -> i64 {
-            match(make()) {
-                Choice::Some(token) => token.value,
-                Choice::None => 0
-            }
-        }
-        main() -> { () }"#,
-        // constructor_and_nullary_value_aliases_are_patterns
-        r#"enum Signal { Stop, Value(i64) }
-        selected(signal: Signal) -> i64 {
-            match(signal) {
-                Signal::Stop => 0,
-                Signal::Value(value) => value
-            }
-        }
-        main() -> { () }"#,
-    ];
-    focused
-        .into_iter()
-        .enumerate()
-        .map(|(index, source)| {
-            let path = directory.join(format!("surface-simplifications-{index}.glorious"));
-            fs::write(&path, source).unwrap();
-            path
-        })
-        .collect()
-}
-
-#[test]
-fn self_host_body_surface_simplifications_matches_bootstrap_ast() {
-    std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let directory = tempfile::tempdir().unwrap();
-            let corpus = surface_simplifications_body_corpus(directory.path());
-            let mut expected = Vec::new();
-            push_u32(&mut expected, corpus.len().try_into().unwrap());
-            for path in &corpus {
-                encode_rust_grouping(&mut expected, &fs::read_to_string(path).unwrap());
-            }
-
-            let phases = grandiose::compile_bundle_to_phases_with_options(
-                &self_host_bundle("probe::bodies::application"),
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O2,
-                },
-            )
-            .unwrap();
-            let entry = phases.artifact.entry_function.unwrap();
-            let verified = verify(phases.artifact.clone()).unwrap();
-            let output_path = directory.path().join("output.bin");
-            let vm = Vm::with_host(
-                verified,
-                ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(
-                    std::iter::once(output_path.clone().into_os_string())
-                        .chain(corpus.iter().map(|path| path.clone().into_os_string()))
-                        .collect::<Vec<_>>(),
-                ),
-            )
-            .unwrap();
-            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            assert_eq!(fs::read(output_path).unwrap(), expected);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
 }

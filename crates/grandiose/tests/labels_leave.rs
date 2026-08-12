@@ -877,3 +877,127 @@ fn nested_leave_cleans_partial_owners_and_loans_at_all_optimization_levels() {
         );
     }
 }
+
+fn run_answer_at_all_optimization_levels(name: &str, source: &str, expected: Value) {
+    for optimization_level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let phases = compile_source_to_phases_with_options(
+            name,
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let answer = phases
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .expect("answer function") as u32;
+        assert_eq!(
+            Vm::new(verify(phases.artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            expected,
+            "{optimization_level:?}"
+        );
+    }
+}
+
+#[test]
+fn terminal_perform_handler_can_forward_a_static_label_to_the_implicit_destination() {
+    let source = r#"
+        effect Escape {
+            exit<L>(value: i64, destination: L) -> ! where L: Label<i64>
+        }
+        answer() -> i64 {
+            handle perform Escape::exit(42, @answer) {
+                Escape::exit(value, destination) => destination(value)
+            }
+        }
+        main() -> { () }
+    "#;
+    run_answer_at_all_optimization_levels(
+        "terminal-perform-forwards-static-label.glorious",
+        source,
+        Value::I64(42),
+    );
+}
+
+#[test]
+fn direct_never_call_can_leave_an_enclosing_label() {
+    let source = r#"
+        leave<L>(destination: L, value: i64) -> ! where L: Label<i64> {
+            destination(value)
+        }
+        answer() -> i64 {
+            @outer: i64 {
+                @inner: i64 {
+                    leave(@outer, 43)
+                }
+            }
+        }
+        main() -> { () }
+    "#;
+    run_answer_at_all_optimization_levels(
+        "direct-never-call-leaves-outer-label.glorious",
+        source,
+        Value::I64(43),
+    );
+}
+
+#[test]
+fn nested_labels_keep_own_and_outer_leaves_distinct() {
+    let source = r#"
+        leave<L>(destination: L, value: i64) -> ! where L: Label<i64> {
+            destination(value)
+        }
+        own() -> i64 {
+            @outer: i64 {
+                @inner: i64 {
+                    leave(@inner, 17)
+                }
+            }
+        }
+        answer() -> i64 {
+            @outer: i64 {
+                @inner: i64 {
+                    leave(@outer, 18)
+                }
+            }
+        }
+        main() -> { () }
+    "#;
+    run_answer_at_all_optimization_levels(
+        "nested-own-and-outer-label-leaves.glorious",
+        source,
+        Value::I64(18),
+    );
+    for optimization_level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let phases = compile_source_to_phases_with_options(
+            "nested-own-and-outer-label-leaves.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let own = phases
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "own")
+            .expect("own function") as u32;
+        assert_eq!(
+            Vm::new(verify(phases.artifact).unwrap())
+                .run(own, vec![])
+                .unwrap(),
+            Value::I64(17),
+            "{optimization_level:?}"
+        );
+    }
+}

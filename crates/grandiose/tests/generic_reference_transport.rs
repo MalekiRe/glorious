@@ -844,8 +844,9 @@ fn higher_order_callback_divergent_cfg_origins_fail_closed() {
         .expect_err("divergent callback origins compiled as one symbolic lifetime");
         assert!(
             errors.iter().any(|error| {
-                error.message.contains("exactly one compatible reference")
-                    || error.message.contains("incompatible live loan")
+                error.code.as_deref() == Some("G1BC002")
+                    && (error.message.contains("reference-returning closure")
+                        || error.message.contains("incompatible live loan"))
             }),
             "{optimization_level:?}: {errors:#?}"
         );
@@ -903,7 +904,7 @@ fn higher_order_selected_lifetime_cannot_escape_or_alias_its_owner() {
         (
             "higher-order-lifetime-opaque-route.glorious",
             opaque_route,
-            "exactly one compatible reference",
+            "select exactly one compatible parameter",
         ),
     ] {
         for optimization_level in [

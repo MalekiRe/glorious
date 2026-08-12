@@ -28,7 +28,7 @@ pub type LocalId = Register;
 macro_rules! mir_id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
-        #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+        #[derive(Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
         pub struct $name(pub u32);
 
         impl $name {
@@ -88,24 +88,24 @@ mir_id!(
     SourceInfoId
 );
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum UseMode {
     Copy,
     Move,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Operand {
     pub register: Register,
     pub mode: UseMode,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Program {
     pub functions: Vec<Function>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Function {
     pub declaration: u32,
     pub name: String,
@@ -144,7 +144,7 @@ pub mod analysis {
     pub const ALL: u8 = CFG | USES | FLOW | EFFECTS | VALUES | COST;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BasicBlock {
     pub id: u32,
     pub params: Vec<BlockParam>,
@@ -156,7 +156,7 @@ pub struct BasicBlock {
 /// compatibility MIR still serializes blocks in one vector; this classification
 /// prevents transformations from silently treating cleanup/control boundaries
 /// as ordinary forwarding blocks.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum BlockKind {
     Entry,
     Normal,
@@ -166,7 +166,7 @@ pub enum BlockKind {
     Label,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum BlockParamRole {
     Ordinary,
     ProtectedExitValue,
@@ -174,14 +174,14 @@ pub enum BlockParamRole {
     ResumeResult,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct BlockParam {
     pub register: Register,
     pub ty: TypeId,
     pub role: BlockParamRole,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Edge {
     pub target: u32,
     pub args: Vec<Operand>,
@@ -191,14 +191,14 @@ pub struct Edge {
 ///
 /// Both register lists are canonical sets (strictly increasing), and
 /// `captured_references` is a subset of `captured_owners`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ResidualCapture {
     pub register: Register,
     /// One entry per runtime aggregate field; `true` means still initialized.
     pub initialized_fields: Vec<bool>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ContinuationCapture {
     pub captured_owners: Vec<Register>,
     pub captured_references: Vec<Register>,
@@ -206,7 +206,7 @@ pub struct ContinuationCapture {
     pub cancellation_safe: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Terminator {
     Goto(Edge),
     Switch {
@@ -466,13 +466,13 @@ impl Terminator {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Instruction {
     pub span: Span,
     pub kind: InstructionKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum InstructionKind {
     Const {
         dst: Register,
@@ -602,7 +602,7 @@ pub enum InstructionKind {
 /// analysis from growing its own exhaustive match. `Consume` includes both
 /// move-mode operands and the bare-register operations which end an owned MIR
 /// state (`EndBorrow` and `Deconstruct`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum RegisterUseKind {
     Inspect,
     Consume,
@@ -721,7 +721,7 @@ impl InstructionKind {
 }
 
 /// Storage class of a local.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum StorageClass {
     /// Defined exactly once; the common case for compact-MIR registers.
     Ssa,
@@ -732,14 +732,14 @@ pub enum StorageClass {
     Erased,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Mutability {
     Immutable,
     Mutable,
 }
 
 /// Ownership category of the value a local holds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum OwnershipCategory {
     Owned,
     SharedRef,
@@ -749,7 +749,7 @@ pub enum OwnershipCategory {
 }
 
 /// Why a local exists.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum LocalKind {
     Receiver,
     Parameter(u32),
@@ -761,7 +761,7 @@ pub enum LocalKind {
 }
 
 /// Drop-glue information for a local's runtime type.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum DropGlueKind {
     /// No owned substructure requires destruction work.
     None,
@@ -772,14 +772,14 @@ pub enum DropGlueKind {
 }
 
 /// Initialization state of a local at function entry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum InitAtEntry {
     Uninitialized,
     Initialized,
 }
 
 /// A declared quantitative `Use` interval. `upper == None` means unbounded.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct UseInterval {
     pub lower: u32,
     pub upper: Option<u32>,
@@ -803,7 +803,7 @@ impl UseInterval {
 /// One fact per local, exported by the frontend at lowering time. Registers
 /// allocated later by optimizer passes receive conservative `Temporary` facts
 /// derived from their runtime type when the flow is re-imported.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LocalFact {
     pub ty: TypeId,
     pub storage: StorageClass,
@@ -818,7 +818,7 @@ pub struct LocalFact {
 }
 
 /// One place projection step.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Projection {
     /// Read/write through a live reference.
     Deref,
@@ -831,7 +831,7 @@ pub enum Projection {
 }
 
 /// A place: a base local plus a projection path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct Place {
     pub base: LocalId,
     pub projection: Vec<Projection>,
@@ -897,7 +897,7 @@ impl Place {
 }
 
 /// One move-path node: a statically distinguishable owned projection.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MovePathFact {
     pub parent: Option<MovePathId>,
     pub base: LocalId,
@@ -906,7 +906,7 @@ pub struct MovePathFact {
 }
 
 /// Deterministic interning arena for the move-path tree of one body.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct MovePaths {
     pub facts: Vec<MovePathFact>,
 }
@@ -992,14 +992,14 @@ impl MovePaths {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum LoanKind {
     Shared,
     Unique,
 }
 
 /// One loan created by a `Borrow`, `ProjectBorrow`, or `Reborrow`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LoanFact {
     pub kind: LoanKind,
     /// Register holding the reference value while the loan is live.
@@ -1016,7 +1016,7 @@ pub struct LoanFact {
 /// One exported lexical scope. The bootstrap frontend destroys scope-local
 /// owners inline, so it exports a single function scope; the tree shape is
 /// kept so finer scopes can be exported without changing fact shapes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ScopeFact {
     pub parent: Option<ScopeId>,
     /// Owners introduced in this scope, in initialization order.
@@ -1024,7 +1024,7 @@ pub struct ScopeFact {
 }
 
 /// One gated source-label region.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct LabelFact {
     pub result_type: TypeId,
     pub scope: ScopeId,
@@ -1032,14 +1032,14 @@ pub struct LabelFact {
 }
 
 /// One `Handle` site.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct HandlerSiteFact {
     pub block: u32,
     pub scope: ScopeId,
 }
 
 /// One `Perform` site.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct PerformSiteFact {
     pub block: u32,
     pub resumptive: bool,
@@ -1048,7 +1048,7 @@ pub struct PerformSiteFact {
 }
 
 /// One `Resume`/`Cancel` site.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ResumptionSiteFact {
     pub block: u32,
     pub cancel: bool,
@@ -1060,7 +1060,7 @@ pub struct ResumptionSiteFact {
 /// The source ownership snapshot and effect row at an indirect-call
 /// suspension boundary.  The ownership solver independently reconstructs the
 /// snapshot before trusting the frontend's cancellation decision.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct IndirectCallSiteFact {
     pub block: u32,
     pub outward_protocols: Vec<u32>,
@@ -1069,7 +1069,7 @@ pub struct IndirectCallSiteFact {
 
 /// One source-lowered control-flow join. Incoming block ids are canonical and
 /// let PlaceFlow reject a frontend/CFG mismatch before ownership dataflow.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct JoinSiteFact {
     pub block: u32,
     pub incoming: Vec<u32>,
@@ -1078,7 +1078,7 @@ pub struct JoinSiteFact {
 /// One drop flag: a compiler-created `u32` local guarding conditional
 /// initialization of `owner`. The VM `Empty` register state realizes the flag
 /// at runtime, so no separate flag value is serialized.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct DropFlagFact {
     pub flag: LocalId,
     pub owner: LocalId,
@@ -1088,7 +1088,7 @@ pub struct DropFlagFact {
 }
 
 /// One ordered cleanup action.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum CleanupAction {
     /// End the static loan; the surviving reference value is already dead.
     EndBorrow(LoanId),
@@ -1106,7 +1106,7 @@ pub enum CleanupAction {
 }
 
 /// The abandoning or scope-exiting edge a cleanup plan is attached to.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum CleanupEdge {
     Return { block: u32 },
     TailCall { block: u32 },
@@ -1117,7 +1117,7 @@ pub enum CleanupEdge {
 
 /// One elaborated cleanup plan. Actions are in execution order (newest owner
 /// first); every destruction already carries `Use<[0,0]>` evidence.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CleanupPlanFact {
     pub edge: CleanupEdge,
     pub source_scope: ScopeId,
@@ -1128,7 +1128,7 @@ pub struct CleanupPlanFact {
 }
 
 /// Where a body's ownership facts came from.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum FlowProvenance {
     /// The frontend exported the facts during lowering; the import phase
     /// validates them strictly against the instruction stream and every
@@ -1144,7 +1144,7 @@ pub enum FlowProvenance {
 
 /// Frontend-exported ownership facts plus the derived arenas filled in by the
 /// `ImportAndValidatePlaceFlow` and `ElaborateCleanup` phases.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct PlaceFlow {
     pub provenance: FlowProvenance,
     /// One fact per register at export time. May be shorter than

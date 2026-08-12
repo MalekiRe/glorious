@@ -315,6 +315,24 @@ pub lowering_diagnostic(
             owner,
             0,
             0
+        ),
+        // Effect Core is intentionally diagnosed until one-shot effect MIR is
+        // fully lowered. Keep that bounded error renderable: otherwise the
+        // diagnostic's exhaustive source handle falls through to `unreachable`
+        // and turns a recoverable compiler error into a VM abort.
+        LoweringError::EffectControlNotLowered(computation) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            26,
+            "self-host compiler: effect control has not reached MIR lowering",
+            model::site(
+                DiagnosticSpace::CoreComputation,
+                Id::to_usize(computation)
+            ),
+            None,
+            owner,
+            0,
+            0
         )
     }
 }

@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use grandiose_vm::{Host, HostFault, Type, Value, Vm, verify};
+use grandiose_vm::{verify, Host, HostFault, Type, Value, Vm};
 
 fn clang_with_native_runtime() -> Command {
     let mut command = Command::new("clang");
@@ -282,6 +282,55 @@ fn native_hash_map_remove_then_insert_preserves_aggregate_value_fields() {
     );
 }
 
+#[test]
+fn llvm_o3_nominal_const_defaults_match_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-nominal-const-defaults.glorious",
+        r#"
+            struct Pair<T, const Width: u32 = 2 + 1> { value: T }
+            struct Window<const Start: u32, const End: u32 = Start + 1> {
+                marker: i64
+            }
+            make_pair() -> Pair<i64> { Pair { value: 9 } }
+            make_window() -> Window<3> { Window { marker: 4 } }
+            read_pair(value: Pair<i64, 3>) -> i64 { value.value }
+            read_window(value: Window<3, 4>) -> i64 { value.marker }
+            selected() -> i64 { read_pair(make_pair()) + read_window(make_window()) }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(13)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        13,
+        "o3-nominal-const-defaults",
+    );
+}
+
 const SYNC_OWNED_INDIRECT_EFFECT_SOURCE: &str = r#"
     effect Ask { [1,1] ask() -> i64 }
     tail_candidate() -> i64 / {Ask} {
@@ -345,6 +394,33 @@ fn compile_cli_executable(
     let output = Command::new(env!("CARGO_BIN_EXE_grc"))
         .arg("--emit")
         .arg("executable")
+        .arg("-o")
+        .arg(&executable)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
+fn compile_cli_executable_with_native_allocation_limit(
+    directory: &std::path::Path,
+    stem: &str,
+    source_text: &str,
+    limit: u64,
+) -> std::path::PathBuf {
+    let source = directory.join(format!("{stem}.glorious"));
+    let executable = directory.join(stem);
+    fs::write(&source, source_text).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grc"))
+        .arg("--emit")
+        .arg("executable")
+        .arg("--native-allocation-limit")
+        .arg(limit.to_string())
         .arg("-o")
         .arg(&executable)
         .arg(&source)
@@ -458,11 +534,9 @@ fn llvm_abort_abi_distinguishes_absent_and_present_empty_messages() {
         .unwrap()
         .terminator = grandiose::compiler_mir::Terminator::Abort { message: None };
     let absent = grandiose::emit_llvm_ir(&absent, &grandiose::LlvmOptions::default()).unwrap();
-    assert!(
-        absent
-            .ir
-            .contains("call void @g1_runtime_fault(i32 13, i32 0, i32 0, ptr null, i64 0)")
-    );
+    assert!(absent
+        .ir
+        .contains("call void @g1_runtime_fault(i32 13, i32 0, i32 0, ptr null, i64 0)"));
     assert!(!absent.ir.contains("@g1.runtime_fault."));
 
     let mut reached_unreachable = phases.clone();
@@ -491,11 +565,9 @@ fn llvm_abort_abi_distinguishes_absent_and_present_empty_messages() {
     };
     let present_empty =
         grandiose::emit_llvm_ir(&present_empty, &grandiose::LlvmOptions::default()).unwrap();
-    assert!(
-        present_empty
-            .ir
-            .contains("@g1.runtime_fault.0 = private constant [0 x i8] c\"\"")
-    );
+    assert!(present_empty
+        .ir
+        .contains("@g1.runtime_fault.0 = private constant [0 x i8] c\"\""));
     assert!(present_empty
         .ir
         .contains("call void @g1_runtime_fault(i32 13, i32 1, i32 0, ptr getelementptr inbounds ([0 x i8], ptr @g1.runtime_fault.0, i32 0, i32 0), i64 0)"));
@@ -514,6 +586,43 @@ fn cli_native_array_allocation_enforces_the_primitive_output_limit() {
     assert_eq!(
         execution.stderr,
         b"grandiose: runtime allocation limit exceeded\n"
+    );
+}
+
+#[test]
+fn llvm_options_embed_the_selected_native_allocation_limit() {
+    let phases = grandiose::compile_source_to_phases(
+        "native-allocation-limit-override.glorious",
+        "new_values() -> Vec<u8> { Vec::with_capacity(1) }\nmain() -> () { new_values(); () }",
+    )
+    .unwrap();
+    let default_module = grandiose::emit_llvm_ir(&phases, &grandiose::LlvmOptions::default())
+        .unwrap();
+    assert!(default_module
+        .ir
+        .contains("icmp ugt i64 %total.size, 67108864"));
+    let mut options = grandiose::LlvmOptions::default();
+    options.native_allocation_limit = 128 * 1024 * 1024;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module
+        .ir
+        .contains("icmp ugt i64 %total.size, 134217728"));
+}
+
+#[test]
+fn cli_native_executable_can_opt_into_a_larger_bounded_allocation_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = compile_cli_executable_with_native_allocation_limit(
+        directory.path(),
+        "native-array-allocation-limit-override",
+        "new_values() -> Vec<u8> { Vec::with_capacity(40000000) }\nmain() -> () { new_values(); () }",
+        128 * 1024 * 1024,
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
     );
 }
 
@@ -556,8 +665,9 @@ fn tuples_are_lowered_to_native_llvm_aggregates() {
         "selected() -> (i64, i64) { (1, 2) } first(value: (i64, i64)) -> i64 { let(head, ignored) = move value; ignored; move head } main() -> () { first(selected()); () }",
     )
     .unwrap();
-    assert!(module.ir.contains("insertvalue { i64, i64 }"));
-    assert!(module.ir.contains("extractvalue { i64, i64 }"));
+    assert!(module.ir.contains("= type { i64, i64 }"));
+    assert!(module.ir.contains("insertvalue %g1.type."));
+    assert!(module.ir.contains("extractvalue %g1.type."));
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("aggregate.ll");
@@ -605,11 +715,20 @@ fn references_lower_to_native_pointers() {
 fn enum_tags_and_payloads_lower_to_native_llvm_values() {
     let module = grandiose::compile_source_to_llvm_ir(
         "llvm-enum.glorious",
-        "enum Choice { Yes(i64), No } select(choice: Choice) -> i64 { if(choice is Choice::Yes(value)) { value } else { 0 } } main() -> () { select(Choice::Yes(9)); () }",
+        "enum Choice { Yes(i64), No } select(choice: Choice) -> i64 { if(choice is Choice::Yes(value)) { value } else { 0 } } main() -> () { select(Choice::Yes(9)); select(Choice::No); () }",
     )
     .unwrap();
-    assert!(module.ir.contains("insertvalue { i32, [1 x i128] }"));
-    assert!(module.ir.contains("extractvalue { i32, [1 x i128] }"));
+    assert!(module.ir.contains("= type { i32, [1 x i128] }"));
+    assert!(module.ir.contains("insertvalue %g1.type."));
+    assert!(module.ir.contains("extractvalue %g1.type."));
+    assert!(
+        module.ir.contains("zeroinitializer, i32 1, 0"),
+        "a unit variant must zero its inactive payload slot before an aggregate copy"
+    );
+    assert!(
+        !module.ir.contains("poison, i32"),
+        "enum values must initialize inactive slots before aggregate copies"
+    );
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("enum.ll");
@@ -653,11 +772,9 @@ fn option_as_ref_reads_the_enum_tag_through_a_shared_reference() {
     let mut options = grandiose::LlvmOptions::default();
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
-    assert!(
-        module
-            .ir
-            .contains("getelementptr inbounds { i32, [1 x i128] }, ptr")
-    );
+    assert!(module
+        .ir
+        .contains("getelementptr inbounds %g1.type."));
     run_native_i64(module, selected, 42, "llvm-option-as-ref");
 }
 
@@ -1061,11 +1178,9 @@ fn checked_integer_and_shift_primitives_emit_valid_guarded_ir() {
     assert!(module.ir.contains("icmp eq i64"));
     assert!(module.ir.contains("icmp uge i32"));
     assert!(module.ir.contains("shl i64"));
-    assert!(
-        module
-            .ir
-            .contains("declare void @g1_runtime_fault(i32, i32, i32, ptr, i64) cold noreturn")
-    );
+    assert!(module
+        .ir
+        .contains("declare void @g1_runtime_fault(i32, i32, i32, ptr, i64) cold noreturn"));
     assert!(module.ir.contains("call void @g1_runtime_fault(i32 2,"));
     assert!(module.ir.contains("call void @g1_runtime_fault(i32 1,"));
     assert!(module.ir.contains("call void @g1_runtime_fault(i32 3,"));
@@ -1135,6 +1250,128 @@ fn checked_division_reports_the_exact_vm_runtime_error_natively() {
 }
 
 #[test]
+fn checked_shift_reports_the_exact_vm_runtime_error_natively() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-shift-fault.glorious",
+        "selected(value: i64, count: u32) -> i64 { shift_left(value, count) }\nmain() -> () { selected(1, 1); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![Value::I64(1), Value::U64(64)])
+            .unwrap_err()
+            .to_string(),
+        "invalid integer shift count"
+    );
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("shift-fault.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("shift-fault");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(&harness, format!("#include <stdint.h>\nextern int64_t g1_f{selected}(int64_t, uint32_t);\nint main(void) {{ (void)g1_f{selected}(1, 64); return 0; }}\n")).unwrap();
+    let output = clang_with_native_runtime()
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success());
+    assert_eq!(
+        execution.stderr,
+        b"grandiose: invalid integer shift count\n"
+    );
+}
+
+#[test]
+fn checked_addition_reports_the_exact_vm_runtime_error_natively() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-addition-overflow.glorious",
+        "selected(value: i64) -> i64 { value + 1 }\nmain() -> () { selected(1); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![Value::I64(i64::MAX)])
+            .unwrap_err()
+            .to_string(),
+        "checked arithmetic overflow"
+    );
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("addition-overflow.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("addition-overflow");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\n#include <limits.h>\nextern int64_t g1_f{selected}(int64_t);\nint main(void) {{ (void)g1_f{selected}(INT64_MAX); return 0; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = clang_with_native_runtime()
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success());
+    assert_eq!(
+        execution.stderr,
+        b"grandiose: checked arithmetic overflow\n"
+    );
+}
+
+#[test]
 fn cli_native_abort_preserves_its_message() {
     let directory = tempfile::tempdir().unwrap();
     let executable = compile_cli_executable(
@@ -1174,6 +1411,65 @@ fn float_char_and_bit_primitives_emit_valid_llvm_ir() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn llvm_o3_float_arithmetic_and_bits_match_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-float-bit-parity.glorious",
+        "selected() -> u64 { f64_to_bits(f64_add(1.0, 0.5)) }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    let expected = 1.5_f64.to_bits();
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::U64(expected)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("float-bit-parity.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("float-bit-parity");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern uint64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == UINT64_C({expected}) ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = clang_with_native_runtime()
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(Command::new(executable).status().unwrap().success());
 }
 
 #[test]
@@ -2098,14 +2394,13 @@ fn target_options_control_pointer_sized_integer_layout() {
             target_data_layout: grandiose::default_target_data_layout(&triple).map(str::to_owned),
             target_triple: triple,
             emit_entry_wrapper: true,
+            native_allocation_limit: grandiose::DEFAULT_NATIVE_ALLOCATION_LIMIT,
         },
     )
     .unwrap();
-    assert!(
-        module
-            .ir
-            .contains("target triple = \"i686-unknown-linux-gnu\"")
-    );
+    assert!(module
+        .ir
+        .contains("target triple = \"i686-unknown-linux-gnu\""));
     assert!(module.ir.contains("target datalayout = \"e-m:e-p:32:32"));
     assert!(module.ir.contains("define i32 @g1_f"));
 
@@ -3517,6 +3812,68 @@ fn llvm_multishot_replays_effectful_terminal_takeover_twice() {
 }
 
 #[test]
+fn llvm_o3_multishot_terminal_takeover_matches_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-multishot-terminal-takeover.glorious",
+        r#"
+            effect Choice {
+                [2,2] choose() -> i64
+                stop() -> !
+            }
+            effect Ask { [1,1] ask() -> i64 }
+            selected() -> i64 {
+                handle {
+                    handle {
+                        perform Choice::choose();
+                        perform Choice::stop()
+                    } {
+                        Choice::choose() with continuation => {
+                            let first = resume(continuation, 0);
+                            let second = resume(move continuation, 0);
+                            first + second
+                        },
+                        Choice::stop() => perform Ask::ask()
+                    }
+                } {
+                    Ask::ask() with continuation =>
+                        resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(84)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("resumption.clone"));
+    run_native_i64(module, selected, 84, "o3-multishot-terminal-takeover");
+}
+
+#[test]
 fn llvm_and_vm_backends_execute_the_same_one_shot_resumption() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-one-shot-resumption.glorious",
@@ -4083,11 +4440,12 @@ fn llvm_erases_available_evidence_fields_in_suspended_binding_packs() {
     let mut options = grandiose::LlvmOptions::default();
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
-    assert!(
-        module
-            .ir
-            .contains("insertvalue { i64, i64 } zeroinitializer")
-    );
+    assert!(module
+        .ir
+        .contains("= type { i64, i64 }"));
+    assert!(module
+        .ir
+        .contains("insertvalue %g1.type."));
     assert!(!module.ir.contains("{ i8, i64, i8, i64 }"));
     run_native_i64(module, selected, 62, "erased-binding-pack");
 }
@@ -4951,11 +5309,9 @@ fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     let mut options = grandiose::LlvmOptions::default();
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
-    assert!(
-        module
-            .ir
-            .contains("declare i32 @g1_host_diagnostic_write(ptr)")
-    );
+    assert!(module
+        .ir
+        .contains("declare i32 @g1_host_diagnostic_write(ptr)"));
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("host.ll");
@@ -5058,6 +5414,132 @@ fn llvm_and_vm_backends_execute_the_same_vec_program() {
         "{:?}\n{}",
         execution.status,
         String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_o3_vecdeque_wraparound_matches_the_vm() {
+    // VecDeque is implemented in the bootstrap surface in terms of a movable
+    // Vec plus a logical head.  Unlike plain Vec coverage, this exercises the
+    // native backend's aggregate moves, modulo arithmetic, and Option result
+    // routing after the ring wraps around.
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-vecdeque-wraparound.glorious",
+        r#"
+            effect I64OptionCase { inspect(value: Result<i64, ()>) -> !; }
+
+            i64_or_zero(value: Option<i64>) -> i64 {
+                handle perform I64OptionCase::inspect(move value) {
+                    I64OptionCase::inspect(Result::Ok(item)) => move item,
+                    I64OptionCase::inspect(Result::Err(_)) => 0
+                }
+            }
+
+            selected() -> i64 {
+                let values = VecDeque::new();
+                VecDeque::push_back(&mut values, 1);
+                VecDeque::push_back(&mut values, 2);
+                VecDeque::push_back(&mut values, 3);
+                i64_or_zero(VecDeque::pop_front(&mut values));
+                i64_or_zero(VecDeque::pop_front(&mut values));
+                VecDeque::push_back(&mut values, 4);
+                VecDeque::push_back(&mut values, 5);
+                VecDeque::push_front(&mut values, 9);
+                let a = i64_or_zero(VecDeque::pop_front(&mut values));
+                let b = i64_or_zero(VecDeque::pop_front(&mut values));
+                let c = i64_or_zero(VecDeque::pop_front(&mut values));
+                let d = i64_or_zero(VecDeque::pop_front(&mut values));
+                a * 1000 + b * 100 + c * 10 + d
+            }
+
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(9_345)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        9_345,
+        "llvm-o3-vecdeque-wraparound",
+    );
+}
+
+#[test]
+fn llvm_o3_bytebuf_reader_roundtrip_and_truncation_match_the_vm() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-o3-bytebuf-reader.glorious",
+        r#"
+            selected() -> i64 {
+                let bytes = ByteBuf::new();
+                ByteBuf::write_u16_le(&mut bytes, 4660);
+                ByteBuf::write_u32_le(&mut bytes, wrapping_convert_to_u32(-1985229329));
+                let bytes = ByteBuf::finish(move bytes);
+                let reader = ByteReader::new(&bytes);
+                let first = Option::unwrap_or(ByteReader::read_u16_le(&mut reader), 0);
+                let second = Option::unwrap_or(ByteReader::read_u32_le(&mut reader), 0);
+                let missing = Option::unwrap_or(ByteReader::read_u16_le(&mut reader), 9);
+                wrapping_convert_to_i64(first) * 10000000000
+                    + wrapping_convert_to_i64(second)
+                    + wrapping_convert_to_i64(ByteReader::position(&reader)) * 10
+                    + wrapping_convert_to_i64(missing)
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let expected = i64::from(0x1234_u16) * 10_000_000_000 + i64::from(0x89ab_cdef_u32) + 69;
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(expected)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        expected,
+        "o3-bytebuf-reader",
     );
 }
 
@@ -5171,16 +5653,14 @@ fn llvm_arrays_run_source_defined_drop_for_elements() {
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
     let hook_call = format!("call void @g1_f{drop_function}(ptr %");
-    assert!(
-        module
-            .ir
-            .match_indices("array.destroy.value")
-            .any(|(start, _)| {
-                let block = &module.ir[start..];
-                let end = block.find("array.destroy.continue").unwrap_or(block.len());
-                block[..end].contains(&hook_call)
-            })
-    );
+    assert!(module
+        .ir
+        .match_indices("array.destroy.value")
+        .any(|(start, _)| {
+            let block = &module.ir[start..];
+            let end = block.find("array.destroy.continue").unwrap_or(block.len());
+            block[..end].contains(&hook_call)
+        }));
     assert!(module.ir.contains(" = sub i64 %"));
     run_native_i64(module, llvm_function, 42, "array-custom-drop");
 }

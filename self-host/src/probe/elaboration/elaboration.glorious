@@ -20,6 +20,38 @@ use super::super::frontend::scanner::ShellId;
 u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
 usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
 
+// Focused Typed-Core surface for effect-row fixed-point tests.  Handler
+// candidates stay separately observable from performed demands, so the probe
+// cannot accidentally validate a terminal-only handler shortcut.
+pub core_effect_summary_shape(
+    body: &TypedBody
+) -> (u32, u32, u32, u32, u32) {
+    let summary = super::super::frontend::elaboration::core_effect_summary(body);
+    (
+        u32_from_usize(
+            super::super::frontend::elaboration::core_effect_summary_required_count(
+                &summary
+            )
+        ),
+        u32_from_usize(
+            super::super::frontend::elaboration::core_effect_summary_handler_candidate_count(
+                &summary
+            )
+        ),
+        u32_from_usize(
+            super::super::frontend::elaboration::core_effect_summary_direct_call_count(
+                &summary
+            )
+        ),
+        u32_from_usize(
+            super::super::frontend::elaboration::core_effect_summary_indirect_call_count(
+                &summary
+            )
+        ),
+        super::super::frontend::elaboration::core_effect_summary_resume_count(&summary)
+    )
+}
+
 // Read-only debugger entry point for mapping the self-host frontend's stable
 // semantic type indices without running body elaboration or backend lowering.
 // A zero tuple indicates that an earlier frontend phase failed or the index is
@@ -73,11 +105,10 @@ pub interface_type_metadata(
     }
 }
 
-// Focused interface-collection gate: returns 0 when the whole header +
-// interface-collection frontend succeeds on `original`, otherwise the
-// rejecting phase index (lex=1, scan=2, headers=3, interface collection=4).
-// This isolates `Self` resolution from body elaboration and lowering.
-pub interface_collection_status(original: String) -> u32 {
+// Focused interface-only probe. This intentionally stops before body
+// elaboration or backend lowering, so header collection regressions stay
+// isolated from later compiler stages.
+pub interface_collection_status(original: String) -> u8 {
     handle super::super::frontend::lexer::lex(&original) {
         Result::Err(_) => 1,
         Result::Ok(source) => handle
@@ -85,87 +116,119 @@ pub interface_collection_status(original: String) -> u32 {
             Result::Err(_) => 2,
             Result::Ok(declarations) => handle
                 super::super::frontend::headers::parse(
-                    &original,
-                    source,
-                    &declarations
+                    &original, source, &declarations
                 ) {
                 Result::Err(_) => 3,
                 Result::Ok(headers) => handle collect_interfaces(
-                    &headers,
-                    &declarations
+                    &headers, &declarations
                 ) {
-                    Result::Err(_) => 4,
-                    Result::Ok(_) => 0
+                    Result::Ok(_) => 0,
+                    Result::Err(_) => 4
                 }
             }
         }
     }
 }
 
-// Trait/impl (instance) arena gate: encodes the trait/impl collection result as
-// (status, trait_count, impl_count, impl_goal_count) where status is the
-// rejecting phase index (lex=1, scan=2, headers=3, interface collection=4)
-// or 0 on success. impl_goal_count sums the where-clause constraint goals
-// collected into every impl arena entry, validating where-clause goal
-// collection independent of body elaboration/lowering.
-sum_trait_impl_goals(
+nominal_method_owner_pair_at(
     interfaces: &TypedInterfaces,
-    index: usize,
-    accumulator: u32
-) -> u32 {
-    if(index < super::super::frontend::elaboration::interface_impl_count(
+    method_index: usize,
+    declaration_index: usize
+) -> Bool {
+    if(declaration_index < super::super::frontend::elaboration::interface_type_count(
         interfaces
     )) {
-        let id = handle
-            super::super::frontend::elaboration::interface_impl_id_at(
-                interfaces, index
-            ) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
-        sum_trait_impl_goals(
-            interfaces,
-            index + 1,
-            accumulator
-                + super::super::frontend::elaboration::interface_impl_constraint_goal_count(
-                    interfaces, id
-                )
-        )
-    } else { accumulator }
+        if(super::super::frontend::elaboration::interface_type_c_at(
+            interfaces, method_index
+        ) == 2
+            and { super::super::frontend::elaboration::interface_type_c_at(
+                interfaces, declaration_index
+            ) == 0 }
+            and { super::super::frontend::elaboration::interface_type_a_at(
+                interfaces, method_index
+            ) == super::super::frontend::elaboration::interface_type_a_at(
+                interfaces, declaration_index
+            ) }) { true } else {
+            nominal_method_owner_pair_at(
+                interfaces, method_index, declaration_index + 1
+            )
+        }
+    } else { false }
 }
 
-pub trait_impl_metadata(original: String) -> (u32, u32, u32, u32) {
+nominal_method_owner_pair_exists(
+    interfaces: &TypedInterfaces,
+    index: usize
+) -> Bool {
+    if(index < super::super::frontend::elaboration::interface_type_count(
+        interfaces
+    )) {
+        nominal_method_owner_pair_at(interfaces, index, 0)
+            or { nominal_method_owner_pair_exists(interfaces, index + 1) }
+    } else { false }
+}
+
+// Trait/impl method binders use the enclosing shell, just like the nominal
+// binders.  This probe proves the method's generic owner remains separately
+// branded even when both binders have ordinal zero.
+pub nominal_method_generic_owner_status(original: String) -> u8 {
     handle super::super::frontend::lexer::lex(&original) {
-        Result::Err(_) => (1, 0, 0, 0),
+        Result::Err(_) => 1,
         Result::Ok(source) => handle
             super::super::frontend::scanner::scan(&source) {
-            Result::Err(_) => (2, 0, 0, 0),
+            Result::Err(_) => 2,
             Result::Ok(declarations) => handle
                 super::super::frontend::headers::parse(
-                    &original,
-                    source,
-                    &declarations
+                    &original, source, &declarations
                 ) {
-                Result::Err(_) => (3, 0, 0, 0),
-                Result::Ok(headers) => handle collect_interfaces(
-                    &headers,
-                    &declarations
-                ) {
-                    Result::Err(_) => (4, 0, 0, 0),
-                    Result::Ok(interfaces) => (
-                        0,
-                        u32_from_usize(
-                            super::super::frontend::elaboration::interface_trait_count(
-                                &interfaces
-                            )
-                        ),
-                        u32_from_usize(
-                            super::super::frontend::elaboration::interface_impl_count(
-                                &interfaces
-                            )
-                        ),
-                        sum_trait_impl_goals(&interfaces, 0, 0)
-                    )
+                    Result::Err(_) => 3,
+                    Result::Ok(headers) => handle collect_interfaces(
+                        &headers, &declarations
+                    ) {
+                        Result::Err(_) => 4,
+                        Result::Ok(interfaces) => if(
+                            nominal_method_owner_pair_exists(&interfaces, 0)
+                        ) { 0 } else { 5 }
+                    }
+                }
+            }
+    }
+}
+
+// Header-only trait probe: semantic trait selection is intentionally not
+// involved.  It proves that generic trait declarations retain each parsed
+// supertrait application in the shared header type arena.
+pub trait_header_collection_status(original: String) -> u8 {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => 1,
+        Result::Ok(source) => handle super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => 2,
+            Result::Ok(declarations) => handle super::super::frontend::headers::parse(
+                &original, source, &declarations
+            ) {
+                Result::Err(_) => 3,
+                Result::Ok(headers) => {
+                    let nominal = super::super::frontend::headers::nominal_index(&headers);
+                    if(super::super::frontend::headers::trait_count(nominal) != 2
+                        or { super::super::frontend::headers::impl_count(nominal) != 1 }) {
+                        4
+                    } else {
+                        let child = handle super::super::frontend::headers::trait_at(nominal, 1) {
+                            Result::Err(_) => unreachable(), Result::Ok(found) => found
+                        };
+                        let implementation = handle super::super::frontend::headers::impl_at(nominal, 0) {
+                            Result::Err(_) => unreachable(), Result::Ok(found) => found
+                        };
+                        if(super::super::frontend::headers::range_count(
+                            super::super::frontend::headers::trait_generics(child)
+                        ) != 1
+                            or { super::super::frontend::headers::range_count(
+                                super::super::frontend::headers::trait_supertraits(child)
+                            ) != 2 }
+                            or { super::super::frontend::headers::range_count(
+                                super::super::frontend::headers::impl_generics(implementation)
+                            ) != 1 }) { 5 } else { 0 }
+                    }
                 }
             }
         }
@@ -675,7 +738,12 @@ write_effect_type(
         super::super::frontend::elaboration::InterfaceTypeView::Effect(id) => {
             ByteBuf::push(output, 13);
             ByteBuf::write_u32_le(output, id)
-        }
+        },
+        // The probe wire format deliberately has no callable descriptor yet.
+        // A future encoder must make that ABI explicit rather than silently
+        // treating a closure as a nominal or effect type.
+        super::super::frontend::elaboration::InterfaceTypeView::Callable(_) =>
+            unreachable()
     }
 }
 
@@ -1121,8 +1189,40 @@ value_uses_local(
             value_uses_local(body, subject, local),
         CoreValueView::Embedded(_, computation) =>
             computation_uses_local(body, computation, local),
+        CoreValueView::Closure(_, site) =>
+            closure_captures_use_local(
+                body,
+                super::super::frontend::elaboration::closure_site_captures(
+                    body,
+                    super::super::frontend::elaboration::closure_site_at(
+                        body, site
+                    )
+                ),
+                0,
+                local
+            ),
         _ => false
     }
+}
+
+closure_captures_use_local<'a>(
+    body: &TypedBody,
+    captures: Slice<'a, super::super::frontend::elaboration::CoreClosureCapture>,
+    ordinal: usize,
+    local: CoreLocalId
+) -> Bool {
+    if(ordinal < Slice::len(captures)) {
+        let capture = handle Slice::get(captures, ordinal) {
+            Result::Err(_) => unreachable(), Result::Ok(found) => found
+        };
+        if(value_uses_local(
+            body,
+            super::super::frontend::elaboration::core_closure_capture_value(capture),
+            local
+        )) { true } else {
+            closure_captures_use_local(body, captures, ordinal + 1, local)
+        }
+    } else { false }
 }
 
 values_use_local<'a>(
@@ -1209,6 +1309,9 @@ computation_uses_local(
             },
         CoreComputationView::Call(_, _, _, operands) =>
             values_use_local(body, operands, 0, local),
+        CoreComputationView::CallIndirect(_, callee, _, operands) =>
+            value_uses_local(body, callee, local)
+                or { values_use_local(body, operands, 0, local) },
         CoreComputationView::Primitive(_, _, operands) =>
             values_use_local(body, operands, 0, local),
         CoreComputationView::Construct(_, _, fields) =>
@@ -1218,7 +1321,14 @@ computation_uses_local(
                 true
             } else {
                 match_arms_use_local(body, arms, 0, local)
-            }
+            },
+        CoreComputationView::Perform(_, _, _, operands) =>
+            values_use_local(body, operands, 0, local),
+        CoreComputationView::Resume(_, resumption, result) =>
+            value_uses_local(body, resumption, local)
+                or { value_uses_local(body, result, local) },
+        CoreComputationView::Handle(_, handled, _) =>
+            computation_uses_local(body, handled, local)
     }
 }
 
@@ -1248,14 +1358,21 @@ write_value_expression(
             write_type_id(output, Id::to_u32(ty));
             Result::Ok(())
         },
-        CoreValueView::Text(ty, spelling) => {
+        CoreValueView::Text(ty, bytes) => {
             ByteBuf::push(output, 8);
             write_type_id(output, Id::to_u32(ty));
-            let text = handle super::super::frontend::lexer::lexeme(source, spelling) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(found) => found
-            };
-            write_string(output, text);
+            ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
+            ByteBuf::append_bytes(output, &bytes);
+            Result::Ok(())
+        },
+        CoreValueView::Bytes(ty, bytes) => {
+            // Tag 11 distinguishes raw bytes from UTF-8 text (tag 8).  This
+            // writes the decoded payload, including escapes, exactly as the
+            // Rust Typed-Core oracle does.
+            ByteBuf::push(output, 11);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
+            ByteBuf::append_bytes(output, &bytes);
             Result::Ok(())
         },
         CoreValueView::Integer(ty, constant_id) => {
@@ -1341,6 +1458,9 @@ write_value_expression(
             ElaborationError::EmbeddedValueSerializationUnsupported(
                 Id::to_usize(value)
             )
+        ),
+        CoreValueView::Closure(_, _) => Result::Err(
+            ElaborationError::UnsupportedExpression(Id::to_usize(value))
         )
     }
 }
@@ -1556,6 +1676,32 @@ write_variant_dispatch_arms<'a>(
     } else { Result::Ok(()) }
 }
 
+write_handler_clauses<'a>(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    source_local_limit: u32,
+    clauses: Slice<'a, super::super::frontend::elaboration::CoreHandlerClause>,
+    ordinal: usize
+) -> Result<(), ElaborationError> {
+    if(ordinal < Slice::len(clauses)) {
+        let clause = handle Slice::get(clauses, ordinal) { Result::Err(_) => unreachable(), Result::Ok(found) => found };
+        ByteBuf::write_u32_le(output, Id::to_u32(super::super::frontend::elaboration::core_handler_clause_instance(clause)));
+        ByteBuf::write_u32_le(output, Id::to_u32(super::super::frontend::elaboration::core_handler_clause_operation(clause)));
+        let payloads = super::super::frontend::elaboration::core_handler_clause_payloads(clause);
+        ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(payloads)));
+        Slice::for_each(payloads, { local => ByteBuf::write_u32_le(output, Id::to_u32(*local)) });
+        handle super::super::frontend::elaboration::core_handler_clause_resumption(clause) {
+            None => ByteBuf::push(output, 0),
+            Option::Some(local) => { ByteBuf::push(output, 1); ByteBuf::write_u32_le(output, Id::to_u32(local)) }
+        };
+        try(write_computation_expression(output, source, declarations, resolved, body, super::super::frontend::elaboration::core_handler_clause_body(clause), source_local_limit, true), @write_handler_clauses);
+        write_handler_clauses(output, source, declarations, resolved, body, source_local_limit, clauses, ordinal + 1)
+    } else { Result::Ok(()) }
+}
+
 write_computation_expression(
     output: &mut ByteBuf,
     source: &super::super::frontend::lexer::LexedSource,
@@ -1607,6 +1753,9 @@ write_computation_expression(
                 operands
             )
         },
+        CoreComputationView::CallIndirect(_, _, _, _) => Result::Err(
+            ElaborationError::UnsupportedExpression(Id::to_usize(computation))
+        ),
         CoreComputationView::Primitive(ty, primitive, operands) => {
             ByteBuf::push(output, 9);
             write_type_id(output, Id::to_u32(ty));
@@ -1679,7 +1828,32 @@ write_computation_expression(
                     computation
                 )
             }
-        }
+        },
+        // Effect-control bytecode lowering is intentionally still gated, but
+        // the Typed Core probe must be able to observe a successfully
+        // elaborated perform without treating it as an ordinary call.
+        CoreComputationView::Perform(ty, _, operation, operands) => {
+            ByteBuf::push(output, 11);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, Id::to_u32(operation));
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(operands)));
+            write_call_operands(
+                output, source, declarations, resolved, body,
+                source_local_limit, operands
+            )
+        },
+        // Tag 12 is a structural Typed-Core handler record. It deliberately
+        // observes handler data without claiming backend execution support.
+        CoreComputationView::Handle(ty, handled, clauses) => {
+            ByteBuf::push(output, 12);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(clauses)));
+            try(write_computation_expression(output, source, declarations, resolved, body, handled, source_local_limit, false), @write_computation_expression);
+            write_handler_clauses(output, source, declarations, resolved, body, source_local_limit, clauses, 0)
+        },
+        CoreComputationView::Resume(_, _, _) => Result::Err(
+            ElaborationError::UnsupportedExpression(Id::to_usize(computation))
+        )
     }
 }
 
@@ -1811,9 +1985,13 @@ write_block_expression(
         CoreComputationView::Pure(found, _) => found,
         CoreComputationView::Let(found, _, _, _) => found,
         CoreComputationView::Call(found, _, _, _) => found,
+        CoreComputationView::CallIndirect(found, _, _, _) => found,
         CoreComputationView::Primitive(found, _, _) => found,
         CoreComputationView::Construct(found, _, _) => found,
-        CoreComputationView::VariantDispatch(found, _, _) => found
+        CoreComputationView::VariantDispatch(found, _, _) => found,
+        CoreComputationView::Perform(found, _, _, _) => found,
+        CoreComputationView::Resume(found, _, _) => found,
+        CoreComputationView::Handle(found, _, _) => found
     };
     write_type_id(output, Id::to_u32(ty));
     ByteBuf::write_u32_le(

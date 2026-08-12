@@ -147,7 +147,7 @@ pub struct ManifestPrimitiveLeaf {
 /// Frozen host-import identities supplied by the compiler distribution.  The
 /// source declaration name is only a lookup key inside the trusted standard
 /// library segment; it is not itself authority.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
 pub enum HostImportRole {
     ProcessArgsGet,
     FsRead,
@@ -1165,6 +1165,23 @@ struct TraitSchema {
 }
 
 impl TraitDb {
+    /// Rebind source-span keyed const arguments after reusing the structural
+    /// database. Callable-body edits may alter these entries while leaving
+    /// trait, nominal, alias, effect, and impl declarations unchanged.
+    pub(crate) fn with_current_type_const_arguments(mut self, program: &Program) -> Self {
+        self.type_const_arguments = program
+            .type_const_arguments
+            .iter()
+            .map(|entry| {
+                (
+                    (entry.application.start, entry.application.end),
+                    entry.arguments.clone(),
+                )
+            })
+            .collect();
+        self
+    }
+
     /// Predefined runtime leaves carry their `Use` capability out of band:
     /// source cannot lawfully implement the external intrinsic for them, and
     /// requiring the distributed standard library to do so would violate the

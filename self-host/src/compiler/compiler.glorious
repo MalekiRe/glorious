@@ -66,7 +66,8 @@ struct CompilerSession {
     headers: headers::ParsedHeaders,
     declarations: scanner::DeclarationIndex,
     resolution_index: resolution::ResolutionIndex,
-    interfaces: elaboration::TypedInterfaces
+    interfaces: elaboration::TypedInterfaces,
+    enum_payload_expected_trace: Bool
 }
 
 // The body-local compilation object is the sole persistent bridge from parsed
@@ -140,6 +141,49 @@ function_name<'a>(
                 Result::Err(_) =>
                     Result::Err(CompileError::DeclarationName(shell)),
                 Result::Ok(found) => Result::Ok(*found)
+            }
+        }
+    }
+}
+
+callable_name<'a>(
+    session: &CompilerSession,
+    callable: InterfaceCallableId
+) -> Result<String, CompileError> {
+    handle lexer::lexeme(
+        headers::parsed_source(&session.headers),
+        Id::from_u32(elaboration::interface_callable_name_raw(
+            &session.interfaces, callable
+        ))
+    ) {
+        Result::Err(_) => Result::Err(CompileError::DeclarationName(
+            elaboration::interface_callable_shell(&session.interfaces, callable)
+        )),
+        Result::Ok(found) => {
+            let shell = elaboration::interface_callable_shell(
+                &session.interfaces, callable
+            );
+            handle scanner::shell_at(&session.declarations, shell) {
+                Result::Ok(declaration) => if(
+                    scanner::shell_kind(declaration)
+                        is scanner::DeclarationKind::Function
+                ) { Result::Ok(*found) } else {
+                    let output = Formatter::new();
+                    // Trait and impl members share their enclosing shell.
+                    // Give lowered methods a deterministic private identity,
+                    // so a member named `main` cannot become the entry point.
+                    Formatter::literal(&mut output, &"$method$");
+                    Formatter::append_u64(
+                        &mut output, wrapping_convert_to_u64(Id::to_u32(shell))
+                    );
+                    Formatter::literal(&mut output, &"$");
+                    Formatter::literal(&mut output, found);
+                    handle Formatter::finish(output) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(name) => Result::Ok(name)
+                    }
+                },
+                Result::Err(_) => Result::Err(CompileError::DeclarationName(shell))
             }
         }
     }
@@ -391,18 +435,36 @@ prepare_body<'a>(
         &session.interfaces,
         callable
     );
-    let name = try(
-        function_name(session, shell),
-        @prepare_body
+    let name = try(callable_name(session, callable), @prepare_body);
+    let header_index = elaboration::interface_callable_header_index(
+        &session.interfaces, callable
     );
     let syntax = try(
         Result::map_err(
-            bodies::parse_function_body(
-                &session.original,
-                &session.headers,
-                &session.declarations,
-                shell
-            ),
+            handle scanner::shell_at(&session.declarations, shell) {
+                Result::Err(_) => bodies::parse_function_body(
+                    &session.original,
+                    &session.headers,
+                    &session.declarations,
+                    shell
+                ),
+                Result::Ok(declaration) => if(
+                    scanner::shell_kind(declaration)
+                        is scanner::DeclarationKind::Impl
+                ) {
+                    bodies::parse_impl_method_body(
+                        &session.original,
+                        &session.headers,
+                        &session.declarations,
+                        header_index
+                    )
+                } else { bodies::parse_function_body(
+                    &session.original,
+                    &session.headers,
+                    &session.declarations,
+                    shell
+                ) }
+            },
             { found => CompileError::BodyParse(shell, found) }
         ),
         @prepare_body
@@ -446,6 +508,10 @@ lower_body<'a>(
         &session.interfaces,
         callable
     );
+    // Do not capture `session` in the resumptive `map_err` handler below:
+    // body elaboration may suspend while reporting a diagnostic.  The flag is
+    // copyable request state, so snapshot it before entering that boundary.
+    let enum_payload_expected_trace = session.enum_payload_expected_trace;
     let typed = try(
         Result::map_err(
             elaboration::elaborate_function_instance_body(
@@ -455,7 +521,8 @@ lower_body<'a>(
                 &mut session.interfaces,
                 &syntax,
                 &resolution,
-                instance
+                instance,
+                enum_payload_expected_trace
             ),
             { found => CompileError::BodyElaboration(shell, found) }
         ),
@@ -520,7 +587,7 @@ lower_callable<'a>(
     try(lower_concrete_type(
         session, map, types, type_names, result
     ), @lower_callable);
-    let name = try(function_name(&*session, shell), @lower_callable);
+    let name = try(callable_name(&*session, callable), @lower_callable);
     handle runtime_leaf_identity(shell, &name) {
         Option::Some(RuntimeLeaf::Primitive(primitive)) => Result::map_err(
             lowering::lower_primitive_function(
@@ -995,6 +1062,31 @@ lower_concrete_type_elements<'a>(
     } else { Result::Ok(true) }
 }
 
+lower_callable_parameter_types<'a>(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    signature: elaboration::CallableSignatureId,
+    ordinal: usize,
+    output: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<(), CompileError> {
+    if(ordinal < elaboration::callable_signature_parameter_count(
+        &session.interfaces, signature
+    )) {
+        let semantic = elaboration::callable_signature_parameter_at(
+            &session.interfaces, signature, ordinal
+        );
+        let artifact = try(lower_concrete_type(
+            session, map, types, type_names, semantic
+        ), @lower_callable_parameter_types);
+        Vec::push(&mut *output, artifact);
+        lower_callable_parameter_types(
+            session, map, types, type_names, signature, ordinal + 1, output
+        )
+    } else { Result::Ok(()) }
+}
+
 lower_concrete_struct_fields<'a>(
     session: &mut CompilerSession,
     map: &mut lowering::ArtifactTypeMap,
@@ -1337,6 +1429,56 @@ lower_concrete_type<'a>(
                     reserved
                 ), @lower_concrete_type);
                 Result::Ok(artifact)
+            } else { if(tag == 14) {
+                let signature = Id::from_u32(a);
+                // Lift the exact parameter/result types before publishing the
+                // opaque callable descriptor. The first vertical slice is
+                // deliberately pure: effect-row and captured closure lowering
+                // remain separate scheduling work.
+                if(elaboration::callable_signature_effect_count(
+                    &session.interfaces, signature
+                ) != 0 or {
+                    Option::is_some(elaboration::callable_signature_effect_tail_at(
+                        &session.interfaces, signature
+                    ))
+                }) {
+                    @lower_concrete_type(Result::Err(
+                        CompileError::UnsupportedInterfaceType(index)
+                    ))
+                } else { () };
+                let parameters = Vec::new();
+                try(lower_callable_parameter_types(
+                    session,
+                    map,
+                    types,
+                    type_names,
+                    signature,
+                    0,
+                    &mut parameters
+                ), @lower_concrete_type);
+                let result = try(lower_concrete_type(
+                    session,
+                    map,
+                    types,
+                    type_names,
+                    elaboration::callable_signature_result_at(
+                        &session.interfaces, signature
+                    )
+                ), @lower_concrete_type);
+                let name_index = checked_u32(Vec::len(&*type_names));
+                Vec::push(&mut *type_names, "callable");
+                lowering::set_callable_type(
+                    types,
+                    reserved,
+                    name_index,
+                    lowering::artifact_type_id(0),
+                    lowering::mir_signature(parameters, result, Vec::new()),
+                    2,
+                    0,
+                    false
+                );
+                lowering::set_mapped_type_copyable(map, semantic, false);
+                Result::Ok(artifact)
             } else { if(tag == 3) {
                 // Dynamically allocated scalars reach lowering only through the
                 // focused-arena Bool marker (scalar kind 16).  The distributed
@@ -1346,10 +1488,10 @@ lower_concrete_type<'a>(
                     let variants = Vec::new();
                     let ok_name = checked_u32(Vec::len(&*type_names));
                     Vec::push(&mut *type_names, ordinal_name(0));
-                    Vec::push(&mut variants, lowering::enum_variant(ok_name, Vec::new(), Vec::new(), None));
+                    Vec::push(&mut variants, lowering::enum_variant(ok_name, Vec::new(), Vec::new()));
                     let err_name = checked_u32(Vec::len(&*type_names));
                     Vec::push(&mut *type_names, ordinal_name(1));
-                    Vec::push(&mut variants, lowering::enum_variant(err_name, Vec::new(), Vec::new(), None));
+                    Vec::push(&mut variants, lowering::enum_variant(err_name, Vec::new(), Vec::new()));
                     let bool_name = checked_u32(Vec::len(&*type_names));
                     Vec::push(&mut *type_names, ordinal_name(2));
                     lowering::set_enum_type(types, reserved, bool_name, variants, 1);
@@ -1360,7 +1502,7 @@ lower_concrete_type<'a>(
                 ) }
             } else { c; Result::Err(
                 CompileError::UnsupportedInterfaceType(index)
-            ) } } } } }
+            ) } } } } } }
         }
     }
 }
@@ -1406,57 +1548,41 @@ lower_typed_body_types<'a>(
 // and break interface resolution. Keep this deliberately small until the
 // self-host driver owns the complete standard-library bundle. Appending keeps
 // every user token (and hence every reported user token index) unchanged.
-scalar_only_prelude(original: &String) -> String {
-    let output = ByteBuf::new();
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(original));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_add<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_sub<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_mul<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_and<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_or<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_xor<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_not<T>(value: T) -> T { move value }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shl<T>(value: T, count: u32) -> T { move value }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shr<T>(value: T, count: u32) -> T { move value }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_add<T>(left: T, right: T) -> T { __g1_int_wrapping_add(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_sub<T>(left: T, right: T) -> T { __g1_int_wrapping_sub(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_mul<T>(left: T, right: T) -> T { __g1_int_wrapping_mul(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_and<T>(left: T, right: T) -> T { __g1_int_bit_and(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_or<T>(left: T, right: T) -> T { __g1_int_bit_or(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_xor<T>(left: T, right: T) -> T { __g1_int_bit_xor(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_not<T>(value: T) -> T { __g1_int_bit_not(move value) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_left<T>(value: T, count: u32) -> T { __g1_int_shl(move value, move count) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_right<T>(value: T, count: u32) -> T { __g1_int_shr(move value, move count) }\n"));
-    handle String::from_utf8(ByteBuf::finish(output)) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
+//
+// The scanner is authoritative here: an explicit root `Result` must not gain
+// a second declaration from this compatibility prelude, because resolution
+// correctly treats that duplicate type name as ambiguous.
+source_declares_root_result(
+    source: &lexer::LexedSource,
+    declarations: &scanner::DeclarationIndex
+) -> Bool {
+    handle lexer::lexeme_id(source, &"Result") {
+        Result::Err(_) => false,
+        Result::Ok(name) => {
+            let found = scanner::def_search(
+                declarations,
+                None,
+                name,
+                scanner::Namespace::Type
+            );
+            scanner::def_search_count(&found) != 0
+        }
     }
 }
-minimal_interface_prelude(original: &String) -> String {
+
+minimal_interface_prelude(
+    original: &String,
+    source: &lexer::LexedSource,
+    declarations: &scanner::DeclarationIndex
+) -> String {
     let output = ByteBuf::new();
     ByteBuf::append_bytes(&mut output, &String::as_bytes(original));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_add<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_sub<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_wrapping_mul<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_and<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_or<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_xor<T>(left: T, right: T) -> T { move left }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_bit_not<T>(value: T) -> T { move value }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shl<T>(value: T, count: u32) -> T { move value }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\n__g1_int_shr<T>(value: T, count: u32) -> T { move value }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_add<T>(left: T, right: T) -> T { __g1_int_wrapping_add(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_sub<T>(left: T, right: T) -> T { __g1_int_wrapping_sub(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nwrapping_mul<T>(left: T, right: T) -> T { __g1_int_wrapping_mul(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_and<T>(left: T, right: T) -> T { __g1_int_bit_and(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_or<T>(left: T, right: T) -> T { __g1_int_bit_or(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_xor<T>(left: T, right: T) -> T { __g1_int_bit_xor(move left, move right) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nbit_not<T>(value: T) -> T { __g1_int_bit_not(move value) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_left<T>(value: T, count: u32) -> T { __g1_int_shl(move value, move count) }\n"));
-    ByteBuf::append_bytes(&mut output, &String::as_bytes(&"\nshift_right<T>(value: T, count: u32) -> T { __g1_int_shr(move value, move count) }\n"));
-    ByteBuf::append_bytes(
-        &mut output,
-        &String::as_bytes(&"\nenum Result<T, E> { Ok(T), Err(E) }\n")
-    );
+    if(not(source_declares_root_result(source, declarations))) {
+        ByteBuf::append_bytes(
+            &mut output,
+            &String::as_bytes(&"\nenum Result<T, E> { Ok(T), Err(E) }\n")
+        )
+    } else { () };
     handle String::from_utf8(ByteBuf::finish(output)) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
@@ -1524,14 +1650,27 @@ result_declared(
 }
 
 prepare_session(
-    original: &String
+    original: &String,
+    enum_payload_expected_trace: Bool
 ) -> Result<CompilerSession, CompileError> {
-    let original = try(
+    let scanned_source = try(
         Result::map_err(
-            session_source(original),
-            { found => found }
+            lexer::lex(original),
+            { found => CompileError::Lex(found) }
         ),
         @prepare_session
+    );
+    let scanned_declarations = try(
+        Result::map_err(
+            scanner::scan(&scanned_source),
+            { found => CompileError::Scan(found) }
+        ),
+        @prepare_session
+    );
+    let original = minimal_interface_prelude(
+        original,
+        &scanned_source,
+        &scanned_declarations
     );
     let source = try(
         Result::map_err(
@@ -1579,8 +1718,113 @@ prepare_session(
         headers: parsed_headers,
         declarations: declarations,
         resolution_index: resolution_index,
-        interfaces: interfaces
+        interfaces: interfaces,
+        enum_payload_expected_trace: enum_payload_expected_trace
     })
+}
+
+// The initial seed has no substitutions.  In particular, a trait interface
+// method can have no callable-local generic parameters while its signature
+// still contains TraitSelf.  Do not turn those abstract interfaces into
+// lowering work: instances are only safe to lower once their entire exposed
+// signature is represented by concrete artifact types.
+type_is_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    semantic: elaboration::TypeId
+) -> Bool {
+    let index = Id::to_usize(semantic);
+    let tag = elaboration::interface_type_tag_at(interfaces, index);
+    if(tag == 8 or { tag == 13 } or { tag == 14 }) {
+        // TypeParameter includes declaration, impl, and TraitSelf owners;
+        // effects and callable descriptors have no artifact type until the
+        // backend lowers a closure environment and callable ABI.
+        false
+    } else { if(tag == 4 or { tag == 10 }) {
+        let start = if(tag == 4) {
+            elaboration::interface_type_a_at(interfaces, index)
+        } else {
+            elaboration::interface_type_b_at(interfaces, index)
+        };
+        let count = if(tag == 4) {
+            elaboration::interface_type_b_at(interfaces, index)
+        } else { elaboration::interface_type_c_at(interfaces, index) };
+        type_elements_are_recursively_concrete(
+            interfaces, start, count, 0
+        )
+    } else { if(tag == 9 or { tag == 6 } or { tag == 7 }) {
+        type_is_recursively_concrete(
+            interfaces,
+            Id::from_u32(elaboration::interface_type_a_at(interfaces, index))
+        )
+    } else { if(tag == 5) {
+        elaboration::interface_nominal_generic_count(
+            interfaces,
+            usize_from_u32(elaboration::interface_type_a_at(interfaces, index))
+        ) == 0
+    } else {
+        // Unit, Never, scalar, Text, and Bytes have no type children.
+        true
+    } } } }
+}
+
+type_elements_are_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    start: u32,
+    count: u32,
+    offset: usize
+) -> Bool {
+    if(offset < usize_from_u32(count)) {
+        let child = elaboration::interface_type_element_at(
+            interfaces,
+            usize_from_u32(start) + offset
+        );
+        type_is_recursively_concrete(interfaces, child) and {
+            type_elements_are_recursively_concrete(
+                interfaces, start, count, offset + 1
+            )
+        }
+    } else { true }
+}
+
+callable_signature_is_recursively_concrete(
+    interfaces: &elaboration::TypedInterfaces,
+    callable: InterfaceCallableId,
+    parameter: usize
+) -> Bool {
+    let parameter_count = elaboration::interface_callable_parameter_count(
+        interfaces, callable
+    );
+    if(parameter < usize_from_u32(parameter_count)) {
+        type_is_recursively_concrete(
+            interfaces,
+            elaboration::interface_callable_parameter_at(
+                interfaces, callable, parameter
+            )
+        ) and {
+            callable_signature_is_recursively_concrete(
+                interfaces, callable, parameter + 1
+            )
+        }
+    } else {
+        type_is_recursively_concrete(
+            interfaces,
+            elaboration::interface_callable_result(interfaces, callable)
+        )
+    }
+}
+
+callable_is_trait_requirement(
+    session: &CompilerSession,
+    callable: InterfaceCallableId
+) -> Bool {
+    let shell = elaboration::interface_callable_shell(
+        &session.interfaces, callable
+    );
+    handle scanner::shell_at(&session.declarations, shell) {
+        Result::Err(_) => true,
+        Result::Ok(declaration) => scanner::shell_kind(declaration)
+            is scanner::DeclarationKind::Trait
+    }
 }
 
 seed_concrete_callables<'a>(
@@ -1598,7 +1842,17 @@ seed_concrete_callables<'a>(
         if(elaboration::interface_callable_generic_count(
             &session.interfaces,
             callable
-        ) == 0) {
+        ) == 0 and {
+            // A receiverless trait requirement can look concrete too, but it
+            // has no body or selected implementation to lower.  Keep its
+            // interface for future dispatch; only implementation members may
+            // enter the initial direct-call seed.
+            not callable_is_trait_requirement(&*session, callable)
+        } and {
+            callable_signature_is_recursively_concrete(
+                &session.interfaces, callable, 0
+            )
+        }) {
             let substitutions = Vec::new();
             elaboration::intern_callable_instance(
                 &mut session.interfaces,
@@ -1611,6 +1865,164 @@ seed_concrete_callables<'a>(
     } else { () }
 }
 
+effect_operation_name(
+    session: &CompilerSession,
+    operation: elaboration::InterfaceEffectOperationId
+) -> Result<String, CompileError> {
+    handle lexer::lexeme(
+        headers::parsed_source(&session.headers),
+        Id::from_u32(elaboration::interface_effect_operation_name(
+            &session.interfaces, operation
+        ))
+    ) {
+        Result::Err(_) => Result::Err(CompileError::InterfaceName(
+            InterfaceNameKind::Field, Id::to_u32(operation)
+        )),
+        Result::Ok(found) => Result::Ok(*found)
+    }
+}
+
+effect_operation_payload_type(
+    session: &CompilerSession,
+    operation: elaboration::InterfaceEffectOperationId,
+    ordinal: u32
+) -> elaboration::TypeId {
+    handle elaboration::interface_effect_operation_payload_at(
+        &session.interfaces, operation, ordinal
+    ) { None => unreachable(), Option::Some(found) => found }
+}
+
+effect_operation_result_type(
+    session: &CompilerSession,
+    operation: elaboration::InterfaceEffectOperationId
+) -> elaboration::TypeId {
+    elaboration::interface_effect_operation_result(&session.interfaces, operation)
+}
+
+lower_effect_operation_payloads(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    operation: elaboration::InterfaceEffectOperationId,
+    ordinal: u32,
+    count: u32,
+    output: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<(), CompileError> {
+    if(ordinal < count) {
+        let semantic = effect_operation_payload_type(&*session, operation, ordinal);
+        handle lower_concrete_type(
+            &mut *session, &mut *map, &mut *types, &mut *type_names, semantic
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(artifact) => {
+                Vec::push(&mut *output, artifact);
+                lower_effect_operation_payloads(
+                    session, map, types, type_names, operation, ordinal + 1, count, output
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+lower_effect_operations(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    protocol: elaboration::InterfaceEffectId,
+    ordinal: u32,
+    output: &mut Vec<lowering::MirOperation>
+) -> Result<(), CompileError> {
+    if(ordinal < elaboration::interface_effect_operation_count(
+        &session.interfaces, protocol
+    )) {
+        let operation = handle elaboration::interface_effect_operation_id(
+            &session.interfaces, protocol, ordinal
+        ) { None => unreachable(), Option::Some(found) => found };
+        let payloads = Vec::new();
+        let count = elaboration::interface_effect_operation_payload_count(
+            &session.interfaces, operation
+        );
+        handle lower_effect_operation_payloads(
+            &mut *session, &mut *map, &mut *types, &mut *type_names,
+            operation, 0, count, &mut payloads
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(()) => {
+                let result_semantic = effect_operation_result_type(&*session, operation);
+                handle lower_concrete_type(
+                    &mut *session, &mut *map, &mut *types, &mut *type_names,
+                    result_semantic
+                ) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(result) => handle effect_operation_name(&*session, operation) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(name) => {
+                        Vec::push(&mut *output, lowering::mir_operation(
+                            name,
+                            lowering::mir_signature(
+                                payloads, lowering::artifact_type_id(0), Vec::new()
+                            ),
+                            result,
+                            elaboration::interface_effect_operation_resumption_lower(&session.interfaces, operation),
+                            elaboration::interface_effect_operation_resumption_upper(&session.interfaces, operation),
+                            elaboration::interface_effect_operation_is_terminal(&session.interfaces, operation)
+                        ));
+                        lower_effect_operations(
+                            session, map, types, type_names, protocol, ordinal + 1, output
+                        )
+                    }
+                }
+            }
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+lower_effect_protocols(
+    session: &mut CompilerSession,
+    map: &mut lowering::ArtifactTypeMap,
+    types: &mut MirTypeArena,
+    type_names: &mut Vec<String>,
+    index: usize,
+    output: &mut Arena<lowering::MirProtocolTag, lowering::MirProtocol>
+) -> Result<(), CompileError> {
+    if(index < elaboration::interface_effect_count(&session.interfaces)) {
+        let protocol = handle elaboration::interface_effect_id_at(&session.interfaces, index) {
+            None => unreachable(), Option::Some(found) => found
+        };
+        // A generic declaration is only a template.  The bootstrap compiler
+        // materializes protocols for ground instances discovered at performs,
+        // rows, or specialized bodies; it does not serialize an empty
+        // declaration-shaped placeholder.  Until that instance collection is
+        // available here, omit an unused template entirely.  In particular,
+        // its declaration ordinal is not a runtime protocol identity.
+        if(elaboration::interface_effect_generic_count(&session.interfaces, protocol) != 0) {
+            lower_effect_protocols(session, map, types, type_names, index + 1, output)
+        } else {
+            let operations = Vec::new();
+            handle lower_effect_operations(
+                &mut *session, &mut *map, &mut *types, &mut *type_names,
+                protocol, 0, &mut operations
+            ) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(()) => handle function_name(
+                    &*session, elaboration::interface_effect_shell(&session.interfaces, protocol)
+                ) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(name) => {
+                        lowering::alloc_mir_protocol(&mut *output, lowering::mir_protocol(
+                            name, Vec::new(), operations
+                        ));
+                        lower_effect_protocols(session, map, types, type_names, index + 1, output)
+                    }
+                }
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
 compile_session<'a>(
     session: CompilerSession
 ) -> Result<Bytes, CompileError> {
@@ -1618,6 +2030,7 @@ compile_session<'a>(
     let types = lowering::mir_types();
     let type_map = lowering::artifact_type_map();
     let type_names = Vec::new();
+    let protocols = lowering::mir_protocols();
     // Move the frontend session (CompilerSession and its whole frontend graph:
     // parsed headers, declaration and resolution indices, and the typed
     // interface arena) into a nested scope. Its ownership therefore ends as
@@ -1629,19 +2042,31 @@ compile_session<'a>(
     try({
         let session = session;
         seed_concrete_callables(&mut session, 0);
-        lower_functions(
+        handle lower_effect_protocols(
             &mut session,
             &mut type_map,
             &mut types,
             &mut type_names,
             0,
-            &mut functions
-        )
+            &mut protocols
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(()) => lower_functions(
+                &mut session,
+                &mut type_map,
+                &mut types,
+                &mut type_names,
+                0,
+                &mut functions
+            )
+        }
     }, @compile_session);
-    let program = lowering::finish_program(
+    let program = lowering::finish_effect_program(
         functions,
         types,
-        type_names
+        type_names,
+        protocols,
+        lowering::mir_handler_definitions()
     );
     let entry = find_entry(&program, 0);
     Result::map_err(
@@ -1651,11 +2076,64 @@ compile_session<'a>(
 }
 
 pub compile_source(original: &String) -> Result<Bytes, CompileError> {
+    compile_source_with_enum_payload_trace(original, false)
+}
+
+compile_source_with_enum_payload_trace(
+    original: &String,
+    enum_payload_expected_trace: Bool
+) -> Result<Bytes, CompileError> {
     let session = try(
-        prepare_session(original),
-        @compile_source
+        prepare_session(original, enum_payload_expected_trace),
+        @compile_source_with_enum_payload_trace
     );
     compile_session(session)
+}
+
+// The native driver accepts an ordered list of source paths. The compiler
+// itself deliberately keeps one source stream: headers and bodies resolve over
+// the complete declaration set, and a newline at each file boundary prevents
+// adjacent final/initial tokens from becoming one token. This is not a
+// filesystem module resolver; external `mod name;` path discovery remains a
+// distinct frontend capability. Keeping that distinction explicit avoids the
+// duplicate-standard-library problem of bootstrap monolithic-source output.
+append_ordered_sources(
+    sources: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) {
+    if(index < Vec::len(sources)) {
+        if(index != 0) { ByteBuf::push(output, 10) } else { () };
+        ByteBuf::append_bytes(
+            output,
+            &String::as_bytes(Vec::index(sources, index))
+        );
+        append_ordered_sources(sources, index + 1, output)
+    } else { () }
+}
+
+pub compile_sources(sources: &Vec<String>) -> Result<Bytes, CompileError> {
+    compile_sources_with_enum_payload_trace(sources, false)
+}
+
+// Kept separate from the ordinary API so an emitted compiler never enables
+// tracing unless native_host_runtime has supplied its explicit marker.
+pub compile_sources_with_enum_payload_trace(
+    sources: &Vec<String>,
+    enum_payload_expected_trace: Bool
+) -> Result<Bytes, CompileError> {
+    let merged = ByteBuf::new();
+    append_ordered_sources(sources, 0, &mut merged);
+    let original = handle String::from_utf8(ByteBuf::finish(merged)) {
+        // The inputs are already valid Strings, so concatenation cannot make
+        // invalid UTF-8. Keep the Result boundary explicit for this ABI.
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    };
+    compile_source_with_enum_payload_trace(
+        &original,
+        enum_payload_expected_trace
+    )
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
@@ -1667,11 +2145,20 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     } else {
         let output_path = *Vec::index(&arguments, 0);
         let input_path = *Vec::index(&arguments, 1);
+        let enum_payload_expected_trace = if(Vec::len(&arguments) >= 3) {
+            String::eq(
+                Vec::index(&arguments, 2),
+                &"--g1-self-host-enum-payload-trace"
+            )
+        } else { false };
         let bytes = read_file(input_path);
         handle String::from_utf8(bytes) {
             Result::Err(_) =>
                 write_diagnostic("self-host compiler: input is not UTF-8"),
-            Result::Ok(source) => handle compile_source(&source) {
+            Result::Ok(source) => handle compile_source_with_enum_payload_trace(
+                &source,
+                enum_payload_expected_trace
+            ) {
                 Result::Err(error) =>
                     write_diagnostic(compile_error_message(&error)),
                 Result::Ok(artifact) =>

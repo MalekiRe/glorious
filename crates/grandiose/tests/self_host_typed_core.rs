@@ -7,12 +7,15 @@ use std::{
 };
 
 use grandiose::{
-    CompileOptions, LlvmOptions, OptimizationLevel, ast,
+    CompileOptions, OptimizationLevel, ast,
     compiler_core::{self as core, ExprKind, Stmt},
     modules::{ModuleResolution, ResolvedProgram},
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{Constant, SystemHost, Type, TypeId, UNIT, Value, Vm, verify};
+
+#[path = "support/native_incremental.rs"]
+mod native_incremental;
 
 const INPUT_NAME: &str = "typed-core-input.glorious";
 const WRAPPER: &str = "\nmain() { () }\n";
@@ -111,6 +114,100 @@ fn inspect_self_host_interface_type_metadata() {
             .unwrap();
         eprintln!("self-host semantic type {index}: {value:?}");
     }
+}
+
+#[test]
+fn self_hosted_trait_and_impl_generic_member_signatures_collect_in_vm() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":interface_collection_status");
+    let verified = verify(phases.artifact).unwrap();
+    let source = "trait Replay<T> { \
+            replay<U>(value: T, other: U) -> U where U: Use<[0, *]>; \
+        } \
+        struct Wrapper<T> { value: T } \
+        impl<T> Replay<T> for Wrapper<T> { \
+            replay<U>(value: T, other: U) -> U where U: Use<[0, *]> { other } \
+        } \
+        main() { () }";
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    let Value::U64(status) = vm.run(function, vec![Value::Text(source.into())]).unwrap()
+    else {
+        panic!("interface_collection_status did not return u8");
+    };
+    assert_eq!(status, 0, "trait and impl member signatures must collect");
+}
+
+#[test]
+fn self_hosted_nominal_method_generic_owner_is_distinct_in_release_vm() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions {
+            optimization_level: OptimizationLevel::O2,
+        },
+    )
+    .unwrap();
+    let function = artifact_function_id(
+        &phases.artifact,
+        ":nominal_method_generic_owner_status",
+    );
+    let verified = verify(phases.artifact).unwrap();
+    let source = "trait Binder<T> { \
+            select<U>(outer: T, receiver: &Self, inner: U) -> U; \
+        } \
+        struct Wrapper<T> { value: T } \
+        impl<T> Binder<T> for Wrapper<T> { \
+            select<U>(outer: T, receiver: &Self, inner: U) -> U { inner } \
+        } \
+        main() { () }";
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    let Value::U64(status) = vm.run(function, vec![Value::Text(source.into())]).unwrap()
+    else {
+        panic!("nominal_method_generic_owner_status did not return u8");
+    };
+    assert_eq!(
+        status, 0,
+        "enclosing T and method U must retain distinct generic owners"
+    );
+}
+
+#[test]
+fn self_hosted_generic_trait_headers_retain_supertrait_applications_in_vm() {
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":trait_header_collection_status");
+    let verified = verify(phases.artifact).unwrap();
+    let source = "trait Parent<T> {} trait Child<T>: Parent<T> + Parent<Vec<T>> {} \
+        struct Wrapper<T> { value: T } impl<T> Child<T> for Wrapper<T> {}";
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    let Value::U64(status) = vm.run(function, vec![Value::Text(source.into())]).unwrap()
+    else {
+        panic!("trait_header_collection_status did not return u8");
+    };
+    assert_eq!(status, 0, "generic trait headers must retain their supertrait applications");
 }
 
 fn push_u32(output: &mut Vec<u8>, value: u32) {
@@ -916,6 +1013,13 @@ impl Encoder<'_> {
                     push_string(output, value);
                     return Ok(());
                 }
+                if let Constant::Bytes(value) = value {
+                    output.push(11);
+                    self.write_type(output, expression.ty)?;
+                    push_u32(output, value.len().try_into().unwrap());
+                    output.extend(value);
+                    return Ok(());
+                }
                 output.push(1);
                 self.write_type(output, expression.ty)?;
                 let raw = match value {
@@ -1421,7 +1525,8 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_false() -> Bool { false }",
         "probe_bool_identity(value: Bool) -> Bool { value }",
         "probe_i64() -> i64 { 7 } probe_u64() -> u64 { 7 }",
-        "probe_text() -> Text { \"hello, 🌍\" } probe_character() -> char { '💩' }",
+        "probe_text() -> Text { \"hello, 🌍\" } probe_character() -> char { '💩' } \
+         probe_byte() -> u8 { b'\\xff' }",
         // Full-width integer literals exercise the fourth Core word.  Before
         // the probe's 128-bit wire correction this valid native-oracle case
         // was rejected as `IntegerEncodingOverflow`.
@@ -1453,6 +1558,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          probe_generic_interfaces() { () }",
         "struct CharacterSlot { value: char } \
          probe_character_interface() { () }",
+        // Keep decoded escapes on the Typed-Core wire: bytes are not text and
+        // must retain a NUL payload rather than source spelling.
+        "probe_bytes() -> Bytes { b\"ok\\x00\" }",
         "mod imported { pub struct TokenSpan { start: usize } } \
          use imported::TokenSpan; \
          struct ImportedHolder { span: TokenSpan } \
@@ -1760,23 +1868,10 @@ fn self_hosted_effect_interfaces_match_rust_semantics_and_rejections() {
     assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
     assert_eq!(fs::read(&vm_path).unwrap(), expected_all);
 
-    let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-    let llvm = directory.path().join("self-host-effect-interfaces.ll");
-    let executable = directory.path().join("self-host-effect-interfaces");
-    fs::write(&llvm, module.ir).unwrap();
-    let clang = Command::new("clang")
-        .arg(&llvm)
-        .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-        .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-        .arg("-O0")
-        .arg("-o")
-        .arg(&executable)
-        .output()
-        .unwrap();
-    assert!(
-        clang.status.success(),
-        "{}",
-        String::from_utf8_lossy(&clang.stderr)
+    let executable = native_incremental::build_cached_native(
+        &self_host_effect_bundle(),
+        directory.path(),
+        "self-host-effect-interfaces",
     );
     let native_path = directory.path().join("effect-native.bin");
     let native = Command::new(&executable)
@@ -1812,6 +1907,18 @@ fn self_hosted_effect_control_headers_match_rust_oracle() {
         ),
         (
             "effect Fail<E> { fail(error: E) -> ! }\nselected() -> / {Fail<i64>} { () }",
+            true,
+        ),
+        // Generic effect heads and generic operations are required by the
+        // compiler's own collection protocols. Keep a nested generic result,
+        // an operation-local where clause, and a following operation together:
+        // the header cursor must not consume the latter as part of `where`.
+        (
+            "effect Convert<T> { convert<U>(value: U) -> U where U: Copy; finish(value: T) -> T }",
+            true,
+        ),
+        (
+            "effect Relay<'scope, const N: u32, E: EffectRow> { [0,1] forward<U>(value: U) -> U where U: Copy; stop() -> ! }",
             true,
         ),
         // shared_handler_resumption_quantities.rs: shared terminal/resumptive
@@ -1870,6 +1977,45 @@ fn self_hosted_effect_control_headers_match_rust_oracle() {
         let value = vm.run(function, vec![Value::Text(source.clone().into())]).unwrap();
         let Value::Bytes(bytes) = value else { panic!("effect probe returned non-bytes"); };
         assert_eq!(bytes.first().copied() == Some(0), accepted, "source: {source}");
+    }
+}
+
+#[test]
+// Trait associated items are header-only at this stage: the bootstrap parser
+// accepts their generic declarations/definitions even though the self-host
+// trait database has not yet lowered their values.  Keep this oracle at the
+// parser boundary so later semantic work cannot accidentally regress the
+// declaration scan needed to compile trait-heavy sources.
+fn self_hosted_trait_associated_item_headers_match_rust_oracle() {
+    let corpus = [
+        "trait Family<T> { type Member<U>; }",
+        "trait Family { type Member<U>; } impl<T> Family for T { type Member<U> = U; }",
+        "trait Carrier { type Effects<U>: EffectRow; } \
+         impl<T> Carrier for T { type Effects<U> = {}; }",
+    ];
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_effect_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let function = artifact_function_id(&phases.artifact, ":effect_interface_bytes");
+    let vm = Vm::with_host(
+        verify(phases.artifact).unwrap(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(Vec::<OsString>::new()),
+    )
+    .unwrap();
+    for declaration in corpus {
+        let source = format!("{declaration}\nmain() -> {{ () }}");
+        let rust = grandiose::lexer::lex(&source)
+            .ok()
+            .and_then(|tokens| grandiose::parser::parse(tokens).ok())
+            .and_then(|program| grandiose::validate::validate(&program).ok())
+            .is_some();
+        assert!(rust, "bad Rust-oracle fixture: {source}");
+        let value = vm.run(function, vec![Value::Text(source.clone().into())]).unwrap();
+        let Value::Bytes(bytes) = value else { panic!("trait probe returned non-bytes"); };
+        assert_eq!(bytes.first().copied(), Some(0), "source: {source}");
     }
 }
 
@@ -2000,6 +2146,441 @@ fn self_host_effect_core_foundation_retains_control_and_rejects_lowering() {
 }
 
 #[test]
+fn self_host_effect_row_summary_is_conservative_and_keeps_fixed_point_edges() {
+    // The first effect-row analysis pass is intentionally monotone: a handler
+    // candidate cannot erase a perform until a later coverage proof closes all
+    // operations and pattern paths.  Calls remain explicit graph edges for the
+    // future generic fixed point.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "pub struct CoreEffectSummary",
+        "required_instances: Vec<EffectInstanceId>",
+        "handler_candidates: Vec<EffectInstanceId>",
+        "direct_calls: Vec<CallableInstanceId>",
+        "indirect_calls: Vec<CallableSignatureId>",
+        "resumptions: Vec<CoreComputationId>",
+        "pub core_effect_summary(body: &TypedBody) -> CoreEffectSummary",
+        "CoreComputationView::Perform(_, instance, _, _)",
+        "CoreComputationView::Handle(_, _, clauses)",
+        "CoreComputationView::Call(_, _, instance, _)",
+        "CoreComputationView::CallIndirect(_, _, signature, _)",
+        "core_effect_summary_handler_candidates",
+        "never turns handler syntax into an outward-row",
+    ] {
+        assert!(core.contains(required), "missing effect-row summary foundation: {required}");
+    }
+    let probe = fs::read_to_string(root.join("self-host/src/probe/elaboration/elaboration.glorious"))
+        .unwrap();
+    for required in [
+        "pub core_effect_summary_shape(",
+        "core_effect_summary(body)",
+        "core_effect_summary_required_count",
+        "core_effect_summary_handler_candidate_count",
+        "core_effect_summary_direct_call_count",
+        "core_effect_summary_indirect_call_count",
+        "core_effect_summary_resume_count",
+    ] {
+        assert!(probe.contains(required), "missing effect-row summary probe: {required}");
+    }
+}
+
+#[test]
+fn self_host_callable_core_retains_ordered_closure_sites_and_indirect_calls() {
+    // This is a Core-model gate: closure layout and instruction selection
+    // belong to the future backend integration, but Typed Core must preserve
+    // all semantic input deterministically before that work starts.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "Callable(CallableSignatureId)",
+        "pub struct CallableSignature",
+        "pub struct ClosureSiteDescriptor",
+        "pub struct CoreClosureCapture",
+        "pub enum CoreCaptureMode { Borrow, Copy, Move }",
+        "Closure(ClosureSiteId)",
+        "CallIndirect(CoreValueId, CallableSignatureId, OperandRange)",
+        "closure_captures_are_ordered",
+        "push_closure_value",
+        "push_indirect_call",
+        "let computation = push_indirect_call(",
+        "Result::Ok(finish_computation(",
+        "let callable_result = instantiate_call_type(",
+        "intern_callable_signature(\n                        &mut *interfaces,",
+        "CoreValueView::Closure",
+        "CoreComputationView::CallIndirect",
+        "interface_callable_signature_effect_tail",
+        "signature: CallableSignature\n) -> Slice<'a, TypeId>",
+        "callable_signature_parameter_slice",
+        "callable_signature_effect_slice",
+    ] {
+        assert!(core.contains(required), "missing callable Typed Core foundation: {required}");
+    }
+
+    let lowering = fs::read_to_string(
+        root.join("self-host/src/backend/lowering/lowering.glorious"),
+    )
+    .unwrap();
+    assert!(lowering.contains("CallableNotLowered(CoreValueId)"));
+    assert!(lowering.contains("CoreComputationView::CallIndirect"));
+}
+
+#[test]
+fn self_hosted_recursive_effect_lowering_preserves_its_unique_session_owner() {
+    // The production self-host compiler recursively lowers effect operations
+    // while one argument lends `session` and a later argument reborrows it.
+    // Keep that real source shape paired with the MIR ownership rule that
+    // retains a control-loop outer as the backedge owner.
+    let root = repository_root();
+    let compiler = fs::read_to_string(root.join("self-host/src/compiler/compiler.glorious"))
+        .unwrap();
+    assert!(
+        compiler.contains(
+            "lower_effect_operations(\n                            session, map, types, type_names, protocol, ordinal + 1, output"
+        ),
+        "the recursive unique-session call is the production regression shape"
+    );
+    let bootstrap = fs::read_to_string(root.join("crates/grandiose/src/compiler.rs")).unwrap();
+    for required in [
+        "fn contains_reborrow_of_local(expression: &core::Expr, local: core::LocalId)",
+        "origin.unique && origin.root == *local && origin.path.is_empty()",
+        "Self::contains_reborrow_of_local(later, *local)",
+        "active_control_outer && unique_reference",
+        "mir::InstructionKind::Reborrow {",
+    ] {
+        assert!(bootstrap.contains(required), "missing unique loop-owner guard: {required}");
+    }
+}
+
+#[test]
+fn self_host_label_elaboration_retains_generative_lexical_control_in_core() {
+    // This is intentionally a Typed-Core gate rather than an emitted-bytecode
+    // claim: labels must remain direct control until the later MIR protected
+    // control lowering exists.  It guards the two semantic invariants taken
+    // from labels_leave.rs: nested same-name destinations shadow lexically,
+    // and a call carries the destination identity rather than just its value.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "LabelDestination(LabelDestinationId, CoreComputationId)",
+        "Leave(LabelDestinationId, CoreValueId)",
+        "active_label_destination_at(",
+        "let current = index - 1;",
+        "push_label_destination(&mut value.core, result_type)",
+        "push_active_label(value, name, destination)",
+        "CoreComputationKind::Leave(destination, payload)",
+        "CoreComputationKind::LabelDestination(destination, child)",
+        "type_id_from_u32(1)",
+    ] {
+        assert!(core.contains(required), "missing label Typed Core behavior: {required}");
+    }
+    let label_call = core
+        .split("elaborate_label_call(")
+        .nth(1)
+        .expect("label call elaborator exists");
+    assert!(
+        label_call.contains("active_label_destination(value, name)"),
+        "label calls must resolve only against the active lexical stack"
+    );
+    assert!(
+        !label_call.contains("expected\n        )\n    } else"),
+        "a label payload must not be checked against its surrounding result type"
+    );
+}
+
+#[test]
+fn self_host_label_lowering_preserves_protected_cfg_and_artifact_namespace() {
+    // This is deliberately structural until the bootstrap VM gate is run: a
+    // label is not an ordinary jump.  Its normal edge must pop then enter the
+    // protected join, while Leave remains terminal and the GRBC metadata must
+    // bound every emitted slot.
+    let root = repository_root();
+    let lowering = fs::read_to_string(
+        root.join("self-host/src/backend/lowering/lowering.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "active_labels: Vec<LabelDestinationId>",
+        "leaving_labels: Vec<LabelDestinationId>",
+        "emit_label_push",
+        "emit_label_pop",
+        "emit_leave",
+        "CoreComputationView::LabelDestination(_, destination, child)",
+        "CoreComputationView::Leave(_, destination, payload)",
+        "emit_move(value, result, found)",
+        "emit_label_pop(value, slot)",
+        "emit_jump(value, join)",
+        "bind_block(value, join)",
+        "MirInstruction::Leave(slot, payload)",
+        "mir_function_label_slot_count",
+    ] {
+        assert!(lowering.contains(required), "missing protected label lowering: {required}");
+    }
+    let emission = fs::read_to_string(
+        root.join("self-host/src/backend/emission/emission.glorious"),
+    )
+    .unwrap();
+    assert!(
+        emission.contains("super::lowering::mir_function_label_slot_count(function)"),
+        "function records must carry the MIR-derived label namespace bound"
+    );
+}
+
+#[test]
+fn self_host_is_refinement_core_retains_decision_shape_and_scoped_bindings() {
+    // This is a structural Typed-Core gate.  `is` has no MIR lowering yet,
+    // but it must already remain a decision with its pattern and success-edge
+    // binding projection plan; lowering it to a subject-only Boolean here
+    // would make the later refinement CFG impossible to recover faithfully.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "CorePatternId",
+        "CorePatternKind",
+        "Float(Bytes)",
+        "Text(Bytes)",
+        "Character(u32)",
+        "Byte(u8)",
+        "Variant(TypeId, u32, CorePatternRange, Bool)",
+        "Tuple(CorePatternRange, Bool)",
+        "Struct(TypeId, CorePatternFieldRange, Bool)",
+        "CorePatternPathSegment { Variant(u32), Field(u32) }",
+        "CoreRefinementBinding",
+        "path: CorePatternPathRange",
+        "Refinement(CoreValueId, CorePatternId, CoreRefinementBindingRange)",
+        "CoreComputationView::Refinement",
+        "typed_body_refinement_bindings",
+        "core_refinement_binding_path",
+        "push_core_pattern",
+        "push_refinement_binding",
+    ] {
+        assert!(core.contains(required), "missing is-refinement Core foundation: {required}");
+    }
+    assert!(
+        !core.contains("Refinement(CoreValueId, Bool)"),
+        "an is refinement must not erase its pattern into a fabricated Boolean"
+    );
+}
+
+#[test]
+fn self_host_is_elaboration_builds_structural_patterns_before_bool_conversion() {
+    // This deliberately remains a source/Core contract: the branch CFG is a
+    // separate MIR feature.  It prevents the elaborator from regressing to
+    // the old subject-only path while that lowering is still pending.
+    let root = repository_root();
+    let core = fs::read_to_string(
+        root.join("self-host/src/frontend/elaboration/elaboration.glorious"),
+    )
+    .unwrap();
+    for required in [
+        "elaborate_is(",
+        "BodyExpressionView::Is(subject, pattern) => elaborate_is(",
+        "elaborate_refinement_pattern(",
+        "find_refinement_variant(",
+        "CorePatternKind::Variant(",
+        "CorePatternKind::Tuple(",
+        "CorePatternPathSegment::Variant(",
+        "CorePatternPathSegment::Field(",
+        "push_refinement_binding(&mut value.core, local, ty, range)",
+        "CoreComputationKind::Refinement(subject_value, core_pattern",
+        "wrap_raw_bool(",
+    ] {
+        assert!(core.contains(required), "missing is elaboration layer: {required}");
+    }
+    let elaboration = core
+        .split("elaborate_is(")
+        .nth(1)
+        .expect("is elaborator exists");
+    assert!(
+        elaboration.contains("let start = super::syntax::range_mark(&value.core.refinement_bindings)"),
+        "success-edge bindings must be ranged before the recursive pattern walk"
+    );
+}
+
+#[test]
+fn self_hosted_monomorphic_perform_elaborates_like_bootstrap() {
+    // Keep the first executable effect-body parity case intentionally narrow:
+    // a monomorphic operation has no continuation lowering requirement, but
+    // it must reach Typed Core as `Perform` with its checked payload/result.
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64 } \
+        answer(value: i64) -> i64 / {Ask} { perform Ask::ask(value) }";
+    let bootstrap = SourceBundle::distributed(
+        Segment::new(INPUT_NAME, format!("{source}{WRAPPER}")),
+        [],
+    );
+    assert!(
+        grandiose::compile_bundle_to_phases_with_options(
+            &bootstrap,
+            CompileOptions { optimization_level: OptimizationLevel::O0 },
+        )
+        .is_ok(),
+        "bootstrap compiler must accept the focused perform fixture"
+    );
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O0 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("perform.glorious");
+    let output = directory.path().join("perform.bin");
+    fs::write(&input, source).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    assert_eq!(fs::read(output).unwrap().first().copied(), Some(0));
+}
+
+#[test]
+fn self_hosted_nested_perform_payload_elaborates_in_release_vm() {
+    // A payload can itself suspend. The outer operation must therefore retain
+    // the inner `Perform` as an embedded Core operand rather than requiring a
+    // pre-existing value local.
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64 } \
+        nested() -> i64 / {Ask} { perform Ask::ask(perform Ask::ask(40)) }";
+    let bootstrap = SourceBundle::distributed(
+        Segment::new(INPUT_NAME, format!("{source}{WRAPPER}")),
+        [],
+    );
+    assert!(
+        grandiose::compile_bundle_to_phases_with_options(
+            &bootstrap,
+            CompileOptions { optimization_level: OptimizationLevel::O2 },
+        )
+        .is_ok(),
+        "bootstrap compiler must accept nested perform payloads"
+    );
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("nested-perform.glorious");
+    let output = directory.path().join("nested-perform.bin");
+    fs::write(&input, source).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let encoded = fs::read(output).unwrap();
+    assert_eq!(&encoded[..4], &1_u32.to_le_bytes());
+    assert_eq!(encoded.get(4).copied(), Some(0));
+}
+
+#[test]
+fn self_hosted_generic_struct_literals_infer_field_arguments_in_vm() {
+    // The local initializer has no expected type.  Its `Box` application must
+    // therefore be inferred from the field value itself, then agree with the
+    // declared result type at the tail of the function.
+    let source = "struct Box<T> { value: T } \
+        make() -> Box<i64> { let boxed = Box { value: 1 }; boxed }";
+    let bootstrap = SourceBundle::distributed(
+        Segment::new(INPUT_NAME, format!("{source}{WRAPPER}")),
+        [],
+    );
+    assert!(
+        grandiose::compile_bundle_to_phases_with_options(
+            &bootstrap,
+            CompileOptions { optimization_level: OptimizationLevel::O2 },
+        )
+        .is_ok(),
+        "bootstrap compiler must accept field-inferred generic products"
+    );
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("generic-product.glorious");
+    let output = directory.path().join("generic-product.bin");
+    fs::write(&input, source).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let encoded = fs::read(output).unwrap();
+    // The probe starts with a little-endian input count. The status for its
+    // first input follows that four-byte framing word.
+    assert_eq!(&encoded[..4], &1_u32.to_le_bytes());
+    assert_eq!(encoded.get(4).copied(), Some(0));
+}
+
+#[test]
+fn self_hosted_full_width_integer_literals_match_bootstrap_in_release_vm() {
+    // Preserve all four Core integer words for the maximum `u128` value.
+    // This is the widest contextual literal accepted by the current focused
+    // self-host Typed Core corpus.
+    let source = "u128_max() -> u128 { 340282366920938463463374607431768211455 }";
+    let bootstrap = SourceBundle::distributed(
+        Segment::new(INPUT_NAME, format!("{source}{WRAPPER}")),
+        [],
+    );
+    assert!(
+        grandiose::compile_bundle_to_phases_with_options(
+            &bootstrap,
+            CompileOptions { optimization_level: OptimizationLevel::O2 },
+        )
+        .is_ok(),
+        "bootstrap compiler must accept the full-width literal corpus"
+    );
+
+    let phases = grandiose::compile_bundle_to_phases_with_options(
+        &self_host_bundle(),
+        CompileOptions { optimization_level: OptimizationLevel::O2 },
+    )
+    .unwrap();
+    let entry = phases.artifact.entry_function.unwrap();
+    let verified = verify(phases.artifact).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("full-width-integers.glorious");
+    let output = directory.path().join("full-width-integers.bin");
+    fs::write(&input, source).unwrap();
+    let vm = Vm::with_host(
+        verified,
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![output.clone().into_os_string(), input.into_os_string()]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+    let encoded = fs::read(output).unwrap();
+    assert_eq!(&encoded[..4], &1_u32.to_le_bytes());
+    assert_eq!(encoded.get(4).copied(), Some(0));
+}
+
+#[test]
 fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
@@ -2098,23 +2679,10 @@ fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
                 "VM whole-corpus typed Core diverged"
             );
 
-            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
-            let llvm = directory.path().join("self-host-typed-core.ll");
-            let executable = directory.path().join("self-host-typed-core");
-            fs::write(&llvm, module.ir).unwrap();
-            let clang = Command::new("clang")
-                .arg(&llvm)
-                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
-                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
-                .arg("-o")
-                .arg(&executable)
-                .output()
-                .unwrap();
-            assert!(
-                clang.status.success(),
-                "{}",
-                String::from_utf8_lossy(&clang.stderr)
+            let executable = native_incremental::build_cached_native(
+                &self_host_bundle(),
+                directory.path(),
+                "self-host-typed-core",
             );
 
             let native_all_path = directory.path().join("native-all.bin");
