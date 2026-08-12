@@ -13404,7 +13404,16 @@ fn validate_bytecode_input_checkpoint(
 /// change ORs the invalidation mask, and this refresh is the only way the
 /// facts become trusted again.
 fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(), ValidationError> {
-    let array_calls = regions::array_call_summaries(program, types);
+    // Most optimizer checkpoints follow an unchanged pass, or a pass that
+    // invalidated only ephemeral metadata. Avoid deriving whole-program array
+    // call summaries in those cases: the summaries are needed solely by the
+    // ownership/cleanup rebuild below.
+    let requires_flow_rebuild = program.functions.iter().any(|function| {
+        function.invalid_analyses & (analysis::CFG | analysis::USES | analysis::FLOW) != 0
+    });
+    let array_calls = requires_flow_rebuild.then(|| {
+        regions::array_call_summaries(program, types)
+    });
     for function in &mut program.functions {
         let invalidated = function.invalid_analyses;
         if invalidated == 0 {
@@ -13423,7 +13432,13 @@ fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(),
         function.flow.locals = locals;
         function.flow.move_paths = derive_move_paths(function);
         let elaboration =
-            derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
+            derive_cleanup_elaboration_with_array_calls(
+                function,
+                types,
+                array_calls
+                    .as_ref()
+                    .expect("flow rebuild prepared array-call summaries"),
+            )?;
         apply_cleanup_elaboration(function, elaboration);
         function.invalid_analyses = 0;
     }
