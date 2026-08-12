@@ -205,7 +205,10 @@ impl IncrementalFrontendCache {
                 && matches!(
                     &token.kind,
                     TokenKind::Ident(keyword)
-                        if matches!(keyword.as_str(), "infixl" | "infixr" | "infix" | "prefix")
+                        if matches!(
+                            keyword.as_str(),
+                            "infixl" | "infixr" | "infix" | "prefix" | "mod"
+                        )
                 )
         }) {
             return None;
@@ -386,6 +389,23 @@ mod tests {
         let bundle = SourceBundle::distributed(
             Segment::new("main.glorious", "infixr 31 +; main() -> i64 { 1 + 2 + 3 }"),
             [],
+        );
+        let mut cache = IncrementalFrontendCache::new();
+
+        let expected = crate::modules::parse_bundle(&bundle);
+        let actual = cache.parse_bundle(&bundle);
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        assert_eq!(cache.stats().reused_standard_ast, 0);
+    }
+
+    #[test]
+    fn distributed_modules_use_the_canonical_bundle_parser() {
+        let bundle = SourceBundle::distributed(
+            Segment::new(
+                "main.glorious",
+                "mod child; main() -> i64 { child::value() + 1 }",
+            ),
+            [Segment::new("child.glorious", "value() -> i64 { 2 * 3 }")],
         );
         let mut cache = IncrementalFrontendCache::new();
 
