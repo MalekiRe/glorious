@@ -11355,11 +11355,48 @@ fn inline_by_cost_with_admission_caps(
     }
 }
 
+/// One complete body result from a transactional local pass.  Future
+/// incremental scheduling may retain these snapshots only at the *same* pass
+/// and body slot that produced them; replaying an entire prefix at once would
+/// change the shared optimizer work-budget ordering.
+#[derive(Clone)]
+pub(crate) struct TransactionalPassBodySnapshot {
+    pub(crate) input: Function,
+    pub(crate) output: Function,
+    pub(crate) outcome: PassOutcome,
+    pub(crate) work_units: u64,
+}
+
+/// Optional process-local storage for exact body snapshots. This deliberately
+/// has no filesystem authority and is not wired into O3 yet. The dispatcher
+/// verifies the exact input and budget before accepting a restored snapshot;
+/// a cache miss always executes the ordinary cold transformation.
+pub(crate) trait TransactionalPassBodyCache {
+    fn restore(
+        &mut self,
+        pass: PassId,
+        input: &Function,
+        work_limit: u64,
+    ) -> Option<TransactionalPassBodySnapshot>;
+
+    fn record(&mut self, pass: PassId, snapshot: TransactionalPassBodySnapshot);
+}
+
 fn run_transactional_pass(
     program: &mut Program,
     pass: PassId,
     types: &[Type],
     global_remaining: &mut u64,
+) -> PassReport {
+    run_transactional_pass_with_body_cache(program, pass, types, global_remaining, None)
+}
+
+fn run_transactional_pass_with_body_cache(
+    program: &mut Program,
+    pass: PassId,
+    types: &[Type],
+    global_remaining: &mut u64,
+    mut body_cache: Option<&mut dyn TransactionalPassBodyCache>,
 ) -> PassReport {
     // Direct custom-hook identity is distinct from structural destruction,
     // but cleanup simplification must still see those hooks recursively when
@@ -11392,35 +11429,63 @@ fn run_transactional_pass(
         } else {
             local_limit.min(*global_remaining)
         };
+        let input = body_cache.as_ref().map(|_| function.clone());
+        let restored = body_cache.as_deref_mut().and_then(|cache| {
+            let input = input.as_ref().expect("cache input was cloned");
+            cache.restore(pass, input, limit).filter(|snapshot| {
+                snapshot.input == *input
+                    && snapshot.work_units <= limit
+                    && snapshot.outcome != PassOutcome::BudgetExhausted
+            })
+        });
         let invalidated_before = function.invalid_analyses;
-        let (body_outcome, work) = match pass {
-            PassId::NormalizeCfg => normalize_cfg(function, limit),
-            PassId::SparseSimplify => sparse_simplify(function, types, limit),
-            PassId::ScalarizeLocals => scalarize_locals(function, types, limit),
-            PassId::SimplifyCleanup => {
-                simplify_cleanup(
-                    function,
-                    types,
-                    direct_custom_drop_types
-                        .as_ref()
-                        .expect("cleanup simplification prepared custom-drop types"),
-                    limit,
-                )
+        let (body_outcome, work) = if let Some(snapshot) = restored {
+            *function = snapshot.output;
+            (snapshot.outcome, snapshot.work_units)
+        } else {
+            let (outcome, work) = match pass {
+                PassId::NormalizeCfg => normalize_cfg(function, limit),
+                PassId::SparseSimplify => sparse_simplify(function, types, limit),
+                PassId::ScalarizeLocals => scalarize_locals(function, types, limit),
+                PassId::SimplifyCleanup => {
+                    simplify_cleanup(
+                        function,
+                        types,
+                        direct_custom_drop_types
+                            .as_ref()
+                            .expect("cleanup simplification prepared custom-drop types"),
+                        limit,
+                    )
+                }
+                PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
+                PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
+                PassId::EraseLoanProofsAndScalarizedReferences => erase_loan_proofs(function, limit),
+                PassId::FormTailCallsAndHoist => {
+                    form_tail_calls_and_hoist(
+                        function,
+                        types,
+                        direct_custom_drop_types
+                            .as_ref()
+                            .expect("tail formation prepared custom-drop types"),
+                        limit,
+                    )
+                }
+                _ => (PassOutcome::SkippedUnavailable, 0),
+            };
+            if let (Some(cache), Some(input)) = (body_cache.as_deref_mut(), input) {
+                if outcome != PassOutcome::BudgetExhausted {
+                    cache.record(
+                        pass,
+                        TransactionalPassBodySnapshot {
+                            input,
+                            output: function.clone(),
+                            outcome,
+                            work_units: work,
+                        },
+                    );
+                }
             }
-            PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
-            PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
-            PassId::EraseLoanProofsAndScalarizedReferences => erase_loan_proofs(function, limit),
-            PassId::FormTailCallsAndHoist => {
-                form_tail_calls_and_hoist(
-                    function,
-                    types,
-                    direct_custom_drop_types
-                        .as_ref()
-                        .expect("tail formation prepared custom-drop types"),
-                    limit,
-                )
-            }
-            _ => (PassOutcome::SkippedUnavailable, 0),
+            (outcome, work)
         };
         if body_outcome == PassOutcome::Changed {
             // Passes may publish a narrower, mutation-specific mask. Fall
@@ -22225,6 +22290,110 @@ mod tests {
         assert_eq!(program.canonical_text(), before);
         assert_eq!(program.fingerprint(), fingerprint);
         assert_eq!(program.functions[0].invalid_analyses, 0);
+    }
+
+    #[derive(Default)]
+    struct TestTransactionalBodyCache {
+        entries: Vec<(PassId, TransactionalPassBodySnapshot)>,
+        restores: usize,
+        records: usize,
+    }
+
+    impl TransactionalPassBodyCache for TestTransactionalBodyCache {
+        fn restore(
+            &mut self,
+            pass: PassId,
+            input: &Function,
+            work_limit: u64,
+        ) -> Option<TransactionalPassBodySnapshot> {
+            let snapshot = self
+                .entries
+                .iter()
+                .find(|(cached_pass, snapshot)| {
+                    *cached_pass == pass
+                        && snapshot.input == *input
+                        && snapshot.work_units <= work_limit
+                })?
+                .1
+                .clone();
+            self.restores += 1;
+            Some(snapshot)
+        }
+
+        fn record(&mut self, pass: PassId, snapshot: TransactionalPassBodySnapshot) {
+            self.records += 1;
+            self.entries.push((pass, snapshot));
+        }
+    }
+
+    fn cache_hook_program() -> Program {
+        let mut body = function(
+            vec![
+                block(
+                    0,
+                    Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![],
+                    }),
+                ),
+                block(1, Terminator::Return { value: None }),
+            ],
+            vec![UNIT],
+        );
+        body.phase = MirPhase::Cleanup;
+        body.features = infer_feature_bits(&body);
+        program(body)
+    }
+
+    #[test]
+    fn transactional_body_cache_hook_disabled_is_cold_equivalent_in_release() {
+        let types = Type::predefined();
+        let mut cold = cache_hook_program();
+        let mut disabled = cold.clone();
+        let mut cold_budget = 100_000;
+        let mut disabled_budget = cold_budget;
+        let cold_report =
+            run_transactional_pass(&mut cold, PassId::NormalizeCfg, &types, &mut cold_budget);
+        let disabled_report = run_transactional_pass_with_body_cache(
+            &mut disabled,
+            PassId::NormalizeCfg,
+            &types,
+            &mut disabled_budget,
+            None,
+        );
+        assert_eq!(disabled, cold);
+        assert_eq!(disabled_report, cold_report);
+        assert_eq!(disabled_budget, cold_budget);
+    }
+
+    #[test]
+    fn transactional_body_cache_replays_exact_snapshot_at_same_pass_slot() {
+        let types = Type::predefined();
+        let mut cache = TestTransactionalBodyCache::default();
+        let mut first = cache_hook_program();
+        let mut first_budget = 100_000;
+        let first_report = run_transactional_pass_with_body_cache(
+            &mut first,
+            PassId::NormalizeCfg,
+            &types,
+            &mut first_budget,
+            Some(&mut cache),
+        );
+        assert_eq!(cache.records, 1);
+
+        let mut replay = cache_hook_program();
+        let mut replay_budget = 100_000;
+        let replay_report = run_transactional_pass_with_body_cache(
+            &mut replay,
+            PassId::NormalizeCfg,
+            &types,
+            &mut replay_budget,
+            Some(&mut cache),
+        );
+        assert_eq!(cache.restores, 1);
+        assert_eq!(replay, first);
+        assert_eq!(replay_report, first_report);
+        assert_eq!(replay_budget, first_budget);
     }
 
     #[test]
