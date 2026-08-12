@@ -45,7 +45,18 @@ impl OptimizationLevel {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    serde::Deserialize,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+)]
 pub enum MirPhase {
     #[default]
     Raw,
@@ -124,7 +135,9 @@ impl DenseWorklist {
     }
 }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[derive(
+    Clone, Copy, Debug, serde::Deserialize, Eq, Ord, PartialEq, PartialOrd, serde::Serialize,
+)]
 pub enum PassId {
     ValidateRawMir,
     ImportAndValidatePlaceFlow,
@@ -3793,8 +3806,8 @@ fn fold_primitive(
         }
         (BytesUtf8ValidUpTo, USIZE, [BYTES], [Constant::Bytes(value)]) => {
             return Some(Constant::Usize(
-                std::str::from_utf8(value)
-                    .map_or_else(|error| error.valid_up_to(), |_| value.len()) as u64,
+                std::str::from_utf8(value).map_or_else(|error| error.valid_up_to(), |_| value.len())
+                    as u64,
             ));
         }
         _ => {}
@@ -7389,7 +7402,10 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
         .functions
         .iter()
         .filter_map(|function| {
-            let entry = function.blocks.iter().find(|block| block.id == function.entry)?;
+            let entry = function
+                .blocks
+                .iter()
+                .find(|block| block.id == function.entry)?;
             if function.receiver_mode.is_some()
                 || function.blocks.len() != 1
                 || !function.return_cleanup.is_empty()
@@ -7421,10 +7437,12 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                     })
                     .map(DirectCallSpecialization::Forward)?,
                 (
-                    [Instruction {
-                        kind: InstructionKind::Const { dst, value },
-                        ..
-                    }],
+                    [
+                        Instruction {
+                            kind: InstructionKind::Const { dst, value },
+                            ..
+                        },
+                    ],
                     Terminator::Return {
                         value:
                             Some(Operand {
@@ -7448,19 +7466,24 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                         dst,
                         primitive,
                         args,
-                    } = &primitive_statement.kind else {
+                    } = &primitive_statement.kind
+                    else {
                         return None;
                     };
-                    if *dst != *register || !prefix.iter().all(|statement| matches!(
-                        statement.kind,
-                        InstructionKind::Const { .. }
-                    )) {
+                    if *dst != *register
+                        || !prefix.iter().all(|statement| {
+                            matches!(statement.kind, InstructionKind::Const { .. })
+                        })
+                    {
                         return None;
                     }
-                    let constants = prefix.iter().filter_map(|statement| match &statement.kind {
-                        InstructionKind::Const { dst, value } => Some((*dst, value)),
-                        _ => None,
-                    }).collect::<BTreeMap<_, _>>();
+                    let constants = prefix
+                        .iter()
+                        .filter_map(|statement| match &statement.kind {
+                            InstructionKind::Const { dst, value } => Some((*dst, value)),
+                            _ => None,
+                        })
+                        .collect::<BTreeMap<_, _>>();
                     let arguments = args
                         .iter()
                         .map(|argument| {
@@ -7472,9 +7495,11 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                             {
                                 Some(DirectPrimitiveArgument::Parameter(index))
                             } else {
-                                constants.get(&argument.register).cloned().cloned().map(
-                                    DirectPrimitiveArgument::Constant,
-                                )
+                                constants
+                                    .get(&argument.register)
+                                    .cloned()
+                                    .cloned()
+                                    .map(DirectPrimitiveArgument::Constant)
                             }
                         })
                         .collect::<Option<Vec<_>>>()?;
@@ -7558,7 +7583,8 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                     }
                 }
                 (DirectCallSpecialization::Constant(value), Some(result)) => {
-                    let Some(result_type) = caller.register_types.get(result as usize).copied() else {
+                    let Some(result_type) = caller.register_types.get(result as usize).copied()
+                    else {
                         continue;
                     };
                     let constant_register = caller.register_types.len() as Register;
@@ -7616,10 +7642,13 @@ fn specialize_forwarding_direct_calls(program: &mut Program, budget: u64) -> (Pa
                     let Some(constants) = constants else {
                         continue;
                     };
-                    let Some(value) = fold_primitive(*result_type, *primitive, argument_types, &constants) else {
+                    let Some(value) =
+                        fold_primitive(*result_type, *primitive, argument_types, &constants)
+                    else {
                         continue;
                     };
-                    let Some(result_type) = caller.register_types.get(result as usize).copied() else {
+                    let Some(result_type) = caller.register_types.get(result as usize).copied()
+                    else {
                         continue;
                     };
                     let constant_register = caller.register_types.len() as Register;
@@ -8638,7 +8667,14 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
                     cleanup_callable: false,
                     args,
                     normal,
-                } => (*result, callable, *known_target, args, Some(normal.clone()), false),
+                } => (
+                    *result,
+                    callable,
+                    *known_target,
+                    args,
+                    Some(normal.clone()),
+                    false,
+                ),
                 Terminator::TailCallIndirect {
                     callable,
                     known_function: Some(known_target),
@@ -10119,8 +10155,8 @@ fn inline_admission_limits(
     level: OptimizationLevel,
     admission_caps: InlineAdmissionCaps,
 ) -> InlineAdmissionLimits {
-    let use_o3_admission_caps =
-        level == OptimizationLevel::O3 && admission_caps == InlineAdmissionCaps::ForOptimizationLevel;
+    let use_o3_admission_caps = level == OptimizationLevel::O3
+        && admission_caps == InlineAdmissionCaps::ForOptimizationLevel;
     if use_o3_admission_caps {
         InlineAdmissionLimits {
             growth_factor: 4,
@@ -10936,9 +10972,11 @@ fn inline_by_cost_with_admission_caps(
         candidates.sort_unstable();
         let mut changed_this_round = false;
         for candidate in candidates {
-            let Some(next_depth) =
-                inline_candidate_depth(&scratch_policy.depths, candidate.target, admission_limits.depth_cap)
-            else {
+            let Some(next_depth) = inline_candidate_depth(
+                &scratch_policy.depths,
+                candidate.target,
+                admission_limits.depth_cap,
+            ) else {
                 continue;
             };
             if scratch_policy
@@ -11156,9 +11194,11 @@ fn inline_by_cost_with_admission_caps(
         candidates.sort_unstable();
         let mut changed_this_round = false;
         for candidate in candidates {
-            let Some(next_depth) =
-                inline_candidate_depth(&scratch_policy.depths, candidate.target, admission_limits.depth_cap)
-            else {
+            let Some(next_depth) = inline_candidate_depth(
+                &scratch_policy.depths,
+                candidate.target,
+                admission_limits.depth_cap,
+            ) else {
                 continue;
             };
             if scratch_policy
@@ -11382,6 +11422,7 @@ pub(crate) trait TransactionalPassBodyCache {
     fn record(&mut self, pass: PassId, snapshot: TransactionalPassBodySnapshot);
 }
 
+#[cfg(test)]
 fn run_transactional_pass(
     program: &mut Program,
     pass: PassId,
@@ -11447,29 +11488,27 @@ fn run_transactional_pass_with_body_cache(
                 PassId::NormalizeCfg => normalize_cfg(function, limit),
                 PassId::SparseSimplify => sparse_simplify(function, types, limit),
                 PassId::ScalarizeLocals => scalarize_locals(function, types, limit),
-                PassId::SimplifyCleanup => {
-                    simplify_cleanup(
-                        function,
-                        types,
-                        direct_custom_drop_types
-                            .as_ref()
-                            .expect("cleanup simplification prepared custom-drop types"),
-                        limit,
-                    )
-                }
+                PassId::SimplifyCleanup => simplify_cleanup(
+                    function,
+                    types,
+                    direct_custom_drop_types
+                        .as_ref()
+                        .expect("cleanup simplification prepared custom-drop types"),
+                    limit,
+                ),
                 PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
                 PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
-                PassId::EraseLoanProofsAndScalarizedReferences => erase_loan_proofs(function, limit),
-                PassId::FormTailCallsAndHoist => {
-                    form_tail_calls_and_hoist(
-                        function,
-                        types,
-                        direct_custom_drop_types
-                            .as_ref()
-                            .expect("tail formation prepared custom-drop types"),
-                        limit,
-                    )
+                PassId::EraseLoanProofsAndScalarizedReferences => {
+                    erase_loan_proofs(function, limit)
                 }
+                PassId::FormTailCallsAndHoist => form_tail_calls_and_hoist(
+                    function,
+                    types,
+                    direct_custom_drop_types
+                        .as_ref()
+                        .expect("tail formation prepared custom-drop types"),
+                    limit,
+                ),
                 _ => (PassOutcome::SkippedUnavailable, 0),
             };
             if let (Some(cache), Some(input)) = (body_cache.as_deref_mut(), input) {
@@ -11585,7 +11624,9 @@ fn run_transactional_whole_program_pass(
     plan: OptimizationPlan,
 ) -> PassReport {
     let (outcome, work_units) = match pass {
-        PassId::SpecializeDirectCalls => specialize_forwarding_direct_calls(program, *global_remaining),
+        PassId::SpecializeDirectCalls => {
+            specialize_forwarding_direct_calls(program, *global_remaining)
+        }
         PassId::ScalarizeCallables => scalarize_callables(program, tables.types, *global_remaining),
         PassId::SpecializeControl => specialize_static_handlers(
             program,
@@ -12571,54 +12612,54 @@ fn validate_cleanup_elaboration(
     elaboration: &CleanupElaboration,
 ) -> Result<(), ValidationError> {
     if elaboration.plans != function.flow.cleanup_plans {
+        return Err(error(
+            function,
+            None,
+            "cleanup plans are stale: a pass mutated ownership-relevant MIR without \
+                 re-elaborating its cleanup facts",
+        ));
+    }
+    for site in &function.flow.performs {
+        if !site.resumptive
+            && site.frame_cleanup != elaboration.perform_plans.get(&site.block).copied()
+        {
             return Err(error(
                 function,
-                None,
-                "cleanup plans are stale: a pass mutated ownership-relevant MIR without \
-                 re-elaborating its cleanup facts",
+                Some(site.block),
+                "terminal perform site lacks its frame cleanup plan",
             ));
         }
-        for site in &function.flow.performs {
-            if !site.resumptive
-                && site.frame_cleanup != elaboration.perform_plans.get(&site.block).copied()
+    }
+    for site in &function.flow.resumptions {
+        if site.cancel
+            && site.cancellation_cleanup != elaboration.cancel_plans.get(&site.block).copied()
+        {
+            return Err(error(
+                function,
+                Some(site.block),
+                "cancellation site lacks its cleanup plan",
+            ));
+        }
+    }
+    for plan in &function.flow.cleanup_plans {
+        for action in &plan.actions {
+            let destroyed = match action {
+                CleanupAction::Destroy(local)
+                | CleanupAction::DestroyResidual { local, .. }
+                | CleanupAction::DestroyIf { local, .. } => Some(*local),
+                CleanupAction::EndBorrow(_) => None,
+            };
+            if let Some(local) = destroyed
+                && plan.protected.contains(&local)
             {
                 return Err(error(
                     function,
-                    Some(site.block),
-                    "terminal perform site lacks its frame cleanup plan",
+                    None,
+                    format!("cleanup plan destroys r{local}, which is protected on its edge"),
                 ));
             }
         }
-        for site in &function.flow.resumptions {
-            if site.cancel
-                && site.cancellation_cleanup != elaboration.cancel_plans.get(&site.block).copied()
-            {
-                return Err(error(
-                    function,
-                    Some(site.block),
-                    "cancellation site lacks its cleanup plan",
-                ));
-            }
-        }
-        for plan in &function.flow.cleanup_plans {
-            for action in &plan.actions {
-                let destroyed = match action {
-                    CleanupAction::Destroy(local)
-                    | CleanupAction::DestroyResidual { local, .. }
-                    | CleanupAction::DestroyIf { local, .. } => Some(*local),
-                    CleanupAction::EndBorrow(_) => None,
-                };
-                if let Some(local) = destroyed
-                    && plan.protected.contains(&local)
-                {
-                    return Err(error(
-                        function,
-                        None,
-                        format!("cleanup plan destroys r{local}, which is protected on its edge"),
-                    ));
-                }
-            }
-        }
+    }
     Ok(())
 }
 
@@ -13547,9 +13588,7 @@ fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(),
     let requires_flow_rebuild = program.functions.iter().any(|function| {
         function.invalid_analyses & (analysis::CFG | analysis::USES | analysis::FLOW) != 0
     });
-    let array_calls = requires_flow_rebuild.then(|| {
-        regions::array_call_summaries(program, types)
-    });
+    let array_calls = requires_flow_rebuild.then(|| regions::array_call_summaries(program, types));
     for function in &mut program.functions {
         let invalidated = function.invalid_analyses;
         if invalidated == 0 {
@@ -13567,14 +13606,13 @@ fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(),
         let locals = bridged_locals(function, types);
         function.flow.locals = locals;
         function.flow.move_paths = derive_move_paths(function);
-        let elaboration =
-            derive_cleanup_elaboration_with_array_calls(
-                function,
-                types,
-                array_calls
-                    .as_ref()
-                    .expect("flow rebuild prepared array-call summaries"),
-            )?;
+        let elaboration = derive_cleanup_elaboration_with_array_calls(
+            function,
+            types,
+            array_calls
+                .as_ref()
+                .expect("flow rebuild prepared array-call summaries"),
+        )?;
         apply_cleanup_elaboration(function, elaboration);
         function.invalid_analyses = 0;
     }
@@ -13844,8 +13882,10 @@ pub(crate) fn optimize_program_with_control_tables_and_plan(
 }
 
 /// The incremental entry point may reuse bodies which have already crossed
-/// the raw-MIR ownership/cleanup boundary. All later optimization remains a
-/// fresh whole-program transaction.
+/// the raw-MIR ownership/cleanup boundary, plus exact snapshots at individual
+/// local O3 pass slots. Whole-program specialization and inlining deliberately
+/// remain fresh transactions: they own cross-body decisions and inlining
+/// policy, while every local replay still proves its exact input and budget.
 pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     program: &mut Program,
     types: &[Type],
@@ -13921,7 +13961,9 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             PassId::SparseSimplify,
             types,
             &mut global_remaining,
-            incremental_cleanup.as_deref_mut().map(|cache| cache as &mut dyn TransactionalPassBodyCache),
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         )?;
         if global_remaining != 0 {
             let report = run_transactional_pass_with_body_cache(
@@ -13929,7 +13971,9 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
                 PassId::ScalarizeLocals,
                 types,
                 &mut global_remaining,
-                incremental_cleanup.as_deref_mut().map(|cache| cache as &mut dyn TransactionalPassBodyCache),
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13939,7 +13983,9 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
                 PassId::SimplifyCleanup,
                 types,
                 &mut global_remaining,
-                incremental_cleanup.as_deref_mut().map(|cache| cache as &mut dyn TransactionalPassBodyCache),
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13958,11 +14004,14 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     }
     if level.at_least(OptimizationLevel::O2) {
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::GlobalSimplify,
                 types,
                 &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -13991,11 +14040,14 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             push_checked(&mut passes, report, program, types)?;
         }
         if global_remaining != 0 {
-            let report = run_transactional_pass(
+            let report = run_transactional_pass_with_body_cache(
                 program,
                 PassId::SpecializeCleanup,
                 types,
                 &mut global_remaining,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             );
             push_checked(&mut passes, report, program, types)?;
         }
@@ -14017,18 +14069,23 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             PassId::SparseSimplify,
             types,
             &mut global_remaining,
-            None,
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         )?;
         // O3 repeats the devirtualization/control/inlining family, then gives
         // its newly exposed local facts a distinct bounded fixed point. This
         // must happen before proof erasure and tail formation.
         if level == OptimizationLevel::O3 {
             if global_remaining != 0 {
-                let report = run_transactional_pass(
+                let report = run_transactional_pass_with_body_cache(
                     program,
                     PassId::GlobalSimplify,
                     types,
                     &mut global_remaining,
+                    incremental_cleanup
+                        .as_deref_mut()
+                        .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
                 );
                 push_checked(&mut passes, report, program, types)?;
             }
@@ -14059,7 +14116,9 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
                 PassId::SparseSimplify,
                 types,
                 &mut global_remaining,
-                None,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             )?;
         }
     }
@@ -14074,7 +14133,9 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
             program,
             types,
             &mut global_remaining,
-            None,
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         )?;
         if level.at_least(OptimizationLevel::O2) {
             // The first direct-call pass can turn an ordinary wrapper into a
@@ -14102,7 +14163,9 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
                 program,
                 types,
                 &mut global_remaining,
-                None,
+                incremental_cleanup
+                    .as_deref_mut()
+                    .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
             )?;
         }
     }
@@ -14112,11 +14175,14 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     let erasure = run_mandatory_loan_erasure(program);
     push_checked(&mut passes, erasure, program, types)?;
     if level.at_least(OptimizationLevel::O2) {
-        let report = run_transactional_pass(
+        let report = run_transactional_pass_with_body_cache(
             program,
             PassId::FormTailCallsAndHoist,
             types,
             &mut global_remaining,
+            incremental_cleanup
+                .as_deref_mut()
+                .map(|cache| cache as &mut dyn TransactionalPassBodyCache),
         );
         push_checked(&mut passes, report, program, types)?;
     }
@@ -15639,9 +15705,13 @@ mod tests {
         assert!(report.passes.iter().any(
             |pass| pass.pass == PassId::SparseSimplify && pass.outcome == PassOutcome::Changed
         ));
-        assert!(report.passes.iter().any(
-            |pass| pass.pass == PassId::NormalizeCfg && pass.outcome == PassOutcome::Changed
-        ));
+        assert!(
+            report
+                .passes
+                .iter()
+                .any(|pass| pass.pass == PassId::NormalizeCfg
+                    && pass.outcome == PassOutcome::Changed)
+        );
     }
 
     #[test]
@@ -16746,12 +16816,7 @@ mod tests {
             Some(Constant::U32(1)),
         );
         assert_eq!(
-            fold_primitive(
-                USIZE,
-                BytesLen,
-                &[BYTES],
-                &[Constant::Bytes(vec![0, 1, 2])],
-            ),
+            fold_primitive(USIZE, BytesLen, &[BYTES], &[Constant::Bytes(vec![0, 1, 2])],),
             Some(Constant::Usize(3)),
         );
         assert_eq!(
@@ -18176,15 +18241,7 @@ mod tests {
         ));
         let original = candidate.clone();
         assert_eq!(
-            specialize_static_handlers(
-                &mut candidate,
-                &types,
-                &[],
-                &[],
-                0,
-                true,
-                true,
-            ),
+            specialize_static_handlers(&mut candidate, &types, &[], &[], 0, true, true,),
             (PassOutcome::BudgetExhausted, 0)
         );
         assert_eq!(candidate, original);
@@ -19058,7 +19115,10 @@ mod tests {
         let report = optimize_program(&mut candidate, &types, OptimizationLevel::O1).unwrap();
         let caller = &candidate.functions[0];
         assert!(matches!(
-            caller.blocks[0].statements.last().map(|statement| &statement.kind),
+            caller.blocks[0]
+                .statements
+                .last()
+                .map(|statement| &statement.kind),
             Some(InstructionKind::Const {
                 dst: 6,
                 value: Constant::I64(42),
@@ -19095,7 +19155,10 @@ mod tests {
         );
         let caller = &candidate.functions[0];
         assert!(matches!(
-            caller.blocks[0].statements.last().map(|statement| &statement.kind),
+            caller.blocks[0]
+                .statements
+                .last()
+                .map(|statement| &statement.kind),
             Some(InstructionKind::Const {
                 dst: 6,
                 value: Constant::I64(42),
@@ -19142,7 +19205,10 @@ mod tests {
         );
         let caller = &candidate.functions[0];
         assert!(matches!(
-            caller.blocks[0].statements.last().map(|statement| &statement.kind),
+            caller.blocks[0]
+                .statements
+                .last()
+                .map(|statement| &statement.kind),
             Some(InstructionKind::Const {
                 dst: 6,
                 value: Constant::I64(41),
@@ -20176,10 +20242,15 @@ mod tests {
             PassOutcome::Changed
         );
         let caller = &program.functions[0];
-        assert!(caller.blocks[0].statements.iter().all(|statement| !matches!(
-            statement.kind,
-            InstructionKind::MakeCallable { .. } | InstructionKind::Move { dst: 4, .. }
-        )));
+        assert!(
+            caller.blocks[0]
+                .statements
+                .iter()
+                .all(|statement| !matches!(
+                    statement.kind,
+                    InstructionKind::MakeCallable { .. } | InstructionKind::Move { dst: 4, .. }
+                ))
+        );
         assert!(matches!(
             caller.blocks[0].terminator,
             Terminator::TailCall {

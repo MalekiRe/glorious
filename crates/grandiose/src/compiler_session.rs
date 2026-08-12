@@ -16,11 +16,11 @@ use crate::compiler_traits::{TraitDb, TrustedTraitManifest};
 use crate::compiler_typeck::{DeclarationKey, IncrementalTypeCache};
 use crate::diagnostic::Diagnostic;
 use crate::source_bundle::SourceBundle;
-use crate::{compiler_core as core, compiler_mir as mir};
 use crate::{
-    llvm_backend::{LlvmFragmentCache, LlvmModule, LlvmOptions},
     CompileOptions, CompiledPhases,
+    llvm_backend::{LlvmFragmentCache, LlvmModule, LlvmOptions},
 };
+use crate::{compiler_core as core, compiler_mir as mir};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IncrementalCompilationStats {
@@ -128,7 +128,10 @@ impl IncrementalTraitDbCache {
             .iter()
             .position(|cached| cached.context == context && cached.manifest == *manifest)
         {
-            let cached = self.entries.remove(index).expect("trait-db index was found");
+            let cached = self
+                .entries
+                .remove(index)
+                .expect("trait-db index was found");
             self.reused_databases = self.reused_databases.saturating_add(1);
             let database = cached
                 .database
@@ -138,16 +141,14 @@ impl IncrementalTraitDbCache {
             return Ok(database);
         }
         let database = TraitDb::build_with_manifest(program, manifest)?;
-        self.entries.retain(|cached| {
-            cached.context != context || cached.manifest != *manifest
-        });
+        self.entries
+            .retain(|cached| cached.context != context || cached.manifest != *manifest);
         self.entries.push_front(CachedTraitDb {
             context: context.to_vec(),
             manifest: manifest.clone(),
             database: database.clone(),
         });
-        self.entries
-            .truncate(INCREMENTAL_TRAIT_DB_CONTEXT_CAPACITY);
+        self.entries.truncate(INCREMENTAL_TRAIT_DB_CONTEXT_CAPACITY);
         Ok(database)
     }
 }
@@ -800,7 +801,10 @@ impl IncrementalMirCache {
         if let Some(position) = self.schemas.iter().position(|schema| {
             schema.types == types && schema.custom_drop_types.as_slice() == custom_drop_types
         }) {
-            let schema = self.schemas.remove(position).expect("schema index was found");
+            let schema = self
+                .schemas
+                .remove(position)
+                .expect("schema index was found");
             self.active_schema = Some(schema.id);
             self.schemas.push_front(schema);
             return;
@@ -815,8 +819,7 @@ impl IncrementalMirCache {
         self.schemas.push_front(schema);
         while self.schemas.len() > INCREMENTAL_MIR_SCHEMA_CAPACITY {
             let evicted = self.schemas.pop_back().expect("length was checked");
-            self.entries
-                .retain(|(schema, _), _| *schema != evicted.id);
+            self.entries.retain(|(schema, _), _| *schema != evicted.id);
             self.local_pass_snapshots
                 .retain(|(schema, _, _), _| *schema != evicted.id);
         }
@@ -828,10 +831,7 @@ impl IncrementalMirCache {
 
     pub(crate) fn reuse(&mut self, function: &core::Function) -> Option<mir::Function> {
         let cached = self.entries.get(&self.active_key(function.declaration)?)?;
-        let matches = cached
-            .core
-            .as_ref()
-            .is_some_and(|core| *core == *function)
+        let matches = cached.core.as_ref().is_some_and(|core| *core == *function)
             || cached.core_debug == format!("{function:?}");
         if !matches {
             return None;
@@ -880,16 +880,15 @@ impl IncrementalMirCache {
         let Some(key) = self.active_key(function.declaration) else {
             return;
         };
-        self.entries
-            .insert(
-                key,
-                CachedMirBody {
-                    core_debug: format!("{function:?}"),
-                    core: Some(function),
-                    lowered,
-                    cleanup: None,
-                },
-            );
+        self.entries.insert(
+            key,
+            CachedMirBody {
+                core_debug: format!("{function:?}"),
+                core: Some(function),
+                lowered,
+                cleanup: None,
+            },
+        );
     }
 
     /// Persist exact per-function raw/cleanup MIR plus transactional local
@@ -988,10 +987,11 @@ impl crate::compiler_mir::optimizer::TransactionalPassBodyCache for IncrementalM
         let position = snapshots.iter().position(|snapshot| {
             snapshot.input == *input
                 && snapshot.work_units <= work_limit
-                && snapshot.outcome
-                    != crate::compiler_mir::optimizer::PassOutcome::BudgetExhausted
+                && snapshot.outcome != crate::compiler_mir::optimizer::PassOutcome::BudgetExhausted
         })?;
-        let snapshot = snapshots.remove(position).expect("snapshot index was found");
+        let snapshot = snapshots
+            .remove(position)
+            .expect("snapshot index was found");
         snapshots.push_front(snapshot.clone());
         self.reused_optimizer_body_snapshots += 1;
         Some(snapshot)
@@ -1009,7 +1009,10 @@ impl crate::compiler_mir::optimizer::TransactionalPassBodyCache for IncrementalM
             .local_pass_snapshots
             .entry((schema, declaration, pass))
             .or_default();
-        if let Some(position) = snapshots.iter().position(|cached| cached.input == snapshot.input) {
+        if let Some(position) = snapshots
+            .iter()
+            .position(|cached| cached.input == snapshot.input)
+        {
             snapshots.remove(position);
         }
         snapshots.push_front(snapshot);
@@ -1291,6 +1294,60 @@ mod tests {
     }
 
     #[test]
+    fn llvm_fragments_retain_unrelated_bodies_after_a_literal_edit() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let target = LlvmOptions::default();
+        // Keep the changed literal's source width fixed so this test isolates
+        // the old global-literal-table dependency rather than source spans.
+        let before = invalid_bundle(
+            "stable() -> Text { \"steady\" } changed() -> Text { \"before\" } main() -> () { stable(); changed(); () }",
+        );
+        let after = invalid_bundle(
+            "stable() -> Text { \"steady\" } changed() -> Text { \"alter!\" } main() -> () { stable(); changed(); () }",
+        );
+        let before_phases = crate::compile_bundle_to_phases_with_options(&before, options).unwrap();
+        let before_manifest =
+            crate::llvm_backend::llvm_incremental_manifest(&before_phases, &target);
+        let before_ir = crate::emit_llvm_ir(&before_phases, &target).unwrap();
+        let after_phases = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
+        let after_manifest = crate::llvm_backend::llvm_incremental_manifest(&after_phases, &target);
+        let after_ir = crate::emit_llvm_ir(&after_phases, &target).unwrap();
+        assert_eq!(
+            before_manifest.runtime_abi_fingerprint, after_manifest.runtime_abi_fingerprint,
+            "content-addressed literal globals must not be a module ABI change"
+        );
+        let invalidated = after_manifest.invalidated_functions(&before_manifest);
+        // O3 has inlined `changed` into `main`, so its real dependent caller
+        // also changes. `stable` remains independently reusable; the old
+        // ordinal global table incorrectly invalidated all three bodies.
+        assert_eq!(
+            invalidated.len(),
+            2,
+            "only the edit and its inlined caller may miss"
+        );
+        let stable_symbol = format!("@g1.bytes.{}", blake3::hash(b"steady").to_hex());
+        assert!(before_ir.ir.contains(&stable_symbol));
+        assert!(after_ir.ir.contains(&stable_symbol));
+        let partitions =
+            crate::llvm_backend::emit_llvm_native_object_units(&before_phases, &target).unwrap();
+        assert!(
+            !partitions.shared.ir.contains(&stable_symbol),
+            "the shared partition must not inherit source-literal cache dependencies"
+        );
+        assert_eq!(
+            partitions
+                .functions
+                .iter()
+                .filter(|function| function.module.ir.contains(&stable_symbol))
+                .count(),
+            1,
+            "only the source fragment that references a literal receives its definition"
+        );
+    }
+
+    #[test]
     fn persistent_type_cache_reuses_unchanged_bodies_after_driver_restart() {
         let options = CompileOptions {
             optimization_level: OptimizationLevel::O2,
@@ -1315,7 +1372,10 @@ mod tests {
         assert_eq!(restarted_driver.stats().reused_bodies, 2);
 
         let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
-        assert_eq!(warm.provisional_fingerprint(), cold.provisional_fingerprint());
+        assert_eq!(
+            warm.provisional_fingerprint(),
+            cold.provisional_fingerprint()
+        );
         assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
         assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
     }
@@ -1374,6 +1434,10 @@ mod tests {
         assert!(restarted_driver.restore_persistent_mir_cache(&persisted));
         let warm = restarted_driver.compile_bundle(&after, options).unwrap();
         assert_eq!(restarted_driver.stats().reused_mir_bodies, 2);
+        assert!(
+            restarted_driver.stats().reused_optimizer_body_snapshots > 0,
+            "unchanged O3 local-pass slots should replay their exact snapshots"
+        );
 
         let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
         assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
