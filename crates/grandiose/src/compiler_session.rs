@@ -1271,13 +1271,25 @@ impl IncrementalMirCache {
         let Some(key) = self.active_key(function.declaration) else {
             return;
         };
+        // A restored cache may not retain the in-memory Core AST, and its
+        // debug identity can legitimately differ across a fresh frontend
+        // process (for example after source-position remapping). Re-lowering
+        // such a body is cheap. If that fresh raw MIR is byte-for-byte equal
+        // to the retained raw MIR, however, its cleanup proof remains exact
+        // and must survive this replacement; otherwise this insert erases the
+        // very snapshot needed to skip the ownership fixed point below.
+        let cleanup = self
+            .entries
+            .get(&key)
+            .filter(|cached| cached.lowered == lowered)
+            .and_then(|cached| cached.cleanup.clone());
         self.entries.insert(
             key,
             CachedMirBody {
                 core_debug: format!("{function:?}"),
                 core: Some(function),
                 lowered,
-                cleanup: None,
+                cleanup,
             },
         );
     }
@@ -1844,6 +1856,35 @@ mod tests {
         let cold = crate::compile_bundle_to_phases_with_options(&after, options).unwrap();
         assert_eq!(warm.core_fingerprint(), cold.core_fingerprint());
         assert_eq!(warm.mir_fingerprint(), cold.mir_fingerprint());
+    }
+
+    #[test]
+    fn relowering_an_identical_raw_body_keeps_its_cleanup_snapshot() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle(
+            "leaf() -> i64 { 1 } caller() -> i64 { leaf() } main() -> () { caller(); () }",
+        );
+        let mut first_driver = CompilationDriver::new();
+        assert!(first_driver.compile_bundle(&bundle, options).is_ok());
+        let persisted = first_driver.persistent_mir_cache().unwrap();
+
+        let mut restarted_driver = CompilationDriver::new();
+        assert!(restarted_driver.restore_persistent_mir_cache(&persisted));
+        // Model a cross-process Core identity miss while leaving its raw MIR
+        // unchanged. The lowerer must replace only the Core identity, not
+        // discard the matching ownership/cleanup proof.
+        for cached in restarted_driver.mir_cache.entries.values_mut() {
+            cached.core_debug.push('!');
+        }
+        assert!(restarted_driver.compile_bundle(&bundle, options).is_ok());
+        assert_eq!(restarted_driver.stats().reused_mir_bodies, 0);
+        assert!(
+            restarted_driver.stats().reused_cleanup_mir_bodies > 0,
+            "an identical fresh raw body must retain its persisted cleanup snapshot: {:?}",
+            restarted_driver.stats()
+        );
     }
 
     #[test]
