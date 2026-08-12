@@ -14084,13 +14084,46 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     // prior specialization/inlining, so running the schedule over them again
     // merely repeats ownership fixed-point work. Functions outside this set
     // remain ordinary cleanup MIR and are optimized normally.
-    let optimized_namespace =
-        optimized_mir_namespace_fingerprint(program, protocols, handler_defs);
-    let optimized_dependencies = optimized_mir_dependency_fingerprints(program);
+    let optimized_namespace = optimized_mir_namespace_fingerprint(program, protocols, handler_defs);
+    let optimized_cache_plan = optimized_mir_cache_plan(program);
     if level == OptimizationLevel::O3 {
         if let Some(cache) = incremental_cleanup.as_mut() {
+            for group in &optimized_cache_plan.recursive_groups {
+                let inputs = group
+                    .declarations
+                    .iter()
+                    .filter_map(|declaration| {
+                        program
+                            .functions
+                            .iter()
+                            .find(|function| function.declaration == *declaration)
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>();
+                if inputs.len() != group.declarations.len() {
+                    continue;
+                }
+                if let Some(outputs) = cache.reuse_recursive_optimized(
+                    &inputs,
+                    group.dependency_fingerprint,
+                    optimized_namespace,
+                ) {
+                    let outputs = outputs
+                        .into_iter()
+                        .map(|function| (function.declaration, function))
+                        .collect::<BTreeMap<_, _>>();
+                    for function in &mut program.functions {
+                        if let Some(output) = outputs.get(&function.declaration) {
+                            *function = output.clone();
+                        }
+                    }
+                }
+            }
             for function in &mut program.functions {
-                let Some(dependency) = optimized_dependencies.get(&function.declaration) else {
+                let Some(dependency) = optimized_cache_plan
+                    .individual_dependencies
+                    .get(&function.declaration)
+                else {
                     continue;
                 };
                 if let Some(output) =
@@ -14360,16 +14393,50 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     )?);
     if level == OptimizationLevel::O3 {
         if let Some(cache) = incremental_cleanup.as_mut() {
-            let base_declarations = optimized_dependencies
+            let base_declarations = optimized_cache_plan
+                .individual_dependencies
                 .keys()
                 .copied()
+                .chain(
+                    optimized_cache_plan
+                        .recursive_groups
+                        .iter()
+                        .flat_map(|group| group.declarations.iter().copied()),
+                )
                 .collect::<BTreeSet<_>>();
             for function in &program.functions {
-                let Some(dependency) = optimized_dependencies.get(&function.declaration) else {
+                let Some(dependency) = optimized_cache_plan
+                    .individual_dependencies
+                    .get(&function.declaration)
+                else {
                     continue;
                 };
                 if optimized_mir_output_is_stable(function, &base_declarations) {
                     cache.cache_optimized(function, *dependency, optimized_namespace);
+                }
+            }
+            for group in &optimized_cache_plan.recursive_groups {
+                let outputs = group
+                    .declarations
+                    .iter()
+                    .filter_map(|declaration| {
+                        program
+                            .functions
+                            .iter()
+                            .find(|function| function.declaration == *declaration)
+                            .cloned()
+                    })
+                    .collect::<Vec<_>>();
+                if outputs.len() == group.declarations.len()
+                    && outputs.iter().all(|function| {
+                        optimized_mir_output_is_stable(function, &base_declarations)
+                    })
+                {
+                    cache.cache_recursive_optimized(
+                        &outputs,
+                        group.dependency_fingerprint,
+                        optimized_namespace,
+                    );
                 }
             }
         }
@@ -14547,6 +14614,238 @@ fn optimized_mir_dependency_fingerprints(program: &Program) -> BTreeMap<u32, u64
         .collect()
 }
 
+#[derive(Clone, Debug)]
+struct RecursiveOptimizedMirGroup {
+    declarations: Vec<u32>,
+    dependency_fingerprint: u64,
+}
+
+#[derive(Default)]
+struct OptimizedMirCachePlan {
+    /// Preserves the existing v1 individual-body keys whenever possible, so
+    /// adding SCC support never discards the durable per-function cache.
+    individual_dependencies: BTreeMap<u32, u64>,
+    recursive_groups: Vec<RecursiveOptimizedMirGroup>,
+}
+
+/// Compute a cache plan over the SCC-condensed direct-call graph. A cyclic
+/// component is reusable only as one atomic O3 fixed point; acyclic callers
+/// of that component become independently cacheable again through the
+/// component's recursive closure fingerprint.
+fn optimized_mir_cache_plan(program: &Program) -> OptimizedMirCachePlan {
+    let functions = program
+        .functions
+        .iter()
+        .map(|function| (function.declaration, function))
+        .collect::<BTreeMap<_, _>>();
+    let dependencies = functions
+        .iter()
+        .map(|(declaration, function)| {
+            (
+                *declaration,
+                optimized_mir_direct_dependencies(function).and_then(|dependencies| {
+                    dependencies
+                        .iter()
+                        .all(|dependency| functions.contains_key(dependency))
+                        .then_some(dependencies)
+                }),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    fn visit_scc(
+        declaration: u32,
+        dependencies: &BTreeMap<u32, Option<BTreeSet<u32>>>,
+        index: &mut usize,
+        indices: &mut BTreeMap<u32, usize>,
+        lowlinks: &mut BTreeMap<u32, usize>,
+        stack: &mut Vec<u32>,
+        on_stack: &mut BTreeSet<u32>,
+        components: &mut Vec<Vec<u32>>,
+    ) {
+        indices.insert(declaration, *index);
+        lowlinks.insert(declaration, *index);
+        *index += 1;
+        stack.push(declaration);
+        on_stack.insert(declaration);
+        if let Some(Some(edges)) = dependencies.get(&declaration) {
+            for dependency in edges {
+                if !indices.contains_key(dependency) {
+                    visit_scc(
+                        *dependency,
+                        dependencies,
+                        index,
+                        indices,
+                        lowlinks,
+                        stack,
+                        on_stack,
+                        components,
+                    );
+                    let dependency_lowlink = lowlinks[dependency];
+                    let lowlink = lowlinks
+                        .get_mut(&declaration)
+                        .expect("current Tarjan node has a lowlink");
+                    *lowlink = (*lowlink).min(dependency_lowlink);
+                } else if on_stack.contains(dependency) {
+                    let dependency_index = indices[dependency];
+                    let lowlink = lowlinks
+                        .get_mut(&declaration)
+                        .expect("current Tarjan node has a lowlink");
+                    *lowlink = (*lowlink).min(dependency_index);
+                }
+            }
+        }
+        if lowlinks[&declaration] == indices[&declaration] {
+            let mut component = Vec::new();
+            loop {
+                let member = stack.pop().expect("Tarjan root has a stack entry");
+                on_stack.remove(&member);
+                component.push(member);
+                if member == declaration {
+                    break;
+                }
+            }
+            component.sort_unstable();
+            components.push(component);
+        }
+    }
+
+    let mut components = Vec::new();
+    let mut index = 0;
+    let mut indices = BTreeMap::new();
+    let mut lowlinks = BTreeMap::new();
+    let mut stack = Vec::new();
+    let mut on_stack = BTreeSet::new();
+    for declaration in dependencies.keys().copied() {
+        if !indices.contains_key(&declaration) {
+            visit_scc(
+                declaration,
+                &dependencies,
+                &mut index,
+                &mut indices,
+                &mut lowlinks,
+                &mut stack,
+                &mut on_stack,
+                &mut components,
+            );
+        }
+    }
+    components.sort_by_key(|component| component.first().copied().unwrap_or_default());
+    let component_for_declaration = components
+        .iter()
+        .enumerate()
+        .flat_map(|(component, declarations)| {
+            declarations
+                .iter()
+                .copied()
+                .map(move |declaration| (declaration, component))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let component_dependencies = components
+        .iter()
+        .enumerate()
+        .map(|(component, declarations)| {
+            let mut valid = true;
+            let mut external = BTreeSet::new();
+            for declaration in declarations {
+                let Some(Some(direct)) = dependencies.get(declaration) else {
+                    valid = false;
+                    continue;
+                };
+                for dependency in direct {
+                    let Some(dependency_component) = component_for_declaration.get(dependency)
+                    else {
+                        valid = false;
+                        continue;
+                    };
+                    if *dependency_component != component {
+                        external.insert(*dependency_component);
+                    }
+                }
+            }
+            (valid, external)
+        })
+        .collect::<Vec<_>>();
+    fn component_fingerprint(
+        component: usize,
+        components: &[Vec<u32>],
+        component_dependencies: &[(bool, BTreeSet<usize>)],
+        functions: &BTreeMap<u32, &Function>,
+        memo: &mut BTreeMap<usize, Option<u64>>,
+        visiting: &mut BTreeSet<usize>,
+    ) -> Option<u64> {
+        if let Some(fingerprint) = memo.get(&component) {
+            return *fingerprint;
+        }
+        if !component_dependencies[component].0 || !visiting.insert(component) {
+            memo.insert(component, None);
+            return None;
+        }
+        let fingerprint = (|| {
+            let mut state =
+                optimized_mir_hash(0xcbf2_9ce4_8422_2325, b"grandiose:o3-scc-closure-v1\0");
+            for declaration in &components[component] {
+                let function = functions.get(declaration)?;
+                state = optimized_mir_hash(state, &declaration.to_le_bytes());
+                state = optimized_mir_hash(state, format!("{function:?}").as_bytes());
+            }
+            for dependency in &component_dependencies[component].1 {
+                let dependency_fingerprint = component_fingerprint(
+                    *dependency,
+                    components,
+                    component_dependencies,
+                    functions,
+                    memo,
+                    visiting,
+                )?;
+                for declaration in &components[*dependency] {
+                    state = optimized_mir_hash(state, &declaration.to_le_bytes());
+                }
+                state = optimized_mir_hash(state, &dependency_fingerprint.to_le_bytes());
+            }
+            Some(state)
+        })();
+        visiting.remove(&component);
+        memo.insert(component, fingerprint);
+        fingerprint
+    }
+
+    let legacy_individual = optimized_mir_dependency_fingerprints(program);
+    let mut plan = OptimizedMirCachePlan {
+        individual_dependencies: legacy_individual.clone(),
+        recursive_groups: Vec::new(),
+    };
+    let mut memo = BTreeMap::new();
+    for component in 0..components.len() {
+        let Some(fingerprint) = component_fingerprint(
+            component,
+            &components,
+            &component_dependencies,
+            &functions,
+            &mut memo,
+            &mut BTreeSet::new(),
+        ) else {
+            continue;
+        };
+        let declarations = &components[component];
+        let self_recursive = declarations.len() == 1
+            && dependencies
+                .get(&declarations[0])
+                .and_then(Option::as_ref)
+                .is_some_and(|dependencies| dependencies.contains(&declarations[0]));
+        if declarations.len() > 1 || self_recursive {
+            plan.recursive_groups.push(RecursiveOptimizedMirGroup {
+                declarations: declarations.clone(),
+                dependency_fingerprint: fingerprint,
+            });
+        } else if !legacy_individual.contains_key(&declarations[0]) {
+            plan.individual_dependencies
+                .insert(declarations[0], fingerprint);
+        }
+    }
+    plan
+}
+
 /// Never recover an output that mentions a scalarized clone or fresh control
 /// declaration. Such IDs are assigned from whole-program candidate order;
 /// keeping only original declarations makes independent body reuse exact.
@@ -14557,29 +14856,35 @@ fn optimized_mir_output_is_stable(function: &Function, base_declarations: &BTree
         return false;
     }
     function.blocks.iter().all(|block| {
-        block.statements.iter().all(|statement| match &statement.kind {
-            InstructionKind::MakeCallable { function, .. } => base_declarations.contains(function),
-            InstructionKind::MakeHandlerShared { functions, .. } => {
-                functions.iter().all(|function| base_declarations.contains(function))
+        block
+            .statements
+            .iter()
+            .all(|statement| match &statement.kind {
+                InstructionKind::MakeCallable { function, .. } => {
+                    base_declarations.contains(function)
+                }
+                InstructionKind::MakeHandlerShared { functions, .. } => functions
+                    .iter()
+                    .all(|function| base_declarations.contains(function)),
+                _ => true,
+            })
+            && match block.terminator {
+                Terminator::Call { function, .. }
+                | Terminator::TailCall { function, .. }
+                | Terminator::CallKnownReceiver { function, .. }
+                | Terminator::TailCallKnownReceiver { function, .. } => {
+                    base_declarations.contains(&function)
+                }
+                Terminator::CallIndirect {
+                    known_function: Some(function),
+                    ..
+                }
+                | Terminator::TailCallIndirect {
+                    known_function: Some(function),
+                    ..
+                } => base_declarations.contains(&function),
+                _ => true,
             }
-            _ => true,
-        }) && match block.terminator {
-            Terminator::Call { function, .. }
-            | Terminator::TailCall { function, .. }
-            | Terminator::CallKnownReceiver { function, .. }
-            | Terminator::TailCallKnownReceiver { function, .. } => {
-                base_declarations.contains(&function)
-            }
-            Terminator::CallIndirect {
-                known_function: Some(function),
-                ..
-            }
-            | Terminator::TailCallIndirect {
-                known_function: Some(function),
-                ..
-            } => base_declarations.contains(&function),
-            _ => true,
-        }
     })
 }
 
@@ -14763,6 +15068,36 @@ mod tests {
         Program {
             functions: vec![function],
         }
+    }
+
+    #[test]
+    fn o3_cache_plan_reuses_recursive_components_and_their_acyclic_callers() {
+        let direct = |declaration, callee| {
+            let mut function = function(
+                vec![block(
+                    0,
+                    Terminator::TailCall {
+                        function: callee,
+                        args: vec![],
+                    },
+                )],
+                vec![],
+            );
+            function.declaration = declaration;
+            function
+        };
+        let program = Program {
+            functions: vec![direct(0, 1), direct(1, 0), direct(2, 0)],
+        };
+
+        let plan = optimized_mir_cache_plan(&program);
+
+        assert_eq!(plan.recursive_groups.len(), 1);
+        assert_eq!(plan.recursive_groups[0].declarations, vec![0, 1]);
+        assert!(
+            plan.individual_dependencies.contains_key(&2),
+            "an acyclic caller should depend on the recursive component rather than be excluded"
+        );
     }
 
     #[test]

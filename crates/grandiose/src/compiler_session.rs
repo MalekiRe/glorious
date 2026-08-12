@@ -784,6 +784,8 @@ pub(crate) struct IncrementalMirCache {
     >,
     optimized: BTreeMap<OptimizedMirKey, OptimizedMirEntry>,
     optimized_disk_directory: Option<PathBuf>,
+    recursive_optimized: BTreeMap<RecursiveOptimizedMirKey, RecursiveOptimizedMirEntry>,
+    recursive_optimized_disk_directory: Option<PathBuf>,
     final_validation: BTreeMap<FinalValidationKey, FinalValidationEntry>,
     final_validation_disk_directory: Option<PathBuf>,
     active_schema: Option<u64>,
@@ -862,6 +864,33 @@ struct PersistentOptimizedMirEntry {
 
 const PERSISTENT_OPTIMIZED_MIR_ENTRY_SCHEMA: u32 = 1;
 
+/// One cyclic call component is optimized as a unit. Reusing its members
+/// together preserves the O3 fixed point while still allowing unrelated SCCs
+/// and their acyclic callers to remain independently incremental.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
+struct RecursiveOptimizedMirKey {
+    schema: u64,
+    declarations: Vec<u32>,
+    dependency_fingerprint: u64,
+    namespace_fingerprint: u64,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct RecursiveOptimizedMirEntry {
+    input: Vec<mir::Function>,
+    output: Vec<mir::Function>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentRecursiveOptimizedMirEntry {
+    schema: u32,
+    key: RecursiveOptimizedMirKey,
+    input: Vec<mir::Function>,
+    output: Vec<mir::Function>,
+}
+
+const PERSISTENT_RECURSIVE_OPTIMIZED_MIR_ENTRY_SCHEMA: u32 = 1;
+
 /// A completed final ownership/cleanup proof is reusable independently of O3
 /// output reuse. This intentionally accepts generated and handler bodies: the
 /// exact post-O3 MIR input, its active type schema, and the summaries it can
@@ -892,6 +921,26 @@ fn optimized_mir_entry_path(directory: &Path, key: &OptimizedMirKey) -> Result<P
     let bytes = bincode::serialize(key)
         .map_err(|error| format!("could not encode optimized MIR cache key: {error}"))?;
     Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn recursive_optimized_mir_entry_path(
+    directory: &Path,
+    key: &RecursiveOptimizedMirKey,
+) -> Result<PathBuf, String> {
+    let bytes = bincode::serialize(key)
+        .map_err(|error| format!("could not encode recursive optimized MIR cache key: {error}"))?;
+    Ok(directory.join(format!("{}.bin", blake3::hash(&bytes).to_hex())))
+}
+
+fn recursive_optimized_outputs_match(output: &[mir::Function], declarations: &[u32]) -> bool {
+    output.len() == declarations.len()
+        && output
+            .iter()
+            .map(|function| function.declaration)
+            .eq(declarations.iter().copied())
+        && output
+            .iter()
+            .all(|function| function.phase == mir::MirPhase::Optimized)
 }
 
 fn final_validation_key(
@@ -953,7 +1002,10 @@ impl IncrementalMirCache {
             self.local_pass_snapshots
                 .retain(|(schema, _, _), _| *schema != evicted.id);
             self.optimized.retain(|key, _| key.schema != evicted.id);
-            self.final_validation.retain(|key, _| key.schema != evicted.id);
+            self.recursive_optimized
+                .retain(|key, _| key.schema != evicted.id);
+            self.final_validation
+                .retain(|key, _| key.schema != evicted.id);
         }
     }
 
@@ -986,9 +1038,11 @@ impl IncrementalMirCache {
         // summaries, but it is not a body identity. A body-only source edit
         // must never recover the previous function's cleanup facts merely
         // because its direct callees happened not to change.
-        if cached.lowered != *function
-            || (dependency_fingerprint != Some(*cached_fingerprint)
-                && !legacy_fingerprint_matches(*cached_fingerprint))
+        if cached.lowered != *function {
+            return None;
+        }
+        if dependency_fingerprint != Some(*cached_fingerprint)
+            && !legacy_fingerprint_matches(*cached_fingerprint)
         {
             return None;
         }
@@ -1019,6 +1073,7 @@ impl IncrementalMirCache {
     /// directory does not read or deserialize any body.
     pub(crate) fn configure_persistent_optimized_directory(&mut self, directory: PathBuf) {
         self.final_validation_disk_directory = Some(directory.join("final-validation-v1"));
+        self.recursive_optimized_disk_directory = Some(directory.join("recursive-scc-v1"));
         self.optimized_disk_directory = Some(directory);
     }
 
@@ -1031,6 +1086,26 @@ impl IncrementalMirCache {
         Some(OptimizedMirKey {
             schema: self.active_schema?,
             declaration,
+            dependency_fingerprint,
+            namespace_fingerprint,
+        })
+    }
+
+    fn recursive_optimized_key(
+        &self,
+        inputs: &[mir::Function],
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<RecursiveOptimizedMirKey> {
+        let mut declarations = inputs
+            .iter()
+            .map(|function| function.declaration)
+            .collect::<Vec<_>>();
+        declarations.sort_unstable();
+        declarations.dedup();
+        (declarations.len() == inputs.len()).then_some(RecursiveOptimizedMirKey {
+            schema: self.active_schema?,
+            declarations,
             dependency_fingerprint,
             namespace_fingerprint,
         })
@@ -1081,6 +1156,53 @@ impl IncrementalMirCache {
         Some(output)
     }
 
+    /// Recover a complete cyclic O3 component atomically. Every cleanup input
+    /// and every optimized output must agree with the requested declaration
+    /// set, so a changed member or external dependency invalidates precisely
+    /// this component and its callers rather than the whole cache.
+    pub(crate) fn reuse_recursive_optimized(
+        &mut self,
+        inputs: &[mir::Function],
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) -> Option<Vec<mir::Function>> {
+        let key =
+            self.recursive_optimized_key(inputs, dependency_fingerprint, namespace_fingerprint)?;
+        let mut expected_input = inputs.to_vec();
+        expected_input.sort_by_key(|function| function.declaration);
+        if let Some(entry) = self.recursive_optimized.get(&key) {
+            if entry.input == expected_input
+                && recursive_optimized_outputs_match(&entry.output, &key.declarations)
+            {
+                self.reused_optimized_bodies = self
+                    .reused_optimized_bodies
+                    .saturating_add(entry.output.len());
+                return Some(entry.output.clone());
+            }
+        }
+        let directory = self.recursive_optimized_disk_directory.as_ref()?;
+        let path = recursive_optimized_mir_entry_path(directory, &key).ok()?;
+        let bytes = std::fs::read(path).ok()?;
+        let entry = bincode::deserialize::<PersistentRecursiveOptimizedMirEntry>(&bytes).ok()?;
+        if entry.schema != PERSISTENT_RECURSIVE_OPTIMIZED_MIR_ENTRY_SCHEMA
+            || entry.key != key
+            || entry.input != expected_input
+            || !recursive_optimized_outputs_match(&entry.output, &key.declarations)
+        {
+            return None;
+        }
+        let output = entry.output.clone();
+        self.recursive_optimized.insert(
+            key,
+            RecursiveOptimizedMirEntry {
+                input: entry.input,
+                output: entry.output,
+            },
+        );
+        self.reused_optimized_bodies = self.reused_optimized_bodies.saturating_add(output.len());
+        Some(output)
+    }
+
     /// Retain an output only when its source function has a current exact
     /// cleanup cache entry. Pattern-generated bodies intentionally have no
     /// durable Core identity and are left on the ordinary optimizer path.
@@ -1113,6 +1235,43 @@ impl IncrementalMirCache {
                 output: output.clone(),
             },
         );
+    }
+
+    /// Record a stable optimized recursive component. The raw cleanup inputs
+    /// are recovered from the per-body cache so output publication remains
+    /// bound to the exact pre-O3 fixed-point inputs.
+    pub(crate) fn cache_recursive_optimized(
+        &mut self,
+        outputs: &[mir::Function],
+        dependency_fingerprint: u64,
+        namespace_fingerprint: u64,
+    ) {
+        let mut output = outputs.to_vec();
+        output.sort_by_key(|function| function.declaration);
+        let mut input = Vec::with_capacity(output.len());
+        for function in &output {
+            let Some(active_key) = self.active_key(function.declaration) else {
+                return;
+            };
+            let Some(cached) = self.entries.get(&active_key) else {
+                return;
+            };
+            let Some((_, cleanup)) = &cached.cleanup else {
+                return;
+            };
+            input.push(cleanup.clone());
+        }
+        input.sort_by_key(|function| function.declaration);
+        let Some(key) =
+            self.recursive_optimized_key(&input, dependency_fingerprint, namespace_fingerprint)
+        else {
+            return;
+        };
+        if !recursive_optimized_outputs_match(&output, &key.declarations) {
+            return;
+        }
+        self.recursive_optimized
+            .insert(key, RecursiveOptimizedMirEntry { input, output });
     }
 
     /// Reuse a completed final optimized-MIR ownership/cleanup proof. The
@@ -1157,8 +1316,7 @@ impl IncrementalMirCache {
         }
         self.final_validation
             .insert(key, FinalValidationEntry { input: entry.input });
-        self.reused_final_validation_bodies =
-            self.reused_final_validation_bodies.saturating_add(1);
+        self.reused_final_validation_bodies = self.reused_final_validation_bodies.saturating_add(1);
         true
     }
 
@@ -1223,6 +1381,45 @@ impl IncrementalMirCache {
                         "could not publish optimized MIR body {}: {error}",
                         path.display()
                     ));
+                }
+            }
+        }
+        if let Some(directory) = &self.recursive_optimized_disk_directory {
+            std::fs::create_dir_all(directory).map_err(|error| {
+                format!(
+                    "could not create recursive optimized MIR directory {}: {error}",
+                    directory.display()
+                )
+            })?;
+            for (key, entry) in &self.recursive_optimized {
+                let path = recursive_optimized_mir_entry_path(directory, key)?;
+                if path.exists() {
+                    continue;
+                }
+                let bytes = bincode::serialize(&PersistentRecursiveOptimizedMirEntry {
+                    schema: PERSISTENT_RECURSIVE_OPTIMIZED_MIR_ENTRY_SCHEMA,
+                    key: key.clone(),
+                    input: entry.input.clone(),
+                    output: entry.output.clone(),
+                })
+                .map_err(|error| {
+                    format!("could not encode recursive optimized MIR component: {error}")
+                })?;
+                let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+                std::fs::write(&temporary, bytes).map_err(|error| {
+                    format!(
+                        "could not write recursive optimized MIR component {}: {error}",
+                        temporary.display()
+                    )
+                })?;
+                if let Err(error) = std::fs::rename(&temporary, &path) {
+                    let _ = std::fs::remove_file(&temporary);
+                    if !path.exists() {
+                        return Err(format!(
+                            "could not publish recursive optimized MIR component {}: {error}",
+                            path.display()
+                        ));
+                    }
                 }
             }
         }
@@ -1369,6 +1566,8 @@ impl IncrementalMirCache {
             local_pass_snapshots: persisted.local_pass_snapshots,
             optimized: BTreeMap::new(),
             optimized_disk_directory: None,
+            recursive_optimized: BTreeMap::new(),
+            recursive_optimized_disk_directory: None,
             final_validation: BTreeMap::new(),
             final_validation_disk_directory: None,
             active_schema: None,
@@ -1884,6 +2083,52 @@ mod tests {
             restarted_driver.stats().reused_cleanup_mir_bodies > 0,
             "an identical fresh raw body must retain its persisted cleanup snapshot: {:?}",
             restarted_driver.stats()
+        );
+    }
+
+    #[test]
+    fn recursive_optimized_mir_groups_persist_and_restore_atomically() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        };
+        let bundle = invalid_bundle(
+            "left() -> i64 { 1 } right() -> i64 { 2 } main() -> () { left(); right(); () }",
+        );
+        let cache_dir = tempfile::tempdir().unwrap();
+        let mut writer = CompilationDriver::new();
+        assert!(writer.compile_bundle(&bundle, options).is_ok());
+        let schema = writer.mir_cache.active_schema.unwrap();
+        let inputs = writer
+            .mir_cache
+            .entries
+            .iter()
+            .filter(|((entry_schema, _), _)| *entry_schema == schema)
+            .filter_map(|(_, entry)| entry.cleanup.as_ref().map(|(_, body)| body.clone()))
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(inputs.len(), 2);
+        let mut outputs = inputs.clone();
+        for output in &mut outputs {
+            output.phase = mir::MirPhase::Optimized;
+        }
+        writer.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        writer.mir_cache.cache_recursive_optimized(&outputs, 73, 91);
+        writer.persist_persistent_optimized_mir_directory().unwrap();
+        let persisted = writer.persistent_mir_cache().unwrap();
+
+        let mut restarted = CompilationDriver::new();
+        assert!(restarted.restore_persistent_mir_cache(&persisted));
+        restarted.configure_persistent_optimized_mir_directory(cache_dir.path().to_path_buf());
+        let schemas = restarted.mir_cache.schemas.clone();
+        let active = schemas.front().unwrap();
+        restarted
+            .mir_cache
+            .prepare(&active.types, &active.custom_drop_types);
+        assert_eq!(
+            restarted
+                .mir_cache
+                .reuse_recursive_optimized(&inputs, 73, 91),
+            Some(outputs)
         );
     }
 
