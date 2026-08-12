@@ -904,6 +904,22 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    // Effect/closure lowering emits helper definitions beside their owning
+    // source body.  A different source body can reference one while cloning
+    // an effect snapshot, so partitioned compilation needs the helper's
+    // prototype just as it needs a direct source-function prototype.  Keep a
+    // symbol map rather than appending every helper declaration to every
+    // partition: an unrelated helper must not perturb a cached object.
+    let helper_declarations = source_functions
+        .iter()
+        .flat_map(|(declaration, _)| {
+            let fragment = &fragments
+                .fragment(&manifest, *declaration)
+                .expect("current canonical emission produced every function fragment")
+                .emitted_text;
+            llvm_fragment_helper_declarations(fragment, *declaration)
+        })
+        .collect::<BTreeMap<_, _>>();
     // Function units need runtime/global declarations and only their direct
     // source-function dependencies.  Because the shared stream was emitted
     // without source bodies, it has no source prototypes to strip one at a
@@ -927,6 +943,7 @@ pub fn emit_llvm_native_object_units_with_fragment_cache(
                 &text,
                 declaration,
                 &source_declarations,
+                &helper_declarations,
                 &literal_definitions,
             );
             LlvmNativeFunctionUnit {
@@ -972,6 +989,7 @@ fn llvm_fragment_source_dependency_prelude(
     body: &str,
     self_declaration: u32,
     source_declarations: &BTreeMap<u32, String>,
+    helper_declarations: &BTreeMap<String, String>,
     literal_definitions: &BTreeMap<String, String>,
 ) -> String {
     let own_symbols = llvm_fragment_defined_symbols(body);
@@ -998,12 +1016,81 @@ fn llvm_fragment_source_dependency_prelude(
             prelude.push_str(prototype);
         }
     }
+    // Do not scan every available helper for every source body: the
+    // self-host compiler has thousands.  Instead, derive the exact `@symbol`
+    // references in this fragment and import only sibling helpers it uses.
+    for symbol in llvm_fragment_referenced_symbols(body) {
+        if own_symbols.contains(symbol.as_str()) {
+            continue;
+        }
+        if let Some(prototype) = helper_declarations.get(&symbol) {
+            prelude.push_str(prototype);
+        }
+    }
     for (symbol, definition) in literal_definitions {
         if body.contains(symbol) {
             prelude.push_str(definition);
         }
     }
     prelude
+}
+
+/// Declarations for the generated helpers defined beside one source body.
+/// They are externalized before object emission, so a sibling partition can
+/// resolve an exact referenced helper through Wild at the final link.
+fn llvm_fragment_helper_declarations(
+    fragment: &str,
+    source_declaration: u32,
+) -> Vec<(String, String)> {
+    let source_symbol = format!("@g1_f{source_declaration}");
+    fragment
+        .lines()
+        .filter(|line| line.starts_with("define "))
+        .filter_map(|line| {
+            let symbol = llvm_definition_symbol(line)?;
+            (symbol != source_symbol).then(|| {
+                let externalized = line.replacen("define internal ", "define ", 1);
+                (
+                    symbol.to_owned(),
+                    llvm_definition_declaration(&externalized),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Collect each LLVM global/function symbol referenced by a fragment.  LLVM
+/// generated identifiers are ASCII, so byte scanning avoids a dependency and
+/// does not mistake the `@` inside a quoted byte literal for a symbol.
+fn llvm_fragment_referenced_symbols(fragment: &str) -> BTreeSet<String> {
+    let bytes = fragment.as_bytes();
+    let mut symbols = BTreeSet::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'@' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < bytes.len()
+            && matches!(
+                bytes[index],
+                b'a'..=b'z'
+                    | b'A'..=b'Z'
+                    | b'0'..=b'9'
+                    | b'_'
+                    | b'.'
+                    | b'$'
+            )
+        {
+            index += 1;
+        }
+        if index > start + 1 {
+            symbols.insert(fragment[start..index].to_owned());
+        }
+    }
+    symbols
 }
 
 fn llvm_literal_global_definitions(ir: &str) -> BTreeMap<String, String> {
@@ -13857,5 +13944,38 @@ mod tests {
         assert_eq!(repeated.shared, units.shared);
         assert_eq!(cache.reused_fragments(), 1);
         assert_eq!(cache.emitted_fragments(), 0);
+    }
+
+    #[test]
+    fn partition_prelude_imports_only_referenced_sibling_helpers() {
+        let body = concat!(
+            "define void @g1_f1() {\n",
+            "  call void @g1_effect_guard_drop_f2(ptr null)\n",
+            "  ret void\n",
+            "}\n",
+            "define void @g1_effect_guard_drop_f1(ptr %callable) {\n",
+            "  ret void\n",
+            "}\n",
+        );
+        let helpers = BTreeMap::from([
+            (
+                "@g1_effect_guard_drop_f1".to_owned(),
+                "declare void @g1_effect_guard_drop_f1(ptr)\n".to_owned(),
+            ),
+            (
+                "@g1_effect_guard_drop_f2".to_owned(),
+                "declare void @g1_effect_guard_drop_f2(ptr)\n".to_owned(),
+            ),
+        ]);
+        let prelude = llvm_fragment_source_dependency_prelude(
+            "",
+            body,
+            1,
+            &BTreeMap::new(),
+            &helpers,
+            &BTreeMap::new(),
+        );
+        assert!(prelude.contains("declare void @g1_effect_guard_drop_f2(ptr)"));
+        assert!(!prelude.contains("declare void @g1_effect_guard_drop_f1(ptr)"));
     }
 }

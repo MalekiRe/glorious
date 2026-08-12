@@ -395,15 +395,23 @@ fn native_function_units_retain_effect_guard_runtime_declarations() {
     let phases = phases_at(
         r#"
             effect Ask { [1,1] ask() -> i64 }
-            selected() -> i64 {
+            first() -> i64 {
                 let captured = 1;
                 let answer = { => perform Ask::ask() + captured };
                 handle { answer() } {
                     Ask::ask() with k => resume(k, 41)
                 }
             }
+            second() -> i64 {
+                let captured = 2;
+                let answer = { => perform Ask::ask() + captured };
+                handle { answer() } {
+                    Ask::ask() with k => resume(k, 40)
+                }
+            }
             main() -> () {
-                selected();
+                first();
+                second();
                 ()
             }
         "#,
@@ -411,30 +419,40 @@ fn native_function_units_retain_effect_guard_runtime_declarations() {
     );
     let units = emit_llvm_native_object_units(&phases, &LlvmOptions::default()).unwrap();
     let guard_symbols = units
-        .shared
-        .ir
-        .lines()
+        .functions
+        .iter()
+        .flat_map(|unit| unit.module.ir.lines())
         .filter_map(|line| {
-            line.strip_prefix("declare void ")
+            line.strip_prefix("define void ")
                 .and_then(|symbol| symbol.split_once('('))
                 .map(|(symbol, _)| symbol)
                 .filter(|symbol| symbol.starts_with("@g1_effect_guard_drop_f"))
         })
-        .collect::<Vec<_>>();
+        .collect::<std::collections::BTreeSet<_>>();
     assert!(
-        !guard_symbols.is_empty(),
-        "effect fixture must exercise emitted guard-drop helpers"
+        guard_symbols.len() >= 2,
+        "effect fixture must define guard-drop helpers in independent source units"
     );
 
     let directory = tempfile::tempdir().unwrap();
+    let mut cross_partition_references = 0;
     for unit in &units.functions {
+        let owned = unit
+            .module
+            .ir
+            .lines()
+            .filter_map(|line| line.strip_prefix("define void "))
+            .filter_map(|symbol| symbol.split_once('(').map(|(symbol, _)| symbol))
+            .collect::<std::collections::BTreeSet<_>>();
         for symbol in &guard_symbols {
-            assert!(
-                unit.module.ir.contains(&format!("declare void {symbol}("))
-                    || unit.module.ir.contains(&format!("define void {symbol}(")),
-                "function unit {} lost shared effect helper {symbol}",
-                unit.declaration,
-            );
+            if unit.module.ir.contains(symbol) && !owned.contains(symbol) {
+                cross_partition_references += 1;
+                assert!(
+                    unit.module.ir.contains(&format!("declare void {symbol}(")),
+                    "function unit {} lost sibling effect helper {symbol}",
+                    unit.declaration,
+                );
+            }
         }
         let input = directory.path().join(format!("effect-{}.ll", unit.declaration));
         let output = directory.path().join(format!("effect-{}.o", unit.declaration));
@@ -452,4 +470,8 @@ fn native_function_units_retain_effect_guard_runtime_declarations() {
             unit.declaration,
         );
     }
+    assert!(
+        cross_partition_references > 0,
+        "effect fixture must reference a guard callback owned by a sibling unit"
+    );
 }
