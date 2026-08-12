@@ -10387,6 +10387,25 @@ fn inline_candidate_depth(depths: &BTreeMap<u32, u8>, target: u32, depth_cap: u8
     (depth <= depth_cap).then_some(depth)
 }
 
+/// Borrow two distinct function bodies without cloning the callee merely to
+/// satisfy the borrow checker.  Inlining mutates only its caller, and a
+/// candidate is never permitted to target that same caller, so splitting the
+/// function slice lets large leaf and CFG targets stay borrowed in place.
+fn inline_caller_and_target(
+    functions: &mut [Function],
+    caller_index: usize,
+    target_index: usize,
+) -> (&mut Function, &Function) {
+    debug_assert_ne!(caller_index, target_index);
+    if caller_index < target_index {
+        let (before_target, from_target) = functions.split_at_mut(target_index);
+        (&mut before_target[caller_index], &from_target[0])
+    } else {
+        let (before_caller, from_caller) = functions.split_at_mut(caller_index);
+        (&mut from_caller[0], &before_caller[target_index])
+    }
+}
+
 /// Whether the call's normal continuation is a closed forward region. A fresh
 /// live callee register is present on the source edge and throughout this
 /// region; an edge entering it from anywhere else would create a mismatched
@@ -10910,14 +10929,14 @@ fn inline_by_cost_with_admission_caps(
             {
                 continue;
             }
-            let Some(target) = scratch
+            let Some(target_index) = scratch
                 .functions
                 .iter()
-                .find(|function| function.declaration == candidate.target)
-                .cloned()
+                .position(|function| function.declaration == candidate.target)
             else {
                 continue;
             };
+            let target = &scratch.functions[target_index];
             let target_block = &target.blocks[0];
             let Terminator::Return { value: returned } = &target_block.terminator else {
                 continue;
@@ -10962,53 +10981,61 @@ fn inline_by_cost_with_admission_caps(
             }
 
             let old_caller = scratch.functions[caller_index].clone();
-            let caller = &mut scratch.functions[caller_index];
-            let mut registers = vec![None; target.register_types.len()];
-            for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
-                let new = caller.register_types.len() as Register;
-                caller.register_types.push(ty);
-                registers[old] = Some(new);
-            }
-            let block = &mut caller.blocks[block_index];
-            let span = block
-                .statements
-                .last()
-                .map(|statement| statement.span)
-                .unwrap_or_default();
-            for (index, argument) in args.into_iter().enumerate() {
-                block.statements.push(Instruction {
-                    span,
-                    kind: InstructionKind::Move {
-                        dst: registers[index + 1].expect("callee ABI register was mapped"),
-                        src: argument,
-                    },
-                });
-            }
-            for mut statement in target_block.statements.clone() {
-                remap_instruction(&mut statement.kind, &registers)
-                    .expect("legal leaf has a complete non-receiver register map");
-                block.statements.push(statement);
-            }
-            let mut edge_args =
-                Vec::with_capacity(normal.args.len() + usize::from(result.is_some()));
-            if let Some(mut value) = *returned {
-                remap_operand(&mut value, &registers)
-                    .expect("legal leaf return does not reference receiver r0");
-                edge_args.push(value);
-            }
-            edge_args.extend(normal.args);
-            block.terminator = Terminator::Goto(Edge {
-                target: normal.target,
-                args: edge_args,
-            });
-            caller.features = infer_feature_bits(caller);
-
             let original = originals[&candidate.caller];
             let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
-            if inline_weight(caller) > cap {
+            let accepted = {
+                let (caller, target) =
+                    inline_caller_and_target(&mut scratch.functions, caller_index, target_index);
+                let target_block = &target.blocks[0];
+                let Terminator::Return { value: returned } = &target_block.terminator else {
+                    unreachable!("inlining target was checked before mutation");
+                };
+                let mut registers = vec![None; target.register_types.len()];
+                for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
+                    let new = caller.register_types.len() as Register;
+                    caller.register_types.push(ty);
+                    registers[old] = Some(new);
+                }
+                let block = &mut caller.blocks[block_index];
+                let span = block
+                    .statements
+                    .last()
+                    .map(|statement| statement.span)
+                    .unwrap_or_default();
+                for (index, argument) in args.into_iter().enumerate() {
+                    block.statements.push(Instruction {
+                        span,
+                        kind: InstructionKind::Move {
+                            dst: registers[index + 1].expect("callee ABI register was mapped"),
+                            src: argument,
+                        },
+                    });
+                }
+                for mut statement in target_block.statements.clone() {
+                    remap_instruction(&mut statement.kind, &registers)
+                        .expect("legal leaf has a complete non-receiver register map");
+                    block.statements.push(statement);
+                }
+                let mut edge_args =
+                    Vec::with_capacity(normal.args.len() + usize::from(result.is_some()));
+                if let Some(mut value) = *returned {
+                    remap_operand(&mut value, &registers)
+                        .expect("legal leaf return does not reference receiver r0");
+                    edge_args.push(value);
+                }
+                edge_args.extend(normal.args);
+                block.terminator = Terminator::Goto(Edge {
+                    target: normal.target,
+                    args: edge_args,
+                });
+                caller.features = infer_feature_bits(caller);
+                inline_weight(caller) <= cap
+            };
+            if !accepted {
                 scratch.functions[caller_index] = old_caller;
                 continue;
             }
+            let caller = &mut scratch.functions[caller_index];
             caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
             scratch_policy
                 .depths
@@ -11103,14 +11130,14 @@ fn inline_by_cost_with_admission_caps(
             {
                 continue;
             }
-            let Some(target) = scratch
+            let Some(target_index) = scratch
                 .functions
                 .iter()
-                .find(|function| function.declaration == candidate.target)
-                .cloned()
+                .position(|function| function.declaration == candidate.target)
             else {
                 continue;
             };
+            let target = &scratch.functions[target_index];
             let Some(caller_index) = scratch
                 .functions
                 .iter()
@@ -11157,129 +11184,92 @@ fn inline_by_cost_with_admission_caps(
             }
 
             let old_caller = scratch.functions[caller_index].clone();
-            let caller = &mut scratch.functions[caller_index];
-            let mut registers = vec![None; target.register_types.len()];
-            for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
-                let new = caller.register_types.len() as Register;
-                caller.register_types.push(ty);
-                registers[old] = Some(new);
-            }
-            let Some(block_count) = u32::try_from(target.blocks.len()).ok() else {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            };
-            let caller_max_block = caller
-                .blocks
-                .iter()
-                .map(|block| block.id)
-                .max()
-                .unwrap_or(0);
-            if caller_max_block.checked_add(block_count).is_none() {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            }
-            let mut blocks = BTreeMap::new();
-            for (offset, block) in target.blocks.iter().enumerate() {
-                blocks.insert(block.id, caller_max_block + 1 + offset as u32);
-            }
-            let Some(&cloned_entry) = blocks.get(&target.entry) else {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            };
-            let Some(arenas) = append_inline_arenas(caller, &target, &registers, &blocks) else {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            };
-
-            let span = caller.blocks[block_index]
-                .statements
-                .last()
-                .map(|statement| statement.span)
-                .unwrap_or_default();
-            for (index, argument) in args.into_iter().enumerate() {
-                caller.blocks[block_index].statements.push(Instruction {
-                    span,
-                    kind: InstructionKind::Move {
-                        dst: registers[index + 1].expect("callee ABI register was mapped"),
-                        src: argument,
-                    },
-                });
-            }
-            caller.blocks[block_index].terminator = Terminator::Goto(Edge {
-                target: cloned_entry,
-                args: vec![],
-            });
-
-            let mut cloned = Vec::with_capacity(target.blocks.len());
-            let mut remap_failed = false;
-            for mut block in target.blocks.clone() {
-                block.id = blocks[&block.id];
-                for parameter in &mut block.params {
-                    let Some(mapped) = remap_register(parameter.register, &registers) else {
-                        remap_failed = true;
-                        break;
-                    };
-                    parameter.register = mapped;
-                }
-                if remap_failed {
-                    break;
-                }
-                for statement in &mut block.statements {
-                    if remap_instruction(&mut statement.kind, &registers).is_none() {
-                        remap_failed = true;
-                        break;
-                    }
-                    if remap_cloned_control_identities(&mut statement.kind, &arenas, &blocks)
-                        .is_none()
-                    {
-                        remap_failed = true;
-                        break;
-                    }
-                }
-                if remap_failed || remap_terminator(&mut block.terminator, &registers).is_none() {
-                    remap_failed = true;
-                    break;
-                }
-                if remap_cloned_terminator_identities(&mut block.terminator, &arenas).is_none() {
-                    remap_failed = true;
-                    break;
-                }
-                match block.terminator.clone() {
-                    Terminator::Return { value } => {
-                        let mut edge_args =
-                            Vec::with_capacity(normal.args.len() + usize::from(value.is_some()));
-                        if let Some(value) = value {
-                            edge_args.push(value);
-                        }
-                        edge_args.extend(normal.args.clone());
-                        block.terminator = Terminator::Goto(Edge {
-                            target: normal.target,
-                            args: edge_args,
-                        });
-                    }
-                    _ => {
-                        if remap_cloned_cfg_targets(&mut block.terminator, &blocks).is_none() {
-                            remap_failed = true;
-                            break;
-                        }
-                    }
-                }
-                cloned.push(block);
-            }
-            if remap_failed {
-                scratch.functions[caller_index] = old_caller;
-                continue;
-            }
-            caller.blocks.extend(cloned);
-            caller.features = infer_feature_bits(caller);
-            caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
-
             let original = originals[&candidate.caller];
             let cap = admission_limits.growth_factor * original + admission_limits.growth_slack;
-            if inline_weight(caller) > cap {
+            let accepted = (|| {
+                let (caller, target) =
+                    inline_caller_and_target(&mut scratch.functions, caller_index, target_index);
+                let mut registers = vec![None; target.register_types.len()];
+                for (old, ty) in target.register_types.iter().copied().enumerate().skip(1) {
+                    let new = caller.register_types.len() as Register;
+                    caller.register_types.push(ty);
+                    registers[old] = Some(new);
+                }
+                let block_count = u32::try_from(target.blocks.len()).ok()?;
+                let caller_max_block = caller
+                    .blocks
+                    .iter()
+                    .map(|block| block.id)
+                    .max()
+                    .unwrap_or(0);
+                caller_max_block.checked_add(block_count)?;
+                let mut blocks = BTreeMap::new();
+                for (offset, block) in target.blocks.iter().enumerate() {
+                    blocks.insert(block.id, caller_max_block + 1 + offset as u32);
+                }
+                let cloned_entry = *blocks.get(&target.entry)?;
+                let arenas = append_inline_arenas(caller, target, &registers, &blocks)?;
+
+                let span = caller.blocks[block_index]
+                    .statements
+                    .last()
+                    .map(|statement| statement.span)
+                    .unwrap_or_default();
+                for (index, argument) in args.into_iter().enumerate() {
+                    caller.blocks[block_index].statements.push(Instruction {
+                        span,
+                        kind: InstructionKind::Move {
+                            dst: registers[index + 1].expect("callee ABI register was mapped"),
+                            src: argument,
+                        },
+                    });
+                }
+                caller.blocks[block_index].terminator = Terminator::Goto(Edge {
+                    target: cloned_entry,
+                    args: vec![],
+                });
+
+                let mut cloned = Vec::with_capacity(target.blocks.len());
+                for mut block in target.blocks.clone() {
+                    block.id = blocks[&block.id];
+                    for parameter in &mut block.params {
+                        parameter.register = remap_register(parameter.register, &registers)?;
+                    }
+                    for statement in &mut block.statements {
+                        remap_instruction(&mut statement.kind, &registers)?;
+                        remap_cloned_control_identities(&mut statement.kind, &arenas, &blocks)?;
+                    }
+                    remap_terminator(&mut block.terminator, &registers)?;
+                    remap_cloned_terminator_identities(&mut block.terminator, &arenas)?;
+                    match block.terminator.clone() {
+                        Terminator::Return { value } => {
+                            let mut edge_args = Vec::with_capacity(
+                                normal.args.len() + usize::from(value.is_some()),
+                            );
+                            if let Some(value) = value {
+                                edge_args.push(value);
+                            }
+                            edge_args.extend(normal.args.clone());
+                            block.terminator = Terminator::Goto(Edge {
+                                target: normal.target,
+                                args: edge_args,
+                            });
+                        }
+                        _ => remap_cloned_cfg_targets(&mut block.terminator, &blocks)?,
+                    }
+                    cloned.push(block);
+                }
+                caller.blocks.extend(cloned);
+                caller.features = infer_feature_bits(caller);
+                (inline_weight(caller) <= cap).then_some(())
+            })()
+            .is_some();
+            if !accepted {
                 scratch.functions[caller_index] = old_caller;
                 continue;
             }
+            let caller = &mut scratch.functions[caller_index];
+            caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
             scratch_policy
                 .depths
                 .entry(candidate.caller)
