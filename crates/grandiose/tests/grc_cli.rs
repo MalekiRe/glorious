@@ -4,6 +4,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    time::Instant,
 };
 
 use grandiose_vm::{verify, Artifact};
@@ -323,7 +324,9 @@ fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
         }))
     };
     let mut session = Session::start_release(&release_grc);
+    let cold_started = Instant::now();
     let cold = request(&mut session, 1, arguments(&directory.path().join("cold-native")));
+    let cold_elapsed = cold_started.elapsed();
     assert_eq!(cold["status"], 0, "{cold}");
     assert_eq!(cold["native_incremental"]["strategy"], "partitioned-function-objects");
     assert!(directory.path().join("cold-native").is_file());
@@ -340,11 +343,13 @@ fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
     );
     write(&compiler, &before_edit.replacen(original, replacement, 1));
 
+    let edited_started = Instant::now();
     let edited = request(
         &mut session,
         2,
         arguments(&directory.path().join("edited-native")),
     );
+    let edited_elapsed = edited_started.elapsed();
     assert_eq!(edited["status"], 0, "{edited}");
     assert!(directory.path().join("edited-native").is_file());
     assert!(
@@ -372,6 +377,10 @@ fn release_selfhost_serve_warm_body_edit_reuses_cached_work() {
         newly_written.iter().any(|manifest| fs::read_to_string(cache.join(manifest))
             .is_ok_and(|contents| contents.contains("role=function;"))),
         "body edit must publish at least one function-object manifest: {newly_written:?}"
+    );
+    eprintln!(
+        "self-host native serve timings: cold={cold_elapsed:.2?}, body_edit={edited_elapsed:.2?}, speedup={:.2}x",
+        cold_elapsed.as_secs_f64() / edited_elapsed.as_secs_f64(),
     );
 }
 
