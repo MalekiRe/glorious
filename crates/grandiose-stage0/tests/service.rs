@@ -734,6 +734,14 @@ fn service_forwards_a_refutable_inner_one_shot_clause_to_an_outer_frame() {
 }
 
 #[test]
+fn service_forwards_a_refutable_generic_effect_clause_to_the_matching_outer_instance() {
+    let source = "effect State<T> { [1,1] set(value: T) -> T; } pub fn main() -> i64 { handle { handle State<i64>::set(40) { State<i64>::set(0) => 0 } } { State<i64>::set(value) => value + 2 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_tries_ordered_refutable_one_shot_clauses_before_forwarding() {
     let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle Ask::ask(40) { Ask::ask(0) => 0, Ask::ask(40) => 42 } } { Ask::ask(seed) => seed + 2 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
