@@ -38,6 +38,28 @@ fn interfaces_elaborate_generic_callable_signatures_without_bodies() {
 }
 
 #[test]
+fn interface_validation_checks_associated_type_names_and_arities() {
+    let package = PackageKey("signature-associated-items@0.1.0".into());
+    let source = "trait Apply { type Output<T>; type Item; } impl Apply for i64 { type Output = i64; type Extra = Text; }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/lib.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let codes = signatures
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"G4114"), "{:#?}", signatures.diagnostics);
+    assert!(codes.contains(&"G4115"), "{:#?}", signatures.diagnostics);
+    assert!(codes.contains(&"G4116"), "{:#?}", signatures.diagnostics);
+}
+
+#[test]
 fn transparent_aliases_are_substituted_in_callable_contracts() {
     let package = PackageKey("signature-alias@0.1.0".into());
     let source = "type Count = i64; type Buffer<T> = Array<T>; pub fn count(value: Count) -> Count { ignored } pub fn bytes(value: Buffer<u8>) -> Buffer<u8> { ignored }";

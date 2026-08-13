@@ -34,6 +34,7 @@ pub struct ElaboratedTraitReference {
 pub struct ElaboratedTrait {
     pub generics: u32,
     pub supertraits: Vec<ElaboratedTraitReference>,
+    pub associated_types: BTreeMap<String, u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +155,7 @@ impl ElaboratedInterface {
             result.diagnostics.extend(elaborator.diagnostics);
         }
         result.normalize_aliases();
+        result.validate_associated_type_definitions();
         result
             .diagnostics
             .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
@@ -167,10 +169,52 @@ impl ElaboratedInterface {
             merged.diagnostics.extend(part.diagnostics);
         }
         merged.normalize_aliases();
+        merged.validate_associated_type_definitions();
         merged
             .diagnostics
             .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
         merged
+    }
+
+    fn validate_associated_type_definitions(&mut self) {
+        let mut diagnostics = Vec::new();
+        for implementation in self.definitions.values().filter_map(|header| match header {
+            ElaboratedHeader::Implementation(implementation) if !implementation.negative => {
+                Some(implementation)
+            }
+            _ => None,
+        }) {
+            let Some(ElaboratedHeader::Trait(trait_header)) =
+                self.definitions.get(&implementation.relation.definition)
+            else {
+                continue;
+            };
+            for (name, item) in &implementation.associated_types {
+                match trait_header.associated_types.get(name) {
+                    Some(expected) if *expected == item.generics => {}
+                    Some(expected) => diagnostics.push(SignatureDiagnostic {
+                        code: "G4114",
+                        message: format!(
+                            "associated type `{name}` has arity {}, but the trait requires {expected}",
+                            item.generics
+                        ),
+                    }),
+                    None => diagnostics.push(SignatureDiagnostic {
+                        code: "G4115",
+                        message: format!("implementation defines unknown associated type `{name}`"),
+                    }),
+                }
+            }
+            for name in trait_header.associated_types.keys() {
+                if !implementation.associated_types.contains_key(name) {
+                    diagnostics.push(SignatureDiagnostic {
+                        code: "G4116",
+                        message: format!("implementation omits associated type `{name}`"),
+                    });
+                }
+            }
+        }
+        self.diagnostics.extend(diagnostics);
     }
 
     /// Instantiate a named struct layout at a particular nominal application.
@@ -598,6 +642,11 @@ impl Elaborator<'_> {
                 .supertraits
                 .iter()
                 .map(|reference| self.trait_ref(reference))
+                .collect(),
+            associated_types: header
+                .associated_types
+                .iter()
+                .map(|item| (item.name.clone(), item.generics.len() as u32))
                 .collect(),
         }
     }
