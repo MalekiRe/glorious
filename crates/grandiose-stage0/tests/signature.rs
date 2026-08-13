@@ -434,3 +434,30 @@ fn generic_effect_rows_keep_protocol_arguments_in_their_identity() {
     assert_eq!(text.arguments, [Type::Scalar(ScalarType::Text)]);
     assert_ne!(integers, text);
 }
+
+#[test]
+fn transparent_aliases_are_normalized_inside_callable_effect_identities() {
+    let package = PackageKey("signature-effect-alias@0.1.0".into());
+    let source = "type Message = Text; effect Log<T> { write(value: T) } pub fn run() -> i64 / Log<Message> { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let run = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("run"))
+        .expect("run declaration");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&run.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    let effect = signature.effects.effects.iter().next().expect("Log effect");
+    assert_eq!(effect.arguments, [Type::Scalar(ScalarType::Text)]);
+}

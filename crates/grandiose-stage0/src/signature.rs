@@ -486,27 +486,7 @@ impl ElaboratedInterface {
         for header in self.definitions.values_mut() {
             match header {
                 ElaboratedHeader::Callable(signature) => {
-                    signature.parameters = signature
-                        .parameters
-                        .clone()
-                        .into_iter()
-                        .map(|ty| normalize_alias_type(ty, &aliases, &mut vec![], &mut diagnostics))
-                        .collect();
-                    signature.result = normalize_alias_type(
-                        signature.result.clone(),
-                        &aliases,
-                        &mut vec![],
-                        &mut diagnostics,
-                    );
-                    for (subject, relation) in &mut signature.where_bounds {
-                        *subject = normalize_alias_type(
-                            subject.clone(),
-                            &aliases,
-                            &mut vec![],
-                            &mut diagnostics,
-                        );
-                        normalize_trait_reference(relation, &aliases, &mut diagnostics);
-                    }
+                    normalize_callable_signature(signature, &aliases, &mut diagnostics);
                 }
                 ElaboratedHeader::Alias { target, .. } => {
                     *target = normalize_alias_type(
