@@ -781,6 +781,32 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) = lowerer
+            .lower_root_runtime_ordered_nested_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = function.validate() {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_runtime_nested_one_shot_handler(body.root, parameters.clone())
         {
@@ -1661,6 +1687,275 @@ impl Lowerer<'_> {
         };
         blocks[steps.len()].instructions = std::mem::take(&mut self.instructions);
         blocks[steps.len()].terminator = MirTerminator::Return { value: result };
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+    /// Lower ordered exact-one-shot clauses for one operation inside an outer
+    /// exact-one-shot frame. Failed structural tests advance through source
+    /// order and exhaust into `Forward`, so a partial inner handler preserves
+    /// ordinary deep-handler outward traversal rather than choosing an arm at
+    /// compile time.
+    fn lower_root_runtime_ordered_nested_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (outer_computation, outer_clauses, root_prefix) =
+            match self.body.expression(root).kind.clone() {
+                CoreKind::Handle {
+                    computation,
+                    clauses,
+                } => (computation, clauses, Vec::new()),
+                CoreKind::Block(values) => {
+                    let (outer, prefix) = values.split_last()?;
+                    let CoreKind::Handle {
+                        computation,
+                        clauses,
+                    } = self.body.expression(*outer).kind.clone()
+                    else {
+                        return None;
+                    };
+                    (computation, clauses, prefix.to_vec())
+                }
+                _ => return None,
+            };
+        let inner = match self.body.expression(outer_computation).kind.clone() {
+            CoreKind::Handle { .. } => outer_computation,
+            CoreKind::Block(values) if values.len() == 1 => values[0],
+            _ => return None,
+        };
+        let CoreKind::Handle {
+            computation: inner_computation,
+            clauses: inner_clauses,
+        } = self.body.expression(inner).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(inner_computation).kind.clone()
+        else {
+            return None;
+        };
+        let outer_operation_clauses = outer_clauses
+            .iter()
+            .filter(|clause| !clause.terminal)
+            .collect::<Vec<_>>();
+        let [outer_clause] = outer_operation_clauses.as_slice() else {
+            return None;
+        };
+        let mut inner_operation_clauses = inner_clauses
+            .iter()
+            .filter(|clause| !clause.terminal)
+            .collect::<Vec<_>>();
+        if inner_operation_clauses.is_empty()
+            || inner_operation_clauses
+                .iter()
+                .any(|clause| clause.effect != effect || clause.operation != operation)
+        {
+            return None;
+        }
+        if let Some(fallback) = inner_operation_clauses
+            .iter()
+            .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable))
+        {
+            inner_operation_clauses.truncate(fallback + 1);
+        }
+        let exact_one_shot = |clause: &CoreHandlerClause| match &clause.resumption {
+            CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Tail { quantity } => {
+                *quantity == crate::quantity::Quantity::ONCE
+            }
+            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => false,
+        };
+        if !exact_one_shot(outer_clause)
+            || outer_clause.patterns.len() != argument_ids.len()
+            || !outer_clause.patterns.iter().all(pattern_is_irrefutable)
+            || inner_operation_clauses.iter().any(|clause| {
+                !exact_one_shot(clause) || clause.patterns.len() != argument_ids.len()
+            })
+        {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let payload_types = argument_ids
+            .iter()
+            .map(|argument| self.body.expression(*argument).ty.clone())
+            .collect::<Vec<_>>();
+        let outer_payload_destinations = payload_types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
+            .collect::<Vec<_>>();
+        let inner_payload_destinations = payload_types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
+            .collect::<Vec<_>>();
+        let mut dispatch = Vec::with_capacity(inner_operation_clauses.len());
+        for clause in inner_operation_clauses {
+            let tests = if clause.patterns.iter().all(pattern_is_irrefutable) {
+                Vec::new()
+            } else {
+                clause
+                    .patterns
+                    .iter()
+                    .cloned()
+                    .zip(inner_payload_destinations.iter().copied())
+                    .map(|(pattern, subject)| {
+                        Some((
+                            self.alloc(
+                                Type::Scalar(crate::types::ScalarType::Bool),
+                                inner_computation,
+                            ),
+                            subject,
+                            lower_pattern(pattern)?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            };
+            dispatch.push((clause, tests));
+        }
+        let test_count = dispatch.iter().map(|(_, tests)| tests.len()).sum::<usize>();
+        let body_start = 2 + test_count as u32;
+        let has_fallback = dispatch
+            .last()
+            .is_some_and(|(clause, _)| clause.patterns.iter().all(pattern_is_irrefutable));
+        let forward_target = MirBlockId(body_start + dispatch.len() as u32);
+        let mut clause_targets = Vec::with_capacity(dispatch.len());
+        let mut next_test = 2u32;
+        for (index, (_, tests)) in dispatch.iter().enumerate() {
+            if tests.is_empty() {
+                clause_targets.push(MirBlockId(body_start + index as u32));
+            } else {
+                clause_targets.push(MirBlockId(next_test));
+                next_test += tests.len() as u32;
+            }
+        }
+        let result = self.alloc(
+            self.body.expression(inner_computation).ty.clone(),
+            inner_computation,
+        );
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: outer_clause.effect.definition,
+            effect_arguments: outer_clause.effect.arguments.clone(),
+            operation: outer_clause.operation,
+            payload_destinations: outer_payload_destinations.clone(),
+            resume_type: self.body.expression(inner_computation).ty.clone(),
+            target: MirBlockId(1),
+        });
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: inner_payload_destinations.clone(),
+            resume_type: self.body.expression(inner_computation).ty.clone(),
+            target: clause_targets[0],
+        });
+        entry.push(MirInstruction::Perform {
+            dst: result,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+        entry.push(MirInstruction::UninstallHandler);
+
+        self.instructions = Vec::new();
+        let outer_named = self.named.clone();
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
+        let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            value: outer_resumed,
+        });
+        let outer_instructions = std::mem::take(&mut self.instructions);
+        self.named = outer_named;
+
+        let mut bodies = Vec::with_capacity(dispatch.len());
+        for (clause, _) in &dispatch {
+            self.instructions = Vec::new();
+            let named = self.named.clone();
+            self.bind_handler_patterns(&clause.patterns, &inner_payload_destinations)?;
+            let resumed = self.direct_handler_clause_value(clause)?;
+            self.instructions
+                .push(MirInstruction::Resume { value: resumed });
+            bodies.push(std::mem::take(&mut self.instructions));
+            self.named = named;
+        }
+
+        let mut blocks = vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: entry,
+                terminator: MirTerminator::Return { value: result },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: outer_instructions,
+                terminator: MirTerminator::Unreachable,
+            },
+        ];
+        let mut test_id = 2u32;
+        for (clause_index, (_, tests)) in dispatch.iter().enumerate() {
+            let failure_target = clause_targets
+                .get(clause_index + 1)
+                .copied()
+                .unwrap_or(forward_target);
+            for (test_index, (condition, subject, pattern)) in tests.iter().cloned().enumerate() {
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject,
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: if test_index + 1 == tests.len() {
+                            MirBlockId(body_start + clause_index as u32)
+                        } else {
+                            MirBlockId(test_id + 1)
+                        },
+                        then_arguments: vec![],
+                        else_target: failure_target,
+                        else_arguments: vec![],
+                    },
+                });
+                test_id += 1;
+            }
+        }
+        for instructions in bodies {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions,
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        if !has_fallback {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+        }
         Some(MirFunction {
             definition: self.definition,
             captures: 0,
