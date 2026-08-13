@@ -1765,15 +1765,21 @@ impl Lowerer<'_> {
         let [outer_clause] = outer_operation_clauses.as_slice() else {
             return None;
         };
-        let mut inner_operation_clauses = inner_clauses
+        let all_inner_operation_clauses = inner_clauses
             .iter()
             .filter(|clause| !clause.terminal)
             .collect::<Vec<_>>();
-        if inner_operation_clauses.is_empty()
-            || inner_operation_clauses
-                .iter()
-                .any(|clause| clause.effect != effect || clause.operation != operation)
-        {
+        let mut inner_operation_clauses = all_inner_operation_clauses
+            .iter()
+            .copied()
+            .filter(|clause| clause.effect == effect && clause.operation == operation)
+            .collect::<Vec<_>>();
+        let sibling_operation_clauses = all_inner_operation_clauses
+            .iter()
+            .copied()
+            .filter(|clause| clause.effect != effect || clause.operation != operation)
+            .collect::<Vec<_>>();
+        if inner_operation_clauses.is_empty() {
             return None;
         }
         if let Some(fallback) = inner_operation_clauses
@@ -1795,6 +1801,19 @@ impl Lowerer<'_> {
             || inner_operation_clauses.iter().any(|clause| {
                 !exact_one_shot(clause) || clause.patterns.len() != argument_ids.len()
             })
+            || sibling_operation_clauses.iter().any(|clause| {
+                !exact_one_shot(clause)
+                    || clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+            })
+            || sibling_operation_clauses
+                .iter()
+                .enumerate()
+                .any(|(index, clause)| {
+                    sibling_operation_clauses[..index].iter().any(|previous| {
+                        previous.effect == clause.effect && previous.operation == clause.operation
+                    })
+                })
         {
             return None;
         }
@@ -1841,6 +1860,7 @@ impl Lowerer<'_> {
             .last()
             .is_some_and(|(clause, _)| clause.patterns.iter().all(pattern_is_irrefutable));
         let forward_target = MirBlockId(body_start + dispatch.len() as u32);
+        let sibling_start = forward_target.0 + u32::from(!has_fallback);
         let mut clause_targets = Vec::with_capacity(dispatch.len());
         let mut next_test = 2u32;
         for (index, (_, tests)) in dispatch.iter().enumerate() {
@@ -1851,6 +1871,21 @@ impl Lowerer<'_> {
                 next_test += tests.len() as u32;
             }
         }
+        let sibling_frames = sibling_operation_clauses
+            .iter()
+            .enumerate()
+            .map(|(index, clause)| {
+                (
+                    *clause,
+                    clause
+                        .payload_types
+                        .iter()
+                        .map(|ty| self.alloc(ty.clone(), inner_computation))
+                        .collect::<Vec<_>>(),
+                    MirBlockId(sibling_start + index as u32),
+                )
+            })
+            .collect::<Vec<_>>();
         let result = self.alloc(
             self.body.expression(inner_computation).ty.clone(),
             inner_computation,
@@ -1869,6 +1904,16 @@ impl Lowerer<'_> {
             self.statement(expression)?;
         }
         entry.extend(std::mem::take(&mut self.instructions));
+        for (clause, payload_destinations, target) in &sibling_frames {
+            entry.push(MirInstruction::InstallHandler {
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payload_destinations.clone(),
+                resume_type: self.body.expression(inner_computation).ty.clone(),
+                target: *target,
+            });
+        }
         entry.push(MirInstruction::InstallHandler {
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
@@ -1894,6 +1939,9 @@ impl Lowerer<'_> {
             arguments,
         });
         entry.push(MirInstruction::UninstallHandler);
+        for _ in &sibling_frames {
+            entry.push(MirInstruction::UninstallHandler);
+        }
         entry.push(MirInstruction::UninstallHandler);
 
         self.instructions = Vec::new();
@@ -1915,6 +1963,17 @@ impl Lowerer<'_> {
             self.instructions
                 .push(MirInstruction::Resume { value: resumed });
             bodies.push(std::mem::take(&mut self.instructions));
+            self.named = named;
+        }
+        let mut sibling_bodies = Vec::with_capacity(sibling_frames.len());
+        for (clause, payload_destinations, _) in &sibling_frames {
+            self.instructions = Vec::new();
+            let named = self.named.clone();
+            self.bind_handler_patterns(&clause.patterns, payload_destinations)?;
+            let resumed = self.direct_handler_clause_value(clause)?;
+            self.instructions
+                .push(MirInstruction::Resume { value: resumed });
+            sibling_bodies.push(std::mem::take(&mut self.instructions));
             self.named = named;
         }
 
@@ -1970,6 +2029,13 @@ impl Lowerer<'_> {
             blocks.push(MirBlock {
                 parameters: vec![],
                 instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        for instructions in sibling_bodies {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions,
                 terminator: MirTerminator::Unreachable,
             });
         }

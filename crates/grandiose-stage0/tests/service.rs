@@ -774,6 +774,14 @@ fn service_keeps_inner_computation_setup_inside_its_inner_frame_scope() {
 }
 
 #[test]
+fn service_installs_sibling_operation_frames_for_nested_handler_setup() {
+    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 / Choice { handle { handle { let first = Choice::first(40); Choice::second(first) } { Choice::first(value) => value + 1, Choice::second(0) => 0 } } { Choice::second(value) => value + 1 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_executes_a_generic_effect_handler_through_vm_frames() {
     let source = "effect State<T> { [1,1] get() -> T; } pub fn main() -> i64 { handle State<i64>::get() { State<i64>::get() => 42 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
