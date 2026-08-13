@@ -50,7 +50,7 @@ fn main() -> ExitCode {
     };
     let package = PackageKey("command@0.1.0".into());
     let request = CompilationRequest {
-        build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"grandiose-stage0-command-v4")),
+        build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"grandiose-stage0-command-v5")),
         mode: if matches!(command.as_str(), "run" | "emit-vm") {
             CompilationMode::Build
         } else {

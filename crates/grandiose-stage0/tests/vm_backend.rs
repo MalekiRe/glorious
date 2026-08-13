@@ -383,6 +383,83 @@ fn nested_partial_handler_forwards_to_an_outer_frame_and_restores_it_on_resume()
 }
 
 #[test]
+fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame() {
+    let effect = DefKey(Digest::of_bytes(b"Console-decline"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"declined-handler-pattern")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::I64,
+                VmType::I64,
+                VmType::I64,
+                VmType::Bool,
+                VmType::I64,
+                VmType::I64,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 40 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![1],
+                    resume_type: VmType::I64,
+                    target: 12,
+                },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![2],
+                    resume_type: VmType::I64,
+                    target: 8,
+                },
+                VmInstruction::Perform {
+                    dst: 3,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![0],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 3 },
+                VmInstruction::Trap,
+                VmInstruction::PatternTest {
+                    dst: 4,
+                    subject: 2,
+                    pattern: VmPattern::Literal("0".into()),
+                },
+                VmInstruction::BranchBool {
+                    condition: 4,
+                    then_target: 10,
+                    else_target: 11,
+                },
+                VmInstruction::Trap,
+                VmInstruction::Forward,
+                VmInstruction::ConstI64 { dst: 5, value: 2 },
+                VmInstruction::AddI64 {
+                    dst: 6,
+                    left: 1,
+                    right: 5,
+                },
+                VmInstruction::Resume { value: 6 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"declined-handler-pattern-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn verifier_allows_checked_store_reinitialization_but_rejects_type_confusion() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

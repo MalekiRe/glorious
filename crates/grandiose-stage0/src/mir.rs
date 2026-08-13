@@ -154,6 +154,11 @@ pub enum MirInstruction {
     Resume {
         value: MirLocal,
     },
+    /// Decline the innermost suspended handler clause and re-perform its
+    /// original operation against the next outer matching frame. The VM keeps
+    /// the declined frame in the resumed continuation, which is the deep
+    /// forwarding counterpart of `Resume`.
+    Forward,
     Copy {
         dst: MirLocal,
         src: MirLocal,
@@ -639,7 +644,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::CallIndirect { dst, .. } => Some(*dst),
         MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
-        | MirInstruction::Resume { .. } => None,
+        | MirInstruction::Resume { .. }
+        | MirInstruction::Forward => None,
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1232,6 +1238,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         } => payload_destinations.clone(),
         MirInstruction::UninstallHandler => Vec::new(),
         MirInstruction::Resume { value } => vec![*value],
+        MirInstruction::Forward => Vec::new(),
         MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
@@ -1739,10 +1746,12 @@ impl Lowerer<'_> {
             };
             if quantity != crate::quantity::Quantity::ONCE
                 || clause.patterns.len() != argument_ids.len()
-                || !clause.patterns.iter().all(pattern_is_irrefutable)
             {
                 return None;
             }
+        }
+        if !outer_clause.patterns.iter().all(pattern_is_irrefutable) {
+            return None;
         }
         for expression in root_prefix {
             self.statement(expression)?;
@@ -1769,6 +1778,32 @@ impl Lowerer<'_> {
             .enumerate()
             .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
             .collect::<Vec<_>>();
+        // An irrefutable arm enters its body directly. A refutable arm uses
+        // the shared structural pattern primitive and explicitly forwards the
+        // suspended operation if any predicate fails.
+        let inner_tests = if inner_clause.patterns.iter().all(pattern_is_irrefutable) {
+            Vec::new()
+        } else {
+            inner_clause
+                .patterns
+                .iter()
+                .cloned()
+                .zip(inner_payload_destinations.iter().copied())
+                .map(|(pattern, subject)| {
+                    Some((
+                        self.alloc(
+                            Type::Scalar(crate::types::ScalarType::Bool),
+                            inner_computation,
+                        ),
+                        subject,
+                        lower_pattern(pattern)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?
+        };
+        let inner_test_count = inner_tests.len();
+        let inner_matched_target = MirBlockId(2 + inner_test_count as u32);
+        let inner_forward_target = MirBlockId(inner_matched_target.0 + 1);
         let result = self.alloc(
             self.body.expression(inner_computation).ty.clone(),
             inner_computation,
@@ -1788,7 +1823,11 @@ impl Lowerer<'_> {
             operation: inner_clause.operation,
             payload_destinations: inner_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
-            target: MirBlockId(2),
+            target: if inner_tests.is_empty() {
+                inner_matched_target
+            } else {
+                MirBlockId(2)
+            },
         });
         entry.push(MirInstruction::Perform {
             dst: result,
@@ -1820,6 +1859,51 @@ impl Lowerer<'_> {
         let inner_instructions = std::mem::take(&mut self.instructions);
         self.named = inner_named;
 
+        let mut blocks = vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: entry,
+                terminator: MirTerminator::Return { value: result },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: outer_instructions,
+                terminator: MirTerminator::Unreachable,
+            },
+        ];
+        for (index, (condition, subject, pattern)) in inner_tests.into_iter().enumerate() {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: if index + 1 == inner_test_count {
+                        inner_matched_target
+                    } else {
+                        MirBlockId(3 + index as u32)
+                    },
+                    then_arguments: vec![],
+                    else_target: inner_forward_target,
+                    else_arguments: vec![],
+                },
+            });
+        }
+        blocks.push(MirBlock {
+            parameters: vec![],
+            instructions: inner_instructions,
+            terminator: MirTerminator::Unreachable,
+        });
+        if inner_test_count != 0 {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+        }
         Some(MirFunction {
             definition: self.definition,
             captures: 0,
@@ -1827,23 +1911,7 @@ impl Lowerer<'_> {
             locals: self.locals.clone(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
-            blocks: vec![
-                MirBlock {
-                    parameters: vec![],
-                    instructions: entry,
-                    terminator: MirTerminator::Return { value: result },
-                },
-                MirBlock {
-                    parameters: vec![],
-                    instructions: outer_instructions,
-                    terminator: MirTerminator::Unreachable,
-                },
-                MirBlock {
-                    parameters: vec![],
-                    instructions: inner_instructions,
-                    terminator: MirTerminator::Unreachable,
-                },
-            ],
+            blocks,
         })
     }
     /// Lower one nonempty, exact-one-shot continuation through the VM handler

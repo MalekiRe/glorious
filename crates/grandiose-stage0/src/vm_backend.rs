@@ -177,6 +177,10 @@ pub enum VmInstruction {
     Resume {
         value: u32,
     },
+    /// Decline the innermost suspended handler clause. The original effect
+    /// transfer is retried at the next matching outer frame; the declined
+    /// frame is retained in the continuation for deep reinstatement.
+    Forward,
     Copy {
         dst: u32,
         src: u32,
@@ -459,7 +463,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 23 adds verifier-checked deep one-shot handler frames.
 /// Older layouts cannot be decoded safely because the operation field now
 /// follows a sequence of canonical VM types.
-pub const STAGE0_VM_SCHEMA: u32 = 23;
+pub const STAGE0_VM_SCHEMA: u32 = 24;
 const MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 const MAX_DECODE_REGISTERS: u64 = 1 << 20;
 const MAX_DECODE_INSTRUCTIONS: u64 = 1 << 22;
@@ -1409,6 +1413,7 @@ impl<'a> Decoder<'a> {
             }
             45 => Ok(VmInstruction::UninstallHandler),
             46 => Ok(VmInstruction::Resume { value: self.u32()? }),
+            47 => Ok(VmInstruction::Forward),
             3 => self.i64_arithmetic(|dst, left, right| VmInstruction::AddI64 { dst, left, right }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
@@ -2054,6 +2059,7 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
         },
         MirInstruction::UninstallHandler => VmInstruction::UninstallHandler,
         MirInstruction::Resume { value } => VmInstruction::Resume { value: value.0 },
+        MirInstruction::Forward => VmInstruction::Forward,
         MirInstruction::Copy { dst, src } => VmInstruction::Copy {
             dst: dst.0,
             src: src.0,
@@ -2368,10 +2374,19 @@ struct VerifierContinuation {
     target: u32,
     dst: u32,
     registers: Vec<Option<bool>>,
+    performed: VerifierPerformed,
     /// Frames crossed while looking for the selected outer handler. They are
     /// absent while its clause runs and are restored when the continuation
     /// resumes, which is the operational form of deep forwarding.
     above: Vec<VerifierHandlerFrame>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifierPerformed {
+    effect: DefKey,
+    effect_arguments: Vec<VmType>,
+    operation: u32,
+    arguments: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2748,6 +2763,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         target: (pc + 1) as u32,
                         dst: *dst,
                         registers: saved,
+                        performed: VerifierPerformed {
+                            effect: *effect,
+                            effect_arguments: effect_arguments.clone(),
+                            operation: *operation,
+                            arguments: arguments.clone(),
+                        },
                         above,
                     }];
                     propagate_state(&mut incoming, &mut worklist, frame.target, &states)?;
@@ -2824,6 +2845,59 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                }
+                advances = false;
+            }
+            VmInstruction::Forward => {
+                let Some(mut declined) = states.handlers.pop() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if declined.continuations.is_empty() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let continuations = std::mem::take(&mut declined.continuations);
+                for continuation in continuations {
+                    let Some(index) = states.handlers.iter().rposition(|frame| {
+                        frame.continuations.is_empty()
+                            && frame.effect == continuation.performed.effect
+                            && frame.effect_arguments == continuation.performed.effect_arguments
+                            && frame.operation == continuation.performed.operation
+                    }) else {
+                        return Err(VmArtifactError::UnhandledEffect {
+                            effect: continuation.performed.effect,
+                            effect_arguments: continuation.performed.effect_arguments,
+                            operation: continuation.performed.operation,
+                        });
+                    };
+                    let mut forwarded = states.clone();
+                    let mut crossed = forwarded.handlers.split_off(index + 1);
+                    let outer = forwarded.handlers[index].clone();
+                    if outer.payload_destinations.len() != continuation.performed.arguments.len() {
+                        return Err(VmArtifactError::CallArity {
+                            expected: outer.payload_destinations.len() as u32,
+                            found: continuation.performed.arguments.len() as u32,
+                        });
+                    }
+                    forwarded.registers = continuation.registers.clone();
+                    for (destination, argument) in outer
+                        .payload_destinations
+                        .iter()
+                        .zip(&continuation.performed.arguments)
+                    {
+                        same_type(function, *destination, *argument)?;
+                        write(&mut forwarded, *destination)?;
+                    }
+                    let declined_active = declined.clone();
+                    crossed.push(declined_active);
+                    crossed.extend(continuation.above.clone());
+                    forwarded.handlers[index].continuations = vec![VerifierContinuation {
+                        target: continuation.target,
+                        dst: continuation.dst,
+                        registers: continuation.registers,
+                        performed: continuation.performed,
+                        above: crossed,
+                    }];
+                    propagate_state(&mut incoming, &mut worklist, outer.target, &forwarded)?;
                 }
                 advances = false;
             }
@@ -3202,7 +3276,17 @@ struct RuntimeHandlerFrame {
 struct RuntimeContinuation {
     target: usize,
     dst: u32,
+    registers: Vec<Option<VmValue>>,
+    performed: RuntimePerformed,
     above: Vec<RuntimeHandlerFrame>,
+}
+
+#[derive(Clone)]
+struct RuntimePerformed {
+    effect: DefKey,
+    effect_arguments: Vec<VmType>,
+    operation: u32,
+    payloads: Vec<VmValue>,
 }
 
 impl VmValue {
@@ -3761,12 +3845,24 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                         found: values.len() as u32,
                     });
                 }
-                for (destination, value) in frame.payload_destinations.iter().zip(values) {
+                let saved = registers.clone();
+                for (destination, value) in frame
+                    .payload_destinations
+                    .iter()
+                    .zip(values.iter().cloned())
+                {
                     registers[*destination as usize] = Some(value);
                 }
                 frame.suspended = Some(RuntimeContinuation {
                     target: pc + 1,
                     dst,
+                    registers: saved,
+                    performed: RuntimePerformed {
+                        effect,
+                        effect_arguments,
+                        operation,
+                        payloads: values,
+                    },
                     above,
                 });
                 pc = frame.target as usize;
@@ -3805,9 +3901,57 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
                 pc = continuation.target;
+                continue;
+            }
+            VmInstruction::Forward => {
+                let Some(mut declined) = handlers.pop() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let Some(continuation) = declined.suspended.take() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let Some(index) = handlers.iter().rposition(|frame| {
+                    frame.suspended.is_none()
+                        && frame.effect == continuation.performed.effect
+                        && frame.effect_arguments == continuation.performed.effect_arguments
+                        && frame.operation == continuation.performed.operation
+                }) else {
+                    return Err(VmArtifactError::UnhandledEffect {
+                        effect: continuation.performed.effect,
+                        effect_arguments: continuation.performed.effect_arguments,
+                        operation: continuation.performed.operation,
+                    });
+                };
+                let mut crossed = handlers.split_off(index + 1);
+                crossed.push(declined);
+                crossed.extend(continuation.above.clone());
+                let frame = &mut handlers[index];
+                if frame.payload_destinations.len() != continuation.performed.payloads.len() {
+                    return Err(VmArtifactError::CallArity {
+                        expected: frame.payload_destinations.len() as u32,
+                        found: continuation.performed.payloads.len() as u32,
+                    });
+                }
+                registers = continuation.registers.clone();
+                for (destination, payload) in frame
+                    .payload_destinations
+                    .iter()
+                    .zip(continuation.performed.payloads.iter().cloned())
+                {
+                    registers[*destination as usize] = Some(payload);
+                }
+                frame.suspended = Some(RuntimeContinuation {
+                    target: continuation.target,
+                    dst: continuation.dst,
+                    registers: continuation.registers,
+                    performed: continuation.performed,
+                    above: crossed,
+                });
+                pc = frame.target as usize;
                 continue;
             }
             VmInstruction::Copy { dst, src } => {
@@ -4308,6 +4452,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(46);
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::Forward => output.push(47),
         VmInstruction::MakeEnum {
             dst,
             definition,
@@ -4793,12 +4938,24 @@ fn execute_with_arguments(
                         found: values.len() as u32,
                     });
                 }
-                for (destination, value) in frame.payload_destinations.iter().zip(values) {
+                let saved = registers.clone();
+                for (destination, value) in frame
+                    .payload_destinations
+                    .iter()
+                    .zip(values.iter().cloned())
+                {
                     registers[*destination as usize] = Some(value);
                 }
                 frame.suspended = Some(RuntimeContinuation {
                     target: pc + 1,
                     dst: *dst,
+                    registers: saved,
+                    performed: RuntimePerformed {
+                        effect: *effect,
+                        effect_arguments: effect_arguments.clone(),
+                        operation: *operation,
+                        payloads: values,
+                    },
                     above,
                 });
                 pc = frame.target as usize;
@@ -4837,9 +4994,57 @@ fn execute_with_arguments(
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
                 pc = continuation.target;
+                continue;
+            }
+            VmInstruction::Forward => {
+                let Some(mut declined) = handlers.pop() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let Some(continuation) = declined.suspended.take() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let Some(index) = handlers.iter().rposition(|frame| {
+                    frame.suspended.is_none()
+                        && frame.effect == continuation.performed.effect
+                        && frame.effect_arguments == continuation.performed.effect_arguments
+                        && frame.operation == continuation.performed.operation
+                }) else {
+                    return Err(VmArtifactError::UnhandledEffect {
+                        effect: continuation.performed.effect,
+                        effect_arguments: continuation.performed.effect_arguments,
+                        operation: continuation.performed.operation,
+                    });
+                };
+                let mut crossed = handlers.split_off(index + 1);
+                crossed.push(declined);
+                crossed.extend(continuation.above.clone());
+                let frame = &mut handlers[index];
+                if frame.payload_destinations.len() != continuation.performed.payloads.len() {
+                    return Err(VmArtifactError::CallArity {
+                        expected: frame.payload_destinations.len() as u32,
+                        found: continuation.performed.payloads.len() as u32,
+                    });
+                }
+                registers = continuation.registers.clone();
+                for (destination, payload) in frame
+                    .payload_destinations
+                    .iter()
+                    .zip(continuation.performed.payloads.iter().cloned())
+                {
+                    registers[*destination as usize] = Some(payload);
+                }
+                frame.suspended = Some(RuntimeContinuation {
+                    target: continuation.target,
+                    dst: continuation.dst,
+                    registers: continuation.registers,
+                    performed: continuation.performed,
+                    above: crossed,
+                });
+                pc = frame.target as usize;
                 continue;
             }
             VmInstruction::Copy { dst, src } => {
