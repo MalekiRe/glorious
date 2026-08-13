@@ -1,0 +1,17 @@
+[package]
+name = "grandiose-stage0"
+version = "0.1.0"
+edition = "2024"
+description = "Independent Rust stage-zero compiler for Grandiose"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "grc-stage0"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = "1"
+

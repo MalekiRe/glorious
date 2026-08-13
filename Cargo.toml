@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/grandiose", "crates/grandiose-vm"]
+members = ["crates/grandiose", "crates/grandiose-vm", "crates/grandiose-stage0"]
 resolver = "2"
 
 # Bootstrap and self-host conformance tests execute the Rust compiler and its

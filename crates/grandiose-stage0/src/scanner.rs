@@ -1,0 +1,314 @@
+//! Structural top-level declaration scanning.
+//!
+//! This phase deliberately consumes the lossless token stream and delimiter
+//! map rather than parsing bodies. It establishes the complete declaration
+//! skeleton required by headers, module resolution, interfaces, and IDE
+//! outlines while preserving one-body-at-a-time parsing later in the pipeline.
+
+use crate::source::{LexedFile, Span, TokenKind};
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum DeclarationKind {
+    Function,
+    Struct,
+    Enum,
+    Trait,
+    Implementation,
+    Effect,
+    TypeAlias,
+    Constant,
+    Module,
+    Import,
+    Fixity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclarationShell {
+    pub kind: DeclarationKind,
+    pub name: Option<String>,
+    pub visibility_public: bool,
+    pub span: Span,
+    pub header: TokenRange,
+    pub body: Option<TokenRange>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanDiagnostic {
+    pub code: &'static str,
+    pub span: Span,
+    pub message: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclarationScan {
+    pub declarations: Vec<DeclarationShell>,
+    pub diagnostics: Vec<ScanDiagnostic>,
+}
+
+impl DeclarationScan {
+    pub fn scan(lexed: &LexedFile, source: &str) -> Self {
+        Self::scan_range(
+            lexed,
+            source,
+            TokenRange {
+                start: 0,
+                end: lexed.tokens.len(),
+            },
+        )
+    }
+
+    /// Scan declarations inside an already delimiter-validated token range.
+    /// Inline module bodies use this entry point; their shells retain original
+    /// file token indices and spans, so all downstream identity and source-map
+    /// products remain anchored in the immutable parent source blob.
+    pub fn scan_range(lexed: &LexedFile, source: &str, range: TokenRange) -> Self {
+        let start = range.start.min(lexed.tokens.len());
+        let end = range.end.min(lexed.tokens.len()).max(start);
+        let significant = lexed
+            .tokens
+            .get(start..end)
+            .expect("clamped token range is valid")
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, token)| (!is_trivia(&token.kind)).then_some(start + offset))
+            .collect::<Vec<_>>();
+        let mut scanner = Scanner {
+            lexed,
+            source,
+            significant,
+            position: 0,
+            declarations: vec![],
+            diagnostics: vec![],
+        };
+        while scanner.current().is_some() {
+            scanner.next_declaration();
+        }
+        scanner
+            .diagnostics
+            .sort_by_key(|diagnostic| diagnostic.span.start);
+        Self {
+            declarations: scanner.declarations,
+            diagnostics: scanner.diagnostics,
+        }
+    }
+}
+
+struct Scanner<'a> {
+    lexed: &'a LexedFile,
+    source: &'a str,
+    significant: Vec<usize>,
+    position: usize,
+    declarations: Vec<DeclarationShell>,
+    diagnostics: Vec<ScanDiagnostic>,
+}
+
+impl Scanner<'_> {
+    fn next_declaration(&mut self) {
+        let start_position = self.position;
+        let mut public = false;
+        if self.word_at(self.position) == Some("pub") {
+            public = true;
+            self.position += 1;
+        }
+        let Some(keyword) = self.word_at(self.position) else {
+            self.unexpected(start_position);
+            return;
+        };
+        let Some(kind) = declaration_kind(keyword) else {
+            self.unexpected(start_position);
+            return;
+        };
+        let declaration_position = self.position;
+        self.position += 1;
+        let name = self.name_after(kind);
+        let header_start = self.significant[start_position];
+        let (header_end, body, next_position) = self.find_boundary(kind, declaration_position);
+        let span = Span {
+            file: self.lexed.file,
+            start: self.lexed.tokens[header_start].span.start,
+            end: self.lexed.tokens[header_end.saturating_sub(1)].span.end,
+        };
+        self.declarations.push(DeclarationShell {
+            kind,
+            name,
+            visibility_public: public,
+            span,
+            header: TokenRange {
+                start: header_start,
+                end: body.map_or(header_end, |body| body.start),
+            },
+            body,
+        });
+        self.position = next_position;
+    }
+
+    fn name_after(&self, kind: DeclarationKind) -> Option<String> {
+        if matches!(
+            kind,
+            DeclarationKind::Implementation | DeclarationKind::Import
+        ) {
+            return None;
+        }
+        // A fixity shell is `infixl|infixr|infix|prefix PRECEDENCE OPERATOR;`.
+        // Its semantic name is the operator, rather than the form keyword or
+        // precedence literal.  Keeping it on the shell gives interfaces the
+        // same stable ownership/name treatment as every other declaration.
+        if kind == DeclarationKind::Fixity {
+            let index = self.significant.get(self.position + 1).copied()?;
+            let token = &self.lexed.tokens[index];
+            return matches!(token.kind, TokenKind::Identifier | TokenKind::Operator)
+                .then(|| self.lexed.text(self.source, token).to_owned());
+        }
+        self.current().and_then(|index| {
+            let token = &self.lexed.tokens[index];
+            (token.kind == TokenKind::Identifier)
+                .then(|| self.lexed.text(self.source, token).to_owned())
+        })
+    }
+
+    fn find_boundary(
+        &mut self,
+        kind: DeclarationKind,
+        declaration_position: usize,
+    ) -> (usize, Option<TokenRange>, usize) {
+        let mut cursor = self.position;
+        let mut initializer_start = None;
+        while let Some(token_index) = self.significant.get(cursor).copied() {
+            let token = &self.lexed.tokens[token_index];
+            match token.kind {
+                TokenKind::Operator
+                    if kind == DeclarationKind::Constant
+                        && self.lexed.text(self.source, token) == "=" =>
+                {
+                    cursor += 1;
+                    initializer_start = self.significant.get(cursor).copied();
+                }
+                // An import tree may contain `{...}` selectors.  Those braces
+                // are part of the header, never a declaration body.
+                TokenKind::Punctuation('{') if kind == DeclarationKind::Import => cursor += 1,
+                // A braced callable effect row is part of a function header,
+                // not its body.  The scanner need not understand effect-row
+                // members: a preceding `/` is the unambiguous structural
+                // delimiter, and the lossless delimiter map skips the row.
+                TokenKind::Punctuation('{')
+                    if kind == DeclarationKind::Function
+                        && self.significant.get(cursor.saturating_sub(1)).is_some_and(
+                            |previous| {
+                                self.lexed.tokens[*previous].kind == TokenKind::Operator
+                                    && self.lexed.text(self.source, &self.lexed.tokens[*previous])
+                                        == "/"
+                            },
+                        ) =>
+                {
+                    let Some(close) = self.lexed.delimiters.matching(token_index) else {
+                        self.diagnostics.push(ScanDiagnostic {
+                            code: "G2001",
+                            span: token.span,
+                            message: "effect row has an unclosed delimiter",
+                        });
+                        return (token_index + 1, None, cursor + 1);
+                    };
+                    cursor = self
+                        .significant
+                        .binary_search(&close)
+                        .expect("matched delimiter is significant")
+                        + 1;
+                }
+                TokenKind::Punctuation('{') => match self.lexed.delimiters.matching(token_index) {
+                    Some(close) => {
+                        let close_position = self
+                            .significant
+                            .binary_search(&close)
+                            .expect("matched delimiter is significant");
+                        let body = TokenRange {
+                            start: token_index,
+                            end: close + 1,
+                        };
+                        return (close + 1, Some(body), close_position + 1);
+                    }
+                    None => {
+                        self.diagnostics.push(ScanDiagnostic {
+                            code: "G2001",
+                            span: token.span,
+                            message: "declaration body has an unclosed delimiter",
+                        });
+                        return (token_index + 1, None, cursor + 1);
+                    }
+                },
+                TokenKind::Punctuation(';') => {
+                    let body = initializer_start.map(|start| TokenRange {
+                        start,
+                        end: token_index,
+                    });
+                    return (token_index + 1, body, cursor + 1);
+                }
+                TokenKind::End => {
+                    self.diagnostics.push(ScanDiagnostic {
+                        code: "G2002",
+                        span: self.lexed.tokens[self.significant[declaration_position]].span,
+                        message: "declaration has no body or terminator",
+                    });
+                    return (token_index, None, cursor);
+                }
+                _ => cursor += 1,
+            }
+        }
+        let last = self.lexed.tokens.len().saturating_sub(1);
+        (last, None, self.significant.len())
+    }
+
+    fn unexpected(&mut self, position: usize) {
+        let Some(index) = self.significant.get(position).copied() else {
+            return;
+        };
+        self.diagnostics.push(ScanDiagnostic {
+            code: "G2003",
+            span: self.lexed.tokens[index].span,
+            message: "expected a top-level declaration",
+        });
+        self.position = position + 1;
+    }
+
+    fn current(&self) -> Option<usize> {
+        self.significant
+            .get(self.position)
+            .copied()
+            .filter(|index| self.lexed.tokens[*index].kind != TokenKind::End)
+    }
+
+    fn word_at(&self, position: usize) -> Option<&str> {
+        let index = self.significant.get(position).copied()?;
+        let token = &self.lexed.tokens[index];
+        (token.kind == TokenKind::Identifier).then(|| self.lexed.text(self.source, token))
+    }
+}
+
+fn declaration_kind(keyword: &str) -> Option<DeclarationKind> {
+    Some(match keyword {
+        "fn" => DeclarationKind::Function,
+        "struct" => DeclarationKind::Struct,
+        "enum" => DeclarationKind::Enum,
+        "trait" => DeclarationKind::Trait,
+        "impl" => DeclarationKind::Implementation,
+        "effect" => DeclarationKind::Effect,
+        "type" => DeclarationKind::TypeAlias,
+        "const" => DeclarationKind::Constant,
+        "mod" => DeclarationKind::Module,
+        "use" => DeclarationKind::Import,
+        "infixl" | "infixr" | "infix" | "prefix" => DeclarationKind::Fixity,
+        _ => return None,
+    })
+}
+
+fn is_trivia(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment
+    )
+}

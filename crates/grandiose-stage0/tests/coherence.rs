@@ -1,0 +1,56 @@
+use grandiose_stage0::{
+    CoherenceSet, DeclarationScan, DefinitionIndex, FileKey, InterfaceSet, LexedFile, PackageKey,
+};
+
+fn collect(source: &str) -> CoherenceSet {
+    let package = PackageKey("coherence@0.1.0".into());
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{:#?}", scan.diagnostics);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let index = DefinitionIndex::from_interface(&interface);
+    CoherenceSet::collect([&interface], &index)
+}
+
+#[test]
+fn coherence_rejects_unifiable_positive_and_negative_heads() {
+    let positive = collect(
+        "trait Marker<T> {} struct Box<T> {} impl<T> Marker<T> for Box<T> {} impl Marker<i64> for Box<i64> {}",
+    );
+    assert!(
+        positive
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "{positive:#?}"
+    );
+
+    let mixed = collect(
+        "trait Marker<T> {} struct Box<T> {} impl<T> Marker<T> for Box<T> {} impl !Marker<i64> for Box<i64> {}",
+    );
+    assert!(
+        mixed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3406"),
+        "{mixed:#?}"
+    );
+}
+
+#[test]
+fn coherence_accepts_disjoint_heads_and_rejects_unconstrained_negative_generics() {
+    let disjoint = collect(
+        "trait Marker {} struct Left {} struct Right {} impl Marker for Left {} impl Marker for Right {}",
+    );
+    assert!(disjoint.diagnostics.is_empty(), "{disjoint:#?}");
+
+    let unconstrained = collect("trait Marker {} struct Left {} impl<T> !Marker for Left {}");
+    assert!(
+        unconstrained
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3407"),
+        "{unconstrained:#?}"
+    );
+}
