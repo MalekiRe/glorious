@@ -139,6 +139,21 @@ pub enum MirInstruction {
         operation: u32,
         arguments: Vec<MirLocal>,
     },
+    /// Install a lexical one-shot handler frame. The VM stores the protected
+    /// continuation at a matching `Perform` and transfers to `target`; a
+    /// `Resume` re-enters that continuation with deep reinstatement.
+    InstallHandler {
+        effect: DefKey,
+        effect_arguments: Vec<Type>,
+        operation: u32,
+        payload_destinations: Vec<MirLocal>,
+        resume_type: Type,
+        target: MirBlockId,
+    },
+    UninstallHandler,
+    Resume {
+        value: MirLocal,
+    },
     Copy {
         dst: MirLocal,
         src: MirLocal,
@@ -622,6 +637,9 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Call { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. } => Some(*dst),
+        MirInstruction::InstallHandler { .. }
+        | MirInstruction::UninstallHandler
+        | MirInstruction::Resume { .. } => None,
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -732,6 +750,32 @@ impl MirLowering {
             };
         }
         if let Some(function) = lowerer.lower_root_let_resumption(body.root, parameters.clone()) {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = function.validate() {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
+            lowerer.lower_root_runtime_one_shot_handler(body.root, parameters.clone())
+        {
             if lowerer.diagnostics.is_empty() {
                 if let Err(message) = function.validate() {
                     return Self {
@@ -964,6 +1008,24 @@ impl MirFunction {
             }
             return validate_pattern(pattern, self.local_type(*subject)?);
         }
+        if let MirInstruction::InstallHandler {
+            payload_destinations,
+            target,
+            ..
+        } = instruction
+        {
+            if target.0 as usize >= self.blocks.len() {
+                return Err("MIR handler target block is absent".into());
+            }
+            let mut destinations = BTreeSet::new();
+            for destination in payload_destinations {
+                self.local_type(*destination)?;
+                if !destinations.insert(*destination) {
+                    return Err("MIR handler repeats a payload destination".into());
+                }
+            }
+            return Ok(());
+        }
         if let MirInstruction::ProjectTuple {
             dst,
             base,
@@ -1112,6 +1174,12 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::Perform { dst, arguments, .. } => std::iter::once(*dst)
             .chain(arguments.iter().copied())
             .collect(),
+        MirInstruction::InstallHandler {
+            payload_destinations,
+            ..
+        } => payload_destinations.clone(),
+        MirInstruction::UninstallHandler => Vec::new(),
+        MirInstruction::Resume { value } => vec![*value],
         MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
@@ -1765,6 +1833,106 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+    /// Lower the smallest source form that requires the VM's real handler
+    /// frame: one direct resumptive operation, one irrefutable exact-one-shot
+    /// arm, and an explicit continuation call. Other shapes remain on the
+    /// proven static specializers until their pattern, forwarding, and
+    /// multi-shot frame contracts are represented in MIR.
+    fn lower_root_runtime_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(root).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit { quantity, .. } = clause.resumption else {
+            return None;
+        };
+        if quantity != crate::quantity::Quantity::ONCE
+            || clause.patterns.len() != argument_ids.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let payload_destinations = argument_ids
+            .iter()
+            .map(|argument| self.alloc(self.body.expression(*argument).ty.clone(), *argument))
+            .collect::<Vec<_>>();
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payload_destinations.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            target: MirBlockId(1),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: result,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        self.instructions = Vec::new();
+        let previous_named = self.named.clone();
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let resumed = self.direct_handler_clause_value(clause)?;
+        self.instructions
+            .push(MirInstruction::Resume { value: resumed });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.named = previous_named;
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
     /// Lower a normal-completion handler into an ordered structural decision

@@ -710,6 +710,14 @@ fn service_tail_resumption_enters_the_same_nonempty_continuation() {
 }
 
 #[test]
+fn service_lowers_a_direct_one_shot_handler_through_vm_handler_frames() {
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(41) { Ask::ask(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_a_direct_one_resume_lowering_for_an_exact_two_shot_contract() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

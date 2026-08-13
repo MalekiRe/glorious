@@ -839,7 +839,12 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
     }
     let mut instructions = Vec::with_capacity(next as usize);
     for block in &function.blocks {
-        instructions.extend(block.instructions.iter().map(lower_instruction));
+        instructions.extend(
+            block
+                .instructions
+                .iter()
+                .map(|instruction| lower_instruction(instruction, &starts)),
+        );
         match &block.terminator {
             MirTerminator::Return { value } => {
                 instructions.push(VmInstruction::Return { value: value.0 });
@@ -1879,7 +1884,7 @@ fn return_type(function: &VmFunction) -> Result<VmType, VmArtifactError> {
     result.ok_or(VmArtifactError::NoReturn)
 }
 
-fn lower_instruction(value: &MirInstruction) -> VmInstruction {
+fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
     match value {
         MirInstruction::ConstUnit { dst } => VmInstruction::ConstUnit { dst: dst.0 },
         MirInstruction::ConstI64 { dst, value } => VmInstruction::ConstI64 {
@@ -2021,6 +2026,34 @@ fn lower_instruction(value: &MirInstruction) -> VmInstruction {
             operation: *operation,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
+        MirInstruction::InstallHandler {
+            effect,
+            effect_arguments,
+            operation,
+            payload_destinations,
+            resume_type,
+            target,
+        } => VmInstruction::InstallHandler {
+            effect: *effect,
+            effect_arguments: effect_arguments
+                .iter()
+                .map(|argument| {
+                    vm_type(argument).expect("validated MIR has VM-representable effect arguments")
+                })
+                .collect(),
+            operation: *operation,
+            payload_destinations: payload_destinations
+                .iter()
+                .map(|destination| destination.0)
+                .collect(),
+            resume_type: vm_type(resume_type)
+                .expect("validated MIR has VM-representable handler result type"),
+            target: *starts
+                .get(target.0 as usize)
+                .expect("validated MIR handler target exists"),
+        },
+        MirInstruction::UninstallHandler => VmInstruction::UninstallHandler,
+        MirInstruction::Resume { value } => VmInstruction::Resume { value: value.0 },
         MirInstruction::Copy { dst, src } => VmInstruction::Copy {
             dst: dst.0,
             src: src.0,
