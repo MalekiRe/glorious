@@ -749,6 +749,32 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) =
+            lowerer.lower_root_runtime_one_shot_resumption(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = function.validate() {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer.lower_root_let_resumption(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 if let Err(message) = function.validate() {
@@ -1610,6 +1636,154 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+    /// Lower one nonempty, exact-one-shot continuation through the VM handler
+    /// frame representation. The continuation begins immediately after the
+    /// suspended `Perform`, so its `UninstallHandler` executes only after a
+    /// resume restores the captured result local.
+    fn lower_root_runtime_one_shot_resumption(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(root).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Block(computation_values) = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let first_perform = computation_values.iter().position(|candidate| {
+            matches!(
+                self.body.expression(*candidate).kind,
+                CoreKind::Let {
+                    value,
+                    ..
+                } if matches!(
+                    self.body.expression(value).kind,
+                    CoreKind::Perform { terminal: false, .. }
+                )
+            )
+        })?;
+        let (prefix, operation_and_residual) = computation_values.split_at(first_perform);
+        let (binding, residual) = operation_and_residual.split_first()?;
+        let CoreKind::Let { name, value } = self.body.expression(*binding).kind.clone() else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(value).kind.clone()
+        else {
+            return None;
+        };
+        if residual.is_empty() {
+            return None;
+        }
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit { quantity, .. } = clause.resumption else {
+            return None;
+        };
+        if quantity != crate::quantity::Quantity::ONCE
+            || clause.patterns.len() != argument_ids.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        for expression in prefix {
+            self.statement(*expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let payload_destinations = argument_ids
+            .iter()
+            .map(|argument| self.alloc(self.body.expression(*argument).ty.clone(), *argument))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(value).ty.clone(), value);
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payload_destinations.clone(),
+            resume_type: self.body.expression(value).ty.clone(),
+            target: MirBlockId(2),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        let continuation_named = self.named.clone();
+        self.named.insert(name, performed);
+        self.instructions = Vec::new();
+        let (last, continuation_prefix) = residual.split_last()?;
+        for expression in continuation_prefix {
+            self.statement(*expression)?;
+        }
+        let continuation_result = self.value(*last)?;
+        let continuation_instructions = std::mem::take(&mut self.instructions);
+        self.named = continuation_named;
+
+        self.instructions = Vec::new();
+        let handler_named = self.named.clone();
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let resumed = self.direct_handler_clause_value(clause)?;
+        self.instructions
+            .push(MirInstruction::Resume { value: resumed });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.named = handler_named;
+
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: continuation_instructions,
+                    terminator: MirTerminator::Return {
+                        value: continuation_result,
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
     /// A first non-empty delimited continuation: an operation result is bound
