@@ -216,6 +216,111 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
 }
 
 #[test]
+fn verified_vm_executes_a_deep_one_shot_handler_frame() {
+    let effect = DefKey(Digest::of_bytes(b"Ask"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"handler-frame")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 5],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 41 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![1],
+                    resume_type: VmType::I64,
+                    target: 5,
+                },
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![0],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 2 },
+                VmInstruction::ConstI64 { dst: 3, value: 1 },
+                VmInstruction::AddI64 {
+                    dst: 4,
+                    left: 1,
+                    right: 3,
+                },
+                VmInstruction::Resume { value: 4 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"handler-frame-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn resumed_handler_frame_reinstalls_for_the_next_matching_operation() {
+    let effect = DefKey(Digest::of_bytes(b"Ask-deep"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"deep-handler-frame")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 8],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 10 },
+                VmInstruction::ConstI64 { dst: 1, value: 20 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![2],
+                    resume_type: VmType::I64,
+                    target: 8,
+                },
+                VmInstruction::Perform {
+                    dst: 3,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![0],
+                },
+                VmInstruction::Perform {
+                    dst: 4,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![1],
+                },
+                VmInstruction::AddI64 {
+                    dst: 5,
+                    left: 3,
+                    right: 4,
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 5 },
+                VmInstruction::ConstI64 { dst: 6, value: 1 },
+                VmInstruction::AddI64 {
+                    dst: 7,
+                    left: 2,
+                    right: 6,
+                },
+                VmInstruction::Resume { value: 7 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"deep-handler-frame-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 32);
+}
+
+#[test]
 fn verifier_allows_checked_store_reinitialization_but_rejects_type_confusion() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

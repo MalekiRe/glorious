@@ -5,7 +5,12 @@
 //! retained as instructions and types grow toward the repository `.grbc`
 //! contract: execution receives only `VerifiedVmArtifact`.
 
-use std::{borrow::Borrow, collections::BTreeMap, sync::Arc};
+use std::{
+    borrow::Borrow,
+    collections::{BTreeMap, BTreeSet},
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
 use crate::{
     identity::{DefKey, Digest},
@@ -151,6 +156,26 @@ pub enum VmInstruction {
         effect_arguments: Vec<VmType>,
         operation: u32,
         arguments: Vec<u32>,
+    },
+    /// Install one lexical, one-shot handler frame. The frame is active while
+    /// its protected continuation executes; an intercepted operation transfers
+    /// to `target`, writes its payload into `payload_destinations`, and makes a
+    /// single continuation available to `Resume`.
+    InstallHandler {
+        effect: DefKey,
+        effect_arguments: Vec<VmType>,
+        operation: u32,
+        payload_destinations: Vec<u32>,
+        resume_type: VmType,
+        target: u32,
+    },
+    /// Leave the current lexical handler after its protected computation has
+    /// completed. A suspended handler cannot be removed.
+    UninstallHandler,
+    /// Consume the innermost suspended continuation and continue its protected
+    /// computation. The handler is thereby reactivated (deep semantics).
+    Resume {
+        value: u32,
     },
     Copy {
         dst: u32,
@@ -393,6 +418,10 @@ pub enum VmArtifactError {
         effect_arguments: Vec<VmType>,
         operation: u32,
     },
+    HandlerStackUnderflow,
+    HandlerResumeUnavailable,
+    HandlerStateMismatch,
+    HandlerStillActive,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmExecutionLimits {
@@ -427,10 +456,10 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 22 preserves nominal effect-instance arguments in `Perform`.
+/// Schema 23 adds verifier-checked deep one-shot handler frames.
 /// Older layouts cannot be decoded safely because the operation field now
 /// follows a sequence of canonical VM types.
-pub const STAGE0_VM_SCHEMA: u32 = 22;
+pub const STAGE0_VM_SCHEMA: u32 = 23;
 const MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 const MAX_DECODE_REGISTERS: u64 = 1 << 20;
 const MAX_DECODE_INSTRUCTIONS: u64 = 1 << 22;
@@ -1037,7 +1066,7 @@ fn encode_optional_digest(value: Option<Digest>, output: &mut Vec<u8>) {
     }
 }
 fn artifact_fingerprint(runtime_manifest: Option<Digest>, function: &VmFunction) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-v19".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-v20".to_vec();
     encode_optional_digest(runtime_manifest, &mut bytes);
     encode_function(function, &mut bytes);
     Digest::of_bytes(&bytes)
@@ -1047,7 +1076,7 @@ fn program_fingerprint(
     runtime_manifest: Option<Digest>,
     functions: &BTreeMap<DefKey, VmFunction>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-program-v19".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-program-v20".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
     encode_optional_digest(runtime_manifest, &mut bytes);
     for function in functions.values() {
@@ -1349,6 +1378,32 @@ impl<'a> Decoder<'a> {
                 field_type: self.vm_type()?,
             }),
             43 => Ok(VmInstruction::Trap),
+            44 => {
+                let effect = self.def_key()?;
+                let effect_argument_count =
+                    self.count("handler protocol arguments", MAX_DECODE_TYPE_DEPTH)?;
+                let mut effect_arguments = Vec::with_capacity(effect_argument_count);
+                for _ in 0..effect_argument_count {
+                    effect_arguments.push(self.vm_type()?);
+                }
+                let operation = self.u32()?;
+                let payload_count =
+                    self.count("handler payload destinations", MAX_DECODE_REGISTERS)?;
+                let mut payload_destinations = Vec::with_capacity(payload_count);
+                for _ in 0..payload_count {
+                    payload_destinations.push(self.u32()?);
+                }
+                Ok(VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments,
+                    operation,
+                    payload_destinations,
+                    resume_type: self.vm_type()?,
+                    target: self.u32()?,
+                })
+            }
+            45 => Ok(VmInstruction::UninstallHandler),
+            46 => Ok(VmInstruction::Resume { value: self.u32()? }),
             3 => self.i64_arithmetic(|dst, left, right| VmInstruction::AddI64 { dst, left, right }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
@@ -2262,6 +2317,46 @@ fn literal_vm_type(value: &str) -> VmType {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifierHandlerFrame {
+    effect: DefKey,
+    effect_arguments: Vec<VmType>,
+    operation: u32,
+    payload_destinations: Vec<u32>,
+    resume_type: VmType,
+    target: u32,
+    /// A verifier join can represent several concrete one-shot suspensions
+    /// reaching one shared handler body. Runtime execution has exactly one.
+    continuations: Vec<VerifierContinuation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifierContinuation {
+    target: u32,
+    dst: u32,
+    registers: Vec<Option<bool>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifierState {
+    registers: Vec<Option<bool>>,
+    handlers: Vec<VerifierHandlerFrame>,
+}
+
+impl Deref for VerifierState {
+    type Target = [Option<bool>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.registers
+    }
+}
+
+impl DerefMut for VerifierState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.registers
+    }
+}
+
 fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     let mut initial = vec![None; function.registers.len()];
     if function.captures > function.parameters {
@@ -2280,7 +2375,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     }
     let mut incoming = vec![None; function.instructions.len()];
     if let Some(entry) = incoming.first_mut() {
-        *entry = Some(initial);
+        *entry = Some(VerifierState {
+            registers: initial,
+            handlers: Vec::new(),
+        });
     }
     let mut worklist = if function.instructions.is_empty() {
         vec![]
@@ -2572,15 +2670,122 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 verify_pattern(pattern, &register_type(function, *subject)?)?;
                 write(&mut states, *dst)?
             }
-            VmInstruction::Perform { dst, arguments, .. } => {
+            VmInstruction::Perform {
+                dst,
+                effect,
+                effect_arguments,
+                operation,
+                arguments,
+            } => {
                 for argument in arguments {
                     read(&states, *argument)?;
                 }
-                // The verifier validates register initialization and keeps
-                // the result type declared by the compiler. Protocol
-                // signature checking and handler evidence are source-level
-                // facts, deliberately not duplicated by the artifact layer.
-                write(&mut states, *dst)?
+                if let Some(index) = states.handlers.iter().rposition(|frame| {
+                    frame.continuations.is_empty()
+                        && frame.effect == *effect
+                        && frame.effect_arguments == *effect_arguments
+                        && frame.operation == *operation
+                }) {
+                    let frame = states.handlers[index].clone();
+                    if frame.payload_destinations.len() != arguments.len() {
+                        return Err(VmArtifactError::CallArity {
+                            expected: frame.payload_destinations.len() as u32,
+                            found: arguments.len() as u32,
+                        });
+                    }
+                    if register_type(function, *dst)? != frame.resume_type {
+                        return Err(VmArtifactError::TypeMismatch {
+                            register: *dst,
+                            expected: frame.resume_type,
+                            found: register_type(function, *dst)?,
+                        });
+                    }
+                    let saved = states.registers.clone();
+                    for (destination, argument) in frame.payload_destinations.iter().zip(arguments)
+                    {
+                        same_type(function, *destination, *argument)?;
+                        write(&mut states, *destination)?;
+                    }
+                    states.handlers[index].continuations = vec![VerifierContinuation {
+                        target: (pc + 1) as u32,
+                        dst: *dst,
+                        registers: saved,
+                    }];
+                    propagate_state(&mut incoming, &mut worklist, frame.target, &states)?;
+                    advances = false;
+                } else {
+                    // The verifier validates register initialization and keeps
+                    // the result type declared by the compiler. Protocol
+                    // signature checking and handler evidence are source-level
+                    // facts, deliberately not duplicated by the artifact layer.
+                    write(&mut states, *dst)?;
+                }
+            }
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                resume_type,
+                target,
+            } => {
+                if function.instructions.get(*target as usize).is_none() {
+                    return Err(VmArtifactError::InvalidInstructionTarget { target: *target });
+                }
+                let mut destinations = BTreeSet::new();
+                for destination in payload_destinations {
+                    register_type(function, *destination)?;
+                    if !destinations.insert(*destination) {
+                        return Err(VmArtifactError::InvalidRegister {
+                            register: *destination,
+                        });
+                    }
+                }
+                states.handlers.push(VerifierHandlerFrame {
+                    effect: *effect,
+                    effect_arguments: effect_arguments.clone(),
+                    operation: *operation,
+                    payload_destinations: payload_destinations.clone(),
+                    resume_type: resume_type.clone(),
+                    target: *target,
+                    continuations: Vec::new(),
+                });
+            }
+            VmInstruction::UninstallHandler => {
+                let Some(frame) = states.handlers.pop() else {
+                    return Err(VmArtifactError::HandlerStackUnderflow);
+                };
+                if !frame.continuations.is_empty() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+            }
+            VmInstruction::Resume { value } => {
+                read(&states, *value)?;
+                let Some(frame) = states.handlers.last_mut() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.continuations.is_empty() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let found = register_type(function, *value)?;
+                if found != frame.resume_type {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *value,
+                        expected: frame.resume_type.clone(),
+                        found,
+                    });
+                }
+                let continuations = std::mem::take(&mut frame.continuations);
+                let resumed_handlers = states.handlers.clone();
+                for continuation in continuations {
+                    let mut resumed = VerifierState {
+                        registers: continuation.registers,
+                        handlers: resumed_handlers.clone(),
+                    };
+                    write(&mut resumed, continuation.dst)?;
+                    propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                }
+                advances = false;
             }
             VmInstruction::Copy { dst, src } => {
                 read(&states, *src)?;
@@ -2756,6 +2961,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::Return { value } => {
                 read(&states, *value)?;
+                if !states.handlers.is_empty() {
+                    return Err(VmArtifactError::HandlerStillActive);
+                }
                 let found = register_type(function, *value)?;
                 if let Some(expected) = &returned {
                     if *expected != found {
@@ -2782,21 +2990,23 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     }
 }
 fn propagate_state(
-    incoming: &mut [Option<Vec<Option<bool>>>],
+    incoming: &mut [Option<VerifierState>],
     worklist: &mut Vec<usize>,
     target: u32,
-    state: &[Option<bool>],
+    state: &VerifierState,
 ) -> Result<(), VmArtifactError> {
     let Some(slot) = incoming.get_mut(target as usize) else {
         return Err(VmArtifactError::InvalidInstructionTarget { target });
     };
     match slot {
         None => {
-            *slot = Some(state.to_vec());
+            *slot = Some(state.clone());
             worklist.push(target as usize);
             Ok(())
         }
         Some(existing) => {
+            let handler_changed = merge_handler_states(&mut existing.handlers, &state.handlers)
+                .ok_or(VmArtifactError::HandlerStateMismatch)?;
             // This is a forward must-analysis: a register is readable at a
             // join only when every predecessor has initialized it and none
             // has moved it.  Requiring identical complete register files
@@ -2804,21 +3014,56 @@ fn propagate_state(
             // temporaries.  Joining their facts also lets a later use of a
             // path-local value produce the ordinary read-before-write error.
             let joined = existing
+                .registers
                 .iter()
-                .zip(state)
+                .zip(&state.registers)
                 .map(|(left, right)| match (left, right) {
                     (Some(true), Some(true)) => Some(true),
                     (Some(false), Some(false)) => Some(false),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            if *existing != joined {
-                *existing = joined;
+            if existing.registers != joined || handler_changed {
+                existing.registers = joined;
                 worklist.push(target as usize);
             }
             Ok(())
         }
     }
+}
+fn merge_handler_states(
+    existing: &mut [VerifierHandlerFrame],
+    incoming: &[VerifierHandlerFrame],
+) -> Option<bool> {
+    if existing.len() != incoming.len() {
+        return None;
+    }
+    let mut changed = false;
+    for (left, right) in existing.iter_mut().zip(incoming) {
+        if left.effect != right.effect
+            || left.effect_arguments != right.effect_arguments
+            || left.operation != right.operation
+            || left.payload_destinations != right.payload_destinations
+            || left.resume_type != right.resume_type
+            || left.target != right.target
+        {
+            return None;
+        }
+        for continuation in &right.continuations {
+            if !left.continuations.contains(continuation) {
+                left.continuations.push(continuation.clone());
+                changed = true;
+            }
+        }
+        left.continuations.sort_by_key(|continuation| {
+            (
+                continuation.target,
+                continuation.dst,
+                continuation.registers.clone(),
+            )
+        });
+    }
+    Some(changed)
 }
 fn register_type(function: &VmFunction, register: u32) -> Result<VmType, VmArtifactError> {
     function
@@ -2902,6 +3147,23 @@ enum VmValue {
         signature: VmType,
     },
 }
+
+#[derive(Clone)]
+struct RuntimeHandlerFrame {
+    effect: DefKey,
+    effect_arguments: Vec<VmType>,
+    operation: u32,
+    payload_destinations: Vec<u32>,
+    target: u32,
+    suspended: Option<RuntimeContinuation>,
+}
+
+#[derive(Clone)]
+struct RuntimeContinuation {
+    target: usize,
+    dst: u32,
+}
+
 impl VmValue {
     fn ty(&self) -> VmType {
         match self {
@@ -3224,6 +3486,7 @@ fn parse_pattern_text(text: &str) -> Option<String> {
 }
 fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
     let mut registers = vec![None; function.registers.len()];
+    let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc).cloned() {
         match instruction {
@@ -3421,16 +3684,86 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 )));
             }
             VmInstruction::Perform {
+                dst,
                 effect,
                 effect_arguments,
                 operation,
-                ..
+                arguments,
             } => {
-                return Err(VmArtifactError::UnhandledEffect {
-                    effect,
-                    effect_arguments,
-                    operation,
+                let values = arguments
+                    .iter()
+                    .map(|argument| {
+                        registers[*argument as usize].clone().ok_or(
+                            VmArtifactError::ReadBeforeWrite {
+                                register: *argument,
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let Some(frame) = handlers.iter_mut().rev().find(|frame| {
+                    frame.suspended.is_none()
+                        && frame.effect == effect
+                        && frame.effect_arguments == effect_arguments
+                        && frame.operation == operation
+                }) else {
+                    return Err(VmArtifactError::UnhandledEffect {
+                        effect,
+                        effect_arguments,
+                        operation,
+                    });
+                };
+                if frame.payload_destinations.len() != values.len() {
+                    return Err(VmArtifactError::CallArity {
+                        expected: frame.payload_destinations.len() as u32,
+                        found: values.len() as u32,
+                    });
+                }
+                for (destination, value) in frame.payload_destinations.iter().zip(values) {
+                    registers[*destination as usize] = Some(value);
+                }
+                frame.suspended = Some(RuntimeContinuation {
+                    target: pc + 1,
+                    dst,
                 });
+                pc = frame.target as usize;
+                continue;
+            }
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                target,
+                ..
+            } => handlers.push(RuntimeHandlerFrame {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                target,
+                suspended: None,
+            }),
+            VmInstruction::UninstallHandler => {
+                let Some(frame) = handlers.pop() else {
+                    return Err(VmArtifactError::HandlerStackUnderflow);
+                };
+                if frame.suspended.is_some() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+            }
+            VmInstruction::Resume { value } => {
+                let resumed = registers[value as usize]
+                    .clone()
+                    .ok_or(VmArtifactError::ReadBeforeWrite { register: value })?;
+                let Some(frame) = handlers.last_mut() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let Some(continuation) = frame.suspended.take() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                registers[continuation.dst as usize] = Some(resumed);
+                pc = continuation.target;
+                continue;
             }
             VmInstruction::Copy { dst, src } => {
                 registers[dst as usize] = registers[src as usize].clone()
@@ -3747,6 +4080,9 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 continue;
             }
             VmInstruction::Return { value } => {
+                if !handlers.is_empty() {
+                    return Err(VmArtifactError::HandlerStillActive);
+                }
                 return Ok(registers[value as usize]
                     .as_ref()
                     .expect("verified register")
@@ -3899,6 +4235,33 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             for argument in arguments {
                 output.extend_from_slice(&argument.to_le_bytes());
             }
+        }
+        VmInstruction::InstallHandler {
+            effect,
+            effect_arguments,
+            operation,
+            payload_destinations,
+            resume_type,
+            target,
+        } => {
+            output.push(44);
+            output.extend_from_slice(&effect.0.as_bytes());
+            output.extend_from_slice(&(effect_arguments.len() as u64).to_le_bytes());
+            for argument in effect_arguments {
+                encode_type(argument, output);
+            }
+            output.extend_from_slice(&operation.to_le_bytes());
+            output.extend_from_slice(&(payload_destinations.len() as u64).to_le_bytes());
+            for destination in payload_destinations {
+                output.extend_from_slice(&destination.to_le_bytes());
+            }
+            encode_type(resume_type, output);
+            output.extend_from_slice(&target.to_le_bytes());
+        }
+        VmInstruction::UninstallHandler => output.push(45),
+        VmInstruction::Resume { value } => {
+            output.push(46);
+            output.extend_from_slice(&value.to_le_bytes());
         }
         VmInstruction::MakeEnum {
             dst,
@@ -4149,6 +4512,7 @@ fn execute_with_arguments(
     for (index, value) in arguments.iter().enumerate() {
         registers[index] = Some(value.clone());
     }
+    let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc) {
         budget.tick()?;
@@ -4348,16 +4712,86 @@ fn execute_with_arguments(
                 )));
             }
             VmInstruction::Perform {
+                dst,
                 effect,
                 effect_arguments,
                 operation,
-                ..
+                arguments,
             } => {
-                return Err(VmArtifactError::UnhandledEffect {
-                    effect: *effect,
-                    effect_arguments: effect_arguments.clone(),
-                    operation: *operation,
+                let values = arguments
+                    .iter()
+                    .map(|argument| {
+                        registers[*argument as usize].clone().ok_or(
+                            VmArtifactError::ReadBeforeWrite {
+                                register: *argument,
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let Some(frame) = handlers.iter_mut().rev().find(|frame| {
+                    frame.suspended.is_none()
+                        && frame.effect == *effect
+                        && frame.effect_arguments == *effect_arguments
+                        && frame.operation == *operation
+                }) else {
+                    return Err(VmArtifactError::UnhandledEffect {
+                        effect: *effect,
+                        effect_arguments: effect_arguments.clone(),
+                        operation: *operation,
+                    });
+                };
+                if frame.payload_destinations.len() != values.len() {
+                    return Err(VmArtifactError::CallArity {
+                        expected: frame.payload_destinations.len() as u32,
+                        found: values.len() as u32,
+                    });
+                }
+                for (destination, value) in frame.payload_destinations.iter().zip(values) {
+                    registers[*destination as usize] = Some(value);
+                }
+                frame.suspended = Some(RuntimeContinuation {
+                    target: pc + 1,
+                    dst: *dst,
                 });
+                pc = frame.target as usize;
+                continue;
+            }
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                target,
+                ..
+            } => handlers.push(RuntimeHandlerFrame {
+                effect: *effect,
+                effect_arguments: effect_arguments.clone(),
+                operation: *operation,
+                payload_destinations: payload_destinations.clone(),
+                target: *target,
+                suspended: None,
+            }),
+            VmInstruction::UninstallHandler => {
+                let Some(frame) = handlers.pop() else {
+                    return Err(VmArtifactError::HandlerStackUnderflow);
+                };
+                if frame.suspended.is_some() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+            }
+            VmInstruction::Resume { value } => {
+                let resumed = registers[*value as usize]
+                    .clone()
+                    .ok_or(VmArtifactError::ReadBeforeWrite { register: *value })?;
+                let Some(frame) = handlers.last_mut() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let Some(continuation) = frame.suspended.take() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                registers[continuation.dst as usize] = Some(resumed);
+                pc = continuation.target;
+                continue;
             }
             VmInstruction::Copy { dst, src } => {
                 registers[*dst as usize] = registers[*src as usize].clone()
@@ -4741,6 +5175,9 @@ fn execute_with_arguments(
                 continue;
             }
             VmInstruction::Return { value } => {
+                if !handlers.is_empty() {
+                    return Err(VmArtifactError::HandlerStillActive);
+                }
                 return Ok(registers[*value as usize]
                     .as_ref()
                     .expect("verified register")

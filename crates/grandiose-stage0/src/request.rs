@@ -71,15 +71,16 @@ pub struct CompilerBuildIdentity {
 /// boundary product changes. Generation two records the schema-21 `Trap`
 /// bytecode instruction and its verifier semantics. Generation three records
 /// schema-22 nominal effect-instance arguments in `Perform`, which are part
-/// of runtime handler identity. Cache generation two
+/// of runtime handler identity. Generation four records schema-23 verified
+/// one-shot deep handler frames and continuation snapshots. Cache generation two
 /// records the total canonical ordering of recovered and open effect-row
 /// types, which changes semantic-product fingerprints.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 1;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 1;
 pub const STAGE0_CACHE_GENERATION: u32 = 2;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 3;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 3;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 4;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 4;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.
