@@ -30,6 +30,21 @@ pub enum TraitAnswer {
     Overflow,
 }
 
+/// The result of normalizing a zero-arity associated type through selected
+/// trait evidence.  This deliberately mirrors [`TraitAnswer`] rather than
+/// hiding failed selection behind an error type: callers need to distinguish a
+/// negative implementation, ambiguity, and a missing associated item when
+/// explaining a projection constraint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraitProjectionAnswer {
+    Normalized { evidence: DefKey, ty: Type },
+    Refuted { evidence: DefKey },
+    NoSolution,
+    Ambiguous,
+    Overflow,
+    MissingAssociatedType { evidence: DefKey },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitSolverLimits {
     pub max_depth: u32,
@@ -117,6 +132,42 @@ impl TraitSolver {
         self.solve_at(goal, 0).into()
     }
 
+    /// Select an implementation for `goal` and normalize one of its
+    /// zero-arity associated types with the selected impl substitution.
+    ///
+    /// Associated-type syntax has not yet reached body type expressions, but
+    /// the frozen interface already carries the data.  Keeping normalization
+    /// at this solver boundary means the later projection syntax can share
+    /// candidate selection, bounds checking, and canonical memoization rather
+    /// than introduce a parallel impl lookup.
+    pub fn normalize_associated_type(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+    ) -> TraitProjectionAnswer {
+        match self.solve(goal.clone()) {
+            TraitAnswer::Proven { evidence } => {
+                let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
+                    return TraitProjectionAnswer::NoSolution;
+                };
+                let Some(substitution) = match_rule(&rule.implementation, &goal) else {
+                    return TraitProjectionAnswer::NoSolution;
+                };
+                match rule.implementation.associated_types.get(name) {
+                    Some(ty) => TraitProjectionAnswer::Normalized {
+                        evidence,
+                        ty: substitute_type(ty, &substitution),
+                    },
+                    None => TraitProjectionAnswer::MissingAssociatedType { evidence },
+                }
+            }
+            TraitAnswer::Refuted { evidence } => TraitProjectionAnswer::Refuted { evidence },
+            TraitAnswer::NoSolution => TraitProjectionAnswer::NoSolution,
+            TraitAnswer::Ambiguous => TraitProjectionAnswer::Ambiguous,
+            TraitAnswer::Overflow => TraitProjectionAnswer::Overflow,
+        }
+    }
+
     fn solve_at(&mut self, goal: TraitGoal, depth: u32) -> TraitAnswerIndex {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
             return TraitAnswerIndex::Overflow;
@@ -139,16 +190,12 @@ impl TraitSolver {
             .cloned()
             .collect::<Vec<_>>();
         let mut positives = vec![];
+        let mut negatives = vec![];
         let mut uncertain = false;
         for rule in rules {
             let Some(substitution) = match_rule(&rule.implementation, &goal) else {
                 continue;
             };
-            if rule.implementation.negative {
-                let answer = TraitAnswerIndex::Refuted(rule.definition);
-                self.tables.insert(key, TableState::Complete(answer));
-                return answer;
-            }
             let mut viable = true;
             for (subject, relation) in &rule.implementation.where_bounds {
                 let obligation = TraitGoal {
@@ -169,13 +216,24 @@ impl TraitSolver {
                 }
             }
             if viable {
-                positives.push(rule.definition);
+                if rule.implementation.negative {
+                    negatives.push(rule.definition);
+                } else {
+                    positives.push(rule.definition);
+                }
             }
         }
-        let answer = match positives.as_slice() {
-            [] if uncertain => TraitAnswerIndex::Ambiguous,
-            [] => TraitAnswerIndex::NoSolution,
-            [definition] => TraitAnswerIndex::Proven(*definition),
+        let answer = match (positives.as_slice(), negatives.as_slice()) {
+            // A coherent interface has at most one applicable answer across
+            // both polarities.  Treat contradictory input as ambiguity so an
+            // unchecked coherence failure cannot make selection order matter.
+            ([..], [..]) if !positives.is_empty() && !negatives.is_empty() => {
+                TraitAnswerIndex::Ambiguous
+            }
+            ([], []) if uncertain => TraitAnswerIndex::Ambiguous,
+            ([], []) => TraitAnswerIndex::NoSolution,
+            ([definition], []) => TraitAnswerIndex::Proven(*definition),
+            ([], [definition]) => TraitAnswerIndex::Refuted(*definition),
             _ => TraitAnswerIndex::Ambiguous,
         };
         self.tables.insert(key, TableState::Complete(answer));

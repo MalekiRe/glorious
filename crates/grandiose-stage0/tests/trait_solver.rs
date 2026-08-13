@@ -1,6 +1,7 @@
 use grandiose_stage0::{
     DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey, InterfaceSet,
-    LexedFile, PackageKey, ScalarType, TraitAnswer, TraitGoal, TraitSolver, Type,
+    LexedFile, PackageKey, ScalarType, TraitAnswer, TraitGoal, TraitProjectionAnswer, TraitSolver,
+    Type,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -93,4 +94,56 @@ fn ordinary_recursive_goal_cycles_are_ambiguous_not_successful() {
         subject: Type::Scalar(ScalarType::I64),
     });
     assert_eq!(answer, TraitAnswer::Ambiguous);
+}
+
+#[test]
+fn negative_impls_must_prove_their_where_bounds_before_refuting_a_goal() {
+    let (interface, signatures) = signatures(
+        "trait Marker {} trait Ready {} struct Box<T> {} impl<T> !Ready for Box<T> where T: Marker {}",
+    );
+    let ready = key(&interface, "Ready");
+    let boxed = key(&interface, "Box");
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![Type::Scalar(ScalarType::I64)],
+        },
+    };
+    assert_eq!(
+        TraitSolver::new(&signatures).solve(goal),
+        TraitAnswer::NoSolution
+    );
+}
+
+#[test]
+fn associated_type_normalization_uses_the_selected_impl_substitution() {
+    let (interface, signatures) = signatures(
+        "trait Iterator { type Item; } struct Range<T> {} impl<T> Iterator for Range<T> { type Item = T; }",
+    );
+    let iterator = key(&interface, "Iterator");
+    let range = key(&interface, "Range");
+    let answer = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: iterator,
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: range,
+                arguments: vec![Type::Scalar(ScalarType::Text)],
+            },
+        },
+        "Item",
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::Text),
+            ..
+        }
+    ));
 }

@@ -100,8 +100,8 @@ pub use signature::{
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{
-    DEFAULT_MAX_TRAIT_DEPTH, DEFAULT_MAX_TRAIT_STEPS, TraitAnswer, TraitGoal, TraitSolver,
-    TraitSolverLimits,
+    DEFAULT_MAX_TRAIT_DEPTH, DEFAULT_MAX_TRAIT_STEPS, TraitAnswer, TraitGoal,
+    TraitProjectionAnswer, TraitSolver, TraitSolverLimits,
 };
 pub use types::{
     EffectInstance, EffectRow, EffectVar, InferContext, InferVar, Mutability, ScalarType, Type,
