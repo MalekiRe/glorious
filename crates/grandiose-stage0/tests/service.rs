@@ -718,6 +718,14 @@ fn service_lowers_a_direct_one_shot_handler_through_vm_handler_frames() {
 }
 
 #[test]
+fn service_forwards_a_nested_partial_one_shot_handler_through_vm_frames() {
+    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 / Choice { handle { handle Choice::second(40) { Choice::first(seed) => seed } } { Choice::second(seed) => seed + 2 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_executes_a_generic_effect_handler_through_vm_frames() {
     let source = "effect State<T> { [1,1] get() -> T; } pub fn main() -> i64 { handle State<i64>::get() { State<i64>::get() => 42 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

@@ -775,6 +775,32 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) =
+            lowerer.lower_root_runtime_nested_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = function.validate() {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer.lower_root_let_resumption(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 if let Err(message) = function.validate() {
@@ -1636,6 +1662,188 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+    /// Lower two lexically nested exact-one-shot handlers around one direct
+    /// operation.  Even when the inner frame does not name the operation, it
+    /// must remain on the continuation snapshot while the outer frame runs:
+    /// resuming the outer clause restores the inner frame before normal scope
+    /// exit uninstalls it.  This is the smallest source form that exercises
+    /// partial-handler forwarding through the real VM stack.
+    fn lower_root_runtime_nested_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (outer_computation, outer_clauses, root_prefix) =
+            match self.body.expression(root).kind.clone() {
+                CoreKind::Handle {
+                    computation,
+                    clauses,
+                } => (computation, clauses, Vec::new()),
+                CoreKind::Block(values) => {
+                    let (outer, prefix) = values.split_last()?;
+                    let CoreKind::Handle {
+                        computation,
+                        clauses,
+                    } = self.body.expression(*outer).kind.clone()
+                    else {
+                        return None;
+                    };
+                    (computation, clauses, prefix.to_vec())
+                }
+                _ => return None,
+            };
+        let inner = match self.body.expression(outer_computation).kind.clone() {
+            CoreKind::Handle { .. } => outer_computation,
+            CoreKind::Block(values) if values.len() == 1 => values[0],
+            _ => return None,
+        };
+        let CoreKind::Handle {
+            computation: inner_computation,
+            clauses: inner_clauses,
+        } = self.body.expression(inner).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(inner_computation).kind.clone()
+        else {
+            return None;
+        };
+        let outer_operation_clauses = outer_clauses
+            .iter()
+            .filter(|clause| !clause.terminal)
+            .collect::<Vec<_>>();
+        let inner_operation_clauses = inner_clauses
+            .iter()
+            .filter(|clause| !clause.terminal)
+            .collect::<Vec<_>>();
+        let [outer_clause] = outer_operation_clauses.as_slice() else {
+            return None;
+        };
+        let [inner_clause] = inner_operation_clauses.as_slice() else {
+            return None;
+        };
+        for clause in [*outer_clause, *inner_clause] {
+            let quantity = match &clause.resumption {
+                CoreHandlerResumption::Explicit { quantity, .. }
+                | CoreHandlerResumption::Tail { quantity } => *quantity,
+                CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
+                    return None;
+                }
+            };
+            if quantity != crate::quantity::Quantity::ONCE
+                || clause.patterns.len() != argument_ids.len()
+                || !clause.patterns.iter().all(pattern_is_irrefutable)
+            {
+                return None;
+            }
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        // A handler frame carries its payload register types locally. For a
+        // forwarded operation these registers are not written; using the
+        // direct operation's already-typed payload shape retains a concrete
+        // frame contract until declaration signatures are materialized in MIR.
+        let payload_types = argument_ids
+            .iter()
+            .map(|argument| self.body.expression(*argument).ty.clone())
+            .collect::<Vec<_>>();
+        let outer_payload_destinations = payload_types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
+            .collect::<Vec<_>>();
+        let inner_payload_destinations = payload_types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
+            .collect::<Vec<_>>();
+        let result = self.alloc(
+            self.body.expression(inner_computation).ty.clone(),
+            inner_computation,
+        );
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: outer_clause.effect.definition,
+            effect_arguments: outer_clause.effect.arguments.clone(),
+            operation: outer_clause.operation,
+            payload_destinations: outer_payload_destinations.clone(),
+            resume_type: self.body.expression(inner_computation).ty.clone(),
+            target: MirBlockId(1),
+        });
+        entry.push(MirInstruction::InstallHandler {
+            effect: inner_clause.effect.definition,
+            effect_arguments: inner_clause.effect.arguments.clone(),
+            operation: inner_clause.operation,
+            payload_destinations: inner_payload_destinations.clone(),
+            resume_type: self.body.expression(inner_computation).ty.clone(),
+            target: MirBlockId(2),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: result,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+        entry.push(MirInstruction::UninstallHandler);
+
+        self.instructions = Vec::new();
+        let outer_named = self.named.clone();
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
+        let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            value: outer_resumed,
+        });
+        let outer_instructions = std::mem::take(&mut self.instructions);
+        self.named = outer_named;
+
+        self.instructions = Vec::new();
+        let inner_named = self.named.clone();
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payload_destinations)?;
+        let inner_resumed = self.direct_handler_clause_value(inner_clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            value: inner_resumed,
+        });
+        let inner_instructions = std::mem::take(&mut self.instructions);
+        self.named = inner_named;
+
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
     /// Lower one nonempty, exact-one-shot continuation through the VM handler
