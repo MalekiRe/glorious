@@ -217,7 +217,20 @@ impl ElaboratedInterface {
             }
             for (name, method) in &implementation.methods {
                 match trait_header.methods.get(name) {
-                    Some(expected) if expected.generics == method.generics => {}
+                    Some(expected) if expected.generics == method.generics => {
+                        let required = instantiate_trait_method_contract(
+                            expected,
+                            implementation,
+                        );
+                        if required != *method {
+                            diagnostics.push(SignatureDiagnostic {
+                                code: "G4147",
+                                message: format!(
+                                    "implementation method `{name}` does not match the required trait contract"
+                                ),
+                            });
+                        }
+                    }
                     Some(expected) => diagnostics.push(SignatureDiagnostic {
                         code: "G4119",
                         message: format!(
@@ -513,6 +526,9 @@ impl ElaboratedInterface {
                     for reference in &mut trait_header.supertraits {
                         normalize_trait_reference(reference, &aliases, &mut diagnostics);
                     }
+                    for method in trait_header.methods.values_mut() {
+                        normalize_callable_signature(method, &aliases, &mut diagnostics);
+                    }
                 }
                 ElaboratedHeader::Implementation(implementation) => {
                     normalize_trait_reference(
@@ -542,6 +558,9 @@ impl ElaboratedInterface {
                             &mut vec![],
                             &mut diagnostics,
                         );
+                    }
+                    for method in implementation.methods.values_mut() {
+                        normalize_callable_signature(method, &aliases, &mut diagnostics);
                     }
                 }
                 ElaboratedHeader::Effect(effect) => {
@@ -573,6 +592,68 @@ impl ElaboratedInterface {
     }
 }
 
+/// Normalize the whole observable callable contract, including every nested
+/// bound and effect argument. Trait and implementation methods live in frozen
+/// interfaces just like top-level callables, so aliases cannot be allowed to
+/// survive in only these declarations.
+fn normalize_callable_signature(
+    signature: &mut CallableSignature,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    diagnostics: &mut Vec<SignatureDiagnostic>,
+) {
+    signature.parameters = signature
+        .parameters
+        .clone()
+        .into_iter()
+        .map(|ty| normalize_alias_type(ty, definitions, &mut vec![], diagnostics))
+        .collect();
+    signature.result = normalize_alias_type(
+        signature.result.clone(),
+        definitions,
+        &mut vec![],
+        diagnostics,
+    );
+    signature.effects = normalize_effect_row(signature.effects.clone(), definitions, diagnostics);
+    for (subject, relation) in &mut signature.where_bounds {
+        *subject = normalize_alias_type(subject.clone(), definitions, &mut vec![], diagnostics);
+        normalize_trait_reference(relation, definitions, diagnostics);
+    }
+}
+
+/// Instantiate a trait method in an implementation's binder environment.
+/// The trait relation supplies its declaration generics; method generics are
+/// kept universally quantified in slots after the implementation binders.
+fn instantiate_trait_method_contract(
+    method: &CallableSignature,
+    implementation: &ElaboratedImplementation,
+) -> CallableSignature {
+    let mut arguments = implementation.relation.arguments.clone();
+    arguments
+        .extend((0..method.generics).map(|offset| Type::Generic(implementation.generics + offset)));
+    CallableSignature {
+        generics: method.generics,
+        parameters: method
+            .parameters
+            .iter()
+            .cloned()
+            .map(|parameter| substitute_alias_generics(parameter, &arguments))
+            .collect(),
+        result: substitute_alias_generics(method.result.clone(), &arguments),
+        effects: substitute_effect_row(method.effects.clone(), &arguments),
+        invocation: method.invocation,
+        where_bounds: method
+            .where_bounds
+            .iter()
+            .map(|(subject, relation)| {
+                (
+                    substitute_alias_generics(subject.clone(), &arguments),
+                    substitute_trait_reference(relation, &arguments),
+                )
+            })
+            .collect(),
+    }
+}
+
 fn normalize_trait_reference(
     reference: &mut ElaboratedTraitReference,
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
@@ -598,6 +679,30 @@ fn substitute_trait_reference(
             .cloned()
             .map(|argument| substitute_alias_generics(argument, arguments))
             .collect(),
+    }
+}
+
+fn normalize_effect_row(
+    value: EffectRow,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    diagnostics: &mut Vec<SignatureDiagnostic>,
+) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| {
+                        normalize_alias_type(argument, definitions, &mut vec![], diagnostics)
+                    })
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
     }
 }
 

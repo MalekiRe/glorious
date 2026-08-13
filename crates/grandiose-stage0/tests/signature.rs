@@ -129,6 +129,47 @@ fn interfaces_retain_implementation_method_signatures_and_validate_method_sets()
 }
 
 #[test]
+fn implementation_methods_must_match_the_instantiated_trait_contract() {
+    let package = PackageKey("signature-impl-method-contract@0.1.0".into());
+    let source = r#"
+        trait Transform<T> { fn transform<U>(value: T, replacement: U) -> (T, U); }
+        impl Transform<i64> for i64 {
+            fn transform<U>(value: i64, replacement: U) -> (i64, U) { (value, replacement) }
+        }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface =
+        InterfaceSet::collect(package.clone(), "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+
+    let mismatched_source = r#"
+        trait Convert { fn convert<T>(value: T) -> T; }
+        impl Convert for i64 { fn convert<T>(value: T) -> i64 { 0 } }
+    "#;
+    let file = FileKey::new(&package, "src/mismatch.glorious");
+    let lexed = LexedFile::lex(file, mismatched_source);
+    let scan = DeclarationScan::scan(&lexed, mismatched_source);
+    let interface =
+        InterfaceSet::collect(package, "crate", &lexed, mismatched_source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4147"),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn transparent_aliases_are_substituted_in_callable_contracts() {
     let package = PackageKey("signature-alias@0.1.0".into());
     let source = "type Count = i64; type Buffer<T> = Array<T>; pub fn count(value: Count) -> Count { ignored } pub fn bytes(value: Buffer<u8>) -> Buffer<u8> { ignored }";
