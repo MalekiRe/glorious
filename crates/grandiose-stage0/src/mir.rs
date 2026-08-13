@@ -1801,19 +1801,15 @@ impl Lowerer<'_> {
         for expression in root_prefix {
             self.statement(expression)?;
         }
-        let payload_types = argument_ids
+        let outer_payload_destinations = outer_clause
+            .payload_types
             .iter()
-            .map(|argument| self.body.expression(*argument).ty.clone())
+            .map(|ty| self.alloc(ty.clone(), inner_computation))
             .collect::<Vec<_>>();
-        let outer_payload_destinations = payload_types
+        let inner_payload_destinations = inner_operation_clauses[0]
+            .payload_types
             .iter()
-            .enumerate()
-            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
-            .collect::<Vec<_>>();
-        let inner_payload_destinations = payload_types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
+            .map(|ty| self.alloc(ty.clone(), inner_computation))
             .collect::<Vec<_>>();
         let mut dispatch = Vec::with_capacity(inner_operation_clauses.len());
         for clause in inner_operation_clauses {
@@ -2076,23 +2072,15 @@ impl Lowerer<'_> {
             .iter()
             .map(|argument| self.value(*argument))
             .collect::<Option<Vec<_>>>()?;
-        // A handler frame carries its payload register types locally. For a
-        // forwarded operation these registers are not written; using the
-        // direct operation's already-typed payload shape retains a concrete
-        // frame contract until declaration signatures are materialized in MIR.
-        let payload_types = argument_ids
+        let outer_payload_destinations = outer_clause
+            .payload_types
             .iter()
-            .map(|argument| self.body.expression(*argument).ty.clone())
+            .map(|ty| self.alloc(ty.clone(), inner_computation))
             .collect::<Vec<_>>();
-        let outer_payload_destinations = payload_types
+        let inner_payload_destinations = inner_clause
+            .payload_types
             .iter()
-            .enumerate()
-            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
-            .collect::<Vec<_>>();
-        let inner_payload_destinations = payload_types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| self.alloc(ty.clone(), argument_ids[index]))
+            .map(|ty| self.alloc(ty.clone(), inner_computation))
             .collect::<Vec<_>>();
         // An irrefutable arm enters its body directly. A refutable arm uses
         // the shared structural pattern primitive and explicitly forwards the

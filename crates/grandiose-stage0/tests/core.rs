@@ -272,6 +272,12 @@ fn typed_core_resolves_deep_handler_operations_payloads_and_resumptions() {
         }
     ));
     assert_eq!(clauses.len(), 1);
+    assert_eq!(
+        clauses[0].payload_types,
+        vec![grandiose_stage0::Type::Scalar(
+            grandiose_stage0::ScalarType::I64
+        )]
+    );
     assert_eq!(clauses[0].bindings[0].0, "value");
     assert!(matches!(
         clauses[0].resumption,

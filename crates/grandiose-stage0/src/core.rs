@@ -72,6 +72,10 @@ pub struct CorePatternField {
 pub struct CoreHandlerClause {
     pub effect: EffectInstance,
     pub operation: u32,
+    /// Exact operation payload signature retained after body elaboration.
+    /// MIR needs it when materializing a lexical frame for a sibling operation
+    /// that is not the immediately visible `Perform` site.
+    pub payload_types: Vec<Type>,
     pub patterns: Vec<CorePattern>,
     pub bindings: Vec<(String, Type)>,
     pub resumption: CoreHandlerResumption,
@@ -2089,6 +2093,7 @@ impl Elaborator<'_> {
             core_clauses.push(CoreHandlerClause {
                 effect: clause.effect,
                 operation: clause.operation_index,
+                payload_types: clause.operation.parameters.clone(),
                 patterns,
                 bindings,
                 resumption,
