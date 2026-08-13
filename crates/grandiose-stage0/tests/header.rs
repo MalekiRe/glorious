@@ -1,6 +1,6 @@
 use grandiose_stage0::{
-    DeclarationScan, Digest, EnumVariantPayloadHeader, FileKey, HeaderParse, HeaderType, LexedFile,
-    LogicalPath, NominalLayoutHeader, PackageKey, ParsedHeader, Quantity,
+    BodySyntax, DeclarationScan, Digest, EnumVariantPayloadHeader, FileKey, HeaderParse,
+    HeaderType, LexedFile, LogicalPath, NominalLayoutHeader, PackageKey, ParsedHeader, Quantity,
 };
 
 #[test]
@@ -183,6 +183,29 @@ fn trait_impl_and_effect_headers_preserve_their_semantic_contracts() {
     assert_eq!(value.operations[0].resumption, Quantity::ONCE);
     assert_eq!(value.operations[1].resumption, Quantity::UNRESTRICTED);
     assert!(value.operations[2].terminal);
+}
+
+#[test]
+fn implementation_methods_retain_exact_body_ranges_for_later_elaboration() {
+    let package = PackageKey("header-implementation-method-body@0.1.0".into());
+    let source = "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> i64 { { let next = value + 1; next } } }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Implementation(implementation) = parsed.header else {
+        panic!("expected implementation header")
+    };
+    let method = implementation
+        .methods
+        .first()
+        .expect("implementation method");
+    let body = method.body.expect("method body range");
+    let syntax = BodySyntax::parse(&lexed, source, body);
+    assert!(syntax.diagnostics.is_empty(), "{:#?}", syntax.diagnostics);
+    assert!(!syntax.recovered);
+    assert!(syntax.expressions.len() > 1, "method body was not retained");
 }
 
 #[test]

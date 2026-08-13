@@ -96,6 +96,11 @@ pub struct AssociatedTypeDefinitionHeader {
 pub struct ImplementationMethodHeader {
     pub name: String,
     pub signature: CallableHeader,
+    /// Exact brace-delimited source range of the method body. The
+    /// implementation declaration itself remains an interface fact, while
+    /// this range lets later body elaboration allocate a distinct callable
+    /// product for each method without reparsing or guessing its boundary.
+    pub body: Option<TokenRange>,
     pub span: Span,
 }
 
@@ -570,9 +575,11 @@ impl Parser<'_> {
                     if !names.insert(name.clone()) {
                         body_parser.error("G3245", "duplicate implementation item name");
                     }
-                    if !body_parser.punctuation('{') {
+                    let body_start = body_parser.current();
+                    let body = if !body_parser.punctuation('{') {
                         body_parser.error("G3244", "expected implementation method body");
                         body_parser.skip_to_item_end();
+                        None
                     } else {
                         let mut depth = 1;
                         while body_parser.current().is_some() && depth > 0 {
@@ -589,12 +596,23 @@ impl Parser<'_> {
                         if depth != 0 {
                             body_parser
                                 .error("G3246", "expected `}` after implementation method body");
+                            None
+                        } else {
+                            let end = body_parser
+                                .previous()
+                                .expect("closed implementation method body has closing brace")
+                                + 1;
+                            Some(TokenRange {
+                                start: body_start.expect("method body start exists"),
+                                end,
+                            })
                         }
-                    }
+                    };
                     let end = body_parser.previous().unwrap_or(start);
                     methods.push(ImplementationMethodHeader {
                         name,
                         signature,
+                        body,
                         span: body_parser.span(start, end),
                     });
                     continue;
