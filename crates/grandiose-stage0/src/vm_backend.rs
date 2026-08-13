@@ -181,6 +181,10 @@ pub enum VmInstruction {
     /// transfer is retried at the next matching outer frame; the declined
     /// frame is retained in the continuation for deep reinstatement.
     Forward,
+    /// Abandon the innermost suspended continuation without resuming it.
+    /// The surrounding source contract must establish that zero resumption
+    /// uses are permitted.
+    Cancel,
     Copy {
         dst: u32,
         src: u32,
@@ -468,7 +472,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 23 adds verifier-checked deep one-shot handler frames.
 /// Older layouts cannot be decoded safely because the operation field now
 /// follows a sequence of canonical VM types.
-pub const STAGE0_VM_SCHEMA: u32 = 24;
+pub const STAGE0_VM_SCHEMA: u32 = 25;
 const MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 const MAX_DECODE_REGISTERS: u64 = 1 << 20;
 const MAX_DECODE_INSTRUCTIONS: u64 = 1 << 22;
@@ -1419,6 +1423,7 @@ impl<'a> Decoder<'a> {
             45 => Ok(VmInstruction::UninstallHandler),
             46 => Ok(VmInstruction::Resume { value: self.u32()? }),
             47 => Ok(VmInstruction::Forward),
+            48 => Ok(VmInstruction::Cancel),
             3 => self.i64_arithmetic(|dst, left, right| VmInstruction::AddI64 { dst, left, right }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
@@ -2065,6 +2070,7 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
         MirInstruction::UninstallHandler => VmInstruction::UninstallHandler,
         MirInstruction::Resume { value } => VmInstruction::Resume { value: value.0 },
         MirInstruction::Forward => VmInstruction::Forward,
+        MirInstruction::Cancel => VmInstruction::Cancel,
         MirInstruction::Copy { dst, src } => VmInstruction::Copy {
             dst: dst.0,
             src: src.0,
@@ -2905,6 +2911,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     propagate_state(&mut incoming, &mut worklist, outer.target, &forwarded)?;
                 }
                 advances = false;
+            }
+            VmInstruction::Cancel => {
+                let Some(frame) = states.handlers.pop() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.continuations.is_empty() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
             }
             VmInstruction::Copy { dst, src } => {
                 read(&states, *src)?;
@@ -3959,6 +3973,14 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 pc = frame.target as usize;
                 continue;
             }
+            VmInstruction::Cancel => {
+                let Some(frame) = handlers.pop() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.suspended.is_none() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+            }
             VmInstruction::Copy { dst, src } => {
                 registers[dst as usize] = registers[src as usize].clone()
             }
@@ -4458,6 +4480,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&value.to_le_bytes());
         }
         VmInstruction::Forward => output.push(47),
+        VmInstruction::Cancel => output.push(48),
         VmInstruction::MakeEnum {
             dst,
             definition,
@@ -5058,6 +5081,14 @@ fn execute_with_arguments(
                 });
                 pc = frame.target as usize;
                 continue;
+            }
+            VmInstruction::Cancel => {
+                let Some(frame) = handlers.pop() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.suspended.is_none() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
             }
             VmInstruction::Copy { dst, src } => {
                 registers[*dst as usize] = registers[*src as usize].clone()

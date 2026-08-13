@@ -159,6 +159,10 @@ pub enum MirInstruction {
     /// the declined frame in the resumed continuation, which is the deep
     /// forwarding counterpart of `Resume`.
     Forward,
+    /// Abandon the innermost suspended continuation. This is legal only for
+    /// source continuation contracts that permit zero uses; the VM consumes
+    /// the snapshot and continues the handler clause normally.
+    Cancel,
     Copy {
         dst: MirLocal,
         src: MirLocal,
@@ -645,7 +649,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
         | MirInstruction::Resume { .. }
-        | MirInstruction::Forward => None,
+        | MirInstruction::Forward
+        | MirInstruction::Cancel => None,
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1265,6 +1270,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::UninstallHandler => Vec::new(),
         MirInstruction::Resume { value } => vec![*value],
         MirInstruction::Forward => Vec::new(),
+        MirInstruction::Cancel => Vec::new(),
         MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
@@ -2440,13 +2446,23 @@ impl Lowerer<'_> {
         let [clause] = matching.as_slice() else {
             return None;
         };
-        let quantity = match &clause.resumption {
+        let cancellation = match &clause.resumption {
             CoreHandlerResumption::Explicit { quantity, .. }
-            | CoreHandlerResumption::Tail { quantity } => *quantity,
-            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => return None,
+            | CoreHandlerResumption::Tail { quantity } => {
+                if *quantity != crate::quantity::Quantity::ONCE {
+                    return None;
+                }
+                false
+            }
+            CoreHandlerResumption::Discard { quantity } => {
+                if quantity.requires_positive_use() {
+                    return None;
+                }
+                true
+            }
+            CoreHandlerResumption::Terminal => return None,
         };
-        if quantity != crate::quantity::Quantity::ONCE
-            || clause.patterns.len() != argument_ids.len()
+        if clause.patterns.len() != argument_ids.len()
             || !clause.patterns.iter().all(pattern_is_irrefutable)
         {
             return None;
@@ -2495,9 +2511,14 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         let handler_named = self.named.clone();
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
-        let resumed = self.direct_handler_clause_value(clause)?;
-        self.instructions
-            .push(MirInstruction::Resume { value: resumed });
+        let handler_result = self.direct_handler_clause_value(clause)?;
+        self.instructions.push(if cancellation {
+            MirInstruction::Cancel
+        } else {
+            MirInstruction::Resume {
+                value: handler_result,
+            }
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = handler_named;
 
@@ -2527,7 +2548,13 @@ impl Lowerer<'_> {
                 MirBlock {
                     parameters: vec![],
                     instructions: handler_instructions,
-                    terminator: MirTerminator::Unreachable,
+                    terminator: if cancellation {
+                        MirTerminator::Return {
+                            value: handler_result,
+                        }
+                    } else {
+                        MirTerminator::Unreachable
+                    },
                 },
             ],
         })

@@ -460,6 +460,50 @@ fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame()
 }
 
 #[test]
+fn cancelled_handler_continuation_abandons_its_snapshot_and_returns_clause_value() {
+    let effect = DefKey(Digest::of_bytes(b"Ask-cancel"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"cancelled-handler")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 3],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![1],
+                    resume_type: VmType::I64,
+                    target: 6,
+                },
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![0],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 2 },
+                VmInstruction::Trap,
+                VmInstruction::ConstI64 { dst: 2, value: 42 },
+                VmInstruction::Cancel,
+                VmInstruction::Return { value: 2 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"cancelled-handler-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn verifier_allows_checked_store_reinitialization_but_rejects_type_confusion() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
