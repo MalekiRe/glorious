@@ -396,6 +396,9 @@ pub enum VmArtifactError {
     CallDepthLimit {
         limit: u32,
     },
+    HandlerDepthLimit {
+        limit: u32,
+    },
     InstructionLimit {
         limit: u64,
     },
@@ -430,12 +433,14 @@ pub enum VmArtifactError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmExecutionLimits {
     pub max_call_depth: u32,
+    pub max_handler_depth: u32,
     pub max_instructions: u64,
 }
 impl Default for VmExecutionLimits {
     fn default() -> Self {
         Self {
             max_call_depth: 4_096,
+            max_handler_depth: 4_096,
             max_instructions: 10_000_000,
         }
     }
@@ -4968,14 +4973,21 @@ fn execute_with_arguments(
                 payload_destinations,
                 target,
                 ..
-            } => handlers.push(RuntimeHandlerFrame {
-                effect: *effect,
-                effect_arguments: effect_arguments.clone(),
-                operation: *operation,
-                payload_destinations: payload_destinations.clone(),
-                target: *target,
-                suspended: None,
-            }),
+            } => {
+                if handlers.len() >= budget.limits.max_handler_depth as usize {
+                    return Err(VmArtifactError::HandlerDepthLimit {
+                        limit: budget.limits.max_handler_depth,
+                    });
+                }
+                handlers.push(RuntimeHandlerFrame {
+                    effect: *effect,
+                    effect_arguments: effect_arguments.clone(),
+                    operation: *operation,
+                    payload_destinations: payload_destinations.clone(),
+                    target: *target,
+                    suspended: None,
+                });
+            }
             VmInstruction::UninstallHandler => {
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);

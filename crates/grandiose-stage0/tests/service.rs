@@ -1527,9 +1527,28 @@ fn verified_vm_program_enforces_explicit_runtime_call_depth_limits() {
     assert!(matches!(
         artifact.run_i64_with_limits(VmExecutionLimits {
             max_call_depth: 4,
+            max_handler_depth: 4_096,
             max_instructions: 100
         }),
         Err(VmArtifactError::CallDepthLimit { limit: 4 })
+    ));
+}
+
+#[test]
+fn verified_vm_program_enforces_explicit_handler_depth_limits() {
+    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle Ask::ask(40) { Ask::ask(0) => 0 } } { Ask::ask(value) => value + 2 } }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap()
+        .artifact
+        .unwrap();
+    assert!(matches!(
+        artifact.run_i64_with_limits(VmExecutionLimits {
+            max_call_depth: 100,
+            max_handler_depth: 1,
+            max_instructions: 100,
+        }),
+        Err(VmArtifactError::HandlerDepthLimit { limit: 1 })
     ));
 }
 
@@ -1544,6 +1563,7 @@ fn verified_vm_program_enforces_explicit_instruction_limits() {
     assert!(matches!(
         artifact.run_i64_with_limits(VmExecutionLimits {
             max_call_depth: 100,
+            max_handler_depth: 4_096,
             max_instructions: 2
         }),
         Err(VmArtifactError::InstructionLimit { limit: 2 })
