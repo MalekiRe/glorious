@@ -54,6 +54,60 @@ fn verified_stage_zero_vm_artifact_executes_lowered_mir() {
 }
 
 #[test]
+fn vm_artifact_preserves_generic_effect_instance_identity() {
+    let package = PackageKey("vm-effect-instance@0.1.0".into());
+    let source =
+        "effect State<T> { get() -> T; } pub fn main() -> i64 / State<i64> { State<i64>::get() }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    let mir = MirLowering::lower(definition.key, &core, &flow)
+        .function
+        .expect("effectful body lowers to MIR");
+    let candidate = emit_vm(&mir).expect("MIR performs have VM representations");
+    let expected_effect = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("State"))
+        .unwrap()
+        .key;
+    assert!(candidate.function.instructions.iter().any(|instruction| {
+        matches!(
+            instruction,
+            VmInstruction::Perform {
+                effect,
+                effect_arguments,
+                operation: 0,
+                arguments,
+                ..
+            } if *effect == expected_effect && effect_arguments == &[VmType::I64] && arguments.is_empty()
+        )
+    }));
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+}
+
+#[test]
 fn verified_vm_round_trips_and_executes_typed_tuple_values() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
