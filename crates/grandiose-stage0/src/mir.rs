@@ -1647,12 +1647,23 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let CoreKind::Handle {
-            computation,
-            clauses,
-        } = self.body.expression(root).kind.clone()
-        else {
-            return None;
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
         };
         let CoreKind::Block(computation_values) = self.body.expression(computation).kind.clone()
         else {
@@ -1696,8 +1707,10 @@ impl Lowerer<'_> {
         let [clause] = matching.as_slice() else {
             return None;
         };
-        let CoreHandlerResumption::Explicit { quantity, .. } = clause.resumption else {
-            return None;
+        let quantity = match &clause.resumption {
+            CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Tail { quantity } => *quantity,
+            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => return None,
         };
         if quantity != crate::quantity::Quantity::ONCE
             || clause.patterns.len() != argument_ids.len()
@@ -1705,7 +1718,7 @@ impl Lowerer<'_> {
         {
             return None;
         }
-        for expression in prefix {
+        for expression in root_prefix.iter().chain(prefix.iter()) {
             self.statement(*expression)?;
         }
         let arguments = argument_ids
@@ -2044,8 +2057,10 @@ impl Lowerer<'_> {
         let [clause] = matching.as_slice() else {
             return None;
         };
-        let CoreHandlerResumption::Explicit { quantity, .. } = clause.resumption else {
-            return None;
+        let quantity = match &clause.resumption {
+            CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Tail { quantity } => *quantity,
+            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => return None,
         };
         if quantity != crate::quantity::Quantity::ONCE
             || clause.patterns.len() != argument_ids.len()

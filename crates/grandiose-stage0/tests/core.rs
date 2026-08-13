@@ -509,3 +509,50 @@ fn placeflow_joins_handler_arms_conservatively_after_dynamic_selection() {
         flow.diagnostics
     );
 }
+
+#[test]
+fn exact_one_shot_tail_resumption_lowers_to_a_runtime_handler_frame() {
+    let package = PackageKey("core-handler-runtime@0.1.0".into());
+    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(41); value + 1 } { Ask::ask(seed) => seed } }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    let mir = MirLowering::lower(definition.key, &core, &flow)
+        .function
+        .expect("one-shot tail handler lowers to MIR");
+    let instructions = mir
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .collect::<Vec<_>>();
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::InstallHandler { .. }))
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::Resume { .. }))
+    );
+}
