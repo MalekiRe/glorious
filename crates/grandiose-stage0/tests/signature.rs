@@ -60,6 +60,42 @@ fn interface_validation_checks_associated_type_names_and_arities() {
 }
 
 #[test]
+fn interfaces_retain_trait_method_signatures_with_trait_and_method_generics() {
+    let package = PackageKey("signature-trait-methods@0.1.0".into());
+    let source = "trait Map<T> { fn apply<U>(value: T, replacement: U) -> (T, U); }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/lib.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let trait_key = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Map"))
+        .unwrap()
+        .key;
+    let ElaboratedHeader::Trait(trait_header) = signatures.definitions.get(&trait_key).unwrap()
+    else {
+        panic!("expected trait signature")
+    };
+    let method = trait_header.methods.get("apply").expect("trait method");
+    assert_eq!(method.generics, 1);
+    assert_eq!(method.parameters, [Type::Generic(0), Type::Generic(1)]);
+    assert_eq!(
+        method.result,
+        Type::Tuple(vec![Type::Generic(0), Type::Generic(1)])
+    );
+}
+
+#[test]
 fn transparent_aliases_are_substituted_in_callable_contracts() {
     let package = PackageKey("signature-alias@0.1.0".into());
     let source = "type Count = i64; type Buffer<T> = Array<T>; pub fn count(value: Count) -> Count { ignored } pub fn bytes(value: Buffer<u8>) -> Buffer<u8> { ignored }";

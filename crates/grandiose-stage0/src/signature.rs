@@ -35,6 +35,7 @@ pub struct ElaboratedTrait {
     pub generics: u32,
     pub supertraits: Vec<ElaboratedTraitReference>,
     pub associated_types: BTreeMap<String, u32>,
+    pub methods: BTreeMap<String, CallableSignature>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -636,6 +637,51 @@ impl Elaborator<'_> {
     }
     fn trait_header(&mut self, header: &TraitHeader) -> ElaboratedTrait {
         self.bind_generics(&header.generics);
+        let methods = header
+            .methods
+            .iter()
+            .map(|method| {
+                let outer_generics = self.generics.clone();
+                let base = outer_generics.len() as u32;
+                for (offset, name) in method.signature.generics.iter().enumerate() {
+                    if self
+                        .generics
+                        .insert(name.clone(), base + offset as u32)
+                        .is_some()
+                    {
+                        self.diagnostics.push(SignatureDiagnostic {
+                            code: "G4117",
+                            message: "trait method generic shadows an outer generic".into(),
+                        });
+                    }
+                }
+                let signature = CallableSignature {
+                    generics: method.signature.generics.len() as u32,
+                    parameters: method
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| self.ty(&parameter.ty))
+                        .collect(),
+                    result: method
+                        .signature
+                        .result
+                        .as_ref()
+                        .map(|value| self.ty(value))
+                        .unwrap_or(Type::Unit),
+                    effects: self.effect_row(&method.signature.effects),
+                    invocation: Quantity::ONCE,
+                    where_bounds: method
+                        .signature
+                        .where_bounds
+                        .iter()
+                        .map(|bound| (self.ty(&bound.subject), self.trait_ref(&bound.relation)))
+                        .collect(),
+                };
+                self.generics = outer_generics;
+                (method.name.clone(), signature)
+            })
+            .collect();
         ElaboratedTrait {
             generics: header.generics.len() as u32,
             supertraits: header
@@ -648,6 +694,7 @@ impl Elaborator<'_> {
                 .iter()
                 .map(|item| (item.name.clone(), item.generics.len() as u32))
                 .collect(),
+            methods,
         }
     }
     fn implementation(&mut self, header: &ImplementationHeader) -> ElaboratedImplementation {
