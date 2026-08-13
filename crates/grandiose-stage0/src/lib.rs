@@ -53,9 +53,9 @@ pub use header::{
     AssociatedTypeDefinitionHeader, AssociatedTypeHeader, CallableHeader, EffectHeader,
     EffectOperationHeader, EffectRowHeader, EnumVariantHeader, EnumVariantPayloadHeader,
     FixityForm, FixityHeader, HeaderDiagnostic, HeaderParameter, HeaderParse, HeaderType,
-    ImplementationHeader, ImportBindingHeader, ImportHeader, NominalFieldHeader,
-    NominalLayoutHeader, ParsedHeader, TraitHeader, TraitMethodHeader, TraitRefHeader,
-    WhereBoundHeader,
+    ImplementationHeader, ImplementationMethodHeader, ImportBindingHeader, ImportHeader,
+    NominalFieldHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitMethodHeader,
+    TraitRefHeader, WhereBoundHeader,
 };
 pub use identity::{DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId};
 pub use interface::{

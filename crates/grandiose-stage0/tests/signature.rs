@@ -96,6 +96,39 @@ fn interfaces_retain_trait_method_signatures_with_trait_and_method_generics() {
 }
 
 #[test]
+fn interfaces_retain_implementation_method_signatures_and_validate_method_sets() {
+    let package = PackageKey("signature-impl-methods@0.1.0".into());
+    let source = "trait Convert { fn convert<T>(value: T) -> T; } impl Convert for i64 { fn convert<T>(value: T) -> T { value } }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/lib.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let implementation = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.is_none())
+        .expect("implementation declaration");
+    let ElaboratedHeader::Implementation(implementation) =
+        signatures.definitions.get(&implementation.key).unwrap()
+    else {
+        panic!("expected implementation signature")
+    };
+    let method = implementation.methods.get("convert").expect("impl method");
+    assert_eq!(method.generics, 1);
+    assert_eq!(method.parameters, [Type::Generic(0)]);
+    assert_eq!(method.result, Type::Generic(0));
+}
+
+#[test]
 fn transparent_aliases_are_substituted_in_callable_contracts() {
     let package = PackageKey("signature-alias@0.1.0".into());
     let source = "type Count = i64; type Buffer<T> = Array<T>; pub fn count(value: Count) -> Count { ignored } pub fn bytes(value: Buffer<u8>) -> Buffer<u8> { ignored }";
@@ -216,7 +249,7 @@ fn trait_impl_and_effect_contracts_elaborate_with_stable_declaration_identity() 
         trait Marker<T> {}
         trait Display<T>: Marker<T> { type Output; render(value: T) -> Text; }
         struct Box<T> { value: T }
-        impl<T> Display<T> for Box<T> where T: Marker<T> { type Output = Text; }
+        impl<T> Display<T> for Box<T> where T: Marker<T> { type Output = Text; fn render(value: T) -> Text { "rendered" } }
         effect Console<T> { write(value: T); [0, 1] read() -> T; stop() -> !; }
     "#;
     let file = FileKey::new(&package, "src/lib.glorious");

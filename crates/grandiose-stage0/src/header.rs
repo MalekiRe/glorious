@@ -93,6 +93,13 @@ pub struct AssociatedTypeDefinitionHeader {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImplementationMethodHeader {
+    pub name: String,
+    pub signature: CallableHeader,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitHeader {
     pub generics: Vec<String>,
     pub supertraits: Vec<TraitRefHeader>,
@@ -115,6 +122,7 @@ pub struct ImplementationHeader {
     pub self_ty: HeaderType,
     pub where_bounds: Vec<WhereBoundHeader>,
     pub associated_types: Vec<AssociatedTypeDefinitionHeader>,
+    pub methods: Vec<ImplementationMethodHeader>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -506,38 +514,91 @@ impl Parser<'_> {
             recovered: false,
         };
         let mut associated_types = vec![];
+        let mut methods = vec![];
         if body_parser.punctuation('{') {
             let mut names = BTreeSet::new();
             while body_parser.current().is_some() && !body_parser.at_punctuation('}') {
-                if body_parser.word() != Some("type") {
+                if body_parser.word() != Some("type") && body_parser.word() != Some("fn") {
                     body_parser.skip_item_body();
                     continue;
                 }
-                let start = body_parser.current().unwrap();
-                body_parser.position += 1;
-                let name = body_parser.identifier().unwrap_or_else(|| {
-                    body_parser.error("G3242", "expected associated type definition name");
-                    "<error>".into()
-                });
-                let item_generics = body_parser.generics();
-                if !body_parser.operator("=") {
-                    body_parser.error("G3243", "expected `=` in associated type definition");
+                if body_parser.word() == Some("type") {
+                    let start = body_parser.current().unwrap();
+                    body_parser.position += 1;
+                    let name = body_parser.identifier().unwrap_or_else(|| {
+                        body_parser.error("G3242", "expected associated type definition name");
+                        "<error>".into()
+                    });
+                    let item_generics = body_parser.generics();
+                    if !body_parser.operator("=") {
+                        body_parser.error("G3243", "expected `=` in associated type definition");
+                    }
+                    let value = body_parser.ty();
+                    if !body_parser.punctuation(';') {
+                        body_parser.error("G3244", "expected `;` after associated type definition");
+                        body_parser.skip_to_item_end();
+                    }
+                    if !names.insert(name.clone()) {
+                        body_parser.error("G3245", "duplicate associated type definition");
+                    }
+                    let end = body_parser.previous().unwrap_or(start);
+                    associated_types.push(AssociatedTypeDefinitionHeader {
+                        name,
+                        generics: item_generics,
+                        value,
+                        span: body_parser.span(start, end),
+                    });
+                    continue;
                 }
-                let value = body_parser.ty();
-                if !body_parser.punctuation(';') {
-                    body_parser.error("G3244", "expected `;` after associated type definition");
-                    body_parser.skip_to_item_end();
+                if body_parser.word() == Some("fn") {
+                    let start = body_parser.current().unwrap();
+                    body_parser.position += 1;
+                    let name = body_parser.identifier().unwrap_or_else(|| {
+                        body_parser.error("G3242", "expected implementation method name");
+                        "<error>".into()
+                    });
+                    let generics = body_parser.generics();
+                    let parameters = body_parser.callable_parameters();
+                    let result = body_parser.operator("->").then(|| body_parser.ty());
+                    let signature = CallableHeader {
+                        generics,
+                        parameters,
+                        result,
+                        effects: body_parser.effect_row_annotation(),
+                        where_bounds: body_parser.where_bounds(),
+                    };
+                    if !names.insert(name.clone()) {
+                        body_parser.error("G3245", "duplicate implementation item name");
+                    }
+                    if !body_parser.punctuation('{') {
+                        body_parser.error("G3244", "expected implementation method body");
+                        body_parser.skip_to_item_end();
+                    } else {
+                        let mut depth = 1;
+                        while body_parser.current().is_some() && depth > 0 {
+                            if body_parser.punctuation('{') {
+                                depth += 1;
+                                continue;
+                            }
+                            if body_parser.punctuation('}') {
+                                depth -= 1;
+                                continue;
+                            }
+                            body_parser.position += 1;
+                        }
+                        if depth != 0 {
+                            body_parser
+                                .error("G3246", "expected `}` after implementation method body");
+                        }
+                    }
+                    let end = body_parser.previous().unwrap_or(start);
+                    methods.push(ImplementationMethodHeader {
+                        name,
+                        signature,
+                        span: body_parser.span(start, end),
+                    });
+                    continue;
                 }
-                if !names.insert(name.clone()) {
-                    body_parser.error("G3245", "duplicate associated type definition");
-                }
-                let end = body_parser.previous().unwrap_or(start);
-                associated_types.push(AssociatedTypeDefinitionHeader {
-                    name,
-                    generics: item_generics,
-                    value,
-                    span: body_parser.span(start, end),
-                });
             }
             if !body_parser.punctuation('}') {
                 body_parser.error("G3246", "expected `}` after implementation body");
@@ -554,6 +615,7 @@ impl Parser<'_> {
             self_ty,
             where_bounds,
             associated_types,
+            methods,
         }
     }
     fn effect_header(&mut self, generics: Vec<String>) -> EffectHeader {

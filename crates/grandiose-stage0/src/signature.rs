@@ -46,6 +46,7 @@ pub struct ElaboratedImplementation {
     pub self_ty: Type,
     pub where_bounds: Vec<(Type, ElaboratedTraitReference)>,
     pub associated_types: BTreeMap<String, ElaboratedAssociatedTypeDefinition>,
+    pub methods: BTreeMap<String, CallableSignature>,
 }
 
 /// A trait implementation's associated type body. Item generics use slots
@@ -211,6 +212,30 @@ impl ElaboratedInterface {
                     diagnostics.push(SignatureDiagnostic {
                         code: "G4116",
                         message: format!("implementation omits associated type `{name}`"),
+                    });
+                }
+            }
+            for (name, method) in &implementation.methods {
+                match trait_header.methods.get(name) {
+                    Some(expected) if expected.generics == method.generics => {}
+                    Some(expected) => diagnostics.push(SignatureDiagnostic {
+                        code: "G4119",
+                        message: format!(
+                            "implementation method `{name}` has {} generics, but the trait requires {}",
+                            method.generics, expected.generics
+                        ),
+                    }),
+                    None => diagnostics.push(SignatureDiagnostic {
+                        code: "G4120",
+                        message: format!("implementation defines unknown trait method `{name}`"),
+                    }),
+                }
+            }
+            for name in trait_header.methods.keys() {
+                if !implementation.methods.contains_key(name) {
+                    diagnostics.push(SignatureDiagnostic {
+                        code: "G4121",
+                        message: format!("implementation omits trait method `{name}`"),
                     });
                 }
             }
@@ -735,6 +760,52 @@ impl Elaborator<'_> {
                 )
             })
             .collect();
+        let methods = header
+            .methods
+            .iter()
+            .map(|method| {
+                let outer_generics = self.generics.clone();
+                let base = outer_generics.len() as u32;
+                for (offset, name) in method.signature.generics.iter().enumerate() {
+                    if self
+                        .generics
+                        .insert(name.clone(), base + offset as u32)
+                        .is_some()
+                    {
+                        self.diagnostics.push(SignatureDiagnostic {
+                            code: "G4118",
+                            message: "implementation method generic shadows an outer generic"
+                                .into(),
+                        });
+                    }
+                }
+                let signature = CallableSignature {
+                    generics: method.signature.generics.len() as u32,
+                    parameters: method
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| self.ty(&parameter.ty))
+                        .collect(),
+                    result: method
+                        .signature
+                        .result
+                        .as_ref()
+                        .map(|value| self.ty(value))
+                        .unwrap_or(Type::Unit),
+                    effects: self.effect_row(&method.signature.effects),
+                    invocation: Quantity::ONCE,
+                    where_bounds: method
+                        .signature
+                        .where_bounds
+                        .iter()
+                        .map(|bound| (self.ty(&bound.subject), self.trait_ref(&bound.relation)))
+                        .collect(),
+                };
+                self.generics = outer_generics;
+                (method.name.clone(), signature)
+            })
+            .collect();
         ElaboratedImplementation {
             generics: header.generics.len() as u32,
             negative: header.negative,
@@ -742,6 +813,7 @@ impl Elaborator<'_> {
             self_ty,
             where_bounds,
             associated_types,
+            methods,
         }
     }
     fn effect_header(&mut self, header: &EffectHeader) -> ElaboratedEffect {
