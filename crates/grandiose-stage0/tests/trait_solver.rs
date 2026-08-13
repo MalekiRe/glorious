@@ -147,7 +147,6 @@ fn associated_type_normalization_uses_the_selected_impl_substitution() {
         }
     ));
 }
-
 #[test]
 fn associated_type_application_normalizes_item_generic_arguments() {
     let (interface, signatures) =

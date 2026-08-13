@@ -278,7 +278,6 @@ impl TraitSolver {
             TraitAnswer::Overflow => TraitMethodAnswer::Overflow,
         }
     }
-
     fn solve_at(&mut self, goal: TraitGoal, depth: u32) -> TraitAnswerIndex {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
             return TraitAnswerIndex::Overflow;
