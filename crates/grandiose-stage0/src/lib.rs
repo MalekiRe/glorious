@@ -93,10 +93,10 @@ pub use runtime_manifest::{
 pub use scanner::{DeclarationKind, DeclarationScan, DeclarationShell, ScanDiagnostic, TokenRange};
 pub use service::{CompilationOutcome, CompileDiagnostic, ServiceError, StageZeroCompiler};
 pub use signature::{
-    CallableSignature, ElaboratedEffect, ElaboratedEffectOperation, ElaboratedEnumVariant,
-    ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface,
-    ElaboratedNominalLayout, ElaboratedTrait, ElaboratedTraitReference, NominalField,
-    SignatureDiagnostic,
+    CallableSignature, ElaboratedAssociatedTypeDefinition, ElaboratedEffect,
+    ElaboratedEffectOperation, ElaboratedEnumVariant, ElaboratedEnumVariantPayload,
+    ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout,
+    ElaboratedTrait, ElaboratedTraitReference, NominalField, SignatureDiagnostic,
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{

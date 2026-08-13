@@ -147,3 +147,47 @@ fn associated_type_normalization_uses_the_selected_impl_substitution() {
         }
     ));
 }
+
+#[test]
+fn associated_type_application_normalizes_item_generic_arguments() {
+    let (interface, signatures) =
+        signatures("trait Apply { type Output<T>; } impl Apply for i64 { type Output<T> = T; }");
+    let apply = key(&interface, "Apply");
+    let answer = TraitSolver::new(&signatures).normalize_associated_type_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: apply,
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Output",
+        &[Type::Scalar(ScalarType::Text)],
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::Text),
+            ..
+        }
+    ));
+
+    let wrong_arity = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: apply,
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Output",
+    );
+    assert!(matches!(
+        wrong_arity,
+        TraitProjectionAnswer::AssociatedTypeArity {
+            expected: 1,
+            found: 0,
+            ..
+        }
+    ));
+}

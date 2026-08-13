@@ -37,12 +37,24 @@ pub enum TraitAnswer {
 /// explaining a projection constraint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TraitProjectionAnswer {
-    Normalized { evidence: DefKey, ty: Type },
-    Refuted { evidence: DefKey },
+    Normalized {
+        evidence: DefKey,
+        ty: Type,
+    },
+    Refuted {
+        evidence: DefKey,
+    },
     NoSolution,
     Ambiguous,
     Overflow,
-    MissingAssociatedType { evidence: DefKey },
+    MissingAssociatedType {
+        evidence: DefKey,
+    },
+    AssociatedTypeArity {
+        evidence: DefKey,
+        expected: u32,
+        found: u32,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -145,6 +157,18 @@ impl TraitSolver {
         goal: TraitGoal,
         name: &str,
     ) -> TraitProjectionAnswer {
+        self.normalize_associated_type_application(goal, name, &[])
+    }
+
+    /// Normalize an associated type application through selected trait
+    /// evidence. Item arguments occupy generic slots after the implementation
+    /// binders, preserving a stable substitution layout for GAT-like items.
+    pub fn normalize_associated_type_application(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[Type],
+    ) -> TraitProjectionAnswer {
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
@@ -154,10 +178,24 @@ impl TraitSolver {
                     return TraitProjectionAnswer::NoSolution;
                 };
                 match rule.implementation.associated_types.get(name) {
-                    Some(ty) => TraitProjectionAnswer::Normalized {
-                        evidence,
-                        ty: substitute_type(ty, &substitution),
-                    },
+                    Some(item) if item.generics != arguments.len() as u32 => {
+                        TraitProjectionAnswer::AssociatedTypeArity {
+                            evidence,
+                            expected: item.generics,
+                            found: arguments.len() as u32,
+                        }
+                    }
+                    Some(item) => {
+                        let base = rule.implementation.generics;
+                        let mut substitution = substitution;
+                        for (offset, argument) in arguments.iter().cloned().enumerate() {
+                            substitution.insert(base + offset as u32, argument);
+                        }
+                        TraitProjectionAnswer::Normalized {
+                            evidence,
+                            ty: substitute_type(&item.value, &substitution),
+                        }
+                    }
                     None => TraitProjectionAnswer::MissingAssociatedType { evidence },
                 }
             }

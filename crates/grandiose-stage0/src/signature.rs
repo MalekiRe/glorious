@@ -43,7 +43,16 @@ pub struct ElaboratedImplementation {
     pub relation: ElaboratedTraitReference,
     pub self_ty: Type,
     pub where_bounds: Vec<(Type, ElaboratedTraitReference)>,
-    pub associated_types: BTreeMap<String, Type>,
+    pub associated_types: BTreeMap<String, ElaboratedAssociatedTypeDefinition>,
+}
+
+/// A trait implementation's associated type body. Item generics use slots
+/// after the implementation's generic slots, so projection normalization can
+/// substitute both environments without conflating them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElaboratedAssociatedTypeDefinition {
+    pub generics: u32,
+    pub value: Type,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -457,8 +466,8 @@ impl ElaboratedInterface {
                         normalize_trait_reference(relation, &aliases, &mut diagnostics);
                     }
                     for value in implementation.associated_types.values_mut() {
-                        *value = normalize_alias_type(
-                            value.clone(),
+                        value.value = normalize_alias_type(
+                            value.value.clone(),
                             &aliases,
                             &mut vec![],
                             &mut diagnostics,
@@ -604,7 +613,31 @@ impl Elaborator<'_> {
         let associated_types = header
             .associated_types
             .iter()
-            .map(|item| (item.name.clone(), self.ty(&item.value)))
+            .map(|item| {
+                let outer_generics = self.generics.clone();
+                let base = outer_generics.len() as u32;
+                for (offset, name) in item.generics.iter().enumerate() {
+                    if self
+                        .generics
+                        .insert(name.clone(), base + offset as u32)
+                        .is_some()
+                    {
+                        self.diagnostics.push(SignatureDiagnostic {
+                            code: "G4113",
+                            message: "associated type generic shadows an outer generic".into(),
+                        });
+                    }
+                }
+                let value = self.ty(&item.value);
+                self.generics = outer_generics;
+                (
+                    item.name.clone(),
+                    ElaboratedAssociatedTypeDefinition {
+                        generics: item.generics.len() as u32,
+                        value,
+                    },
+                )
+            })
             .collect();
         ElaboratedImplementation {
             generics: header.generics.len() as u32,
