@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey, InterfaceSet,
-    LexedFile, PackageKey, ScalarType, TraitAnswer, TraitGoal, TraitProjectionAnswer, TraitSolver,
-    Type,
+    LexedFile, PackageKey, ScalarType, TraitAnswer, TraitGoal, TraitMethodAnswer,
+    TraitProjectionAnswer, TraitSolver, Type,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -189,5 +189,34 @@ fn associated_type_application_normalizes_item_generic_arguments() {
             found: 0,
             ..
         }
+    ));
+}
+
+#[test]
+fn method_selection_substitutes_impl_and_method_generic_arguments() {
+    let (interface, signatures) = signatures(
+        "trait Convert<T> { fn convert<U>(value: T, other: U) -> (T, U); } struct Box<T> {} impl<T> Convert<T> for Box<T> { fn convert<U>(value: T, other: U) -> (T, U) { (value, other) } }",
+    );
+    let convert = key(&interface, "Convert");
+    let boxed = key(&interface, "Box");
+    let answer = TraitSolver::new(&signatures).select_method(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: convert,
+                arguments: vec![Type::Scalar(ScalarType::I64)],
+            },
+            subject: Type::Nominal {
+                definition: boxed,
+                arguments: vec![Type::Scalar(ScalarType::I64)],
+            },
+        },
+        "convert",
+        &[Type::Scalar(ScalarType::Text)],
+    );
+    assert!(matches!(
+        answer,
+        TraitMethodAnswer::Selected { ref signature, .. }
+            if signature.parameters == vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)]
+                && signature.result == Type::Tuple(vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)])
     ));
 }

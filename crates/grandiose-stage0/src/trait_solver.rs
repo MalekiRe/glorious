@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    DefKey, Digest, ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface,
-    ElaboratedTraitReference, Type,
+    CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
+    ElaboratedImplementation, ElaboratedInterface, ElaboratedTraitReference, Type,
 };
 
 pub const DEFAULT_MAX_TRAIT_DEPTH: u32 = 128;
@@ -51,6 +51,30 @@ pub enum TraitProjectionAnswer {
         evidence: DefKey,
     },
     AssociatedTypeArity {
+        evidence: DefKey,
+        expected: u32,
+        found: u32,
+    },
+}
+
+/// Selected implementation method evidence with all implementation and method
+/// generic slots substituted for one concrete call site.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraitMethodAnswer {
+    Selected {
+        evidence: DefKey,
+        signature: CallableSignature,
+    },
+    Refuted {
+        evidence: DefKey,
+    },
+    NoSolution,
+    Ambiguous,
+    Overflow,
+    MissingMethod {
+        evidence: DefKey,
+    },
+    MethodArity {
         evidence: DefKey,
         expected: u32,
         found: u32,
@@ -203,6 +227,49 @@ impl TraitSolver {
             TraitAnswer::NoSolution => TraitProjectionAnswer::NoSolution,
             TraitAnswer::Ambiguous => TraitProjectionAnswer::Ambiguous,
             TraitAnswer::Overflow => TraitProjectionAnswer::Overflow,
+        }
+    }
+
+    /// Select an implementation method and instantiate both the implementation
+    /// binders and method-local generic binders. The returned declaration key
+    /// is the evidence identity that later Core/MIR lowering can carry without
+    /// repeating source-shaped impl lookup.
+    pub fn select_method(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[Type],
+    ) -> TraitMethodAnswer {
+        match self.solve(goal.clone()) {
+            TraitAnswer::Proven { evidence } => {
+                let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
+                    return TraitMethodAnswer::NoSolution;
+                };
+                let Some(method) = rule.implementation.methods.get(name) else {
+                    return TraitMethodAnswer::MissingMethod { evidence };
+                };
+                if method.generics != arguments.len() as u32 {
+                    return TraitMethodAnswer::MethodArity {
+                        evidence,
+                        expected: method.generics,
+                        found: arguments.len() as u32,
+                    };
+                }
+                let Some(mut substitution) = match_rule(&rule.implementation, &goal) else {
+                    return TraitMethodAnswer::NoSolution;
+                };
+                for (offset, argument) in arguments.iter().cloned().enumerate() {
+                    substitution.insert(rule.implementation.generics + offset as u32, argument);
+                }
+                TraitMethodAnswer::Selected {
+                    evidence,
+                    signature: substitute_callable_signature(method, &substitution),
+                }
+            }
+            TraitAnswer::Refuted { evidence } => TraitMethodAnswer::Refuted { evidence },
+            TraitAnswer::NoSolution => TraitMethodAnswer::NoSolution,
+            TraitAnswer::Ambiguous => TraitMethodAnswer::Ambiguous,
+            TraitAnswer::Overflow => TraitMethodAnswer::Overflow,
         }
     }
 
@@ -440,10 +507,55 @@ fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
                 .map(|value| substitute_type(value, substitution))
                 .collect(),
             result: Box::new(substitute_type(result, substitution)),
-            effects: effects.clone(),
+            effects: substitute_effect_row(effects, substitution),
             invocation: *invocation,
         },
         _ => value.clone(),
+    }
+}
+
+fn substitute_effect_row(value: &EffectRow, substitution: &BTreeMap<u32, Type>) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument, substitution))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+}
+
+fn substitute_callable_signature(
+    value: &CallableSignature,
+    substitution: &BTreeMap<u32, Type>,
+) -> CallableSignature {
+    CallableSignature {
+        generics: 0,
+        parameters: value
+            .parameters
+            .iter()
+            .map(|parameter| substitute_type(parameter, substitution))
+            .collect(),
+        result: substitute_type(&value.result, substitution),
+        effects: substitute_effect_row(&value.effects, substitution),
+        invocation: value.invocation,
+        where_bounds: value
+            .where_bounds
+            .iter()
+            .map(|(subject, relation)| {
+                (
+                    substitute_type(subject, substitution),
+                    substitute_relation(relation, substitution),
+                )
+            })
+            .collect(),
     }
 }
 

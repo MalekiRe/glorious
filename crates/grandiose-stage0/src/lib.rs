@@ -100,7 +100,7 @@ pub use signature::{
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{
-    DEFAULT_MAX_TRAIT_DEPTH, DEFAULT_MAX_TRAIT_STEPS, TraitAnswer, TraitGoal,
+    DEFAULT_MAX_TRAIT_DEPTH, DEFAULT_MAX_TRAIT_STEPS, TraitAnswer, TraitGoal, TraitMethodAnswer,
     TraitProjectionAnswer, TraitSolver, TraitSolverLimits,
 };
 pub use types::{
