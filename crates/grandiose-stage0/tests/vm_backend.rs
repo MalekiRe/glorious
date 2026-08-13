@@ -321,6 +321,68 @@ fn resumed_handler_frame_reinstalls_for_the_next_matching_operation() {
 }
 
 #[test]
+fn nested_partial_handler_forwards_to_an_outer_frame_and_restores_it_on_resume() {
+    let effect = DefKey(Digest::of_bytes(b"Console-forward"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"nested-forwarding")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 5],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 40 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 1,
+                    payload_destinations: vec![1],
+                    resume_type: VmType::I64,
+                    target: 9,
+                },
+                // This inner frame handles operation zero only. Operation one
+                // must cross it, invoke the outer frame, then be restored
+                // before the continuation uninstalls it.
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    target: 12,
+                },
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 1,
+                    arguments: vec![0],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 2 },
+                VmInstruction::Trap,
+                VmInstruction::Trap,
+                VmInstruction::ConstI64 { dst: 3, value: 2 },
+                VmInstruction::AddI64 {
+                    dst: 4,
+                    left: 1,
+                    right: 3,
+                },
+                VmInstruction::Resume { value: 4 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"nested-forwarding-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn verifier_allows_checked_store_reinitialization_but_rejects_type_confusion() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
