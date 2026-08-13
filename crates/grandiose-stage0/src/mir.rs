@@ -1726,9 +1726,12 @@ impl Lowerer<'_> {
                 }
                 _ => return None,
             };
-        let inner = match self.body.expression(outer_computation).kind.clone() {
-            CoreKind::Handle { .. } => outer_computation,
-            CoreKind::Block(values) if values.len() == 1 => values[0],
+        let (inner, outer_prefix) = match self.body.expression(outer_computation).kind.clone() {
+            CoreKind::Handle { .. } => (outer_computation, Vec::new()),
+            CoreKind::Block(values) => {
+                let (inner, prefix) = values.split_last()?;
+                (inner.to_owned(), prefix.to_vec())
+            }
             _ => return None,
         };
         let CoreKind::Handle {
@@ -1738,12 +1741,20 @@ impl Lowerer<'_> {
         else {
             return None;
         };
+        let (performed, inner_prefix) = match self.body.expression(inner_computation).kind.clone() {
+            CoreKind::Perform { .. } => (inner_computation, Vec::new()),
+            CoreKind::Block(values) => {
+                let (performed, prefix) = values.split_last()?;
+                (*performed, prefix.to_vec())
+            }
+            _ => return None,
+        };
         let CoreKind::Perform {
             effect,
             operation,
             arguments: argument_ids,
             terminal: false,
-        } = self.body.expression(inner_computation).kind.clone()
+        } = self.body.expression(performed).kind.clone()
         else {
             return None;
         };
@@ -1790,10 +1801,6 @@ impl Lowerer<'_> {
         for expression in root_prefix {
             self.statement(expression)?;
         }
-        let arguments = argument_ids
-            .iter()
-            .map(|argument| self.value(*argument))
-            .collect::<Option<Vec<_>>>()?;
         let payload_types = argument_ids
             .iter()
             .map(|argument| self.body.expression(*argument).ty.clone())
@@ -1861,6 +1868,11 @@ impl Lowerer<'_> {
             resume_type: self.body.expression(inner_computation).ty.clone(),
             target: MirBlockId(1),
         });
+        self.instructions = Vec::new();
+        for expression in outer_prefix {
+            self.statement(expression)?;
+        }
+        entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::InstallHandler {
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
@@ -1869,6 +1881,15 @@ impl Lowerer<'_> {
             resume_type: self.body.expression(inner_computation).ty.clone(),
             target: clause_targets[0],
         });
+        self.instructions = Vec::new();
+        for expression in inner_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
             dst: result,
             effect: effect.definition,

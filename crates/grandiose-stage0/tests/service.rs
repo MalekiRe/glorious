@@ -750,6 +750,22 @@ fn service_uses_an_irrefutable_inner_fallback_before_the_outer_handler() {
 }
 
 #[test]
+fn service_keeps_nested_handler_setup_inside_its_outer_frame_scope() {
+    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let seed = 40; handle Ask::ask(seed) { Ask::ask(0) => 0 } } { Ask::ask(value) => value + 2 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_keeps_inner_computation_setup_inside_its_inner_frame_scope() {
+    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle { let seed = 40; Ask::ask(seed) } { Ask::ask(0) => 0 } } { Ask::ask(value) => value + 2 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_executes_a_generic_effect_handler_through_vm_frames() {
     let source = "effect State<T> { [1,1] get() -> T; } pub fn main() -> i64 { handle State<i64>::get() { State<i64>::get() => 42 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
