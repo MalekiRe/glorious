@@ -556,3 +556,43 @@ fn exact_one_shot_tail_resumption_lowers_to_a_runtime_handler_frame() {
             .any(|instruction| matches!(instruction, MirInstruction::Resume { .. }))
     );
 }
+
+#[test]
+fn generic_effect_handler_frame_retains_its_nominal_instance_arguments() {
+    let package = PackageKey("core-handler-runtime-generic@0.1.0".into());
+    let source = "effect State<T> { [1,1] get() -> T; } pub fn main() -> i64 { handle State<i64>::get() { State<i64>::get() => 42 } }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let mir = MirLowering::lower(definition.key, &core, &flow)
+        .function
+        .expect("generic one-shot handler lowers to MIR");
+    assert!(mir.blocks.iter().flat_map(|block| &block.instructions).any(
+        |instruction| matches!(
+            instruction,
+            MirInstruction::InstallHandler {
+                effect_arguments,
+                ..
+            } if effect_arguments == &[grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::I64)]
+        )
+    ));
+}

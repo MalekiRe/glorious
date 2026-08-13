@@ -2032,12 +2032,23 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let CoreKind::Handle {
-            computation,
-            clauses,
-        } = self.body.expression(root).kind.clone()
-        else {
-            return None;
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
         };
         let CoreKind::Perform {
             effect,
@@ -2067,6 +2078,9 @@ impl Lowerer<'_> {
             || !clause.patterns.iter().all(pattern_is_irrefutable)
         {
             return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
         }
         let arguments = argument_ids
             .iter()

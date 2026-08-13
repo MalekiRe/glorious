@@ -718,6 +718,14 @@ fn service_lowers_a_direct_one_shot_handler_through_vm_handler_frames() {
 }
 
 #[test]
+fn service_executes_a_generic_effect_handler_through_vm_frames() {
+    let source = "effect State<T> { [1,1] get() -> T; } pub fn main() -> i64 { handle State<i64>::get() { State<i64>::get() => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_a_direct_one_resume_lowering_for_an_exact_two_shot_contract() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
