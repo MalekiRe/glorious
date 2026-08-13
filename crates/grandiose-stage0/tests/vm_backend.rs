@@ -193,7 +193,7 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
                 VmInstruction::Perform {
                     dst: 0,
                     effect,
-                    effect_arguments: vec![],
+                    effect_arguments: vec![VmType::I64],
                     operation: 0,
                     arguments: vec![],
                 },
@@ -209,8 +209,9 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
         decode_and_verify_artifact(&bytes).unwrap().run_i64(),
         Err(VmArtifactError::UnhandledEffect {
             effect: actual,
+            effect_arguments,
             operation: 0,
-        }) if actual == effect
+        }) if actual == effect && effect_arguments == vec![VmType::I64]
     ));
 }
 

@@ -387,6 +387,10 @@ pub enum VmArtifactError {
     ArithmeticOverflow,
     UnhandledEffect {
         effect: DefKey,
+        /// The exact nominal protocol instance that escaped the handler
+        /// stack. This is required to distinguish e.g. `State<i64>` from
+        /// `State<Text>` at the VM boundary.
+        effect_arguments: Vec<VmType>,
         operation: u32,
     },
 }
@@ -3417,9 +3421,16 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 )));
             }
             VmInstruction::Perform {
-                effect, operation, ..
+                effect,
+                effect_arguments,
+                operation,
+                ..
             } => {
-                return Err(VmArtifactError::UnhandledEffect { effect, operation });
+                return Err(VmArtifactError::UnhandledEffect {
+                    effect,
+                    effect_arguments,
+                    operation,
+                });
             }
             VmInstruction::Copy { dst, src } => {
                 registers[dst as usize] = registers[src as usize].clone()
@@ -4337,10 +4348,14 @@ fn execute_with_arguments(
                 )));
             }
             VmInstruction::Perform {
-                effect, operation, ..
+                effect,
+                effect_arguments,
+                operation,
+                ..
             } => {
                 return Err(VmArtifactError::UnhandledEffect {
                     effect: *effect,
+                    effect_arguments: effect_arguments.clone(),
                     operation: *operation,
                 });
             }
