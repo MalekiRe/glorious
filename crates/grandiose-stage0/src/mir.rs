@@ -1774,7 +1774,7 @@ impl Lowerer<'_> {
             .copied()
             .filter(|clause| clause.effect == effect && clause.operation == operation)
             .collect::<Vec<_>>();
-        let sibling_operation_clauses = all_inner_operation_clauses
+        let mut sibling_operation_clauses = all_inner_operation_clauses
             .iter()
             .copied()
             .filter(|clause| clause.effect != effect || clause.operation != operation)
@@ -1782,11 +1782,23 @@ impl Lowerer<'_> {
         if inner_operation_clauses.is_empty() {
             return None;
         }
+        if sibling_operation_clauses.iter().skip(1).any(|clause| {
+            clause.effect != sibling_operation_clauses[0].effect
+                || clause.operation != sibling_operation_clauses[0].operation
+        }) {
+            return None;
+        }
         if let Some(fallback) = inner_operation_clauses
             .iter()
             .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable))
         {
             inner_operation_clauses.truncate(fallback + 1);
+        }
+        if let Some(fallback) = sibling_operation_clauses
+            .iter()
+            .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable))
+        {
+            sibling_operation_clauses.truncate(fallback + 1);
         }
         let exact_one_shot = |clause: &CoreHandlerClause| match &clause.resumption {
             CoreHandlerResumption::Explicit { quantity, .. }
@@ -1802,18 +1814,8 @@ impl Lowerer<'_> {
                 !exact_one_shot(clause) || clause.patterns.len() != argument_ids.len()
             })
             || sibling_operation_clauses.iter().any(|clause| {
-                !exact_one_shot(clause)
-                    || clause.patterns.len() != clause.payload_types.len()
-                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+                !exact_one_shot(clause) || clause.patterns.len() != clause.payload_types.len()
             })
-            || sibling_operation_clauses
-                .iter()
-                .enumerate()
-                .any(|(index, clause)| {
-                    sibling_operation_clauses[..index].iter().any(|previous| {
-                        previous.effect == clause.effect && previous.operation == clause.operation
-                    })
-                })
         {
             return None;
         }
@@ -1860,7 +1862,7 @@ impl Lowerer<'_> {
             .last()
             .is_some_and(|(clause, _)| clause.patterns.iter().all(pattern_is_irrefutable));
         let forward_target = MirBlockId(body_start + dispatch.len() as u32);
-        let sibling_start = forward_target.0 + u32::from(!has_fallback);
+        let sibling_test_start = forward_target.0 + u32::from(!has_fallback);
         let mut clause_targets = Vec::with_capacity(dispatch.len());
         let mut next_test = 2u32;
         for (index, (_, tests)) in dispatch.iter().enumerate() {
@@ -1871,21 +1873,62 @@ impl Lowerer<'_> {
                 next_test += tests.len() as u32;
             }
         }
-        let sibling_frames = sibling_operation_clauses
+        let sibling_payload_destinations = sibling_operation_clauses.first().map(|clause| {
+            clause
+                .payload_types
+                .iter()
+                .map(|ty| self.alloc(ty.clone(), inner_computation))
+                .collect::<Vec<_>>()
+        });
+        let mut sibling_dispatch = Vec::with_capacity(sibling_operation_clauses.len());
+        for clause in sibling_operation_clauses {
+            let tests = if clause.patterns.iter().all(pattern_is_irrefutable) {
+                Vec::new()
+            } else {
+                clause
+                    .patterns
+                    .iter()
+                    .cloned()
+                    .zip(
+                        sibling_payload_destinations
+                            .as_ref()
+                            .expect("sibling clause payload destinations exist")
+                            .iter()
+                            .copied(),
+                    )
+                    .map(|(pattern, subject)| {
+                        Some((
+                            self.alloc(
+                                Type::Scalar(crate::types::ScalarType::Bool),
+                                inner_computation,
+                            ),
+                            subject,
+                            lower_pattern(pattern)?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            };
+            sibling_dispatch.push((clause, tests));
+        }
+        let sibling_test_count = sibling_dispatch
             .iter()
-            .enumerate()
-            .map(|(index, clause)| {
-                (
-                    *clause,
-                    clause
-                        .payload_types
-                        .iter()
-                        .map(|ty| self.alloc(ty.clone(), inner_computation))
-                        .collect::<Vec<_>>(),
-                    MirBlockId(sibling_start + index as u32),
-                )
-            })
-            .collect::<Vec<_>>();
+            .map(|(_, tests)| tests.len())
+            .sum::<usize>();
+        let sibling_body_start = sibling_test_start + sibling_test_count as u32;
+        let sibling_has_fallback = sibling_dispatch
+            .last()
+            .is_some_and(|(clause, _)| clause.patterns.iter().all(pattern_is_irrefutable));
+        let sibling_forward_target = MirBlockId(sibling_body_start + sibling_dispatch.len() as u32);
+        let mut sibling_clause_targets = Vec::with_capacity(sibling_dispatch.len());
+        let mut next_sibling_test = sibling_test_start;
+        for (index, (_, tests)) in sibling_dispatch.iter().enumerate() {
+            if tests.is_empty() {
+                sibling_clause_targets.push(MirBlockId(sibling_body_start + index as u32));
+            } else {
+                sibling_clause_targets.push(MirBlockId(next_sibling_test));
+                next_sibling_test += tests.len() as u32;
+            }
+        }
         let result = self.alloc(
             self.body.expression(inner_computation).ty.clone(),
             inner_computation,
@@ -1904,14 +1947,17 @@ impl Lowerer<'_> {
             self.statement(expression)?;
         }
         entry.extend(std::mem::take(&mut self.instructions));
-        for (clause, payload_destinations, target) in &sibling_frames {
+        if let (Some((clause, _)), Some(payload_destinations)) = (
+            sibling_dispatch.first(),
+            sibling_payload_destinations.as_ref(),
+        ) {
             entry.push(MirInstruction::InstallHandler {
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
                 payload_destinations: payload_destinations.clone(),
                 resume_type: self.body.expression(inner_computation).ty.clone(),
-                target: *target,
+                target: sibling_clause_targets[0],
             });
         }
         entry.push(MirInstruction::InstallHandler {
@@ -1939,7 +1985,7 @@ impl Lowerer<'_> {
             arguments,
         });
         entry.push(MirInstruction::UninstallHandler);
-        for _ in &sibling_frames {
+        if sibling_payload_destinations.is_some() {
             entry.push(MirInstruction::UninstallHandler);
         }
         entry.push(MirInstruction::UninstallHandler);
@@ -1965,11 +2011,16 @@ impl Lowerer<'_> {
             bodies.push(std::mem::take(&mut self.instructions));
             self.named = named;
         }
-        let mut sibling_bodies = Vec::with_capacity(sibling_frames.len());
-        for (clause, payload_destinations, _) in &sibling_frames {
+        let mut sibling_bodies = Vec::with_capacity(sibling_dispatch.len());
+        for (clause, _) in &sibling_dispatch {
             self.instructions = Vec::new();
             let named = self.named.clone();
-            self.bind_handler_patterns(&clause.patterns, payload_destinations)?;
+            self.bind_handler_patterns(
+                &clause.patterns,
+                sibling_payload_destinations
+                    .as_ref()
+                    .expect("sibling clause payload destinations exist"),
+            )?;
             let resumed = self.direct_handler_clause_value(clause)?;
             self.instructions
                 .push(MirInstruction::Resume { value: resumed });
@@ -2032,10 +2083,46 @@ impl Lowerer<'_> {
                 terminator: MirTerminator::Unreachable,
             });
         }
+        let mut sibling_test_id = sibling_test_start;
+        for (clause_index, (_, tests)) in sibling_dispatch.iter().enumerate() {
+            let failure_target = sibling_clause_targets
+                .get(clause_index + 1)
+                .copied()
+                .unwrap_or(sibling_forward_target);
+            for (test_index, (condition, subject, pattern)) in tests.iter().cloned().enumerate() {
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject,
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: if test_index + 1 == tests.len() {
+                            MirBlockId(sibling_body_start + clause_index as u32)
+                        } else {
+                            MirBlockId(sibling_test_id + 1)
+                        },
+                        then_arguments: vec![],
+                        else_target: failure_target,
+                        else_arguments: vec![],
+                    },
+                });
+                sibling_test_id += 1;
+            }
+        }
         for instructions in sibling_bodies {
             blocks.push(MirBlock {
                 parameters: vec![],
                 instructions,
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        if !sibling_has_fallback && !sibling_dispatch.is_empty() {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
                 terminator: MirTerminator::Unreachable,
             });
         }
