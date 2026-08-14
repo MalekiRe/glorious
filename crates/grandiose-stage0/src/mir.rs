@@ -12241,6 +12241,22 @@ impl Lowerer<'_> {
                     self.statement(statement)?;
                 }
                 self.lower_completion_return(completion, root, blocks)?
+            } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
+                // Bottom-typed arms are control exits, not values of the
+                // enclosing completion result.  Emitting a normal `Return`
+                // would create a MIR return whose local has type `!` while
+                // the function returns the completion's ordinary result.
+                // Preserve the arm's strict evaluation (so `abort` and
+                // terminal effects are still selected), then end its CFG
+                // path explicitly.
+                self.statement(clause.body)?;
+                let id = MirBlockId(blocks.len() as u32);
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: std::mem::take(&mut self.instructions),
+                    terminator: MirTerminator::Unreachable,
+                });
+                id
             } else {
                 let body = self.value(clause.body)?;
                 let id = MirBlockId(blocks.len() as u32);
@@ -12317,8 +12333,11 @@ impl Lowerer<'_> {
             CoreKind::Completion { .. } => Some((vec![], id)),
             CoreKind::Block(values) => {
                 let (completion, prefix) = values.split_last()?;
-                matches!(self.body.expression(*completion).kind, CoreKind::Completion { .. })
-                    .then(|| (prefix.to_vec(), *completion))
+                matches!(
+                    self.body.expression(*completion).kind,
+                    CoreKind::Completion { .. }
+                )
+                .then(|| (prefix.to_vec(), *completion))
             }
             _ => None,
         }
