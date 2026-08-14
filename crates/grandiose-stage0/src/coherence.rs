@@ -264,8 +264,24 @@ fn collect_generic_argument_names(
     declared: &BTreeSet<String>,
     used: &mut BTreeSet<String>,
 ) {
-    if let HeaderGenericArgument::Type(value) = value {
-        collect_generic_names(value, declared, used);
+    match value {
+        HeaderGenericArgument::Type(value) => collect_generic_names(value, declared, used),
+        HeaderGenericArgument::Lifetime(value) if declared.contains(value) => {
+            used.insert(value.clone());
+        }
+        HeaderGenericArgument::EffectRow(value) => {
+            for effect in &value.effects {
+                collect_generic_names(effect, declared, used);
+            }
+            if let Some(tail) = &value.tail
+                && declared.contains(tail)
+            {
+                used.insert(tail.clone());
+            }
+        }
+        HeaderGenericArgument::U32(_)
+        | HeaderGenericArgument::Quantity(_)
+        | HeaderGenericArgument::Lifetime(_) => {}
     }
 }
 
@@ -301,6 +317,12 @@ fn unify_generic_argument(
     match (left, right) {
         (HeaderGenericArgument::Type(left), HeaderGenericArgument::Type(right)) => {
             unify_type(left, right, left_generics, right_generics, bindings)
+        }
+        (HeaderGenericArgument::Lifetime(left), HeaderGenericArgument::Lifetime(right)) => {
+            left == right || left_generics.contains(left) || right_generics.contains(right)
+        }
+        (HeaderGenericArgument::EffectRow(left), HeaderGenericArgument::EffectRow(right)) => {
+            left == right
         }
         (HeaderGenericArgument::U32(left), HeaderGenericArgument::U32(right)) => left == right,
         (HeaderGenericArgument::Quantity(left), HeaderGenericArgument::Quantity(right)) => {
