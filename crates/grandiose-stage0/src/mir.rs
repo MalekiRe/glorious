@@ -7799,15 +7799,16 @@ impl Lowerer<'_> {
     }
 
     /// Lower several exact replayable operations whose suspended performances
-    /// are reached through one direct ordinary callee call.
+    /// are reached through one ordinary callee call.
     ///
     /// Every operation receives its own dynamic replay frame and private
     /// handler target.  This matters when a resumed first operation performs
     /// a second operation: the VM must retain both the first operation's
     /// cross-call continuation and the second operation's distinct result
     /// type, rather than treating a closed effect row as one untyped frame.
-    /// Refutable/ordered rows and indirect calls deliberately remain with
-    /// their dedicated lowering slices.
+    /// Function values retain their materialized callable register through a
+    /// `CallIndirect`; refutable/ordered rows and mixed quantities deliberately
+    /// remain with their dedicated lowering slices.
     fn lower_root_interprocedural_multi_operation_replay_resumption(
         &mut self,
         root: CoreId,
@@ -7865,16 +7866,7 @@ impl Lowerer<'_> {
         if effects.tail.is_some() || !effects.projections.is_empty() {
             return None;
         }
-        // This slice intentionally owns direct named calls only.  An indirect
-        // callee needs a separate capability-preservation proof, and a trait
-        // call carries an independent dictionary identity through the VM.
-        let CoreKind::Function {
-            definition: callee,
-            arguments: generic_arguments,
-        } = self.body.expression(callee).kind.clone()
-        else {
-            return None;
-        };
+        let callee_kind = self.body.expression(callee).kind.clone();
         if clauses.len() < 2
             || clauses.iter().any(|clause| {
                 clause.terminal
@@ -7910,6 +7902,10 @@ impl Lowerer<'_> {
             .into_iter()
             .map(|argument| self.value(argument))
             .collect::<Option<Vec<_>>>()?;
+        let indirect = match &callee_kind {
+            CoreKind::Function { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
         let performed = self.alloc(self.body.expression(call).ty.clone(), call);
         let payload_destinations = clauses
             .iter()
@@ -7946,13 +7942,23 @@ impl Lowerer<'_> {
                 target: *target,
             });
         }
-        entry.push(MirInstruction::Call {
-            dst: performed,
-            callee,
-            generic_arguments,
-            trait_instance: None,
-            arguments,
-        });
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: performed,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: performed,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
         for _ in &clauses {
             entry.push(MirInstruction::UninstallHandler);
         }

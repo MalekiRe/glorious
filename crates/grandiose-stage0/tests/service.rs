@@ -3600,6 +3600,62 @@ fn service_replays_distinct_generic_operations_across_a_direct_call() {
 }
 
 #[test]
+fn service_replays_distinct_generic_operations_through_a_function_value() {
+    let source = "effect Console<T> { [2,2] read() -> T; [2,2] write(value: T) -> i64; } pub fn helper() -> i64 / Console<Text> { let text = Console<Text>::read(); Console<Text>::write(text) } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); value + 1 } { Console<Text>::read(k) => k(\"one\") + k(\"two\"); Console<Text>::write(value, k) => k(10) + k(20) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "the captured function value must survive into the protected call"
+    );
+    let frames = entry
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            VmInstruction::InstallHandler {
+                effect_arguments,
+                operation,
+                resume_type,
+                continuation: VmContinuationPolicy::Replay,
+                target,
+                ..
+            } => Some((
+                effect_arguments.clone(),
+                *operation,
+                resume_type.clone(),
+                *target,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        frames.len(),
+        2,
+        "each indirect operation needs a replay frame"
+    );
+    assert_eq!(frames[0].0, vec![VmGenericArgument::Type(VmType::Text)]);
+    assert_eq!(frames[1].0, vec![VmGenericArgument::Type(VmType::Text)]);
+    assert_eq!((frames[0].1, &frames[0].2), (0, &VmType::Text));
+    assert_eq!((frames[1].1, &frames[1].2), (1, &VmType::I64));
+    assert_ne!(frames[0].3, frames[1].3);
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .count(),
+        4
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 64);
+}
+
+#[test]
 fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

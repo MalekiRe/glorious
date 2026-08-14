@@ -355,6 +355,69 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
 }
 
 #[test]
+fn verifier_rejects_an_unrestored_handler_across_a_replay_return() {
+    let replayed = DefKey(Digest::of_bytes(b"replay-return-outer"));
+    let unrelated = DefKey(Digest::of_bytes(b"replay-return-unrelated"));
+    // ResumeReturn may retain frames restored from the suspended continuation,
+    // but it must not turn that return edge into a general escape hatch for a
+    // fresh handler installed by forged protected bytecode.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"replay-return-frame-proof")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 4],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::InstallHandler {
+                    effect: replayed,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Replay,
+                    target: 6,
+                },
+                VmInstruction::Perform {
+                    dst: 1,
+                    effect: replayed,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                // This is the resumed protected path. The handler at pc 3
+                // was never part of the snapshot, so its active return must
+                // fail instead of returning to the replay clause.
+                VmInstruction::InstallHandler {
+                    effect: unrelated,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 10,
+                },
+                VmInstruction::Return { value: 1 },
+                VmInstruction::Trap,
+                VmInstruction::ConstI64 { dst: 2, value: 42 },
+                VmInstruction::ResumeReturn { dst: 3, value: 2 },
+                VmInstruction::Cancel,
+                VmInstruction::Return { value: 3 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"replay-return-frame-proof-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerStillActive)
+    ));
+}
+
+#[test]
 fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
     use grandiose_stage0::{
         ConstKind, EffectTail, Lifetime, VmEffectInstance, VmEffectRow, VmEffectRowProjection,
