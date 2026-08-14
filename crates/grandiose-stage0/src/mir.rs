@@ -1175,6 +1175,36 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A closed callable effect row is an interprocedural summary, not a
+        // request to inline or re-derive the callee's body.  Install the
+        // caller's lexical frames around the ordinary call so the VM can
+        // dispatch a later callee `Perform` through its real call stack.
+        if let Some(function) =
+            lowerer.lower_root_interprocedural_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer.lower_root_linear_resumptions(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -7141,6 +7171,197 @@ impl Lowerer<'_> {
             target: next,
             arguments: vec![],
         };
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+    /// Lower a closed, effectful ordinary call through lexical VM frames.
+    ///
+    /// The callee's frozen callable effect row is the interprocedural summary
+    /// used here. It authorizes only exact, closed protocol instances; open
+    /// tails and delayed projections deliberately remain unsupported rather
+    /// than being guessed from a callee body. This keeps calls, functions,
+    /// and function values as genuine VM calls while allowing a caller's
+    /// handler to intercept a callee performance dynamically.
+    fn lower_root_interprocedural_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        // Stage 0 still links one generic body per declaration. Until the
+        // executable-instance linker carries substitutions into a callee's
+        // `Perform` identities, dispatching a generic body through a concrete
+        // caller frame would be unsound. Leave that case to the existing
+        // proven specialization rather than comparing `Ask<T>` with
+        // `Ask<i64>` at runtime.
+        if matches!(
+            self.body.expression(callee).kind,
+            CoreKind::Function { ref arguments, .. } if !arguments.is_empty()
+        ) {
+            return None;
+        }
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        // A nonempty closed row is the only summary this lowering may trust.
+        // An open row can contain arbitrary protocols; an associated
+        // projection requires the source solver's evidence and must not be
+        // approximated by bytecode lowering.
+        if effects.effects.is_empty() || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let mut active = clauses
+            .into_iter()
+            .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
+            .collect::<Vec<_>>();
+        if active.is_empty()
+            || active.iter().any(|clause| {
+                clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+                    || !matches!(
+                        clause.resumption,
+                        CoreHandlerResumption::Tail {
+                            quantity: crate::quantity::Quantity::ONCE
+                        } | CoreHandlerResumption::Explicit {
+                            quantity: crate::quantity::Quantity::ONCE,
+                            ..
+                        }
+                    )
+                    || self.handler_body_uses_snapshot_alias(clause.body)
+            })
+        {
+            return None;
+        }
+        active.sort_by_key(|clause| (clause.effect.clone(), clause.operation));
+        if active
+            .windows(2)
+            .any(|pair| pair[0].effect == pair[1].effect && pair[0].operation == pair[1].operation)
+        {
+            // One VM frame owns one protocol operation. Refutable or sibling
+            // operation dispatch needs the general handler matrix; accepting
+            // it here would silently change source row ordering.
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let payloads = active
+            .iter()
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), computation))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (index, clause) in active.iter().enumerate() {
+            entry.push(MirInstruction::InstallHandler {
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads[index].clone(),
+                resume_type: self.body.expression(computation).ty.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId((index + 1) as u32),
+            });
+        }
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        for _ in &active {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let mut blocks = vec![MirBlock {
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return { value: result },
+        }];
+        let previous_named = self.named.clone();
+        for (clause, payloads) in active.iter().zip(payloads) {
+            self.instructions = Vec::new();
+            self.named = previous_named.clone();
+            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            let resumed = self.direct_handler_clause_value(clause)?;
+            self.instructions
+                .push(MirInstruction::Resume { value: resumed });
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: std::mem::take(&mut self.instructions),
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        self.named = previous_named;
         Some(MirFunction {
             definition: self.definition,
             captures: 0,

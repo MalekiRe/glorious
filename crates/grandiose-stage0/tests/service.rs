@@ -2812,9 +2812,82 @@ fn service_handles_an_indirect_generic_helper_performance_through_a_vm_frame() {
             .instructions
             .iter()
             .any(|instruction| matches!(instruction, VmInstruction::Perform { .. })),
-        "helper effect must lower to an executable caller-side performance"
+        "generic effect bodies remain fail-closed until executable instance linking preserves their substitutions"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_handles_a_nontransparent_nested_callee_through_normal_vm_calls() {
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn leaf(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn helper(value: i64) -> i64 / Ask { let shifted = value + 1; leaf(shifted) } pub fn main() -> i64 { handle helper(40) { Ask::ask(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+        "the outer handler must preserve the helper call boundary"
+    );
+    assert!(
+        program
+            .functions
+            .iter()
+            .filter(|(definition, _)| **definition != program.entry)
+            .any(|(_, function)| function
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::Call { .. }))),
+        "the nontransparent helper must retain its nested ordinary call"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_handles_an_effectful_function_value_through_a_dynamic_frame() {
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Ask::ask(value) with k => k(value + 2) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "effectful function value must retain an indirect VM call"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_propagates_a_closed_multi_operation_effect_summary_through_a_callee() {
+    let source = "effect Console { [1,1] read() -> i64; [1,1] write(value: i64) -> i64; } pub fn helper() -> i64 / Console { let value = Console::read(); Console::write(value) } pub fn main() -> i64 { handle helper() { Console::read() with k => k(20), Console::write(value) with k => k(value + 2) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .count(),
+        2,
+        "one dynamic frame is required for each summarized operation"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. }))
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 22);
 }
 
 #[test]
