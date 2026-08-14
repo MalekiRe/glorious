@@ -581,13 +581,30 @@ impl Parser<'_> {
             } else if self.at_punctuation('{') && !self.handler_computation {
                 let block = self.parse_block(true)?;
                 let span = join(self.expression(value).span, self.expression(block).span);
-                value = self.alloc(
-                    ExprKind::Call {
-                        callee: value,
-                        arguments: vec![block],
-                    },
-                    span,
-                );
+                // A trailing contextual block is the final argument of an
+                // ordinary direct call, not an implicit curried call of its
+                // result.  In particular, canonical control source writes
+                // `if(condition) { body }`: treating that as
+                // `(if(condition))({ body })` loses `if`'s second callable
+                // parameter before Core can give the block its expected
+                // zero-argument closure type.  Preserve the direct call and
+                // append the block to its source-order argument list.
+                if let ExprKind::Call {
+                    callee,
+                    mut arguments,
+                } = self.expression(value).kind.clone()
+                {
+                    arguments.push(block);
+                    value = self.alloc(ExprKind::Call { callee, arguments }, span);
+                } else {
+                    value = self.alloc(
+                        ExprKind::Call {
+                            callee: value,
+                            arguments: vec![block],
+                        },
+                        span,
+                    );
+                }
             } else {
                 break;
             }

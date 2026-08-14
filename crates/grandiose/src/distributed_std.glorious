@@ -571,8 +571,8 @@ E: Use<[0, 0]> { handle value { Result::Ok(result) => result, Result::Err(_) => 
 __g1_option_map<A, B, F>(value: Option<A>, transform: F) -> Option<B> where F: Fn<(A), Output = B>,
 F: Use<[0, 0]> {
     handle value {
-        Result::Ok(result) => Option::Some(transform(move result)),
-        Result::Err(_) => None
+        Result::Ok(result) => Result::Ok(transform(move result)),
+        Result::Err(_) => Result::Err(())
     }
 }
 
@@ -581,7 +581,7 @@ __g1_option_and_then<A, B, F>(value: Option<A>, transform: F) -> Option<B> where
     Output = Option<B>
 >,
 F: Use<[0, 0]> {
-    handle value { Result::Ok(result) => transform(move result), Result::Err(_) => None }
+    handle value { Result::Ok(result) => transform(move result), Result::Err(_) => Result::Err(()) }
 }
 
 __g1_option_or_else<A, F>(value: Option<A>, fallback: F) -> Option<A> where F: Fn<
@@ -589,7 +589,7 @@ __g1_option_or_else<A, F>(value: Option<A>, fallback: F) -> Option<A> where F: F
     Output = Option<A>
 >,
 F: Use<[0, 0]> {
-    handle value { Result::Ok(result) => Option::Some(result), Result::Err(_) => fallback() }
+    handle value { Result::Ok(result) => Result::Ok(result), Result::Err(_) => fallback() }
 }
 
 __g1_option_unwrap_or<A>(value: Option<A>, fallback: A) -> A where A: Use<[0, 0]> {
@@ -609,15 +609,15 @@ __g1_result_as_mut<'a, A, E>(value: &'a mut Result<A, E>) -> Result<& 'a mut A, 
 }
 
 __g1_option_as_ref<'a, A>(value: &'a Option<A>) -> Option<& 'a A> {
-    if(*value is Option::Some(_)) {
-        Option::Some(&value.0)
-    } else { None }
+    if(*value is Result::Ok(_)) {
+        Result::Ok(&value.0)
+    } else { Result::Err(()) }
 }
 
 __g1_option_as_mut<'a, A>(value: &'a mut Option<A>) -> Option<& 'a mut A> {
-    if(*value is Option::Some(_)) {
-        Option::Some(&mut value.0)
-    } else { None }
+    if(*value is Result::Ok(_)) {
+        Result::Ok(&mut value.0)
+    } else { Result::Err(()) }
 }
 
 let Result::is_ok = __g1_result_is_ok;
