@@ -2717,36 +2717,137 @@ impl Elaborator<'_> {
             let span = self.expressions[index].span;
             let ty = self.expressions[index].ty.clone();
             self.expressions[index].ty = self.zonk_type(ty, span);
-            let closure_data = match &self.expressions[index].kind {
-                CoreKind::Closure {
-                    parameters,
-                    captures,
-                    ..
-                } => Some((parameters.clone(), captures.clone())),
-                _ => None,
-            };
-            let Some((parameters, captures)) = closure_data else {
-                continue;
-            };
-            let parameters = parameters
-                .into_iter()
-                .map(|(name, ty)| (name, self.zonk_type(ty, span)))
-                .collect();
-            let captures = captures
-                .into_iter()
-                .map(|mut capture| {
-                    capture.ty = self.zonk_type(capture.ty, span);
-                    capture
-                })
-                .collect();
-            if let CoreKind::Closure {
-                parameters: target_parameters,
-                captures: target_captures,
+            let kind = self.expressions[index].kind.clone();
+            self.expressions[index].kind = self.zonk_core_metadata(kind, span);
+        }
+    }
+
+    fn zonk_core_metadata(&mut self, mut kind: CoreKind, span: Span) -> CoreKind {
+        match &mut kind {
+            CoreKind::Closure {
+                parameters,
+                captures,
                 ..
-            } = &mut self.expressions[index].kind
-            {
-                *target_parameters = parameters;
-                *target_captures = captures;
+            } => {
+                for (_, ty) in parameters {
+                    *ty = self.zonk_type(ty.clone(), span);
+                }
+                for capture in captures {
+                    capture.ty = self.zonk_type(capture.ty.clone(), span);
+                }
+            }
+            CoreKind::Assign { place, .. } => self.zonk_place(place, span),
+            CoreKind::Perform { effect, .. } => {
+                effect.arguments = effect
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|ty| self.zonk_type(ty, span))
+                    .collect();
+            }
+            CoreKind::PatternTest { pattern, .. } => self.zonk_pattern(pattern, span),
+            CoreKind::Handle { clauses, .. } => {
+                for clause in clauses {
+                    clause.effect.arguments = clause
+                        .effect
+                        .arguments
+                        .iter()
+                        .cloned()
+                        .map(|ty| self.zonk_type(ty, span))
+                        .collect();
+                    clause.payload_types = clause
+                        .payload_types
+                        .iter()
+                        .cloned()
+                        .map(|ty| self.zonk_type(ty, span))
+                        .collect();
+                    for pattern in &mut clause.patterns {
+                        self.zonk_pattern(pattern, span);
+                    }
+                    for (_, ty) in &mut clause.bindings {
+                        *ty = self.zonk_type(ty.clone(), span);
+                    }
+                    if let Some(continuation) = &mut clause.continuation {
+                        continuation.parameter =
+                            self.zonk_type(continuation.parameter.clone(), span);
+                        continuation.result = self.zonk_type(continuation.result.clone(), span);
+                        continuation.effects =
+                            self.zonk_effect_row(continuation.effects.clone(), span);
+                    }
+                }
+            }
+            CoreKind::Completion { clauses, .. } => {
+                for clause in clauses {
+                    self.zonk_pattern(&mut clause.pattern, span);
+                    for (_, ty) in &mut clause.bindings {
+                        *ty = self.zonk_type(ty.clone(), span);
+                    }
+                }
+            }
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant(_)
+            | CoreKind::Tuple(_)
+            | CoreKind::Array(_)
+            | CoreKind::Record { .. }
+            | CoreKind::Field { .. }
+            | CoreKind::Enum { .. }
+            | CoreKind::Let { .. }
+            | CoreKind::Call { .. }
+            | CoreKind::Binary { .. }
+            | CoreKind::Block(_)
+            | CoreKind::Borrow { .. }
+            | CoreKind::Move(_)
+            | CoreKind::Unary { .. }
+            | CoreKind::Error => {}
+        }
+        kind
+    }
+
+    fn zonk_place(&mut self, place: &mut CorePlace, span: Span) {
+        match place {
+            CorePlace::Local { ty, .. } => *ty = self.zonk_type(ty.clone(), span),
+            CorePlace::Field { base, ty, .. } => {
+                self.zonk_place(base, span);
+                *ty = self.zonk_type(ty.clone(), span);
+            }
+            CorePlace::Error => {}
+        }
+    }
+
+    fn zonk_pattern(&mut self, pattern: &mut CorePattern, span: Span) {
+        match pattern {
+            CorePattern::Tuple(values) => {
+                for value in values {
+                    self.zonk_pattern(value, span);
+                }
+            }
+            CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+                for field in fields {
+                    field.ty = self.zonk_type(field.ty.clone(), span);
+                    self.zonk_pattern(&mut field.pattern, span);
+                }
+            }
+            CorePattern::Any
+            | CorePattern::Bind { .. }
+            | CorePattern::Literal(_)
+            | CorePattern::Error => {}
+        }
+    }
+
+    fn zonk_effect_row(&mut self, effects: EffectRow, span: Span) -> EffectRow {
+        match self.inference.zonk_effects_allowing_generic_tail(effects) {
+            Ok(effects) => effects,
+            Err(_) => {
+                self.error(
+                    span,
+                    "G4116",
+                    "cannot infer a complete Typed Core effect row",
+                );
+                self.recovered = true;
+                EffectRow::empty()
             }
         }
     }
