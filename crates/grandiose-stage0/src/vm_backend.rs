@@ -8334,7 +8334,10 @@ enum ReferenceTarget {
     /// denotes the direct caller; larger values walk further outward. Unlike
     /// a captured snapshot, this target preserves write-back into the live
     /// owning register while a callee holds a reborrow.
-    Caller { caller_depth: u32, register: u32 },
+    Caller {
+        caller_depth: u32,
+        register: u32,
+    },
     Captured(Arc<VmValue>),
 }
 
@@ -8627,11 +8630,13 @@ fn store_reference_target(
     budget: &mut ExecutionBudget,
 ) -> Result<(), VmArtifactError> {
     let register = match target {
-        ReferenceTarget::Register(register) => registers
-            .get_mut(*register as usize)
-            .ok_or(VmArtifactError::InvalidRegister {
-                register: *register,
-            })?,
+        ReferenceTarget::Register(register) => {
+            registers
+                .get_mut(*register as usize)
+                .ok_or(VmArtifactError::InvalidRegister {
+                    register: *register,
+                })?
+        }
         ReferenceTarget::Caller {
             caller_depth,
             register,
@@ -9067,7 +9072,12 @@ fn transfer_call_frame_value(
     transfer: UniqueReferenceTransfer,
 ) -> Result<VmValue, VmArtifactError> {
     match value {
-        VmValue::Reference { unique: true, target, fields, referent } => {
+        VmValue::Reference {
+            unique: true,
+            target,
+            fields,
+            referent,
+        } => {
             let target = match (transfer, target) {
                 (UniqueReferenceTransfer::IntoCallee, ReferenceTarget::Register(register)) => {
                     ReferenceTarget::Caller {
