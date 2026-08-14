@@ -57568,7 +57568,6 @@ fn serialize_mir_cleanup_plans_incremental(
 fn cross_validate_cleanup_maps(
     artifact: &Artifact,
     mir_program: &mir::Program,
-    cleanup_lists: &[BTreeMap<u32, Vec<Vec<u32>>>],
     pc_maps: &[Option<PeepholePcMap>],
     already_prepared: &BTreeSet<u32>,
 ) -> Result<(), String> {
