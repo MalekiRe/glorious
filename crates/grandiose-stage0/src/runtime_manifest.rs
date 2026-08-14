@@ -96,6 +96,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_bit_not<T>` in distributed std.
     /// Its frozen i64 specialization is a distinct unary VM operation.
     IntBitNot,
+    /// Exact generic declaration `__g1_int_shr<T>` in distributed std.
+    /// Its frozen i64 specialization wraps the u32 shift count modulo 64.
+    IntShr,
 }
 
 impl PrimitiveRole {
@@ -146,6 +149,7 @@ impl PrimitiveRole {
             Self::IntBitOr => "int-bit-or",
             Self::IntBitXor => "int-bit-xor",
             Self::IntBitNot => "int-bit-not",
+            Self::IntShr => "int-shr",
         }
     }
 
@@ -196,6 +200,7 @@ impl PrimitiveRole {
             "int-bit-or" => Self::IntBitOr,
             "int-bit-xor" => Self::IntBitXor,
             "int-bit-not" => Self::IntBitNot,
+            "int-shr" => Self::IntShr,
             _ => return None,
         })
     }
@@ -619,6 +624,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
                 where_associated_effect_bindings: vec![],
             }
         }
+        PrimitiveRole::IntShr => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0), Type::Scalar(crate::ScalarType::U32)],
+            result: Type::Generic(0),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
     }
 }
 fn manifest_digest(
@@ -675,6 +691,7 @@ fn manifest_digest(
             PrimitiveRole::IntBitOr => 40,
             PrimitiveRole::IntBitXor => 41,
             PrimitiveRole::IntBitNot => 42,
+            PrimitiveRole::IntShr => 44,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

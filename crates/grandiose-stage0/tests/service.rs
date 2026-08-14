@@ -318,6 +318,41 @@ fn manifest_bound_generic_int_predicates_preserve_their_u32_runtime_abi() {
 }
 
 #[test]
+fn manifest_bound_generic_int_shr_uses_its_mixed_vm_abi() {
+    let mut input = request(
+        "fn __g1_int_shr<T>(value: T, count: u32) -> T { () } fn __g1_int_equal<T>(left: T, right: T) -> u32 { () } pub fn main() -> i64 { __g1_int_shr<i64>(8, __g1_int_equal<i64>(65, 65)) }",
+    );
+    input.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        selectors: vec![
+            PrimitiveSelector {
+                role: PrimitiveRole::IntShr,
+                module_path: "crate".into(),
+                name: "__g1_int_shr".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::IntEqual,
+                module_path: "crate".into(),
+                name: "__g1_int_equal".into(),
+            },
+        ],
+    });
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("the exact generic int declaration must specialize for frozen i64")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), 4);
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::IntShrI64 { .. }))
+    }));
+}
+
+#[test]
 fn manifest_bound_generic_int_bit_xor_uses_distinct_bitwise_vm_semantics() {
     let mut input = request(
         "fn __g1_int_bit_xor<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_bit_xor<i64>(42, 15) }",

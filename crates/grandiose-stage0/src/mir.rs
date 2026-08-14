@@ -490,6 +490,13 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// Exact manifest-bound i64 right shift, with a u32 count masked modulo
+    /// 64. This stays distinct from checked source arithmetic.
+    IntShrI64 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
     /// Exact manifest-bound i64 bitwise-or. This is never ordinary source
     /// arithmetic and remains distinct in the frozen MIR contract.
     BitOrI64 {
@@ -1090,6 +1097,7 @@ fn fold_block(
             | MirInstruction::BitAndI64 { .. }
             | MirInstruction::BitOrI64 { .. }
             | MirInstruction::BitXorI64 { .. }
+            | MirInstruction::IntShrI64 { .. }
             | MirInstruction::BitNotI64 { .. } => None,
             MirInstruction::SubI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_sub)
@@ -1328,6 +1336,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::IntGreaterI64 { dst, .. }
         | MirInstruction::BitAndI64 { dst, .. }
         | MirInstruction::BitXorI64 { dst, .. }
+        | MirInstruction::IntShrI64 { dst, .. }
         | MirInstruction::BitOrI64 { dst, .. }
         | MirInstruction::BitNotI64 { dst, .. }
         | MirInstruction::SubI64 { dst, .. }
@@ -3332,6 +3341,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::IntGreaterI64 { .. }
         | MirInstruction::BitAndI64 { .. }
         | MirInstruction::BitXorI64 { .. }
+        | MirInstruction::IntShrI64 { .. }
         | MirInstruction::BitOrI64 { .. }
         | MirInstruction::BitNotI64 { .. }
         | MirInstruction::SubI64 { .. }
@@ -4077,6 +4087,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::IntGreaterI64 { dst, left, right }
         | MirInstruction::BitAndI64 { dst, left, right }
         | MirInstruction::BitXorI64 { dst, left, right }
+        | MirInstruction::IntShrI64 { dst, left, right }
         | MirInstruction::BitOrI64 { dst, left, right }
         | MirInstruction::SubI64 { dst, left, right }
         | MirInstruction::MulI64 { dst, left, right }
@@ -13708,6 +13719,37 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::BitNotI64 { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::IntShr) => {
+                                let [left, right] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic int shift primitive requires two operands",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[left.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.locals[right.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic int shift primitive is only VM-specialized for frozen i64 and u32 count",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::IntShrI64 {
+                                    dst,
+                                    left: *left,
+                                    right: *right,
+                                });
                             }
                             Some(
                                 role @ (PrimitiveRole::IntCheckedAdd
