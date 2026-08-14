@@ -27,6 +27,26 @@ fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
                 module_path: "crate".into(),
                 name: "__g1_text_byte_len".into(),
             },
+            PrimitiveSelector {
+                role: PrimitiveRole::TextConcat,
+                module_path: "crate".into(),
+                name: "__g1_text_concat".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::TextEq,
+                module_path: "crate".into(),
+                name: "__g1_text_eq".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::TextFromUtf8Checked,
+                module_path: "crate".into(),
+                name: "__g1_text_from_utf8_checked".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::TextAsBytes,
+                module_path: "crate".into(),
+                name: "__g1_text_as_bytes".into(),
+            },
         ],
     }
 }
@@ -34,7 +54,7 @@ fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
 #[test]
 fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
     let standard = PackageKey("std@0.1.0".into());
-    let source = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> usize { () }";
+    let source = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () }";
     let standard_interface = interface(standard.clone(), source);
     let signatures = ElaboratedInterface::elaborate(&standard_interface);
     assert!(
@@ -80,7 +100,7 @@ fn primitive_manifest_rejects_signature_mismatch_before_authority_freezes() {
     let standard = PackageKey("bad-std@0.1.0".into());
     let interface = interface(
         standard.clone(),
-        "pub fn branch_bool(condition: Bool) -> Bool { condition } pub fn __g1_text_byte_len(value: Text) -> usize { () }",
+        "pub fn branch_bool(condition: Bool) -> Bool { condition } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () }",
     );
     let signatures = ElaboratedInterface::elaborate(&interface);
     assert!(matches!(
@@ -97,7 +117,7 @@ fn text_byte_len_requires_its_exact_monomorphic_abi() {
     let standard = PackageKey("bad-std@0.1.0".into());
     let interface = interface(
         standard.clone(),
-        "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> i64 { () }",
+        "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> i64 { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () }",
     );
     let signatures = ElaboratedInterface::elaborate(&interface);
     assert!(matches!(

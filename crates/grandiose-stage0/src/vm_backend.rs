@@ -34,10 +34,12 @@ pub enum VmType {
     /// host pointer width, so frozen artifacts preserve the standard-library
     /// `usize` ABI across hosts.
     Usize,
+    U32,
     F64,
     Bool,
     Char,
     Text,
+    Bytes,
     /// Binder-local type variable in a generic VM function. The program
     /// verifier instantiates it at each direct call before execution begins.
     Generic(u32),
@@ -262,6 +264,24 @@ pub enum VmInstruction {
     /// neither a symbol nor a capability because manifest authority was
     /// consumed while lowering source identity to this sealed instruction.
     TextByteLen {
+        dst: u32,
+        value: u32,
+    },
+    TextConcat {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    TextEq {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    TextFromUtf8Checked {
+        dst: u32,
+        value: u32,
+    },
+    TextAsBytes {
         dst: u32,
         value: u32,
     },
@@ -738,6 +758,8 @@ pub enum VmArtifactError {
     },
     NoReturn,
     Trap,
+    /// Checked text construction rejected a byte sequence that is not UTF-8.
+    InvalidUtf8,
     InstructionAfterReturn,
     MissingFunction {
         definition: DefKey,
@@ -869,8 +891,9 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 39 adds a target-independent `usize` scalar and opcode 64 for the
-/// manifest-bound `TextByteLen` leaf. Schema 38 adds recursively validated
+/// Schema 40 adds `u32`/`Bytes` values and opcodes 65 through 68 for the
+/// manifest-bound Text family. Schema 39 adds a target-independent `usize`
+/// scalar and opcode 64 for the manifest-bound `TextByteLen` leaf. Schema 38 adds recursively validated
 /// nominal copy descriptors to each VM
 /// function. Earlier encodings lack the declaration-owned evidence required
 /// to distinguish a copyable record from one that carries a unique reference.
@@ -884,7 +907,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 39;
+pub const STAGE0_VM_SCHEMA: u32 = 40;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1072,6 +1095,9 @@ impl VerifiedVmArtifact {
     pub fn run_usize(&self) -> Result<u64, VmArtifactError> {
         expect_usize(self.execute_with_limits(VmExecutionLimits::default())?)
     }
+    pub fn run_u32(&self) -> Result<u32, VmArtifactError> {
+        expect_u32(self.execute_with_limits(VmExecutionLimits::default())?)
+    }
     pub fn run_i64_with_limits(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
         expect_i64(self.execute_with_limits(limits)?)
     }
@@ -1143,6 +1169,20 @@ impl VerifiedVmProgram {
             allocated_elements: 0,
         };
         expect_usize(execute_with_arguments(
+            &self.program,
+            self.program.entry,
+            &[],
+            0,
+            &mut budget,
+        )?)
+    }
+    pub fn run_u32(&self) -> Result<u32, VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits::default(),
+            instructions: 0,
+            allocated_elements: 0,
+        };
+        expect_u32(execute_with_arguments(
             &self.program,
             self.program.entry,
             &[],
@@ -1611,10 +1651,12 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         Type::Unit | Type::Never => Ok(VmType::Unit),
         Type::Scalar(ScalarType::I64) => Ok(VmType::I64),
         Type::Scalar(ScalarType::Usize) => Ok(VmType::Usize),
+        Type::Scalar(ScalarType::U32) => Ok(VmType::U32),
         Type::Scalar(ScalarType::F64) => Ok(VmType::F64),
         Type::Scalar(ScalarType::Bool) => Ok(VmType::Bool),
         Type::Scalar(ScalarType::Char) => Ok(VmType::Char),
         Type::Scalar(ScalarType::Text) => Ok(VmType::Text),
+        Type::Scalar(ScalarType::Bytes) => Ok(VmType::Bytes),
         Type::Generic(index) => Ok(VmType::Generic(*index)),
         Type::ConstU32(value) => Ok(VmType::ConstU32(*value)),
         Type::ConstQuantity(value) => Ok(VmType::ConstQuantity {
@@ -1838,10 +1880,12 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Unit => 0,
         VmType::I64 => 1,
         VmType::Usize => 16,
+        VmType::U32 => 17,
         VmType::F64 => 2,
         VmType::Bool => 3,
         VmType::Char => 4,
         VmType::Text => 5,
+        VmType::Bytes => 18,
         VmType::Generic(_) => 9,
         VmType::Array(_) => 10,
         VmType::Callable { .. } => 6,
@@ -2264,10 +2308,12 @@ impl<'a> Decoder<'a> {
             0 => Ok(VmType::Unit),
             1 => Ok(VmType::I64),
             16 => Ok(VmType::Usize),
+            17 => Ok(VmType::U32),
             2 => Ok(VmType::F64),
             3 => Ok(VmType::Bool),
             4 => Ok(VmType::Char),
             5 => Ok(VmType::Text),
+            18 => Ok(VmType::Bytes),
             6 => {
                 let count = self.count("callable parameters", MAX_DECODE_REGISTERS)?;
                 let mut parameters = Vec::with_capacity(count);
@@ -2995,6 +3041,24 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
+            65 => Ok(VmInstruction::TextConcat {
+                dst: self.u32()?,
+                left: self.u32()?,
+                right: self.u32()?,
+            }),
+            66 => Ok(VmInstruction::TextEq {
+                dst: self.u32()?,
+                left: self.u32()?,
+                right: self.u32()?,
+            }),
+            67 => Ok(VmInstruction::TextFromUtf8Checked {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            68 => Ok(VmInstruction::TextAsBytes {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             25 => self.bool_equality(|dst, left, right| VmInstruction::EqText { dst, left, right }),
             26 => self.bool_equality(|dst, left, right| VmInstruction::NeText { dst, left, right }),
             27 => self.i64_arithmetic(|dst, left, right| VmInstruction::ConcatText {
@@ -3718,6 +3782,24 @@ fn lower_instruction(
             value: value.clone(),
         },
         MirInstruction::TextByteLen { dst, value } => VmInstruction::TextByteLen {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::TextConcat { dst, left, right } => VmInstruction::TextConcat {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::TextEq { dst, left, right } => VmInstruction::TextEq {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::TextFromUtf8Checked { dst, value } => VmInstruction::TextFromUtf8Checked {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::TextAsBytes { dst, value } => VmInstruction::TextAsBytes {
             dst: dst.0,
             value: value.0,
         },
@@ -4546,6 +4628,34 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::TextByteLen { dst, value } => {
                 expect_type(function, *dst, VmType::Usize)?;
+                expect_type(function, *value, VmType::Text)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::TextConcat { dst, left, right } => {
+                expect_type(function, *dst, VmType::Text)?;
+                for value in [left, right] {
+                    expect_type(function, *value, VmType::Text)?;
+                    read(&states, *value)?;
+                }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::TextEq { dst, left, right } => {
+                expect_type(function, *dst, VmType::U32)?;
+                for value in [left, right] {
+                    expect_type(function, *value, VmType::Text)?;
+                    read(&states, *value)?;
+                }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::TextFromUtf8Checked { dst, value } => {
+                expect_type(function, *dst, VmType::Text)?;
+                expect_type(function, *value, VmType::Bytes)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::TextAsBytes { dst, value } => {
+                expect_type(function, *dst, VmType::Bytes)?;
                 expect_type(function, *value, VmType::Text)?;
                 read(&states, *value)?;
                 write(&mut states, *dst)?
@@ -5716,10 +5826,12 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
         VmType::Unit
         | VmType::I64
         | VmType::Usize
+        | VmType::U32
         | VmType::F64
         | VmType::Bool
         | VmType::Char
         | VmType::Text
+        | VmType::Bytes
         | VmType::Generic(_) => Ok(()),
     }
 }
@@ -6072,10 +6184,12 @@ enum VmValue {
     Unit,
     I64(i64),
     Usize(u64),
+    U32(u32),
     F64(f64),
     Bool(bool),
     Char(char),
     Text(Arc<str>),
+    Bytes(Arc<[u8]>),
     Tuple(Arc<[VmValue]>),
     Array(Arc<[VmValue]>),
     Record {
@@ -6191,10 +6305,12 @@ impl VmValue {
             Self::Unit => VmType::Unit,
             Self::I64(_) => VmType::I64,
             Self::Usize(_) => VmType::Usize,
+            Self::U32(_) => VmType::U32,
             Self::F64(_) => VmType::F64,
             Self::Bool(_) => VmType::Bool,
             Self::Char(_) => VmType::Char,
             Self::Text(_) => VmType::Text,
+            Self::Bytes(_) => VmType::Bytes,
             Self::Tuple(values) => VmType::Tuple(values.iter().map(VmValue::ty).collect()),
             Self::Array(values) => VmType::Array(Box::new(
                 values.first().map(VmValue::ty).unwrap_or(VmType::Unit),
@@ -6393,10 +6509,12 @@ fn format_vm_value(value: &VmValue) -> String {
         VmValue::Unit => "()".into(),
         VmValue::I64(value) => value.to_string(),
         VmValue::Usize(value) => value.to_string(),
+        VmValue::U32(value) => value.to_string(),
         VmValue::F64(value) => value.to_string(),
         VmValue::Bool(value) => value.to_string(),
         VmValue::Char(value) => format!("{value:?}"),
         VmValue::Text(value) => format!("{value:?}"),
+        VmValue::Bytes(value) => format!("{value:?}"),
         VmValue::Tuple(values) => format!(
             "({})",
             values
@@ -6472,6 +6590,24 @@ fn expect_usize(value: impl Borrow<VmValue>) -> Result<u64, VmArtifactError> {
         VmValue::Usize(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::Usize,
+            found: value.ty(),
+        }),
+    }
+}
+fn expect_u32(value: impl Borrow<VmValue>) -> Result<u32, VmArtifactError> {
+    match value.borrow() {
+        VmValue::U32(value) => Ok(*value),
+        value => Err(VmArtifactError::ResultType {
+            expected: VmType::U32,
+            found: value.ty(),
+        }),
+    }
+}
+fn expect_bytes(value: impl Borrow<VmValue>) -> Result<Arc<[u8]>, VmArtifactError> {
+    match value.borrow() {
+        VmValue::Bytes(value) => Ok(value.clone()),
+        value => Err(VmArtifactError::ResultType {
+            expected: VmType::Bytes,
             found: value.ty(),
         }),
     }
@@ -6705,10 +6841,12 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         VmType::Unit => matches!(value, VmValue::Unit),
         VmType::I64 => matches!(value, VmValue::I64(_)),
         VmType::Usize => matches!(value, VmValue::Usize(_)),
+        VmType::U32 => matches!(value, VmValue::U32(_)),
         VmType::F64 => matches!(value, VmValue::F64(_)),
         VmType::Bool => matches!(value, VmValue::Bool(_)),
         VmType::Char => matches!(value, VmValue::Char(_)),
         VmType::Text => matches!(value, VmValue::Text(_)),
+        VmType::Bytes => matches!(value, VmValue::Bytes(_)),
         VmType::Tuple(expected) => {
             matches!(value, VmValue::Tuple(values) if values.len() == expected.len() && values.iter().zip(expected).all(|(value, ty)| value_matches_vm_type(value, ty)))
         }
@@ -6895,6 +7033,50 @@ fn execute(
                         .expect("verified register"),
                 )?;
                 registers[dst as usize] = Some(VmValue::Usize(text.len() as u64));
+            }
+            VmInstruction::TextConcat { dst, left, right } => {
+                let left = expect_text(
+                    registers[left as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let right = expect_text(
+                    registers[right as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
+            }
+            VmInstruction::TextEq { dst, left, right } => {
+                let left = expect_text(
+                    registers[left as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let right = expect_text(
+                    registers[right as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::U32(u32::from(left == right)));
+            }
+            VmInstruction::TextFromUtf8Checked { dst, value } => {
+                let bytes = expect_bytes(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let text =
+                    String::from_utf8(bytes.to_vec()).map_err(|_| VmArtifactError::InvalidUtf8)?;
+                registers[dst as usize] = Some(VmValue::Text(Arc::from(text)));
+            }
+            VmInstruction::TextAsBytes { dst, value } => {
+                let text = expect_text(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::Bytes(Arc::from(text.as_bytes())));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
@@ -8339,6 +8521,28 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::TextConcat { dst, left, right } => {
+            output.push(65);
+            for register in [dst, left, right] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+        }
+        VmInstruction::TextEq { dst, left, right } => {
+            output.push(66);
+            for register in [dst, left, right] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+        }
+        VmInstruction::TextFromUtf8Checked { dst, value } => {
+            output.push(67);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::TextAsBytes { dst, value } => {
+            output.push(68);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::MakeCallable {
             dst,
             callee,
@@ -8556,6 +8760,50 @@ fn execute_with_arguments(
                         .expect("verified register"),
                 )?;
                 registers[*dst as usize] = Some(VmValue::Usize(text.len() as u64));
+            }
+            VmInstruction::TextConcat { dst, left, right } => {
+                let left = expect_text(
+                    registers[*left as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let right = expect_text(
+                    registers[*right as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
+            }
+            VmInstruction::TextEq { dst, left, right } => {
+                let left = expect_text(
+                    registers[*left as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let right = expect_text(
+                    registers[*right as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::U32(u32::from(left == right)));
+            }
+            VmInstruction::TextFromUtf8Checked { dst, value } => {
+                let bytes = expect_bytes(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let text =
+                    String::from_utf8(bytes.to_vec()).map_err(|_| VmArtifactError::InvalidUtf8)?;
+                registers[*dst as usize] = Some(VmValue::Text(Arc::from(text)));
+            }
+            VmInstruction::TextAsBytes { dst, value } => {
+                let text = expect_text(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::Bytes(Arc::from(text.as_bytes())));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;

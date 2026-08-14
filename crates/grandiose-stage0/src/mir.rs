@@ -123,6 +123,24 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    TextConcat {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    TextEq {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    TextFromUtf8Checked {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    TextAsBytes {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1137,6 +1155,10 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Call { dst, .. }
         | MirInstruction::HostCall { dst, .. }
         | MirInstruction::TextByteLen { dst, .. }
+        | MirInstruction::TextConcat { dst, .. }
+        | MirInstruction::TextEq { dst, .. }
+        | MirInstruction::TextFromUtf8Checked { dst, .. }
+        | MirInstruction::TextAsBytes { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3015,6 +3037,10 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
             validate_mir_type(result, &mut lifetime_binders)
         }
         MirInstruction::TextByteLen { .. } => Ok(()),
+        MirInstruction::TextConcat { .. }
+        | MirInstruction::TextEq { .. }
+        | MirInstruction::TextFromUtf8Checked { .. }
+        | MirInstruction::TextAsBytes { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -3697,6 +3723,10 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. } => vec![*dst],
         MirInstruction::TextByteLen { dst, value } => vec![*dst, *value],
+        MirInstruction::TextConcat { dst, left, right }
+        | MirInstruction::TextEq { dst, left, right } => vec![*dst, *left, *right],
+        MirInstruction::TextFromUtf8Checked { dst, value }
+        | MirInstruction::TextAsBytes { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -12856,6 +12886,102 @@ impl Lowerer<'_> {
                             }
                             self.instructions
                                 .push(MirInstruction::TextByteLen { dst, value: *value });
+                        }
+                        Some(PrimitiveRole::TextConcat) => {
+                            let [left, right] = arguments.as_slice() else {
+                                self.error(
+                                    "G6005",
+                                    "TextConcat primitive must have two Text operands",
+                                );
+                                return None;
+                            };
+                            if !generic_arguments.is_empty()
+                                || self.locals[left.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                                || self.locals[right.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                                || self.body.expression(id).ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                            {
+                                self.error(
+                                    "G6005",
+                                    "TextConcat primitive ABI does not match manifest contract",
+                                );
+                                return None;
+                            }
+                            self.instructions.push(MirInstruction::TextConcat {
+                                dst,
+                                left: *left,
+                                right: *right,
+                            });
+                        }
+                        Some(PrimitiveRole::TextEq) => {
+                            let [left, right] = arguments.as_slice() else {
+                                self.error("G6005", "TextEq primitive must have two Text operands");
+                                return None;
+                            };
+                            if !generic_arguments.is_empty()
+                                || self.locals[left.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                                || self.locals[right.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                                || self.body.expression(id).ty
+                                    != Type::Scalar(crate::types::ScalarType::U32)
+                            {
+                                self.error(
+                                    "G6005",
+                                    "TextEq primitive ABI does not match manifest contract",
+                                );
+                                return None;
+                            }
+                            self.instructions.push(MirInstruction::TextEq {
+                                dst,
+                                left: *left,
+                                right: *right,
+                            });
+                        }
+                        Some(PrimitiveRole::TextFromUtf8Checked) => {
+                            let [value] = arguments.as_slice() else {
+                                self.error(
+                                    "G6005",
+                                    "TextFromUtf8Checked primitive must have one Bytes operand",
+                                );
+                                return None;
+                            };
+                            if !generic_arguments.is_empty()
+                                || self.locals[value.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Bytes)
+                                || self.body.expression(id).ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                            {
+                                self.error("G6005", "TextFromUtf8Checked primitive ABI does not match manifest contract");
+                                return None;
+                            }
+                            self.instructions
+                                .push(MirInstruction::TextFromUtf8Checked { dst, value: *value });
+                        }
+                        Some(PrimitiveRole::TextAsBytes) => {
+                            let [value] = arguments.as_slice() else {
+                                self.error(
+                                    "G6005",
+                                    "TextAsBytes primitive must have one Text operand",
+                                );
+                                return None;
+                            };
+                            if !generic_arguments.is_empty()
+                                || self.locals[value.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                                || self.body.expression(id).ty
+                                    != Type::Scalar(crate::types::ScalarType::Bytes)
+                            {
+                                self.error(
+                                    "G6005",
+                                    "TextAsBytes primitive ABI does not match manifest contract",
+                                );
+                                return None;
+                            }
+                            self.instructions
+                                .push(MirInstruction::TextAsBytes { dst, value: *value });
                         }
                         Some(PrimitiveRole::BranchBool) => {
                             // BranchBool remains a source-level callable until

@@ -1127,8 +1127,15 @@ impl StageZeroCompiler {
             {
                 session.checkpoint(1)?;
                 if runtime_manifest.as_ref().is_some_and(|manifest| {
-                    manifest.primitives.get(&crate::PrimitiveRole::TextByteLen)
-                        == Some(&declaration.key)
+                    [
+                        crate::PrimitiveRole::TextByteLen,
+                        crate::PrimitiveRole::TextConcat,
+                        crate::PrimitiveRole::TextEq,
+                        crate::PrimitiveRole::TextFromUtf8Checked,
+                        crate::PrimitiveRole::TextAsBytes,
+                    ]
+                    .iter()
+                    .any(|role| manifest.primitives.get(role) == Some(&declaration.key))
                 }) {
                     // This exact manifest-bound runtime leaf has an opaque
                     // source body. Do not parse or elaborate it as `Unit`:

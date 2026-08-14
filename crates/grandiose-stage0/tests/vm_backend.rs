@@ -78,6 +78,47 @@ fn verifier_rejects_text_byte_len_with_forged_operand_or_result_abi() {
 }
 
 #[test]
+fn verifier_rejects_forged_text_family_opcode_abis() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-text-family-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Text, VmType::Text, VmType::U32],
+        instructions: vec![
+            VmInstruction::ConstText {
+                dst: 0,
+                value: "a".into(),
+            },
+            VmInstruction::ConstText {
+                dst: 1,
+                value: "b".into(),
+            },
+            VmInstruction::TextConcat {
+                dst: 2,
+                left: 0,
+                right: 1,
+            },
+            VmInstruction::Return { value: 2 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"forged-text-family-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::TypeMismatch {
+            expected: VmType::Text,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols() {
     use grandiose_stage0::{ConstKind, Quantity, StructuralU32Expr};
 

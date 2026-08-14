@@ -25,6 +25,14 @@ pub enum PrimitiveRole {
     /// a source function named `text_byte_len` never receives primitive
     /// authority merely by spelling.
     TextByteLen,
+    /// Capability-free concatenation over immutable UTF-8 text values.
+    TextConcat,
+    /// Capability-free equality predicate with the G1 `u32` boolean ABI.
+    TextEq,
+    /// Checked conversion from a frozen byte sequence to UTF-8 text.
+    TextFromUtf8Checked,
+    /// Borrow-free frozen byte snapshot of a UTF-8 text value.
+    TextAsBytes,
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PrimitiveSelector {
@@ -90,7 +98,14 @@ impl RuntimeManifestInput {
             }
         }
         let mut primitives = BTreeMap::new();
-        for role in [PrimitiveRole::BranchBool, PrimitiveRole::TextByteLen] {
+        for role in [
+            PrimitiveRole::BranchBool,
+            PrimitiveRole::TextByteLen,
+            PrimitiveRole::TextConcat,
+            PrimitiveRole::TextEq,
+            PrimitiveRole::TextFromUtf8Checked,
+            PrimitiveRole::TextAsBytes,
+        ] {
             let selector = selectors
                 .get(&role)
                 .ok_or(ManifestError::MissingRole(role))?;
@@ -177,6 +192,56 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::TextConcat => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                Type::Scalar(ScalarType::Text),
+                Type::Scalar(ScalarType::Text),
+            ],
+            result: Type::Scalar(ScalarType::Text),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::TextEq => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                Type::Scalar(ScalarType::Text),
+                Type::Scalar(ScalarType::Text),
+            ],
+            result: Type::Scalar(ScalarType::U32),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::TextFromUtf8Checked => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Bytes)],
+            result: Type::Scalar(ScalarType::Text),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::TextAsBytes => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Text)],
+            result: Type::Scalar(ScalarType::Bytes),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
     }
 }
 fn manifest_digest(
@@ -190,6 +255,10 @@ fn manifest_digest(
         bytes.push(match role {
             PrimitiveRole::BranchBool => 0,
             PrimitiveRole::TextByteLen => 1,
+            PrimitiveRole::TextConcat => 2,
+            PrimitiveRole::TextEq => 3,
+            PrimitiveRole::TextFromUtf8Checked => 4,
+            PrimitiveRole::TextAsBytes => 5,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
