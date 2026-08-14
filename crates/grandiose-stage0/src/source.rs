@@ -240,7 +240,7 @@ impl Lexer<'_> {
             b'/' if self.peek(1) == Some(b'/') => self.line_comment(start),
             b'/' if self.peek(1) == Some(b'*') => self.block_comment(start),
             b'"' => self.string(start),
-            b'\'' => self.character(start),
+            b'\'' => self.lifetime_or_character(start),
             b'0'..=b'9' => self.number(start),
             byte if is_identifier_start(byte) => self.identifier(start),
             byte if is_punctuation(byte) => {
@@ -269,6 +269,38 @@ impl Lexer<'_> {
             self.index += 1;
         }
         self.push(TokenKind::Identifier, start);
+    }
+
+    /// A leading apostrophe is shared by character literals and lifetime
+    /// identifiers.  Prefer a character literal when a matching closing
+    /// apostrophe follows the identifier-shaped payload; otherwise retain the
+    /// complete `'name` spelling as an identifier.  Keeping lifetimes in the
+    /// identifier token class lets all existing binder/name consumers retain
+    /// their source spelling without treating the apostrophe as an operator.
+    fn lifetime_or_character(&mut self, start: usize) {
+        let mut end = start + 1;
+        if self
+            .bytes
+            .get(end)
+            .copied()
+            .is_some_and(is_identifier_start)
+        {
+            end += 1;
+            while self
+                .bytes
+                .get(end)
+                .copied()
+                .is_some_and(is_identifier_continue)
+            {
+                end += 1;
+            }
+            if self.bytes.get(end) != Some(&b'\'') {
+                self.index = end;
+                self.push(TokenKind::Identifier, start);
+                return;
+            }
+        }
+        self.character(start);
     }
 
     fn number(&mut self, start: usize) {

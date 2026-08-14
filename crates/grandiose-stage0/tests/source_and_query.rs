@@ -251,6 +251,24 @@ fn scalar_literals_validate_escapes_and_character_cardinality() {
 }
 
 #[test]
+fn lifetime_identifiers_are_not_mislexed_as_unterminated_characters() {
+    let snapshot = snapshot();
+    let file = snapshot.world().sources[0].key;
+    let source = "fn borrow<'a, '_>(value: i64) -> i64 { value } 'x'";
+    let lexed = grandiose_stage0::LexedFile::lex(file, source);
+    assert!(lexed.diagnostics.is_empty(), "{:#?}", lexed.diagnostics);
+    let significant = lexed
+        .tokens
+        .iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::End))
+        .map(|token| (token.kind.clone(), lexed.text(source, token)))
+        .collect::<Vec<_>>();
+    assert!(significant.contains(&(TokenKind::Identifier, "'a")));
+    assert!(significant.contains(&(TokenKind::Identifier, "'_")));
+    assert!(significant.contains(&(TokenKind::Character, "'x'")));
+}
+
+#[test]
 fn memo_publication_is_revision_qualified_and_records_dependencies() {
     let snapshot = snapshot();
     let memo = MemoTable::<String, u32>::new();

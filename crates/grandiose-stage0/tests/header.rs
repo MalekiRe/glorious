@@ -45,6 +45,21 @@ fn callable_headers_retain_generic_kind_metadata() {
 }
 
 #[test]
+fn callable_headers_retain_lifetime_binder_spellings() {
+    let package = PackageKey("header-lifetime-binders@0.1.0".into());
+    let source = "pub fn borrow<'a, '_>(value: i64) -> i64 { value }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert_eq!(header.generics, ["'a", "'_"]);
+}
+
+#[test]
 fn callable_types_are_header_facts_with_tuple_parameters_and_result() {
     let package = PackageKey("header-callable-type@0.1.0".into());
     let source = "pub fn apply(value: (i64, Bool) -> Text) -> Text { value }";
