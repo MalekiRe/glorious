@@ -3174,3 +3174,92 @@ fn refutable_completion_label_transfer_preserves_unmatched_fallback() {
         42
     );
 }
+
+#[test]
+fn ordered_refutable_completion_transfers_chain_through_each_test() {
+    let core = core_for(
+        "core-ordered-completion-label-transfer@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { 1 => transfer done 101, 41 => transfer done 141, value => value, Ask::ask() => 41 } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("ordered completion chain lowers");
+    assert!(matches!(
+        mir.blocks[1].terminator,
+        grandiose_stage0::MirTerminator::SwitchBool {
+            else_target: grandiose_stage0::MirBlockId(2),
+            ..
+        }
+    ));
+    assert!(matches!(
+        mir.blocks[2].terminator,
+        grandiose_stage0::MirTerminator::SwitchBool { .. }
+    ));
+    assert!(matches!(
+        mir.blocks[3].terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    ));
+    assert!(matches!(
+        mir.blocks[4].terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    ));
+    assert!(matches!(
+        mir.blocks[5].terminator,
+        grandiose_stage0::MirTerminator::Return { .. }
+    ));
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        141
+    );
+}
+
+#[test]
+fn ordered_refutable_completion_preserves_first_match_and_final_fallback() {
+    for (package, source, expected) in [
+        (
+            "core-ordered-completion-first-match@0.1.0",
+            "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { 1 => transfer done 101, 41 => transfer done 141, value => value, Ask::ask() => 1 } } }",
+            101,
+        ),
+        (
+            "core-ordered-completion-final-fallback@0.1.0",
+            "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { 1 => transfer done 101, 41 => transfer done 141, value => value, Ask::ask() => 42 } } }",
+            42,
+        ),
+    ] {
+        let core = core_for(package, source);
+        assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+        let flow = PlaceFlow::analyze(&core);
+        let owner = core
+            .expressions
+            .iter()
+            .find_map(|expression| match expression.kind {
+                CoreKind::Label { brand, .. } => Some(brand.owner),
+                _ => None,
+            })
+            .expect("outer label owner");
+        let mir = MirLowering::lower(owner, &core, &flow)
+            .function
+            .expect("ordered completion source lowers");
+        assert_eq!(
+            grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+                .unwrap()
+                .run_i64()
+                .unwrap(),
+            expected
+        );
+    }
+}

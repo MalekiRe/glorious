@@ -1043,8 +1043,26 @@ impl MirLowering {
                 local
             })
             .collect::<Vec<_>>();
-        // A direct normal-completion clause may leave after the protected
-        // frame has been uninstalled.
+        // Ordered refutable normal-completion clauses may leave after the
+        // protected frame has been uninstalled.
+        if let Some(function) =
+            lowerer.lower_root_label_completion_chain(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        // An irrefutable direct normal-completion clause may leave after the
+        // protected frame has been uninstalled.
         if let Some(function) =
             lowerer.lower_root_label_completion_leave(body.root, parameters.clone())
         {
@@ -2251,7 +2269,287 @@ struct SiblingHandlerDispatch<'a> {
     forward_block: Option<MirBlockId>,
 }
 
+/// The selected result of a normal-completion clause in the constrained
+/// direct-handler lowering.  A matching clause either exits the enclosing
+/// lexical label or produces the ordinary handler result; the chain itself
+/// owns the ordered pattern-dispatch edges.
+enum CompletionChainArm {
+    Leave {
+        instructions: Vec<MirInstruction>,
+        value: MirLocal,
+    },
+    Return {
+        instructions: Vec<MirInstruction>,
+        value: MirLocal,
+    },
+}
+
 impl Lowerer<'_> {
+    /// Lower an ordered, direct normal-completion chain under an enclosing
+    /// label.  Every refutable clause receives the protected computation's
+    /// result on an explicit block edge; a failed test carries that exact
+    /// subject forward to the next clause.  This remains intentionally narrow
+    /// (direct one-shot handler and a final ordinary fallback) so multi-shot
+    /// continuations and closure-captured control cannot acquire a synthetic
+    /// CFG path here.
+    fn lower_root_label_completion_chain(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let completion = match self.body.expression(body).kind.clone() {
+            CoreKind::Completion { .. } => body,
+            CoreKind::Block(values) => *values.last()?,
+            _ => return None,
+        };
+        let CoreKind::Completion {
+            computation,
+            clauses: completion_clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        let (fallback_clause, refutable_clauses) = completion_clauses.split_last()?;
+        if refutable_clauses.is_empty()
+            || !pattern_is_irrefutable(&fallback_clause.pattern)
+            || self.contains_label_transfer(fallback_clause.body, brand)
+            || !refutable_clauses
+                .iter()
+                .all(|clause| !pattern_is_irrefutable(&clause.pattern))
+            || !refutable_clauses
+                .iter()
+                .any(|clause| self.contains_label_transfer(clause.body, brand))
+        {
+            return None;
+        }
+        let CoreKind::Handle {
+            computation: protected,
+            clauses: operation_clauses,
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(protected).kind.clone()
+        else {
+            return None;
+        };
+        let matching = operation_clauses
+            .iter()
+            .filter(|clause| clause.effect == effect && clause.operation == operation)
+            .collect::<Vec<_>>();
+        let [operation_clause] = matching.as_slice() else {
+            return None;
+        };
+        let quantity = match operation_clause.resumption {
+            CoreHandlerResumption::Tail { quantity }
+            | CoreHandlerResumption::Explicit { quantity, .. } => quantity,
+            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => return None,
+        };
+        if quantity != crate::quantity::Quantity::ONCE
+            || operation_clause.terminal
+            || operation_clause.patterns.len() != argument_ids.len()
+            || !operation_clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        for value in root_prefix {
+            self.statement(value)?;
+        }
+        let payloads = operation_clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), protected))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(protected).ty.clone(), protected);
+        let arguments = argument_ids
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        let completion_count = refutable_clauses.len();
+        let test_start = 1_u32;
+        let arm_start = test_start + completion_count as u32;
+        let fallback_block = arm_start + completion_count as u32;
+        let handler_block = fallback_block + 1;
+        let join_block = handler_block + 1;
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(protected).ty.clone(),
+            target: MirBlockId(handler_block),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        let completion_subjects = (0..completion_count)
+            .map(|_| self.alloc(self.body.expression(protected).ty.clone(), CoreId(u32::MAX)))
+            .collect::<Vec<_>>();
+        let conditions = (0..completion_count)
+            .map(|_| self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root))
+            .collect::<Vec<_>>();
+        let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let mut arms = Vec::with_capacity(completion_count);
+        for (clause, subject) in refutable_clauses.iter().zip(&completion_subjects) {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(std::slice::from_ref(&clause.pattern), &[*subject])?;
+            let instructions;
+            let value;
+            if self.contains_label_transfer(clause.body, brand) {
+                value = self.lower_label_transfer_path(clause.body, brand)?;
+                instructions = std::mem::take(&mut self.instructions);
+                arms.push(CompletionChainArm::Leave {
+                    instructions,
+                    value,
+                });
+            } else {
+                value = self.value(clause.body)?;
+                instructions = std::mem::take(&mut self.instructions);
+                arms.push(CompletionChainArm::Return {
+                    instructions,
+                    value,
+                });
+            }
+        }
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(
+            std::slice::from_ref(&fallback_clause.pattern),
+            &[completion_subjects[completion_count - 1]],
+        )?;
+        let fallback_value = self.value(fallback_clause.body)?;
+        let fallback_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&operation_clause.patterns, &payloads)?;
+        let resumed = self.direct_handler_clause_value(operation_clause)?;
+        self.instructions
+            .push(MirInstruction::Resume { value: resumed });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+
+        let mut blocks = Vec::with_capacity(2 * completion_count + 3);
+        blocks.push(MirBlock {
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Goto {
+                target: MirBlockId(test_start),
+                arguments: vec![performed],
+            },
+        });
+        for index in 0..completion_count {
+            let is_last = index + 1 == completion_count;
+            let pattern = lower_pattern(refutable_clauses[index].pattern.clone())?;
+            blocks.push(MirBlock {
+                parameters: vec![completion_subjects[index]],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: conditions[index],
+                    subject: completion_subjects[index],
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition: conditions[index],
+                    then_target: MirBlockId(arm_start + index as u32),
+                    then_arguments: vec![],
+                    else_target: if is_last {
+                        MirBlockId(fallback_block)
+                    } else {
+                        MirBlockId(test_start + index as u32 + 1)
+                    },
+                    else_arguments: if is_last {
+                        vec![]
+                    } else {
+                        vec![completion_subjects[index]]
+                    },
+                },
+            });
+        }
+        for arm in arms {
+            let (instructions, terminator) = match arm {
+                CompletionChainArm::Leave {
+                    instructions,
+                    value,
+                } => (
+                    instructions,
+                    MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(join_block),
+                        arguments: vec![value],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    },
+                ),
+                CompletionChainArm::Return {
+                    instructions,
+                    value,
+                } => (instructions, MirTerminator::Return { value }),
+            };
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions,
+                terminator,
+            });
+        }
+        blocks.push(MirBlock {
+            parameters: vec![],
+            instructions: fallback_instructions,
+            terminator: MirTerminator::Return {
+                value: fallback_value,
+            },
+        });
+        blocks.push(MirBlock {
+            parameters: vec![],
+            instructions: handler_instructions,
+            terminator: MirTerminator::Unreachable,
+        });
+        blocks.push(MirBlock {
+            parameters: vec![join],
+            instructions: vec![],
+            terminator: MirTerminator::Return { value: join },
+        });
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
     /// Lower one direct normal-completion arm that leaves an enclosing label.
     /// The operation frame is resumed on its own block; the restored protected
     /// path executes `UninstallHandler` before entering the completion block,
