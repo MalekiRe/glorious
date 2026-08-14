@@ -2026,6 +2026,26 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A completion can itself be an operand of a strict label body. Its
+        // normal arms resume that body; a selected transfer arm exits the
+        // label instead.  This must be claimed before generic completion
+        // continuation lowering tries to treat the bottom arm as a value.
+        if let Some(function) =
+            lowerer.lower_root_label_nested_completion_transfer(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // A transfer on the demanded side of `and`/`or` is a real lexical
         // exit, but the skipped side remains the ordinary boolean result.
         // Give that mixed normal/nonlocal control flow its own typed join
@@ -5501,6 +5521,20 @@ impl Lowerer<'_> {
                 prefix.extend(nested_prefix);
                 Some((computation, clauses, prefix))
             }
+            // The direct frame-aware leave path may sit on the demanded side
+            // of an ordinary strict expression.  Its preceding operand is
+            // still evaluated before handler installation, while the
+            // transfer abandons the enclosing binary continuation.
+            CoreKind::Binary {
+                operator,
+                left,
+                right,
+            } if !matches!(operator.as_str(), "and" | "or") => {
+                let (computation, clauses, nested_prefix) = self.lexical_handle(right)?;
+                let mut prefix = vec![left];
+                prefix.extend(nested_prefix);
+                Some((computation, clauses, prefix))
+            }
             _ => None,
         }
     }
@@ -5627,6 +5661,252 @@ impl Lowerer<'_> {
         blocks[1].instructions = std::mem::take(&mut self.instructions);
         blocks[1].terminator = MirTerminator::Return { value: result };
 
+        let mut next = if has_fallback {
+            *arms.last().expect("completion fallback arm exists")
+        } else {
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            });
+            id
+        };
+        let tested = if has_fallback {
+            selected.len().saturating_sub(1)
+        } else {
+            selected.len()
+        };
+        for index in (0..tested).rev() {
+            let pattern = lower_pattern(selected[index].pattern.clone())?;
+            let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: arms[index],
+                    then_arguments: vec![],
+                    else_target: next,
+                    else_arguments: vec![],
+                },
+            });
+            next = id;
+        }
+        blocks[0].terminator = MirTerminator::Goto {
+            target: next,
+            arguments: vec![],
+        };
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
+    /// Return the first strict completion evaluated by a label body.  This is
+    /// intentionally the same left-to-right search shape used by suspended
+    /// completion lowering: a later completion cannot be selected until an
+    /// earlier one has produced a normal value.
+    fn first_strict_completion(&self, id: CoreId) -> Option<CoreId> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Completion { .. } => Some(id),
+            CoreKind::Closure { .. } | CoreKind::Handle { .. } => None,
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
+                .into_iter()
+                .find_map(|value| self.first_strict_completion(value)),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .find_map(|field| self.first_strict_completion(field)),
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Unary { value: base, .. }
+            | CoreKind::Transfer { value: base, .. } => self.first_strict_completion(base),
+            CoreKind::Assign { value, .. } => self.first_strict_completion(value),
+            CoreKind::Binary {
+                operator,
+                left,
+                right,
+            } => self.first_strict_completion(left).or_else(|| {
+                (!matches!(operator.as_str(), "and" | "or"))
+                    .then(|| self.first_strict_completion(right))
+                    .flatten()
+            }),
+            CoreKind::Call {
+                callee, arguments, ..
+            } => self.first_strict_completion(callee).or_else(|| {
+                arguments
+                    .into_iter()
+                    .find_map(|argument| self.first_strict_completion(argument))
+            }),
+            CoreKind::Perform { arguments, .. } => arguments
+                .into_iter()
+                .find_map(|argument| self.first_strict_completion(argument)),
+            CoreKind::Label { body, .. } => self.first_strict_completion(body),
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Error => None,
+        }
+    }
+
+    fn label_nested_completion_transfer_parts(
+        &self,
+        label: CoreId,
+    ) -> Option<(crate::LabelBrand, CoreId, CoreId)> {
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let completion = self.first_strict_completion(body)?;
+        // Direct completions are handled by the smaller label-completion
+        // matrix above. This path is specifically for a completion whose
+        // normal result still has strict label-body work to perform.
+        if completion == body {
+            return None;
+        }
+        let CoreKind::Completion { clauses, .. } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        clauses
+            .iter()
+            .any(|clause| self.contains_label_transfer(clause.body, brand))
+            .then_some((brand, body, completion))
+    }
+
+    /// Combine an ordered normal-completion matrix with the rejoin edge of
+    /// its enclosing lexical label. Normal arms cache their selected
+    /// completion value and lower the remaining strict label body once; a
+    /// transfer arm never enters that continuation and instead reaches the
+    /// label's typed join through `Leave` and the canonical cleanup plan.
+    fn lower_root_label_nested_completion_transfer(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. }
+                if self.label_nested_completion_transfer_parts(root).is_some() =>
+            {
+                (root, Vec::new())
+            }
+            CoreKind::Block(values) => {
+                let (label, prefix) = values.split_last()?;
+                self.label_nested_completion_transfer_parts(*label)
+                    .is_some()
+                    .then_some((*label, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let (brand, body, completion) = self.label_nested_completion_transfer_parts(label)?;
+        let CoreKind::Completion {
+            computation,
+            clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        for value in root_prefix {
+            self.statement(value)?;
+        }
+
+        // Suspend exactly at the selected completion after emitting the
+        // common strict prefix in the label body. This is what makes a form
+        // such as `1 + handle value { ... }` evaluate `1` once rather than in
+        // every arm.
+        self.suspend_completion = true;
+        self.deferred_completion = None;
+        let finished = self.value(body);
+        self.suspend_completion = false;
+        if finished.is_some() || self.deferred_completion != Some(completion) {
+            return None;
+        }
+        self.deferred_completion = None;
+        let subject = self.value(computation)?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let boundary_values = self.values.clone();
+        let boundary_named = self.named.clone();
+        let fallback_index = clauses
+            .iter()
+            .position(|clause| pattern_is_irrefutable(&clause.pattern));
+        let selected = fallback_index
+            .map(|index| clauses[..=index].to_vec())
+            .unwrap_or(clauses);
+        let has_fallback = fallback_index.is_some();
+        let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
+        let mut blocks = vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: entry_instructions,
+                terminator: MirTerminator::Unreachable,
+            },
+            MirBlock {
+                parameters: vec![join],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: join },
+            },
+        ];
+        let mut arms = Vec::with_capacity(selected.len());
+        for clause in &selected {
+            self.instructions = Vec::new();
+            self.values = boundary_values.clone();
+            self.named = boundary_named.clone();
+            self.bind_completion_clause(clause, subject)?;
+            let id = MirBlockId(blocks.len() as u32);
+            let terminator = if self.contains_label_transfer(clause.body, brand) {
+                let value = self.lower_label_transfer_path(clause.body, brand)?;
+                MirTerminator::Leave {
+                    brand,
+                    target: MirBlockId(1),
+                    arguments: vec![value],
+                    cleanup: MirCleanupPlan {
+                        moved_places: self.leave_cleanup.moved_places.clone(),
+                        active_loans: self.leave_cleanup.active_loans.clone(),
+                    },
+                }
+            } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
+                self.statement(clause.body)?;
+                MirTerminator::Unreachable
+            } else {
+                let value = self.value(clause.body)?;
+                let arm_instructions = std::mem::take(&mut self.instructions);
+                self.instructions = arm_instructions;
+                self.values = boundary_values.clone();
+                self.values.insert(completion, value);
+                self.named = boundary_named.clone();
+                let continued = self.value(body)?;
+                MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![continued],
+                }
+            };
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: std::mem::take(&mut self.instructions),
+                terminator,
+            });
+            arms.push(id);
+        }
+        self.values = boundary_values;
+        self.named = boundary_named;
+        self.instructions = Vec::new();
         let mut next = if has_fallback {
             *arms.last().expect("completion fallback arm exists")
         } else {

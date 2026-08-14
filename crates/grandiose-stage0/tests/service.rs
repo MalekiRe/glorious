@@ -6234,6 +6234,43 @@ fn service_lazy_label_transfer_rejoins_a_bound_continuation() {
 }
 
 #[test]
+fn service_nested_completion_label_transfer_bypasses_its_strict_suffix() {
+    let source = r#"
+        pub fn choose(value: i64) -> i64 {
+            label done {
+                1 + handle value {
+                    40 => transfer done 42,
+                    _ => 0,
+                }
+            }
+        }
+        pub fn main() -> i64 { choose(40) + choose(1) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    // The transfer arm skips the `+ 1` continuation (42); the fallback arm
+    // reaches it normally (1).
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
+fn service_nested_effect_handler_label_transfer_leaves_after_strict_prefix() {
+    let source = r#"
+        effect Ask { [1, 1] ask() -> i64; }
+        pub fn main() -> i64 {
+            label done {
+                1 + handle Ask::ask() {
+                    Ask::ask() => transfer done 42,
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }

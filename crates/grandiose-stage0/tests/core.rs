@@ -6860,6 +6860,46 @@ fn lazy_label_transfer_uses_a_boolean_join_for_the_skipped_branch() {
 }
 
 #[test]
+fn nested_completion_label_transfer_keeps_ordered_normal_and_leave_edges() {
+    let core = core_for(
+        "core-nested-completion-label-transfer@0.1.0",
+        "pub fn main() -> i64 { label done { 1 + handle 40 { 40 => transfer done 42, _ => 0 } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("nested completion label transfer lowers");
+    assert!(mir.blocks.iter().any(|block| matches!(
+        &block.terminator,
+        grandiose_stage0::MirTerminator::Leave { target, cleanup, .. }
+            if *target == grandiose_stage0::MirBlockId(1)
+                && cleanup.moved_places == flow.moved_places
+                && cleanup.active_loans == flow.active_loans
+    )));
+    assert!(mir.blocks.iter().any(|block| matches!(
+        &block.terminator,
+        grandiose_stage0::MirTerminator::Goto { target, arguments }
+            if *target == grandiose_stage0::MirBlockId(1) && arguments.len() == 1
+    )));
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
 fn label_operand_transfer_preserves_preceding_left_to_right_computation() {
     let core = core_for(
         "core-operand-label-prefix@0.1.0",
