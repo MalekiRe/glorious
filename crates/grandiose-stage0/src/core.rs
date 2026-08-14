@@ -7255,7 +7255,8 @@ impl Elaborator<'_> {
                 "trait method operation arguments do not match its declaration",
             )?
         };
-        let answer = TraitSolver::new(self.signatures).select_method(
+        let assumptions = self.ambient_trait_solver_assumptions();
+        let answer = TraitSolver::new(self.signatures).select_method_with_assumptions(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
@@ -7265,6 +7266,7 @@ impl Elaborator<'_> {
             },
             name,
             &method_arguments,
+            &assumptions,
         );
         let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {
@@ -7424,7 +7426,8 @@ impl Elaborator<'_> {
                 "trait method operation arguments do not match its declaration",
             )?
         };
-        let answer = TraitSolver::new(self.signatures).select_method(
+        let assumptions = self.ambient_trait_solver_assumptions();
+        let answer = TraitSolver::new(self.signatures).select_method_with_assumptions(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
@@ -7434,6 +7437,7 @@ impl Elaborator<'_> {
             },
             name,
             &method_arguments,
+            &assumptions,
         );
         let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {
@@ -9301,7 +9305,8 @@ impl Elaborator<'_> {
         bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
         span: Span,
     ) {
-        let mut solver = TraitSolver::new(self.signatures);
+        let solver = TraitSolver::new(self.signatures);
+        let assumptions = self.ambient_trait_solver_assumptions();
         let mut failed = false;
         for (subject, relation) in bounds {
             let subject = match self.inference.zonk(subject) {
@@ -9345,10 +9350,7 @@ impl Elaborator<'_> {
                 },
                 subject,
             };
-            if self.ambient_where_bound_proves(&goal) {
-                continue;
-            }
-            match solver.solve(goal) {
+            match solver.solve_with_assumptions(goal, &assumptions) {
                 TraitAnswer::Proven { .. } => {}
                 TraitAnswer::Refuted { .. } => {
                     self.error(
@@ -9477,17 +9479,35 @@ impl Elaborator<'_> {
             }
         }
     }
-    /// Discharge an obligation directly from the declaration contract in
-    /// scope.  This intentionally uses structural equality after zonking
-    /// rather than extending the global trait solver: a caller's assumptions
-    /// must never become implementation evidence for another callable.
-    fn ambient_where_bound_proves(&mut self, goal: &TraitGoal) -> bool {
-        self.ambient_where_bounds.iter().any(|(subject, relation)| {
-            self.inference
-                .zonk(subject.clone())
-                .ok()
-                .is_some_and(|subject| subject == goal.subject && relation == &goal.relation)
-        })
+    /// Freeze the declaration-owned trait contracts into scoped solver
+    /// assumptions.  The solver expands their supertrait closure, while this
+    /// elaborator keeps them local to the body that declared the bounds.
+    fn ambient_trait_solver_assumptions(&mut self) -> Vec<TraitGoal> {
+        self.ambient_where_bounds
+            .clone()
+            .into_iter()
+            .filter_map(|(subject, relation)| {
+                let subject = self.inference.zonk(subject).ok()?;
+                let arguments = relation
+                    .arguments
+                    .into_iter()
+                    .map(|argument| match argument {
+                        GenericArgument::Type(argument) => {
+                            self.inference.zonk(argument).map(GenericArgument::Type)
+                        }
+                        argument => Ok(argument),
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                Some(TraitGoal {
+                    relation: crate::ElaboratedTraitReference {
+                        definition: relation.definition,
+                        arguments,
+                    },
+                    subject,
+                })
+            })
+            .collect()
     }
     fn operators(&mut self, operands: Vec<ExprId>, operators: Vec<String>, span: Span) -> CoreId {
         if operands.len() != operators.len().saturating_add(1) {

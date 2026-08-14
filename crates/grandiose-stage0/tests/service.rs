@@ -2606,6 +2606,14 @@ fn service_runs_generic_subtrait_impls_proven_by_their_where_contract() {
 }
 
 #[test]
+fn service_uses_generic_child_bounds_to_discharge_parent_callable_contracts() {
+    let source = "trait Parent {} trait Child: Parent {} pub fn requires_parent<T>(value: T) -> T where T: Parent { value } pub fn relay<T>(value: T) -> T where T: Child { requires_parent(value) } impl Parent for i64 {} impl Child for i64 {} pub fn main() -> i64 { relay(42) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_type_checks_implementation_method_bodies() {
     let source = "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> i64 { \"not an integer\" } } pub fn main() -> i64 { 42 }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

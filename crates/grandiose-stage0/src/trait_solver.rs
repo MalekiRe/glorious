@@ -1503,12 +1503,48 @@ impl TraitSolver {
         name: &str,
         arguments: &[GenericArgument],
     ) -> TraitMethodAnswer {
-        let goal = match self.find_method_goal(&goal, name, &mut Vec::new()) {
-            SupertraitLookup::Found(goal) => goal,
-            SupertraitLookup::Missing => return TraitMethodAnswer::NoSolution,
-            SupertraitLookup::Ambiguous => return TraitMethodAnswer::Ambiguous,
+        let goal = match self.method_goal(goal, name) {
+            Ok(goal) => goal,
+            Err(answer) => return answer,
         };
-        match self.solve(goal.clone()) {
+        let answer = self.solve(goal.clone());
+        self.finish_method_selection(goal, name, arguments, answer)
+    }
+
+    /// Select a method with lexical trait evidence from the enclosing
+    /// declaration.  These assumptions can establish inherited parent traits
+    /// without becoming globally cached implementation evidence.
+    pub fn select_method_with_assumptions(
+        &self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[GenericArgument],
+        assumptions: &[TraitGoal],
+    ) -> TraitMethodAnswer {
+        let goal = match self.method_goal(goal, name) {
+            Ok(goal) => goal,
+            Err(answer) => return answer,
+        };
+        let answer = self.solve_with_assumptions(goal.clone(), assumptions);
+        self.finish_method_selection(goal, name, arguments, answer)
+    }
+
+    fn method_goal(&self, goal: TraitGoal, name: &str) -> Result<TraitGoal, TraitMethodAnswer> {
+        match self.find_method_goal(&goal, name, &mut Vec::new()) {
+            SupertraitLookup::Found(goal) => Ok(goal),
+            SupertraitLookup::Missing => Err(TraitMethodAnswer::NoSolution),
+            SupertraitLookup::Ambiguous => Err(TraitMethodAnswer::Ambiguous),
+        }
+    }
+
+    fn finish_method_selection(
+        &self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[GenericArgument],
+        answer: TraitAnswer,
+    ) -> TraitMethodAnswer {
+        match answer {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
                     return TraitMethodAnswer::NoSolution;

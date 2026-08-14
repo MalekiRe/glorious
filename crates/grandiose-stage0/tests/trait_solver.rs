@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 
 use grandiose_stage0::{
-    ConstKind, DeclarationScan, DefKey, EffectRow, EffectTail, ElaboratedInterface,
-    ElaboratedTraitReference, FileKey, GenericArgument, InterfaceSet, LexedFile, Lifetime,
-    Mutability, PackageKey, Quantity, ScalarType, TraitAnswer, TraitCandidateExplanation,
+    ConstKind, DeclarationScan, DefKey, DefinitionIndex, DefinitionNamespace, EffectRow,
+    EffectTail, ElaboratedInterface, ElaboratedTraitReference, FileKey, GenericArgument,
+    InterfaceSet, LexedFile, Lifetime, ModuleKey, Mutability, PackageInterface, PackageKey,
+    Quantity, ResolutionState, ScalarType, TraitAnswer, TraitCandidateExplanation,
     TraitCandidateRejection, TraitConstProjectionAnswer, TraitCyclePolicy,
     TraitEffectRowProjectionAnswer, TraitExplanationTerminal, TraitGoal, TraitMethodAnswer,
     TraitProjectionAnswer, TraitSelectionExplanation, TraitSolver, TraitSolverLimits, Type,
@@ -33,6 +34,36 @@ fn key(interface: &grandiose_stage0::PackageInterface, name: &str) -> DefKey {
         .find(|definition| definition.name.as_deref() == Some(name))
         .unwrap()
         .key
+}
+
+fn linked_interface(package: &str, module: &str, source: &str) -> PackageInterface {
+    let package = PackageKey(package.into());
+    let file = FileKey::new(&package, &format!("{module}.glorious"));
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{:#?}", scan.diagnostics);
+    let collected = InterfaceSet::collect(package, module, &lexed, source, &scan);
+    assert!(
+        collected.diagnostics.is_empty(),
+        "{:#?}",
+        collected.diagnostics
+    );
+    collected.interface
+}
+
+fn linked_signatures(interfaces: &[PackageInterface]) -> (DefinitionIndex, ElaboratedInterface) {
+    let index = DefinitionIndex::from_interfaces(interfaces.iter());
+    let signatures = ElaboratedInterface::merge(
+        interfaces
+            .iter()
+            .map(|interface| ElaboratedInterface::elaborate_with_index(interface, &index)),
+    );
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    (index, signatures)
 }
 
 fn terminal(explanation: &TraitSelectionExplanation) -> Option<&TraitExplanationTerminal> {
@@ -259,6 +290,119 @@ fn supertrait_method_and_associated_items_follow_canonical_instantiated_edges() 
             ..
         }
     ));
+}
+
+#[test]
+fn method_selection_uses_lexical_where_bounds_for_generic_impl_candidates() {
+    let (interface, signatures) = signatures(
+        "trait Gate {} trait Parent { fn identity(value: Self) -> Self; } impl<T> Parent for T where T: Gate { fn identity(value: T) -> T { value } }",
+    );
+    let parent = key(&interface, "Parent");
+    let gate = key(&interface, "Gate");
+    let generic = Type::Generic(0);
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: parent,
+            arguments: vec![],
+        },
+        subject: generic.clone(),
+    };
+    let assumption = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: gate,
+            arguments: vec![],
+        },
+        subject: generic,
+    };
+    assert!(matches!(
+        TraitSolver::new(&signatures).select_method_with_assumptions(
+            goal,
+            "identity",
+            &[],
+            &[assumption],
+        ),
+        TraitMethodAnswer::Selected { .. }
+    ));
+}
+
+#[test]
+fn method_selection_preserves_supertrait_identity_through_cross_package_reexports() {
+    let provider = linked_interface(
+        "provider@0.1.0",
+        "crate",
+        "pub trait Parent { fn identity(value: i64) -> i64; } pub trait Child: Parent {} impl Parent for i64 { fn identity(value: i64) -> i64 { value } } impl Child for i64 {}",
+    );
+    let bridge = linked_interface("bridge@0.1.0", "crate", "pub use provider::Child;");
+    let consumer = linked_interface("consumer@0.1.0", "crate", "use bridge::Child;");
+    let (index, signatures) = linked_signatures(&[provider.clone(), bridge, consumer]);
+    let child = key(&provider, "Child");
+    let resolved = index.resolve_path(
+        DefinitionNamespace::Trait,
+        &ModuleKey {
+            package: PackageKey("consumer@0.1.0".into()),
+            path: "crate".into(),
+        },
+        &["bridge".into(), "Child".into()],
+    );
+    assert_eq!(resolved, ResolutionState::Resolved(child));
+    assert!(matches!(
+        TraitSolver::new(&signatures).select_method(
+            TraitGoal {
+                relation: ElaboratedTraitReference {
+                    definition: child,
+                    arguments: vec![],
+                },
+                subject: Type::Scalar(ScalarType::I64),
+            },
+            "identity",
+            &[],
+        ),
+        TraitMethodAnswer::Selected { .. }
+    ));
+}
+
+#[test]
+fn method_selection_fails_closed_for_assumption_only_method_evidence() {
+    let (interface, signatures) = signatures("trait Parent { fn identity(value: Self) -> Self; }");
+    let parent = key(&interface, "Parent");
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: parent,
+            arguments: vec![],
+        },
+        subject: Type::Generic(0),
+    };
+    assert_eq!(
+        TraitSolver::new(&signatures).select_method_with_assumptions(
+            goal.clone(),
+            "identity",
+            &[],
+            &[goal],
+        ),
+        TraitMethodAnswer::NoSolution,
+        "a forged lexical bound cannot become a codegen-capable implementation method"
+    );
+}
+
+#[test]
+fn method_selection_reports_ambiguous_duplicate_supertrait_methods() {
+    let (interface, signatures) = signatures(
+        "trait Left { fn identity(value: i64) -> i64; } trait Right { fn identity(value: i64) -> i64; } trait Child: Left + Right {} impl Left for i64 { fn identity(value: i64) -> i64 { value } } impl Right for i64 { fn identity(value: i64) -> i64 { value } } impl Child for i64 {}",
+    );
+    assert_eq!(
+        TraitSolver::new(&signatures).select_method(
+            TraitGoal {
+                relation: ElaboratedTraitReference {
+                    definition: key(&interface, "Child"),
+                    arguments: vec![],
+                },
+                subject: Type::Scalar(ScalarType::I64),
+            },
+            "identity",
+            &[],
+        ),
+        TraitMethodAnswer::Ambiguous
+    );
 }
 
 #[test]
