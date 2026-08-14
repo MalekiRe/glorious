@@ -2183,40 +2183,93 @@ struct SiblingHandlerDispatch<'a> {
 }
 
 impl Lowerer<'_> {
-    /// Lower the initial label-transfer kernel to an explicit CFG edge. This
-    /// covers a complete lexical label body and proves that no currently
-    /// modeled loan or moved place crosses the edge; future cleanup plans can
-    /// extend this same edge rather than changing label identity semantics.
+    /// Lower a lexical label transfer into its own checked CFG edge.  This is
+    /// deliberately a source/Core operation rather than an emitter shortcut:
+    /// the target block receives the transferred value as a typed parameter
+    /// and then runs the lexical continuation after the label.  Consequently
+    /// `let value = label done { transfer done 40 }; value + 2` preserves both
+    /// the label result and the code that follows the label expression.
     fn lower_root_label_transfer(
         &mut self,
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let label = match self.body.expression(root).kind.clone() {
-            CoreKind::Label { .. } => root,
-            CoreKind::Block(values) => *values.last()?,
+        let (label, binding, prefix, suffix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { brand, body } if self.contains_label_transfer(body, brand) => {
+                (root, None, Vec::new(), Vec::new())
+            }
+            CoreKind::Block(values) => {
+                let (index, label, binding) =
+                    values.iter().enumerate().find_map(|(index, id)| {
+                        match self.body.expression(*id).kind.clone() {
+                            CoreKind::Label { brand, body }
+                                if self.contains_label_transfer(body, brand) =>
+                            {
+                                Some((index, *id, None))
+                            }
+                            CoreKind::Let { name, value }
+                                if matches!(
+                                    self.body.expression(value).kind,
+                                    CoreKind::Label { .. }
+                                ) =>
+                            {
+                                let CoreKind::Label { brand, body } =
+                                    self.body.expression(value).kind.clone()
+                                else {
+                                    unreachable!("matched label value")
+                                };
+                                self.contains_label_transfer(body, brand).then_some((
+                                    index,
+                                    value,
+                                    Some((name, *id)),
+                                ))
+                            }
+                            _ => None,
+                        }
+                    })?;
+                (
+                    label,
+                    binding,
+                    values[..index].to_vec(),
+                    values[index + 1..].to_vec(),
+                )
+            }
             _ => return None,
         };
         let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
             return None;
         };
-        if !self.contains_label_transfer(body, brand) {
-            return None;
+        for value in prefix {
+            self.statement(value)?;
         }
         let value = self.lower_label_transfer_path(body, brand)?;
-        let result = self.body.expression(root).ty.clone();
-        let join = self.alloc(result.clone(), CoreId(u32::MAX));
+        let label_result = self.body.expression(label).ty.clone();
+        let join = self.alloc(label_result, CoreId(u32::MAX));
+        let leave_instructions = std::mem::take(&mut self.instructions);
+        if let Some((name, _let_id)) = binding {
+            self.named.insert(name, join);
+        }
+        let result = if suffix.is_empty() {
+            join
+        } else {
+            for value in suffix.iter().take(suffix.len() - 1) {
+                self.statement(*value)?;
+            }
+            self.value(*suffix.last().expect("nonempty suffix"))?
+        };
+        let result_type = self.body.expression(root).ty.clone();
+        let continuation_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
             definition: self.definition,
             captures: 0,
             parameters,
             locals: self.locals.clone(),
-            result,
+            result: result_type,
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
                     parameters: vec![],
-                    instructions: self.instructions.clone(),
+                    instructions: leave_instructions,
                     terminator: MirTerminator::Leave {
                         brand,
                         target: MirBlockId(1),
@@ -2229,8 +2282,8 @@ impl Lowerer<'_> {
                 },
                 MirBlock {
                     parameters: vec![join],
-                    instructions: vec![],
-                    terminator: MirTerminator::Return { value: join },
+                    instructions: continuation_instructions,
+                    terminator: MirTerminator::Return { value: result },
                 },
             ],
         })

@@ -2758,6 +2758,88 @@ fn nested_labels_can_transfer_to_an_enclosing_brand_through_the_vm_edge() {
 }
 
 #[test]
+fn bound_label_transfer_rejoins_its_source_continuation_before_vm_execution() {
+    let core = core_for(
+        "core-bound-label-transfer@0.1.0",
+        "pub fn main() -> i64 { let answer = label done { transfer done 40; 0 }; answer + 2 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("bound label transfer lowers");
+    assert!(matches!(
+        mir.blocks[0].terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    ));
+    assert!(
+        mir.blocks[1]
+            .instructions
+            .iter()
+            .any(|instruction| matches!(
+                instruction,
+                grandiose_stage0::MirInstruction::AddI64 { .. }
+            ))
+    );
+    let verified = grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap()).unwrap();
+    assert_eq!(verified.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nested_label_transfer_preserves_cleanup_and_the_outer_continuation() {
+    let core = core_for(
+        "core-nested-bound-label-cleanup@0.1.0",
+        "pub fn main() -> i64 { let value = 1; let answer = label outer { label inner { move value; transfer outer 40; 0 }; 1 }; answer + 2 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let outer = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } if brand.label == 0 => Some(brand),
+            _ => None,
+        })
+        .expect("outer label brand");
+    let mir = MirLowering::lower(outer.owner, &core, &flow)
+        .function
+        .expect("nested bound transfer lowers");
+    let grandiose_stage0::MirTerminator::Leave { brand, cleanup, .. } = &mir.blocks[0].terminator
+    else {
+        panic!("nested transfer must lower to Leave")
+    };
+    assert_eq!(*brand, outer);
+    assert_eq!(cleanup.moved_places, flow.moved_places);
+    assert_eq!(cleanup.active_loans, flow.active_loans);
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("emit nested cleanup leave");
+    assert!(
+        artifact
+            .function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(
+                instruction,
+                grandiose_stage0::VmInstruction::Leave { cleanup, .. } if cleanup.validate()
+            ))
+    );
+    assert_eq!(
+        grandiose_stage0::verify_vm(artifact)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
 fn leave_edges_carry_canonical_placeflow_cleanup_evidence() {
     let core = core_for(
         "core-label-cleanup-plan@0.1.0",
