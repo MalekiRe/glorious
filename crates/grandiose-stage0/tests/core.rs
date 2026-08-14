@@ -1359,6 +1359,48 @@ fn concrete_associated_type_projections_normalize_in_typed_closure_contracts() {
 }
 
 #[test]
+fn trait_associated_type_defaults_normalize_in_source_contracts() {
+    let core = core_for(
+        "core-associated-default-source",
+        "trait Source { type Item = Text; } struct Value {} impl Source for Value {} pub fn main() -> i64 { let identity = (value: <Value as Source>::Item) -> Text { value }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        expression.kind,
+        CoreKind::Closure { ref parameters, .. }
+            if parameters[0].1 == Type::Scalar(ScalarType::Text)
+    )));
+}
+
+#[test]
+fn generic_trait_associated_type_defaults_normalize_in_source_contracts() {
+    let core = core_for(
+        "core-associated-generic-default-source",
+        "trait Convert { type Output<U> = U; } struct Value {} impl Convert for Value {} pub fn main() -> i64 { let identity = (value: <Value as Convert>::Output<Text>) -> Text { value }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        expression.kind,
+        CoreKind::Closure { ref parameters, .. }
+            if parameters[0].1 == Type::Scalar(ScalarType::Text)
+    )));
+}
+
+#[test]
+fn explicit_associated_type_source_definition_overrides_a_default() {
+    let core = core_for(
+        "core-associated-default-override-source",
+        "trait Source { type Item = Text; } struct Value {} impl Source for Value { type Item = i64; } pub fn main() -> i64 { let identity = (value: <Value as Source>::Item) -> i64 { value }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        expression.kind,
+        CoreKind::Closure { ref parameters, .. }
+            if parameters[0].1 == Type::Scalar(ScalarType::I64)
+    )));
+}
+
+#[test]
 fn concrete_gat_projections_normalize_in_typed_closure_contracts() {
     let package = PackageKey("core-gat-projection@0.1.0".into());
     let source = "trait Apply { type Output<T>; } struct Wrapper {} impl Apply for Wrapper { type Output<T> = T; } pub fn main() -> i64 { let identity = (value: <Wrapper as Apply>::Output<Text>) -> Text { value }; 0 }";

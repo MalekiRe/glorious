@@ -191,6 +191,15 @@ pub struct AssociatedTypeHeader {
     /// `type Output: EffectRow;` declares an associated effect row rather
     /// than an ordinary associated type.
     pub effect_row: bool,
+    /// A value-type fallback used when a positive implementation omits this
+    /// associated item.  The parser retains it in the trait declaration so
+    /// signature elaboration can resolve its outer and item binders before
+    /// any implementation is selected.
+    pub default: Option<HeaderType>,
+    /// The row-kinded counterpart of [`Self::default`].  It is separate from
+    /// `HeaderType` so an effect row can never accidentally enter a value-type
+    /// projection or layout boundary.
+    pub effect_row_default: Option<EffectRowHeader>,
     pub span: Span,
 }
 
@@ -543,10 +552,21 @@ impl Parser<'_> {
                 } else {
                     false
                 };
-                if self.operator("=") {
-                    self.error("G3235", "associated type defaults are not supported");
-                    self.skip_to_item_end();
-                }
+                let (default, effect_row_default) = if self.operator("=") {
+                    if effect_row && self.at_punctuation('{') {
+                        (None, Some(self.effect_row_literal()))
+                    } else {
+                        if effect_row {
+                            self.error(
+                                "G3235",
+                                "associated effect-row defaults require a row literal",
+                            );
+                        }
+                        (Some(self.ty()), None)
+                    }
+                } else {
+                    (None, None)
+                };
                 if !self.punctuation(';') {
                     self.error("G3236", "expected `;` after associated type declaration");
                     self.skip_to_item_end();
@@ -559,6 +579,8 @@ impl Parser<'_> {
                     name,
                     generics: item_generics,
                     effect_row,
+                    default,
+                    effect_row_default,
                     span: self.span(start, end),
                 });
                 continue;

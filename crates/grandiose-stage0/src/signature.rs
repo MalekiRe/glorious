@@ -22,7 +22,7 @@ use crate::{
 /// densely numbered source binders so it cannot collide with trait or method
 /// generic arguments.  A selected implementation replaces it with its
 /// concrete self type before a method contract becomes callable.
-const TRAIT_SELF_GENERIC: u32 = u32::MAX;
+pub(crate) const TRAIT_SELF_GENERIC: u32 = u32::MAX;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
@@ -68,6 +68,12 @@ pub struct ElaboratedAssociatedType {
     /// distinct substitution domains even though each has one binder.
     pub generic_kinds: Vec<GenericKind>,
     pub effect_row: bool,
+    /// A trait-declared value default, elaborated in the declaration's
+    /// generic environment plus the associated item's binder scope.
+    pub default: Option<Type>,
+    /// A trait-declared effect-row default.  This remains distinct from the
+    /// value default all the way to trait selection.
+    pub effect_row_default: Option<EffectRow>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -403,9 +409,11 @@ impl ElaboratedInterface {
                     }),
                 }
             }
-            for name in trait_header.associated_types.keys() {
+            for (name, declaration) in &trait_header.associated_types {
                 if !implementation.associated_types.contains_key(name)
                     && !implementation.associated_effect_rows.contains_key(name)
+                    && declaration.default.is_none()
+                    && declaration.effect_row_default.is_none()
                 {
                     diagnostics.push(SignatureDiagnostic {
                         code: "G4116",
@@ -900,6 +908,20 @@ impl ElaboratedInterface {
                 ElaboratedHeader::Trait(trait_header) => {
                     for reference in &mut trait_header.supertraits {
                         normalize_trait_reference(reference, &aliases, &mut diagnostics);
+                    }
+                    for item in trait_header.associated_types.values_mut() {
+                        if let Some(default) = item.default.take() {
+                            item.default = Some(normalize_alias_type(
+                                default,
+                                &aliases,
+                                &mut vec![],
+                                &mut diagnostics,
+                            ));
+                        }
+                        if let Some(default) = item.effect_row_default.take() {
+                            item.effect_row_default =
+                                Some(normalize_effect_row(default, &aliases, &mut diagnostics));
+                        }
                     }
                     for method in trait_header.methods.values_mut() {
                         normalize_callable_signature(method, &aliases, &mut diagnostics);
@@ -1799,12 +1821,39 @@ impl Elaborator<'_> {
                 .iter()
                 .map(|item| {
                     self.require_type_generics(&item.generics, "associated type declarations");
+                    // Defaults may mention both the trait declaration's
+                    // binders and this item's binders.  Give the latter the
+                    // same slot assignment used by implementation-side item
+                    // definitions, then restore the declaration environment
+                    // before elaborating the next item.
+                    let outer_generics = self.generics.clone();
+                    let outer_effect_row_generics = self.effect_row_generics.clone();
+                    let outer_lifetime_generics = self.lifetime_generics.clone();
+                    let outer_const_generics = self.const_generics.clone();
+                    let base = self.generic_binder_count();
+                    self.extend_generics(
+                        &item.generics,
+                        base,
+                        "G4113",
+                        "associated type generic shadows an outer generic",
+                    );
+                    let default = item.default.as_ref().map(|value| self.ty(value));
+                    let effect_row_default = item
+                        .effect_row_default
+                        .as_ref()
+                        .map(|value| self.effect_row(value));
+                    self.generics = outer_generics;
+                    self.effect_row_generics = outer_effect_row_generics;
+                    self.lifetime_generics = outer_lifetime_generics;
+                    self.const_generics = outer_const_generics;
                     (
                         item.name.clone(),
                         ElaboratedAssociatedType {
                             generics: item.generics.len() as u32,
                             generic_kinds: item.generics.kinds(),
                             effect_row: item.effect_row,
+                            default,
+                            effect_row_default,
                         },
                     )
                 })

@@ -432,6 +432,24 @@ fn trait_impl_and_effect_headers_preserve_their_semantic_contracts() {
 }
 
 #[test]
+fn trait_headers_preserve_value_and_effect_row_associated_defaults() {
+    let package = PackageKey("header-associated-defaults@0.1.0".into());
+    let source = "trait Capability<T> { type Output<U> = (T, U); type Effects: EffectRow = { Trace }; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Trait(trait_header) = parsed.header else {
+        panic!("expected trait header");
+    };
+    assert!(trait_header.associated_types[0].default.is_some());
+    assert!(trait_header.associated_types[0].effect_row_default.is_none());
+    assert!(trait_header.associated_types[1].default.is_none());
+    assert!(trait_header.associated_types[1].effect_row_default.is_some());
+}
+
+#[test]
 fn implementation_methods_retain_exact_body_ranges_for_later_elaboration() {
     let package = PackageKey("header-implementation-method-body@0.1.0".into());
     let source = "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> i64 { { let next = value + 1; next } } }";

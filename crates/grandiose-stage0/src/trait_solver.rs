@@ -9,8 +9,10 @@ use std::collections::BTreeMap;
 
 use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
-    ElaboratedImplementation, ElaboratedInterface, ElaboratedTraitReference, GenericArgument, Type,
+    ElaboratedImplementation, ElaboratedInterface, ElaboratedTrait, ElaboratedTraitReference,
+    GenericArgument, Type,
     implementation_method_key,
+    signature::TRAIT_SELF_GENERIC,
     types::{canonical_generic_arguments_encoding, canonical_type_encoding},
 };
 
@@ -228,6 +230,10 @@ impl From<TraitAnswerIndex> for TraitAnswer {
 /// scratch; every entry is keyed by a span-free canonical goal digest.
 pub struct TraitSolver {
     rules: Vec<Rule>,
+    /// Trait declarations carry associated-item defaults.  The solver owns a
+    /// frozen copy alongside implementation rules so projection selection
+    /// remains self-contained and deterministic.
+    traits: BTreeMap<DefKey, ElaboratedTrait>,
     tables: BTreeMap<Digest, TableState>,
     limits: TraitSolverLimits,
     steps: u32,
@@ -251,8 +257,17 @@ impl TraitSolver {
             })
             .collect::<Vec<_>>();
         rules.sort_by_key(|rule| rule.definition);
+        let traits = signatures
+            .definitions
+            .iter()
+            .filter_map(|(definition, header)| match header {
+                ElaboratedHeader::Trait(trait_header) => Some((*definition, trait_header.clone())),
+                _ => None,
+            })
+            .collect();
         Self {
             rules,
+            traits,
             tables: BTreeMap::new(),
             limits,
             steps: 0,
@@ -285,6 +300,7 @@ impl TraitSolver {
         let answer = self.solve(goal.clone());
         let mut probe = Self {
             rules: self.rules.clone(),
+            traits: self.traits.clone(),
             tables: BTreeMap::new(),
             limits: self.limits.clone(),
             steps: 0,
@@ -448,7 +464,36 @@ impl TraitSolver {
                             ty: substitute_type(&item.value, &substitution),
                         }
                     }
-                    None => TraitProjectionAnswer::MissingAssociatedType { evidence },
+                    None => {
+                        let Some(trait_header) = self.traits.get(&goal.relation.definition) else {
+                            return TraitProjectionAnswer::NoSolution;
+                        };
+                        let Some(declaration) = trait_header.associated_types.get(name) else {
+                            return TraitProjectionAnswer::MissingAssociatedType { evidence };
+                        };
+                        if declaration.generics != arguments.len() as u32 {
+                            return TraitProjectionAnswer::AssociatedTypeArity {
+                                evidence,
+                                expected: declaration.generics,
+                                found: arguments.len() as u32,
+                            };
+                        }
+                        if !generic_arguments_match_kinds(arguments, &declaration.generic_kinds) {
+                            return TraitProjectionAnswer::NoSolution;
+                        }
+                        let Some(default) = &declaration.default else {
+                            return TraitProjectionAnswer::MissingAssociatedType { evidence };
+                        };
+                        let substitution = default_associated_item_substitution(
+                            &goal,
+                            trait_header.generics,
+                            arguments,
+                        );
+                        TraitProjectionAnswer::Normalized {
+                            evidence,
+                            ty: substitute_type(default, &substitution),
+                        }
+                    }
                 }
             }
             TraitAnswer::Refuted { evidence } => TraitProjectionAnswer::Refuted { evidence },
@@ -685,7 +730,40 @@ impl TraitSolver {
                             row: substitute_effect_row(&item.value, &substitution),
                         }
                     }
-                    None => TraitEffectRowProjectionAnswer::MissingAssociatedEffectRow { evidence },
+                    None => {
+                        let Some(trait_header) = self.traits.get(&goal.relation.definition) else {
+                            return TraitEffectRowProjectionAnswer::NoSolution;
+                        };
+                        let Some(declaration) = trait_header.associated_types.get(name) else {
+                            return TraitEffectRowProjectionAnswer::MissingAssociatedEffectRow {
+                                evidence,
+                            };
+                        };
+                        if declaration.generics != arguments.len() as u32 {
+                            return TraitEffectRowProjectionAnswer::AssociatedEffectRowArity {
+                                evidence,
+                                expected: declaration.generics,
+                                found: arguments.len() as u32,
+                            };
+                        }
+                        if !generic_arguments_match_kinds(arguments, &declaration.generic_kinds) {
+                            return TraitEffectRowProjectionAnswer::NoSolution;
+                        }
+                        let Some(default) = &declaration.effect_row_default else {
+                            return TraitEffectRowProjectionAnswer::MissingAssociatedEffectRow {
+                                evidence,
+                            };
+                        };
+                        let substitution = default_associated_item_substitution(
+                            &goal,
+                            trait_header.generics,
+                            arguments,
+                        );
+                        TraitEffectRowProjectionAnswer::Normalized {
+                            evidence,
+                            row: substitute_effect_row(default, &substitution),
+                        }
+                    }
                 }
             }
             TraitAnswer::Refuted { evidence } => {
@@ -1019,6 +1097,31 @@ struct ImplementationSubstitution {
     types: BTreeMap<u32, Type>,
     lifetimes: BTreeMap<u32, crate::Lifetime>,
     generic_arguments: BTreeMap<u32, GenericArgument>,
+    effect_rows: BTreeMap<u32, EffectRow>,
+}
+
+/// Defaults belong to the trait declaration, not the selected implementation:
+/// their outer binder slots receive the concrete trait arguments and their
+/// synthetic `Self` binder receives the solved subject.  Item binders begin
+/// immediately after the trait's declaration binders, just as they did during
+/// header elaboration.
+fn default_associated_item_substitution(
+    goal: &TraitGoal,
+    trait_generics: u32,
+    item_arguments: &[GenericArgument],
+) -> ImplementationSubstitution {
+    let mut substitution = ImplementationSubstitution::default();
+    substitution
+        .types
+        .insert(TRAIT_SELF_GENERIC, goal.subject.clone());
+    for (index, argument) in goal.relation.arguments.iter().enumerate() {
+        let index = index as u32;
+        install_item_argument(&mut substitution, index, argument.clone());
+    }
+    for (offset, argument) in item_arguments.iter().cloned().enumerate() {
+        install_item_argument(&mut substitution, trait_generics + offset as u32, argument);
+    }
+    substitution
 }
 
 fn generic_arguments_match_kinds(
@@ -1075,8 +1178,11 @@ fn install_item_argument(
         GenericArgument::Lifetime(value) => {
             substitution.lifetimes.insert(index, *value);
         }
-        GenericArgument::EffectRow(_)
-        | GenericArgument::ConstU32(_)
+        GenericArgument::EffectRow(value) => {
+            substitution.effect_rows.insert(index, value.clone());
+            substitution.generic_arguments.insert(index, argument);
+        }
+        GenericArgument::ConstU32(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => {
             substitution.generic_arguments.insert(index, argument);
@@ -1372,6 +1478,9 @@ fn substitute_generic_argument(
 ) -> GenericArgument {
     match argument {
         GenericArgument::Type(value) => GenericArgument::Type(substitute_type(value, substitution)),
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(substitute_effect_row(value, substitution))
+        }
         GenericArgument::ConstGeneric { index, kind } => substitution
             .generic_arguments
             .get(index)
@@ -1499,6 +1608,17 @@ fn substitute_effect_row(
     value: &EffectRow,
     substitution: &ImplementationSubstitution,
 ) -> EffectRow {
+    // A row binder used as a whole row has a canonical empty prefix and one
+    // generic tail.  Replacing that exact shape preserves all effects and
+    // projections supplied by the selected trait argument rather than merely
+    // replacing its tail.
+    if value.effects.is_empty() && value.projections.is_empty() {
+        if let Some(crate::EffectTail::Generic(index)) = value.tail {
+            if let Some(row) = substitution.effect_rows.get(&index) {
+                return row.clone();
+            }
+        }
+    }
     EffectRow {
         effects: value
             .effects

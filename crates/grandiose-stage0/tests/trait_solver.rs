@@ -558,6 +558,91 @@ fn associated_type_normalization_uses_the_selected_impl_substitution() {
         }
     ));
 }
+
+#[test]
+fn associated_type_defaults_normalize_when_a_positive_impl_omits_the_item() {
+    let (interface, signatures) = signatures(
+        "trait Source { type Item = Text; } struct Value {} impl Source for Value {}",
+    );
+    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    let answer = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: key(&interface, "Source"),
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            },
+        },
+        "Item",
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::Text),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn generic_associated_type_defaults_substitute_trait_and_item_binders() {
+    let (interface, signatures) = signatures(
+        "trait Convert<T> { type Output<U> = (T, U); } struct Value {} impl Convert<i64> for Value {}",
+    );
+    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    let answer = TraitSolver::new(&signatures).normalize_associated_type_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: key(&interface, "Convert"),
+                arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+            },
+            subject: Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            },
+        },
+        "Output",
+        &[Type::Scalar(ScalarType::Text)],
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Tuple(values),
+            ..
+        } if values == vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)]
+    ));
+}
+
+#[test]
+fn explicit_associated_type_definitions_override_trait_defaults() {
+    let (interface, signatures) = signatures(
+        "trait Source { type Item = Text; } struct Value {} impl Source for Value { type Item = i64; }",
+    );
+    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    let answer = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: key(&interface, "Source"),
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            },
+        },
+        "Item",
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::I64),
+            ..
+        }
+    ));
+}
 #[test]
 fn associated_type_application_normalizes_item_generic_arguments() {
     let (interface, signatures) =
