@@ -142,6 +142,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         PrimitiveRole::BranchBool => {
             let result = Type::Generic(0);
             let thunk = Type::Callable {
+                lifetime_binders: 0,
                 parameters: vec![],
                 result: Box::new(result.clone()),
                 effects: EffectRow::empty(),

@@ -37,6 +37,17 @@ pub enum EffectTail {
 pub enum Lifetime {
     Static,
     Generic(u32),
+    /// A rigid region introduced by a `for<'a>` callable binder. The index is
+    /// local to the nearest enclosing [`Type::Callable`] binder list, making
+    /// alpha-equivalent source spellings canonical while keeping this region
+    /// distinct from declaration generics and inference/elision.
+    Bound {
+        /// Number of intervening higher-ranked callable binders between this
+        /// use and its binder (de Bruijn depth).
+        depth: u32,
+        /// Position within that binder list.
+        index: u32,
+    },
     Elided,
 }
 
@@ -199,6 +210,10 @@ pub enum Type {
         referent: Box<Type>,
     },
     Callable {
+        /// The number of higher-ranked lifetime binders that scope this
+        /// callable's parameter/result tree. Bound lifetimes use their
+        /// position in this binder list, so their identity is alpha-stable.
+        lifetime_binders: u32,
         parameters: Vec<Type>,
         result: Box<Type>,
         effects: EffectRow,
@@ -371,20 +386,23 @@ impl InferContext {
             }
             (
                 Type::Callable {
+                    lifetime_binders: left_binders,
                     parameters: left_parameters,
                     result: left_result,
                     effects: left_effects,
                     invocation: left_invocation,
                 },
                 Type::Callable {
+                    lifetime_binders: right_binders,
                     parameters: right_parameters,
                     result: right_result,
                     effects: right_effects,
                     invocation: right_invocation,
                 },
-            ) if left_invocation == right_invocation => {
+            ) if left_binders == right_binders && left_invocation == right_invocation => {
                 let effects = self.unify_effect_rows(left_effects, right_effects)?;
                 Ok(Type::Callable {
+                    lifetime_binders: left_binders,
                     parameters: self.unify_many(left_parameters, right_parameters)?,
                     result: Box::new(self.unify(*left_result, *right_result)?),
                     effects,
@@ -447,11 +465,13 @@ impl InferContext {
                 referent: Box::new(self.zonk(*referent)?),
             }),
             Type::Callable {
+                lifetime_binders,
                 parameters,
                 result,
                 effects,
                 invocation,
             } => Ok(Type::Callable {
+                lifetime_binders,
                 parameters: parameters
                     .into_iter()
                     .map(|parameter| self.zonk(parameter))
@@ -975,20 +995,27 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.push(match lifetime {
                 Lifetime::Static => 0,
                 Lifetime::Generic(_) => 1,
-                Lifetime::Elided => 2,
+                Lifetime::Bound { .. } => 2,
+                Lifetime::Elided => 3,
             });
             if let Lifetime::Generic(index) = lifetime {
+                output.extend_from_slice(&index.to_le_bytes());
+            }
+            if let Lifetime::Bound { depth, index } = lifetime {
+                output.extend_from_slice(&depth.to_le_bytes());
                 output.extend_from_slice(&index.to_le_bytes());
             }
             encode_type(referent, output);
         }
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => {
             output.push(7);
+            output.extend_from_slice(&lifetime_binders.to_le_bytes());
             encode_types(parameters, output);
             encode_type(result, output);
             output.extend_from_slice(&(effects.effects.len() as u64).to_le_bytes());

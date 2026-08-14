@@ -237,6 +237,7 @@ impl ElaboratedInterface {
                 generics: BTreeMap::new(),
                 effect_row_generics: BTreeMap::new(),
                 lifetime_generics: BTreeMap::new(),
+                bound_lifetime_scopes: vec![],
                 const_generics: BTreeMap::new(),
                 self_type: None,
                 diagnostics: vec![],
@@ -979,11 +980,13 @@ fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
             referent: Box::new(replace_trait_self_type(*referent, self_ty)),
         },
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            lifetime_binders,
             parameters: parameters
                 .into_iter()
                 .map(|value| replace_trait_self_type(value, self_ty))
@@ -1145,11 +1148,13 @@ fn rebase_method_lifetimes(
             )),
         },
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            lifetime_binders,
             parameters: parameters
                 .into_iter()
                 .map(|value| {
@@ -1344,6 +1349,10 @@ struct Elaborator<'a> {
     generics: BTreeMap<String, u32>,
     effect_row_generics: BTreeMap<String, u32>,
     lifetime_generics: BTreeMap<String, u32>,
+    /// Lexical HRTB scopes, innermost last. These map source names to their
+    /// alpha-stable binder positions and deliberately never share the
+    /// declaration-generic lifetime namespace.
+    bound_lifetime_scopes: Vec<BTreeMap<String, u32>>,
     const_generics: BTreeMap<String, (u32, ConstKind)>,
     /// Trait declarations retain an implicit `Self` placeholder; implementation
     /// members instead see their declared implementation head directly.
@@ -1992,12 +2001,24 @@ impl Elaborator<'_> {
         match spelling {
             None | Some("'_") => Lifetime::Elided,
             Some("'static") => Lifetime::Static,
-            Some(name) => match self.lifetime_generics.get(name) {
-                Some(index) => Lifetime::Generic(*index),
-                None => {
-                    self.error("G3315", format!("unbound lifetime `{name}`"));
-                    Lifetime::Elided
-                }
+            Some(name) => match self
+                .bound_lifetime_scopes
+                .iter()
+                .rev()
+                .enumerate()
+                .find_map(|(depth, scope)| scope.get(name).map(|index| (depth, index)))
+            {
+                Some((depth, index)) => Lifetime::Bound {
+                    depth: depth as u32,
+                    index: *index,
+                },
+                None => match self.lifetime_generics.get(name) {
+                    Some(index) => Lifetime::Generic(*index),
+                    None => {
+                        self.error("G3315", format!("unbound lifetime `{name}`"));
+                        Lifetime::Elided
+                    }
+                },
             },
         }
     }
@@ -2009,12 +2030,28 @@ impl Elaborator<'_> {
             HeaderType::Tuple(values) => {
                 Type::Tuple(values.iter().map(|value| self.ty(value)).collect())
             }
-            HeaderType::Callable { parameters, result } => Type::Callable {
-                parameters: parameters.iter().map(|value| self.ty(value)).collect(),
-                result: Box::new(self.ty(result)),
-                effects: EffectRow::empty(),
-                invocation: Quantity::ONCE,
-            },
+            HeaderType::Callable {
+                lifetime_binders,
+                parameters,
+                result,
+            } => {
+                let scope = lifetime_binders
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| (name.clone(), index as u32))
+                    .collect();
+                self.bound_lifetime_scopes.push(scope);
+                let parameters = parameters.iter().map(|value| self.ty(value)).collect();
+                let result = Box::new(self.ty(result));
+                self.bound_lifetime_scopes.pop();
+                Type::Callable {
+                    lifetime_binders: lifetime_binders.len() as u32,
+                    parameters,
+                    result,
+                    effects: EffectRow::empty(),
+                    invocation: Quantity::ONCE,
+                }
+            }
             HeaderType::Reference {
                 unique,
                 lifetime,
@@ -2395,11 +2432,13 @@ fn normalize_alias_type(
             )),
         },
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            lifetime_binders,
             parameters: parameters
                 .into_iter()
                 .map(|value| normalize_alias_type(value, definitions, stack, diagnostics))
@@ -2520,11 +2559,13 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
             referent: Box::new(substitute_alias_generics(*referent, arguments)),
         },
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            lifetime_binders,
             parameters: parameters
                 .into_iter()
                 .map(|value| substitute_alias_generics(value, arguments))

@@ -51,6 +51,61 @@ fn tabled_solver_proves_generic_impls_after_where_obligations() {
 }
 
 #[test]
+fn solver_matches_alpha_equivalent_hrtb_heads_but_rejects_outer_lifetime_leaks() {
+    let (interface, signatures) = signatures(
+        "trait CallableMarker {} impl CallableMarker for for<'a> (&'a i64) -> &'a i64 {}",
+    );
+    let marker = key(&interface, "CallableMarker");
+    let hrtb = Type::Callable {
+        lifetime_binders: 1,
+        parameters: vec![Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 0, index: 0 },
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
+        }],
+        result: Box::new(Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 0, index: 0 },
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
+        }),
+        effects: grandiose_stage0::EffectRow::empty(),
+        invocation: grandiose_stage0::Quantity::ONCE,
+    };
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: marker,
+            arguments: vec![],
+        },
+        subject: hrtb,
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+
+    let leaked_outer = Type::Callable {
+        lifetime_binders: 1,
+        parameters: vec![Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Generic(77),
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
+        }],
+        result: Box::new(Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Generic(77),
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
+        }),
+        effects: grandiose_stage0::EffectRow::empty(),
+        invocation: grandiose_stage0::Quantity::ONCE,
+    };
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: marker,
+            arguments: vec![],
+        },
+        subject: leaked_outer,
+    });
+    assert!(matches!(answer, TraitAnswer::NoSolution), "{answer:#?}");
+}
+
+#[test]
 fn tabled_solver_normalizes_associated_projections_in_where_obligations() {
     let (interface, signatures) = signatures(
         "trait Source { type Item; } trait Consume<T> {} trait Ready {} struct Value {} impl Source for Value { type Item = i64; } impl Consume<i64> for Value {} impl Ready for Value where Value: Consume< <Value as Source>::Item > {}",

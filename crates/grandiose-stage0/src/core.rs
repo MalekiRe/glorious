@@ -374,6 +374,7 @@ impl TypedBody {
                         .collect()
                 })
                 .unwrap_or_default(),
+            bound_lifetime_scopes: vec![],
             const_parameters: definition
                 .callable_header()
                 .map(|header| {
@@ -540,6 +541,7 @@ impl TypedBody {
                 }
                 parameters
             },
+            bound_lifetime_scopes: vec![],
             const_parameters: {
                 let mut parameters = std::collections::BTreeMap::new();
                 for (index, name) in context.implementation_header.generics.iter().enumerate() {
@@ -639,6 +641,7 @@ impl TypedBody {
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
             lifetime_parameters: std::collections::BTreeMap::new(),
+            bound_lifetime_scopes: vec![],
             const_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             ambient_where_bounds: vec![],
@@ -759,6 +762,10 @@ struct Elaborator<'a> {
     /// Lifetime binders have their own namespace and slot identity. They are
     /// valid only as the qualifier of a reference, never as a value type.
     lifetime_parameters: std::collections::BTreeMap<String, u32>,
+    /// Stack of lexical higher-ranked lifetime binders while elaborating a
+    /// header type. Bound regions cannot be confused with callable-declaration
+    /// lifetimes or escape through normal body inference.
+    bound_lifetime_scopes: Vec<std::collections::BTreeMap<String, u32>>,
     /// Structural const binders share source-slot numbering with the other
     /// generic kinds, but are only valid while elaborating an explicit const
     /// argument of a kinded nominal application.
@@ -1106,6 +1113,7 @@ impl Elaborator<'_> {
                 result,
                 effects,
                 invocation,
+                ..
             }) if parameters.is_empty() => self.contextual_zero_arg_closure(
                 values,
                 *result,
@@ -1176,6 +1184,7 @@ impl Elaborator<'_> {
                 body,
             },
             Type::Callable {
+                lifetime_binders: 0,
                 parameters: vec![],
                 result: Box::new(result),
                 effects,
@@ -1244,6 +1253,7 @@ impl Elaborator<'_> {
                 body,
             },
             Type::Callable {
+                lifetime_binders: 0,
                 parameters: parameters.into_iter().map(|(_, ty)| ty).collect(),
                 result: Box::new(result),
                 effects,
@@ -1261,15 +1271,31 @@ impl Elaborator<'_> {
             HeaderType::Tuple(values) => {
                 Type::Tuple(values.iter().map(|value| self.header_type(value)).collect())
             }
-            HeaderType::Callable { parameters, result } => Type::Callable {
-                parameters: parameters
+            HeaderType::Callable {
+                lifetime_binders,
+                parameters,
+                result,
+            } => {
+                let scope = lifetime_binders
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| (name.clone(), index as u32))
+                    .collect();
+                self.bound_lifetime_scopes.push(scope);
+                let parameters = parameters
                     .iter()
                     .map(|value| self.header_type(value))
-                    .collect(),
-                result: Box::new(self.header_type(result)),
-                effects: crate::types::EffectRow::empty(),
-                invocation: crate::quantity::Quantity::ONCE,
-            },
+                    .collect();
+                let result = Box::new(self.header_type(result));
+                self.bound_lifetime_scopes.pop();
+                Type::Callable {
+                    lifetime_binders: lifetime_binders.len() as u32,
+                    parameters,
+                    result,
+                    effects: crate::types::EffectRow::empty(),
+                    invocation: crate::quantity::Quantity::ONCE,
+                }
+            }
             HeaderType::Reference {
                 unique,
                 lifetime,
@@ -1301,17 +1327,29 @@ impl Elaborator<'_> {
         match spelling {
             None | Some("'_") => Lifetime::Elided,
             Some("'static") => Lifetime::Static,
-            Some(name) => match self.lifetime_parameters.get(name) {
-                Some(index) => Lifetime::Generic(*index),
-                None => {
-                    self.error(
-                        self.body.expression(self.body.root).span,
-                        "G4170",
-                        &format!("unbound lifetime `{name}` in closure annotation"),
-                    );
-                    self.recovered = true;
-                    Lifetime::Elided
-                }
+            Some(name) => match self
+                .bound_lifetime_scopes
+                .iter()
+                .rev()
+                .enumerate()
+                .find_map(|(depth, scope)| scope.get(name).map(|index| (depth, index)))
+            {
+                Some((depth, index)) => Lifetime::Bound {
+                    depth: depth as u32,
+                    index: *index,
+                },
+                None => match self.lifetime_parameters.get(name) {
+                    Some(index) => Lifetime::Generic(*index),
+                    None => {
+                        self.error(
+                            self.body.expression(self.body.root).span,
+                            "G4170",
+                            &format!("unbound lifetime `{name}` in closure annotation"),
+                        );
+                        self.recovered = true;
+                        Lifetime::Elided
+                    }
+                },
             },
         }
     }
@@ -2288,6 +2326,7 @@ impl Elaborator<'_> {
                     let value = self.alloc(
                         CoreKind::Function(definition),
                         Type::Callable {
+                            lifetime_binders: 0,
                             parameters: signature.parameters,
                             result: Box::new(signature.result),
                             effects: signature.effects,
@@ -2918,6 +2957,7 @@ impl Elaborator<'_> {
         let callee = self.alloc(
             CoreKind::TraitMethod { evidence, method },
             Type::Callable {
+                lifetime_binders: 0,
                 parameters: signature.parameters.clone(),
                 result: Box::new(signature.result.clone()),
                 effects: signature.effects.clone(),
@@ -3171,6 +3211,7 @@ impl Elaborator<'_> {
                 self.locals.define(
                     name.clone(),
                     Type::Callable {
+                        lifetime_binders: 0,
                         parameters: vec![clause.operation.result.clone()],
                         result: Box::new(result.clone()),
                         // A deep resumption reinstalls this handler, so its

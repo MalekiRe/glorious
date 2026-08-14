@@ -30,6 +30,7 @@ fn unification_is_occurs_checked_and_zonks_body_local_uncertainty() {
 #[test]
 fn callable_unification_requires_effect_and_invocation_agreement() {
     let callable = Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
         result: Box::new(Type::Unit),
         effects: EffectRow::empty(),
@@ -41,6 +42,7 @@ fn callable_unification_requires_effect_and_invocation_agreement() {
         callable
     );
     let incompatible = Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
         result: Box::new(Type::Unit),
         effects: EffectRow::empty(),
@@ -86,6 +88,7 @@ fn open_effect_rows_unify_without_becoming_type_holes() {
     });
 
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,
@@ -116,6 +119,7 @@ fn effect_rows_distinguish_instances_of_the_same_protocol_declaration() {
         arguments: vec![Type::Scalar(ScalarType::Text)],
     }]);
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,
@@ -133,6 +137,7 @@ fn callable_fingerprints_include_associated_effect_row_projections() {
     let capability = DefKey(Digest::of_bytes(b"Capability"));
     let subject = Type::Scalar(ScalarType::I64);
     let callable = |name: &str| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects: EffectRow {
@@ -171,6 +176,7 @@ fn symbolic_effect_row_projections_are_sorted_deduplicated_and_fingerprinted_can
         tail: None,
     };
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,
@@ -222,6 +228,7 @@ fn matching_associated_effect_row_projections_unify_without_erasure() {
         tail: None,
     };
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,
@@ -260,6 +267,7 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
         tail: None,
     };
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,
@@ -294,6 +302,7 @@ fn associated_effect_row_projection_sets_unify_independently_of_source_order() {
         tail: None,
     };
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,
@@ -323,6 +332,7 @@ fn distinct_associated_effect_row_projections_do_not_unify() {
         tail: None,
     };
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,
@@ -348,6 +358,7 @@ fn effect_row_unification_solves_protocol_argument_inference() {
         arguments: vec![Type::Scalar(ScalarType::I64)],
     }]);
     let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
         effects,

@@ -1145,6 +1145,7 @@ impl Parser<'_> {
             if self.at_operator("->") {
                 self.position += 1;
                 return Some(HeaderType::Callable {
+                    lifetime_binders: vec![],
                     parameters: values,
                     result: Box::new(self.closure_type()?),
                 });

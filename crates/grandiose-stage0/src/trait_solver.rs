@@ -441,11 +441,13 @@ impl TraitSolver {
                 referent: Box::new(self.normalize_type_projections(*referent, active)?),
             }),
             Type::Callable {
+                lifetime_binders,
                 parameters,
                 result,
                 effects,
                 invocation,
             } => Ok(Type::Callable {
+                lifetime_binders,
                 parameters: parameters
                     .into_iter()
                     .map(|parameter| self.normalize_type_projections(parameter, active))
@@ -994,6 +996,7 @@ fn match_type(
             _ => None,
         },
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
@@ -1001,11 +1004,13 @@ fn match_type(
         } => {
             match actual {
                 Type::Callable {
+                    lifetime_binders: actual_lifetime_binders,
                     parameters: actual_parameters,
                     result: actual_result,
                     effects: actual_effects,
                     invocation: actual_invocation,
-                } if parameters.len() == actual_parameters.len()
+                } if lifetime_binders == actual_lifetime_binders
+                    && parameters.len() == actual_parameters.len()
                     && effects == actual_effects
                     && invocation == actual_invocation =>
                 {
@@ -1038,7 +1043,9 @@ fn match_lifetime(
                 Some(())
             }
         },
-        crate::Lifetime::Static | crate::Lifetime::Elided => (template == actual).then_some(()),
+        crate::Lifetime::Bound { .. } | crate::Lifetime::Static | crate::Lifetime::Elided => {
+            (template == actual).then_some(())
+        }
     }
 }
 
@@ -1146,11 +1153,13 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             referent: Box::new(substitute_type(referent, substitution)),
         },
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            lifetime_binders: *lifetime_binders,
             parameters: parameters
                 .iter()
                 .map(|value| substitute_type(value, substitution))

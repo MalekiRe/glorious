@@ -233,7 +233,9 @@ fn collect_generic_names(
                 collect_generic_names(value, declared, used);
             }
         }
-        HeaderType::Callable { parameters, result } => {
+        HeaderType::Callable {
+            parameters, result, ..
+        } => {
             for parameter in parameters {
                 collect_generic_names(parameter, declared, used);
             }
@@ -382,15 +384,18 @@ fn unify_type(
         }
         (
             HeaderType::Callable {
+                lifetime_binders: left_binders,
                 parameters: left_parameters,
                 result: left_result,
             },
             HeaderType::Callable {
+                lifetime_binders: right_binders,
                 parameters: right_parameters,
                 result: right_result,
             },
         ) => {
-            left_parameters.len() == right_parameters.len()
+            left_binders.len() == right_binders.len()
+                && left_parameters.len() == right_parameters.len()
                 && left_parameters
                     .iter()
                     .zip(right_parameters)

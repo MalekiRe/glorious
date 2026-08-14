@@ -29,6 +29,30 @@ fn callable_headers_share_generic_and_type_grammar_without_parsing_the_body() {
 }
 
 #[test]
+fn headers_parse_higher_ranked_callable_lifetime_scopes() {
+    let package = PackageKey("header-hrtb@0.1.0".into());
+    let source = "pub fn use_callback(callback: for<'a> (&'a i64) -> &'a i64) { callback }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        &header.parameters[0].ty,
+        HeaderType::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+        } if lifetime_binders == &["'a"]
+            && matches!(parameters.as_slice(), [HeaderType::Reference { lifetime: Some(name), .. }] if name == "'a")
+            && matches!(result.as_ref(), HeaderType::Reference { lifetime: Some(name), .. } if name == "'a")
+    ));
+}
+
+#[test]
 fn nominal_headers_retain_structural_u32_arguments() {
     let package = PackageKey("header-structural-u32-argument@0.1.0".into());
     let source = "pub fn seven() -> Tag<7> { seven }";
@@ -226,7 +250,8 @@ fn callable_types_are_header_facts_with_tuple_parameters_and_result() {
         &header.parameters[0].ty,
         HeaderType::Callable {
             parameters,
-            result
+            result,
+            ..
         } if parameters.len() == 2 && matches!(result.as_ref(), HeaderType::Path(path) if path == &["Text"])
     ));
 }

@@ -41,6 +41,100 @@ fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
 }
 
 #[test]
+fn signatures_canonicalize_higher_ranked_lifetimes_without_capturing_outer_binders() {
+    let package = PackageKey("signature-hrtb@0.1.0".into());
+    let source = "pub fn apply<'outer>(callback: for<'inner> (&'inner i64) -> &'inner i64, value: &'outer i64) -> &'outer i64 { value }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface.definitions.first().expect("apply definition");
+    let ElaboratedHeader::Callable(signature) =
+        signatures.definitions.get(&definition.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        &signature.parameters[0],
+        Type::Callable { lifetime_binders: 1, parameters, result, .. }
+            if matches!(parameters.as_slice(), [Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. }])
+                && matches!(result.as_ref(), Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. })
+    ));
+    assert!(matches!(
+        &signature.parameters[1],
+        Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn nested_higher_ranked_callable_scopes_use_debruijn_depths() {
+    let package = PackageKey("signature-nested-hrtb@0.1.0".into());
+    let source = "pub fn nested(callback: for<'a> (for<'b> (&'a i64, &'b i64) -> &'a i64) -> ()) { callback }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface.definitions.first().expect("nested definition");
+    let ElaboratedHeader::Callable(signature) =
+        signatures.definitions.get(&definition.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    let Type::Callable {
+        parameters: outer_parameters,
+        lifetime_binders: 1,
+        ..
+    } = &signature.parameters[0]
+    else {
+        panic!("expected outer HRTB")
+    };
+    let Type::Callable {
+        parameters: inner_parameters,
+        result,
+        lifetime_binders: 1,
+        ..
+    } = &outer_parameters[0]
+    else {
+        panic!("expected nested HRTB")
+    };
+    assert!(matches!(
+        inner_parameters.as_slice(),
+        [
+            Type::Reference {
+                lifetime: Lifetime::Bound { depth: 1, index: 0 },
+                ..
+            },
+            Type::Reference {
+                lifetime: Lifetime::Bound { depth: 0, index: 0 },
+                ..
+            },
+        ]
+    ));
+    assert!(matches!(
+        result.as_ref(),
+        Type::Reference {
+            lifetime: Lifetime::Bound { depth: 1, index: 0 },
+            ..
+        }
+    ));
+}
+
+#[test]
 fn declaration_index_retains_const_generic_kinds_for_future_argument_elaboration() {
     let package = PackageKey("signature-indexed-const-generics@0.1.0".into());
     let source = "pub struct Tag<T, n: u32, budget: Quantity> {}";
@@ -1188,6 +1282,7 @@ fn frozen_associated_effect_rows_are_canonical_sets() {
     let mut inference = grandiose_stage0::InferContext::default();
     let first = inference
         .type_fingerprint(grandiose_stage0::Type::Callable {
+            lifetime_binders: 0,
             parameters: signature.parameters.clone(),
             result: Box::new(signature.result.clone()),
             effects: signature.effects.clone(),
@@ -1196,6 +1291,7 @@ fn frozen_associated_effect_rows_are_canonical_sets() {
         .unwrap();
     let second = inference
         .type_fingerprint(grandiose_stage0::Type::Callable {
+            lifetime_binders: 0,
             parameters: signature.parameters.clone(),
             result: Box::new(signature.result.clone()),
             effects: signature.effects.clone().canonicalized(),

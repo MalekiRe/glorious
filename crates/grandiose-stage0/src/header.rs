@@ -96,6 +96,12 @@ pub enum HeaderType {
     },
     Tuple(Vec<HeaderType>),
     Callable {
+        /// Lifetimes quantified by this callable type.  These bind only the
+        /// parameter/result tree of this type, not its surrounding declaration.
+        /// Keeping the binder on the syntax node gives `for<'a> (&'a T) -> ...`
+        /// a real lexical scope instead of accidentally reusing an outer
+        /// declaration lifetime.
+        lifetime_binders: Vec<String>,
         parameters: Vec<HeaderType>,
         result: Box<HeaderType>,
     },
@@ -1336,6 +1342,48 @@ impl Parser<'_> {
         generics
     }
     fn ty(&mut self) -> HeaderType {
+        // Higher-ranked callable types use an explicit lifetime-only binder
+        // prefix: `for<'a, 'b> (&'a T, &'b U) -> R`.  This is deliberately
+        // parsed here rather than as declaration generics: the binders are
+        // lexical to this one type occurrence.
+        if self.word() == Some("for") {
+            self.position += 1;
+            let binders = self.generics();
+            let mut lifetime_binders = vec![];
+            for name in &binders.names {
+                if binders.is_lifetime(name) {
+                    lifetime_binders.push(name.clone());
+                } else {
+                    self.error("G3323", "higher-ranked binders must be lifetimes");
+                }
+            }
+            let body = self.ty();
+            return match body {
+                HeaderType::Callable {
+                    lifetime_binders: nested,
+                    parameters,
+                    result,
+                } if nested.is_empty() => HeaderType::Callable {
+                    lifetime_binders,
+                    parameters,
+                    result,
+                },
+                HeaderType::Callable { .. } => {
+                    self.error(
+                        "G3324",
+                        "nested higher-ranked callable binders are not supported here",
+                    );
+                    HeaderType::Recovered
+                }
+                _ => {
+                    self.error(
+                        "G3325",
+                        "a higher-ranked binder must qualify a callable type",
+                    );
+                    HeaderType::Recovered
+                }
+            };
+        }
         if self.operator("<") {
             let subject = self.ty();
             if self.word() != Some("as") {
@@ -1402,6 +1450,7 @@ impl Parser<'_> {
             }
             if self.operator("->") {
                 return HeaderType::Callable {
+                    lifetime_binders: vec![],
                     parameters: values,
                     result: Box::new(self.ty()),
                 };

@@ -6505,11 +6505,13 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
             referent: Box::new(substitute_generic_type(*referent, substitutions)?),
         }),
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Some(Type::Callable {
+            lifetime_binders,
             parameters: parameters
                 .into_iter()
                 .map(|parameter| substitute_generic_type(parameter, substitutions))
