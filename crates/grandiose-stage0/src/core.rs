@@ -2404,11 +2404,17 @@ impl Elaborator<'_> {
                 parameters,
                 result,
             } => {
-                let scope = lifetime_binders
-                    .iter()
-                    .enumerate()
-                    .map(|(index, name)| (name.clone(), index as u32))
-                    .collect();
+                let mut scope = std::collections::BTreeMap::new();
+                for (index, name) in lifetime_binders.iter().enumerate() {
+                    if scope.insert(name.clone(), index as u32).is_some() {
+                        self.error(
+                            self.body.expression(self.body.root).span,
+                            "G4174",
+                            "duplicate higher-ranked lifetime binder",
+                        );
+                        self.recovered = true;
+                    }
+                }
                 self.bound_lifetime_scopes.push(scope);
                 let parameters = parameters
                     .iter()

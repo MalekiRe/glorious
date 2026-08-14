@@ -109,6 +109,46 @@ fn solver_matches_alpha_equivalent_hrtb_heads_but_rejects_outer_lifetime_leaks()
 }
 
 #[test]
+fn solver_instantiates_hrtb_heads_without_capturing_fresh_placeholders() {
+    let (interface, signatures) = signatures(
+        "trait CallableMarker {} impl<T> CallableMarker for for<'a> (&'a T) -> &'a T {}",
+    );
+    let marker = key(&interface, "CallableMarker");
+    let callable = |referent: Type| Type::Callable {
+        lifetime_binders: 1,
+        parameters: vec![Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 0, index: 0 },
+            referent: Box::new(referent.clone()),
+        }],
+        result: Box::new(Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 0, index: 0 },
+            referent: Box::new(referent),
+        }),
+        effects: grandiose_stage0::EffectRow::empty(),
+        invocation: grandiose_stage0::Quantity::ONCE,
+    };
+    let goal = |subject| TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: marker,
+            arguments: vec![],
+        },
+        subject,
+    };
+    let valid = TraitSolver::new(&signatures).solve(goal(callable(Type::Scalar(ScalarType::I64))));
+    assert!(matches!(valid, TraitAnswer::Proven { .. }), "{valid:#?}");
+
+    let escaped = Type::Reference {
+        mutability: Mutability::Shared,
+        lifetime: Lifetime::Bound { depth: 0, index: 0 },
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    };
+    let leaked = TraitSolver::new(&signatures).solve(goal(callable(escaped)));
+    assert!(matches!(leaked, TraitAnswer::NoSolution), "{leaked:#?}");
+}
+
+#[test]
 fn tabled_solver_normalizes_associated_projections_in_where_obligations() {
     let (interface, signatures) = signatures(
         "trait Source { type Item; } trait Consume<T> {} trait Ready {} struct Value {} impl Source for Value { type Item = i64; } impl Consume<i64> for Value {} impl Ready for Value where Value: Consume< <Value as Source>::Item > {}",

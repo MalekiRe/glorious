@@ -1393,18 +1393,11 @@ impl Parser<'_> {
                     lifetime_binders: nested,
                     parameters,
                     result,
-                } if nested.is_empty() => HeaderType::Callable {
-                    lifetime_binders,
+                } => HeaderType::Callable {
+                    lifetime_binders: lifetime_binders.into_iter().chain(nested).collect(),
                     parameters,
                     result,
                 },
-                HeaderType::Callable { .. } => {
-                    self.error(
-                        "G3324",
-                        "nested higher-ranked callable binders are not supported here",
-                    );
-                    HeaderType::Recovered
-                }
                 _ => {
                     self.error(
                         "G3325",

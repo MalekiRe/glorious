@@ -181,6 +181,46 @@ fn nested_higher_ranked_callable_scopes_use_debruijn_depths() {
 }
 
 #[test]
+fn stacked_higher_ranked_binders_are_alpha_canonical() {
+    let package = PackageKey("signature-stacked-hrtb@0.1.0".into());
+    let source = "pub fn first(value: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) { value } pub fn second(value: for<'x, 'y> (&'x i64, &'y i64) -> &'x i64) { value }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let parameter = |name: &str| {
+        let definition = interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some(name))
+            .expect("callable definition");
+        let ElaboratedHeader::Callable(signature) =
+            signatures.definitions.get(&definition.key).unwrap()
+        else {
+            panic!("expected callable")
+        };
+        signature.parameters[0].clone()
+    };
+    let first = parameter("first");
+    let second = parameter("second");
+    assert_eq!(first, second);
+    assert!(matches!(
+        first,
+        Type::Callable { lifetime_binders: 2, parameters, result, .. }
+            if matches!(parameters.as_slice(), [
+                Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. },
+                Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 1 }, .. },
+            ]) && matches!(result.as_ref(), Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. })
+    ));
+}
+
+#[test]
 fn declaration_index_retains_const_generic_kinds_for_future_argument_elaboration() {
     let package = PackageKey("signature-indexed-const-generics@0.1.0".into());
     let source = "pub struct Tag<T, n: u32, budget: Quantity> {}";

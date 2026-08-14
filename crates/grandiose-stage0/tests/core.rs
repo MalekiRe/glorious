@@ -2743,6 +2743,31 @@ fn higher_ranked_call_opens_its_bound_lifetime_without_leaking_it() {
 }
 
 #[test]
+fn typed_closures_elaborate_stacked_higher_ranked_binders() {
+    let core = core_for(
+        "core-stacked-hrtb-closure@0.1.0",
+        "pub fn main() -> i64 { let callback = (value: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) -> i64 { 0 }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let closure = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Closure { .. }))
+        .expect("typed closure");
+    let Type::Callable { parameters, .. } = &closure.ty else {
+        panic!("expected outer typed closure")
+    };
+    assert!(matches!(
+        parameters.as_slice(),
+        [Type::Callable { lifetime_binders: 2, parameters, result, .. }]
+            if matches!(parameters.as_slice(), [
+                Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. },
+                Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 1 }, .. },
+            ]) && matches!(result.as_ref(), Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. })
+    ));
+}
+
+#[test]
 fn selected_trait_methods_share_the_call_lifetime_constraint_boundary() {
     let source = r#"
         trait Relay {

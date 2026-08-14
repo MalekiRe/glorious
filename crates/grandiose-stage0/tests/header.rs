@@ -53,6 +53,31 @@ fn headers_parse_higher_ranked_callable_lifetime_scopes() {
 }
 
 #[test]
+fn headers_merge_stacked_higher_ranked_binder_prefixes() {
+    let package = PackageKey("header-stacked-hrtb@0.1.0".into());
+    let source =
+        "pub fn use_callback(callback: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) { callback }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        &header.parameters[0].ty,
+        HeaderType::Callable { lifetime_binders, parameters, result }
+            if lifetime_binders == &vec!["'a".to_owned(), "'b".to_owned()]
+                && matches!(parameters.as_slice(), [
+                    HeaderType::Reference { lifetime: Some(first), .. },
+                    HeaderType::Reference { lifetime: Some(second), .. },
+                ] if first == "'a" && second == "'b")
+                && matches!(result.as_ref(), HeaderType::Reference { lifetime: Some(name), .. } if name == "'a")
+    ));
+}
+
+#[test]
 fn nominal_headers_retain_structural_u32_arguments() {
     let package = PackageKey("header-structural-u32-argument@0.1.0".into());
     let source = "pub fn seven() -> Tag<7> { seven }";

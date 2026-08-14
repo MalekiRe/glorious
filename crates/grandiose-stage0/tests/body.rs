@@ -1,6 +1,6 @@
 use grandiose_stage0::{
-    BodySyntax, DeclarationScan, ExprKind, FileKey, HeaderGenericArgument, LexedFile, LogicalPath,
-    PackageKey, PatternKind, TokenRange,
+    BodySyntax, DeclarationScan, ExprKind, FileKey, HeaderGenericArgument, HeaderType, LexedFile,
+    LogicalPath, PackageKey, PatternKind, TokenRange,
 };
 
 fn parse(source: &str) -> BodySyntax {
@@ -48,6 +48,28 @@ fn body_parser_marks_malformed_bodies_recovered_without_nontermination() {
     let body = parse("{ let = ; }");
     assert!(body.recovered);
     assert!(!body.diagnostics.is_empty());
+}
+
+#[test]
+fn body_parser_retains_stacked_higher_ranked_closure_type_binders() {
+    let body = parse(
+        "{ let callback = (value: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) -> i64 { 0 }; 0 }",
+    );
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block")
+    };
+    let ExprKind::Let { value, .. } = body.expression(values[0]).kind else {
+        panic!("expected let")
+    };
+    let ExprKind::TypedClosure { parameters, .. } = &body.expression(value).kind else {
+        panic!("expected typed closure")
+    };
+    assert!(matches!(
+        &parameters[0].ty,
+        Some(HeaderType::Callable { lifetime_binders, .. })
+            if lifetime_binders == &vec!["'a".to_owned(), "'b".to_owned()]
+    ));
 }
 
 #[test]

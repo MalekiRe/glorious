@@ -1166,6 +1166,51 @@ impl Parser<'_> {
     }
 
     fn closure_type(&mut self) -> Option<HeaderType> {
+        if self.word() == Some("for") {
+            self.position += 1;
+            if !self.at_operator("<") {
+                self.error_current("G4009", "expected `<` after `for` in callable type");
+                return None;
+            }
+            self.position += 1;
+            let mut binders = vec![];
+            while !self.at_operator(">") && self.current().is_some() {
+                let binder = self.expect_identifier()?;
+                if !binder.starts_with('\'') {
+                    self.error_current("G4009", "higher-ranked binders must be lifetimes");
+                    return None;
+                }
+                binders.push(binder);
+                if !self.at_punctuation(',') {
+                    break;
+                }
+                self.position += 1;
+            }
+            if !self.at_operator(">") {
+                self.error_current("G4009", "expected `>` after higher-ranked binders");
+                return None;
+            }
+            self.position += 1;
+            let body = self.closure_type()?;
+            return match body {
+                HeaderType::Callable {
+                    lifetime_binders,
+                    parameters,
+                    result,
+                } => Some(HeaderType::Callable {
+                    lifetime_binders: binders.into_iter().chain(lifetime_binders).collect(),
+                    parameters,
+                    result,
+                }),
+                _ => {
+                    self.error_current(
+                        "G4009",
+                        "a higher-ranked binder must qualify a callable type",
+                    );
+                    None
+                }
+            };
+        }
         if self.at_operator("<") {
             self.position += 1;
             let subject = self.closure_type()?;

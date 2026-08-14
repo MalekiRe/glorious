@@ -1221,9 +1221,18 @@ fn match_generic_argument(
     actual: &GenericArgument,
     substitution: &mut ImplementationSubstitution,
 ) -> Option<()> {
+    match_generic_argument_at(template, actual, substitution, 0)
+}
+
+fn match_generic_argument_at(
+    template: &GenericArgument,
+    actual: &GenericArgument,
+    substitution: &mut ImplementationSubstitution,
+    binder_depth: u32,
+) -> Option<()> {
     match (template, actual) {
         (GenericArgument::Type(template), GenericArgument::Type(actual)) => {
-            match_type(template, actual, substitution)
+            match_type_at(template, actual, substitution, binder_depth)
         }
         (GenericArgument::ConstGeneric { index, kind }, actual)
             if generic_argument_is_const_kind(actual, *kind) =>
@@ -1273,11 +1282,28 @@ fn match_type(
     actual: &Type,
     substitution: &mut ImplementationSubstitution,
 ) -> Option<()> {
+    match_type_at(template, actual, substitution, 0)
+}
+
+/// Match frozen implementation heads against a goal while tracking the
+/// higher-ranked binder depth. Bound regions are rigid placeholders; a type
+/// metavariable may not capture one from inside a callable binder, because
+/// that substitution would escape when the implementation's where-bounds or
+/// associated items are later instantiated.
+fn match_type_at(
+    template: &Type,
+    actual: &Type,
+    substitution: &mut ImplementationSubstitution,
+    binder_depth: u32,
+) -> Option<()> {
     match template {
         Type::Generic(index) => match substitution.types.get(index) {
             Some(previous) if previous != actual => None,
             Some(_) => Some(()),
             None => {
+                if binder_depth > 0 && has_free_hrtb_placeholder(actual, 0) {
+                    return None;
+                }
                 substitution.types.insert(*index, actual.clone());
                 Some(())
             }
@@ -1343,12 +1369,14 @@ fn match_type(
                 && trait_arguments.len() == actual_trait_arguments.len()
                 && item_arguments.len() == actual_item_arguments.len() =>
             {
-                match_type(subject, actual_subject, substitution)?;
+                match_type_at(subject, actual_subject, substitution, binder_depth)?;
                 trait_arguments
                     .iter()
                     .zip(actual_trait_arguments)
                     .chain(item_arguments.iter().zip(actual_item_arguments))
-                    .try_for_each(|(template, actual)| match_type(template, actual, substitution))
+                    .try_for_each(|(template, actual)| {
+                        match_type_at(template, actual, substitution, binder_depth)
+                    })
             }
             _ => None,
         },
@@ -1356,11 +1384,15 @@ fn match_type(
             Type::Tuple(actual_values) if values.len() == actual_values.len() => values
                 .iter()
                 .zip(actual_values)
-                .try_for_each(|(template, actual)| match_type(template, actual, substitution)),
+                .try_for_each(|(template, actual)| {
+                    match_type_at(template, actual, substitution, binder_depth)
+                }),
             _ => None,
         },
         Type::Array(element) => match actual {
-            Type::Array(actual_element) => match_type(element, actual_element, substitution),
+            Type::Array(actual_element) => {
+                match_type_at(element, actual_element, substitution, binder_depth)
+            }
             _ => None,
         },
         Type::Reference {
@@ -1374,7 +1406,7 @@ fn match_type(
                 referent: actual_referent,
             } if mutability == actual_mutability => {
                 match_lifetime(*lifetime, *actual_lifetime, substitution)?;
-                match_type(referent, actual_referent, substitution)
+                match_type_at(referent, actual_referent, substitution, binder_depth)
             }
             _ => None,
         },
@@ -1384,31 +1416,87 @@ fn match_type(
             result,
             effects,
             invocation,
-        } => {
-            match actual {
-                Type::Callable {
-                    lifetime_binders: actual_lifetime_binders,
-                    parameters: actual_parameters,
-                    result: actual_result,
-                    effects: actual_effects,
-                    invocation: actual_invocation,
-                } if lifetime_binders == actual_lifetime_binders
-                    && parameters.len() == actual_parameters.len()
-                    && effects == actual_effects
-                    && invocation == actual_invocation =>
-                {
-                    parameters.iter().zip(actual_parameters).try_for_each(
-                        |(template, actual)| match_type(template, actual, substitution),
-                    )?;
-                    match_type(result, actual_result, substitution)
-                }
-                _ => None,
+        } => match actual {
+            Type::Callable {
+                lifetime_binders: actual_lifetime_binders,
+                parameters: actual_parameters,
+                result: actual_result,
+                effects: actual_effects,
+                invocation: actual_invocation,
+            } if lifetime_binders == actual_lifetime_binders
+                && parameters.len() == actual_parameters.len()
+                && effects == actual_effects
+                && invocation == actual_invocation =>
+            {
+                parameters
+                    .iter()
+                    .zip(actual_parameters)
+                    .try_for_each(|(template, actual)| {
+                        match_type_at(template, actual, substitution, binder_depth + 1)
+                    })?;
+                match_type_at(result, actual_result, substitution, binder_depth + 1)
             }
-        }
+            _ => None,
+        },
         // A caller-owned inference variable is intentionally not solved by
         // this frozen-interface kernel.  Body elaboration must choose a type
         // first, then issue a canonical trait goal.
         Type::Infer(_) => None,
+    }
+}
+
+/// A `Bound` lifetime is a fresh universe placeholder unless it is closed by
+/// a callable nested inside the candidate type. This walk distinguishes a
+/// self-contained nested HRTB from a reference to an enclosing binder.
+fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
+    match value {
+        Type::Reference {
+            lifetime: crate::Lifetime::Bound { depth, .. },
+            referent,
+            ..
+        } => *depth >= callable_nesting || has_free_hrtb_placeholder(referent, callable_nesting),
+        Type::Reference { referent, .. } | Type::Array(referent) => {
+            has_free_hrtb_placeholder(referent, callable_nesting)
+        }
+        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| match argument {
+            GenericArgument::Type(value) => has_free_hrtb_placeholder(value, callable_nesting),
+            GenericArgument::EffectRow(row) => row.effects.iter().any(|effect| {
+                effect
+                    .arguments
+                    .iter()
+                    .any(|argument| matches!(argument, GenericArgument::Type(value) if has_free_hrtb_placeholder(value, callable_nesting)))
+            }),
+            GenericArgument::Lifetime(crate::Lifetime::Bound { depth, .. }) => {
+                *depth >= callable_nesting
+            }
+            _ => false,
+        }),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            has_free_hrtb_placeholder(subject, callable_nesting)
+                || trait_arguments
+                    .iter()
+                    .any(|value| has_free_hrtb_placeholder(value, callable_nesting))
+                || item_arguments
+                    .iter()
+                    .any(|value| has_free_hrtb_placeholder(value, callable_nesting))
+        }
+        Type::Tuple(values) => values
+            .iter()
+            .any(|value| has_free_hrtb_placeholder(value, callable_nesting)),
+        Type::Callable {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(|value| has_free_hrtb_placeholder(value, callable_nesting + 1))
+                || has_free_hrtb_placeholder(result, callable_nesting + 1)
+        }
+        _ => false,
     }
 }
 

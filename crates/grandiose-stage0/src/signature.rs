@@ -2381,11 +2381,15 @@ impl Elaborator<'_> {
                 parameters,
                 result,
             } => {
-                let scope = lifetime_binders
-                    .iter()
-                    .enumerate()
-                    .map(|(index, name)| (name.clone(), index as u32))
-                    .collect();
+                let mut scope = BTreeMap::new();
+                for (index, name) in lifetime_binders.iter().enumerate() {
+                    if scope.insert(name.clone(), index as u32).is_some() {
+                        self.error(
+                            "G3326",
+                            format!("duplicate higher-ranked lifetime `{name}`"),
+                        );
+                    }
+                }
                 self.bound_lifetime_scopes.push(scope);
                 let parameters = parameters.iter().map(|value| self.ty(value)).collect();
                 let result = Box::new(self.ty(result));
