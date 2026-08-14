@@ -63,3 +63,24 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
 
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn cli_renders_invalid_request_failures_as_stable_diagnostics() {
+    let directory = temporary_directory();
+    let source = directory.join("invalid-utf8.glorious");
+    fs::write(&source, [0xff]).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args(["check", source.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("G7018: source"), "{stderr}");
+    assert!(
+        !stderr.contains("Revision(Input") && !stderr.contains("ServiceError"),
+        "CLI must not expose implementation enum formatting: {stderr}"
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}

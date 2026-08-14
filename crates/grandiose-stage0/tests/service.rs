@@ -56,6 +56,36 @@ fn request_with_modules(root: &str, modules: &[(&str, &str)]) -> CompilationRequ
     }
     request
 }
+
+#[test]
+fn service_exposes_malformed_requests_as_structured_diagnostics() {
+    let mut malformed = request("pub fn main() -> i64 { 0 }");
+    malformed.sources.clear();
+
+    let error = StageZeroCompiler::new().compile(malformed).unwrap_err();
+    let diagnostics = error.diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "G7015");
+    assert_eq!(diagnostics[0].class, DiagnosticClass::Request);
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(diagnostics[0].primary.is_none());
+    assert!(diagnostics[0].input_fingerprint.is_none());
+}
+
+#[test]
+fn service_classifies_untrusted_source_bytes_as_input_corruption() {
+    let mut malformed = request("pub fn main() -> i64 { 0 }");
+    malformed.sources[0].bytes = vec![0xff].into();
+    malformed.sources[0].digest = Digest::of_bytes(&[0xff]);
+
+    let error = StageZeroCompiler::new().compile(malformed).unwrap_err();
+    let diagnostics = error.diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "G7018");
+    assert_eq!(diagnostics[0].class, DiagnosticClass::InputCorruption);
+    assert!(diagnostics[0].input_fingerprint.is_none());
+}
+
 #[test]
 fn service_compiles_and_runs_a_verified_vm_artifact_from_an_immutable_request() {
     let outcome = StageZeroCompiler::new()

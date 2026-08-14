@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     BodySyntax, BootstrapManifest, CoherenceSet, CompilationMode, CompilationRequest,
     CompilerDatabase, DefKey, DefinitionIndex, DiagnosticClass, Digest, ElaboratedHeader,
-    ElaboratedInterface, FixityTable, MirFunction, MirLowering, MirProgram, ModuleGraph,
-    ParsedHeader, PlaceFlow, RevisionError, RevisionId, Severity, SourceSpan, Span,
+    ElaboratedInterface, FixityTable, InputError, MirFunction, MirLowering, MirProgram,
+    ModuleGraph, ParsedHeader, PlaceFlow, RevisionError, RevisionId, Severity, SourceSpan, Span,
     TrustedRuntimeManifest, TypedBody, VerifiedVmProgram, emit_vm_program,
     implementation_method_key, verify_vm_program,
 };
@@ -227,6 +227,58 @@ pub struct CompilationOutcome {
 pub enum ServiceError {
     Revision(RevisionError),
     Failed(Vec<CompileDiagnostic>),
+}
+
+impl ServiceError {
+    /// Return every failure through the same structured diagnostic boundary
+    /// used for ordinary compilation errors.  Request and revision failures
+    /// happen before a stable source world exists, so they deliberately have
+    /// no source span or input fingerprint; callers must not scrape a Rust
+    /// `Debug` representation to learn why a request was rejected.
+    pub fn diagnostics(&self) -> Vec<CompileDiagnostic> {
+        match self {
+            Self::Failed(diagnostics) => diagnostics.clone(),
+            Self::Revision(RevisionError::Input(error)) => {
+                vec![CompileDiagnostic::from_input_error(error)]
+            }
+            Self::Revision(RevisionError::UnknownRevision(_)) => {
+                vec![CompileDiagnostic::request(
+                    "G7025",
+                    "requested compilation revision is unavailable",
+                )]
+            }
+            Self::Revision(RevisionError::StaleRevision(_)) => {
+                vec![CompileDiagnostic::request(
+                    "G7026",
+                    "requested compilation revision belongs to a different compiler database",
+                )]
+            }
+            Self::Revision(RevisionError::RetiredRevision(_)) => {
+                vec![CompileDiagnostic::request(
+                    "G7027",
+                    "requested compilation revision has been retired",
+                )]
+            }
+        }
+    }
+}
+
+impl CompileDiagnostic {
+    fn from_input_error(error: &InputError) -> Self {
+        let (code, class) = match error {
+            InputError::EmptySources => ("G7015", DiagnosticClass::Request),
+            InputError::DuplicateFileKey(_) => ("G7016", DiagnosticClass::Request),
+            InputError::DigestMismatch { .. } => ("G7017", DiagnosticClass::InputCorruption),
+            InputError::InvalidUtf8(_) => ("G7018", DiagnosticClass::InputCorruption),
+            InputError::InvalidLogicalPath(_) => ("G7019", DiagnosticClass::Request),
+            InputError::DuplicateCapability(_) => ("G7020", DiagnosticClass::Request),
+            InputError::InvalidCapability(_) => ("G7021", DiagnosticClass::Request),
+            InputError::InvalidRuntimeManifest => ("G7022", DiagnosticClass::Request),
+            InputError::InvalidBootstrapStage { .. } => ("G7023", DiagnosticClass::Request),
+            InputError::BootstrapSourceLimit { .. } => ("G7024", DiagnosticClass::Resource),
+        };
+        Self::new(code, error.to_string(), class, None)
+    }
 }
 impl From<RevisionError> for ServiceError {
     fn from(value: RevisionError) -> Self {

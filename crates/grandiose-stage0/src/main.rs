@@ -99,7 +99,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("grc-stage0: compilation failed: {error:?}");
+            for diagnostic in error.diagnostics() {
+                eprintln!("{}: {}", diagnostic.code, diagnostic.message);
+            }
             ExitCode::from(1)
         }
     }
