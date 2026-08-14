@@ -4,6 +4,32 @@ use grandiose_stage0::{
     MirLowering, PackageKey, PlaceFlow, Type, TypedBody, implementation_method_key,
 };
 
+fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
+    let package = PackageKey(package_name.into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    PlaceFlow::analyze(&core)
+}
+
 #[test]
 fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
     let package = PackageKey("core@0.1.0".into());
@@ -354,6 +380,46 @@ fn placeflow_tracks_a_field_borrow_back_to_its_root_local() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G5004"),
         "a projection loan must keep its root from moving: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_allows_disjoint_field_access_while_a_projection_loan_is_live() {
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.right = 3; pair.right }";
+    let flow = flow_for("core-projection-disjoint@0.1.0", source);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+}
+
+#[test]
+fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
+    let unique_read = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.left }";
+    let flow = flow_for("core-projection-unique-read@0.1.0", unique_read);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5008"),
+        "a unique field loan must exclude reads of that field: {:#?}",
+        flow.diagnostics
+    );
+
+    let shared_write = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; pair.left = 3; pair.right }";
+    let flow = flow_for("core-projection-shared-write@0.1.0", shared_write);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5007"),
+        "a shared field loan must exclude writes to that field: {:#?}",
+        flow.diagnostics
+    );
+
+    let whole_unique = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; let whole = &mut pair; 0 }";
+    let flow = flow_for("core-projection-whole-conflict@0.1.0", whole_unique);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5006"),
+        "a whole unique loan must conflict with a live field loan: {:#?}",
         flow.diagnostics
     );
 }

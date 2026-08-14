@@ -1,10 +1,33 @@
 //! Ownership facts derived solely from Typed Core before MIR lowering.
 
 use crate::{
-    core::{CaptureMode, CoreId, CoreKind, TypedBody},
+    core::{CaptureMode, CoreId, CoreKind, CorePlace, TypedBody},
     source::Span,
 };
 use std::collections::BTreeMap;
+
+/// A statically-selected subplace of one local.  PlaceFlow deliberately keeps
+/// dereferences out of this representation: their aliasing is not yet proven
+/// precisely enough to make them disjoint.  Struct-field paths, on the other
+/// hand, have stable Core indices and can safely participate in overlap tests.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct Projection {
+    root: String,
+    fields: Vec<u32>,
+}
+
+impl Projection {
+    fn overlaps(&self, other: &Self) -> bool {
+        self.root == other.root
+            && (self.fields.starts_with(&other.fields) || other.fields.starts_with(&self.fields))
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProjectionLoan {
+    place: Projection,
+    unique: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalState {
@@ -44,6 +67,7 @@ impl PlaceFlow {
         let mut a = Analyzer {
             body,
             states: BTreeMap::new(),
+            projection_loans: vec![],
             events: vec![],
             diagnostics: vec![],
         };
@@ -62,6 +86,9 @@ impl PlaceFlow {
 struct Analyzer<'a> {
     body: &'a TypedBody,
     states: BTreeMap<String, LocalState>,
+    /// Loans of proper field projections.  Whole-local loans continue to use
+    /// `LocalState`, preserving the compact public final-state summary.
+    projection_loans: Vec<ProjectionLoan>,
     events: Vec<FlowEvent>,
     diagnostics: Vec<FlowDiagnostic>,
 }
@@ -83,7 +110,7 @@ impl Analyzer<'_> {
                     }
                 }
             }
-            CoreKind::Local(n) => self.read(&n, e.span),
+            CoreKind::Local(_) => self.read_place(id, e.span),
             CoreKind::Let { name, value } => {
                 self.visit(value);
                 self.states.insert(name.clone(), LocalState::Initialized);
@@ -91,9 +118,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Assign { place, value } => {
                 self.visit(value);
-                if let Some((name, _)) = place.root_local() {
-                    self.assign(name, e.span);
-                }
+                self.assign_place(&place, e.span);
             }
             CoreKind::Move(v) => {
                 self.visit(v);
@@ -102,9 +127,7 @@ impl Analyzer<'_> {
                 // so consuming a projection must conservatively consume the
                 // owner too.  That preserves the essential ownership
                 // invariant until partial-move states are represented.
-                if let Some(name) = self.root_local(v).map(str::to_owned) {
-                    self.move_(&name, e.span)
-                }
+                self.move_place(v, e.span)
             }
             CoreKind::Unary { value, .. } => self.visit(value),
             CoreKind::Borrow { unique, value } => {
@@ -115,9 +138,7 @@ impl Analyzer<'_> {
                 // treating `&record.field` as a borrow of a temporary value.
                 // This is conservative, but prevents moving or overwriting
                 // the enclosing record while a reference into it is live.
-                if let Some(name) = self.root_local(value).map(str::to_owned) {
-                    self.borrow(&name, unique, e.span)
-                }
+                self.borrow_place(value, unique, e.span)
             }
             CoreKind::Call { callee, arguments } => {
                 self.visit(callee);
@@ -136,9 +157,11 @@ impl Analyzer<'_> {
             } => {
                 self.visit(computation);
                 let incoming = self.states.clone();
+                let incoming_loans = self.projection_loans.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
+                    self.projection_loans = incoming_loans.clone();
                     for (name, _) in clause.bindings {
                         self.states.insert(name, LocalState::Initialized);
                     }
@@ -148,10 +171,16 @@ impl Analyzer<'_> {
                         self.states.insert(name, LocalState::Initialized);
                     }
                     self.visit(clause.body);
-                    exits.push(self.states.clone());
+                    exits.push((self.states.clone(), self.projection_loans.clone()));
                 }
                 if !exits.is_empty() {
-                    self.states = join_handler_exits(&exits);
+                    self.states = join_handler_exits(
+                        &exits
+                            .iter()
+                            .map(|(states, _)| states.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                    self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                 }
             }
             CoreKind::Completion {
@@ -160,17 +189,25 @@ impl Analyzer<'_> {
             } => {
                 self.visit(computation);
                 let incoming = self.states.clone();
+                let incoming_loans = self.projection_loans.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
+                    self.projection_loans = incoming_loans.clone();
                     for (name, _) in clause.bindings {
                         self.states.insert(name, LocalState::Initialized);
                     }
                     self.visit(clause.body);
-                    exits.push(self.states.clone());
+                    exits.push((self.states.clone(), self.projection_loans.clone()));
                 }
                 if !exits.is_empty() {
-                    self.states = join_handler_exits(&exits);
+                    self.states = join_handler_exits(
+                        &exits
+                            .iter()
+                            .map(|(states, _)| states.clone())
+                            .collect::<Vec<_>>(),
+                    );
+                    self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                 }
             }
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
@@ -188,7 +225,7 @@ impl Analyzer<'_> {
                     self.visit(field)
                 }
             }
-            CoreKind::Field { base, .. } => self.visit(base),
+            CoreKind::Field { .. } => self.read_place(id, e.span),
             CoreKind::PatternTest { subject, .. } => self.visit(subject),
             CoreKind::Binary { left, right, .. } => {
                 self.visit(left);
@@ -264,15 +301,154 @@ impl Analyzer<'_> {
         self.events.push(FlowEvent { kind, span })
     }
 
-    /// Return the root local for a readable place expression.  Borrow
-    /// expressions are only emitted for values, but field expressions remain
-    /// addressable projections of their local base.
-    fn root_local(&self, id: CoreId) -> Option<&str> {
+    fn projection(&self, id: CoreId) -> Option<Projection> {
         match &self.body.expression(id).kind {
-            CoreKind::Local(name) => Some(name),
-            CoreKind::Field { base, .. } => self.root_local(*base),
+            CoreKind::Local(name) => Some(Projection {
+                root: name.clone(),
+                fields: vec![],
+            }),
+            CoreKind::Field { base, index, .. } => {
+                let mut projection = self.projection(*base)?;
+                projection.fields.push(*index);
+                Some(projection)
+            }
             _ => None,
         }
+    }
+
+    fn place_projection(place: &CorePlace) -> Option<Projection> {
+        match place {
+            CorePlace::Local { name, .. } => Some(Projection {
+                root: name.clone(),
+                fields: vec![],
+            }),
+            CorePlace::Field { base, index, .. } => {
+                let mut projection = Self::place_projection(base)?;
+                projection.fields.push(*index);
+                Some(projection)
+            }
+            CorePlace::Error => None,
+        }
+    }
+
+    fn read_place(&mut self, id: CoreId, span: Span) {
+        let Some(place) = self.projection(id) else {
+            return;
+        };
+        self.read(&place.root, span);
+        if self
+            .projection_loans
+            .iter()
+            .any(|loan| loan.unique && loan.place.overlaps(&place))
+        {
+            self.error(
+                span,
+                "G5008",
+                format!("cannot read uniquely borrowed place `{}`", place.root),
+            );
+        }
+    }
+
+    fn move_place(&mut self, id: CoreId, span: Span) {
+        let Some(place) = self.projection(id) else {
+            return;
+        };
+        if self
+            .projection_loans
+            .iter()
+            .any(|loan| loan.place.overlaps(&place))
+        {
+            self.error(
+                span,
+                "G5004",
+                format!("cannot move borrowed place `{}`", place.root),
+            );
+            return;
+        }
+        self.move_(&place.root, span);
+    }
+
+    fn borrow_place(&mut self, id: CoreId, unique: bool, span: Span) {
+        let Some(place) = self.projection(id) else {
+            return;
+        };
+        if self
+            .projection_loans
+            .iter()
+            .any(|loan| loan.place.overlaps(&place) && (unique || loan.unique))
+        {
+            self.error(
+                span,
+                "G5006",
+                format!("conflicting borrow of place `{}`", place.root),
+            );
+            return;
+        }
+        if place.fields.is_empty() {
+            self.borrow(&place.root, unique, span);
+            return;
+        }
+        match self.states.get(&place.root) {
+            Some(LocalState::Initialized) | Some(LocalState::SharedBorrowed(_)) => {}
+            Some(LocalState::Moved) => {
+                self.error(
+                    span,
+                    "G5005",
+                    format!("cannot borrow moved local `{}`", place.root),
+                );
+                return;
+            }
+            Some(LocalState::UniquelyBorrowed) => {
+                self.error(
+                    span,
+                    "G5006",
+                    format!("conflicting borrow of local `{}`", place.root),
+                );
+                return;
+            }
+            None => {
+                self.error(
+                    span,
+                    "G5002",
+                    format!("unknown local `{}` in PlaceFlow", place.root),
+                );
+                return;
+            }
+        }
+        self.projection_loans.push(ProjectionLoan { place, unique });
+        self.event(
+            if unique {
+                FlowEventKind::BorrowUnique(self.root_name(id))
+            } else {
+                FlowEventKind::BorrowShared(self.root_name(id))
+            },
+            span,
+        );
+    }
+
+    fn assign_place(&mut self, place: &CorePlace, span: Span) {
+        let Some(projection) = Self::place_projection(place) else {
+            return;
+        };
+        if self
+            .projection_loans
+            .iter()
+            .any(|loan| loan.place.overlaps(&projection))
+        {
+            self.error(
+                span,
+                "G5007",
+                format!("cannot assign to borrowed place `{}`", projection.root),
+            );
+            return;
+        }
+        self.assign(&projection.root, span);
+    }
+
+    fn root_name(&self, id: CoreId) -> String {
+        self.projection(id)
+            .map(|place| place.root)
+            .unwrap_or_default()
     }
 
     fn error(&mut self, span: Span, code: &'static str, message: String) {
@@ -322,4 +498,24 @@ fn join_handler_exits(exits: &[BTreeMap<String, LocalState>]) -> BTreeMap<String
             })
         })
         .collect()
+}
+
+/// A handler arm is dynamically selected, so any projection loan established
+/// on an outer local by one possible exit remains live after the handler.  We
+/// retain only roots that existed before entering the handler: clause-local
+/// references cannot escape their lexical arm merely because another arm uses
+/// the same spelling.
+fn join_handler_projection_loans(
+    exits: &[(BTreeMap<String, LocalState>, Vec<ProjectionLoan>)],
+    incoming: &BTreeMap<String, LocalState>,
+) -> Vec<ProjectionLoan> {
+    let mut loans = exits
+        .iter()
+        .flat_map(|(_, loans)| loans)
+        .filter(|loan| incoming.contains_key(&loan.place.root))
+        .cloned()
+        .collect::<Vec<_>>();
+    loans.sort();
+    loans.dedup();
+    loans
 }
