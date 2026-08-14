@@ -523,6 +523,12 @@ pub enum CoreKind {
     Perform {
         effect: EffectInstance,
         operation: u32,
+        /// The fully instantiated operation payload contract selected during
+        /// body elaboration.  Keeping it beside the actual argument nodes
+        /// makes effect performance an independently checkable callable
+        /// boundary for ownership/quantity consumers; they must not infer a
+        /// receiver contract from the sender's realized expression type.
+        payload_types: Vec<Type>,
         arguments: Vec<CoreId>,
         terminal: bool,
         /// The operation declaration's caller-region relation before body
@@ -710,6 +716,13 @@ impl TypedBody {
                 });
             }
             if let Some(message) = core_structural_error(&expression.kind) {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4183",
+                    span: expression.span,
+                    message,
+                });
+            }
+            if let Some(message) = perform_payload_contract_error(self, &expression.kind) {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4183",
                     span: expression.span,
@@ -1105,6 +1118,7 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Perform {
                 effect,
                 operation,
+                payload_types,
                 arguments,
                 terminal,
                 reference_contract,
@@ -1115,6 +1129,7 @@ impl CoreFingerprintEncoder<'_> {
                 self.effect(effect);
                 self.bytes(&operation.to_le_bytes());
                 self.bytes(&[*terminal as u8]);
+                self.types(payload_types);
                 self.ids(arguments);
                 self.debug(reference_contract);
                 self.debug(reference_origin);
@@ -1324,6 +1339,46 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
         }),
         _ => None,
     }
+}
+
+/// `Perform` is an operation-call boundary with no callee expression from
+/// which later passes can recover a parameter contract.  Freeze and validate
+/// the selected ABI directly in Core so UseFlow, PlaceFlow, and a future
+/// persisted-Core reader agree on which payload capability receives a
+/// transfer.
+fn perform_payload_contract_error(body: &TypedBody, kind: &CoreKind) -> Option<String> {
+    let CoreKind::Perform {
+        arguments,
+        payload_types,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    if arguments.len() != payload_types.len() {
+        return Some(format!(
+            "effect operation has {} payload arguments but {} frozen payload contract entries",
+            arguments.len(),
+            payload_types.len()
+        ));
+    }
+    for (index, (argument, payload_type)) in arguments.iter().zip(payload_types).enumerate() {
+        let Some(actual) = body
+            .expressions
+            .get(argument.0 as usize)
+            .map(|value| &value.ty)
+        else {
+            // Missing child IDs are independently diagnosed by the general
+            // Core graph validator above.
+            continue;
+        };
+        if actual != payload_type {
+            return Some(format!(
+                "effect operation payload {index} does not match its frozen selected parameter contract"
+            ));
+        }
+    }
+    None
 }
 
 fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type) -> Option<String> {
@@ -1825,10 +1880,17 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
             .iter()
             .chain(method_arguments)
             .any(generic_argument_contains_inference),
-        CoreKind::Perform { effect, .. } => effect
-            .arguments
-            .iter()
-            .any(generic_argument_contains_inference),
+        CoreKind::Perform {
+            effect,
+            payload_types,
+            ..
+        } => {
+            effect
+                .arguments
+                .iter()
+                .any(generic_argument_contains_inference)
+                || payload_types.iter().any(type_contains_inference)
+        }
         CoreKind::PatternTest { pattern, .. } => pattern_contains_inference(pattern),
         CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause| {
             clause
@@ -1918,10 +1980,19 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
             .iter()
             .chain(method_arguments)
             .any(|argument| !is_canonical_generic_argument_identity(argument)),
-        CoreKind::Perform { effect, .. } => effect
-            .arguments
-            .iter()
-            .any(|argument| !is_canonical_generic_argument_identity(argument)),
+        CoreKind::Perform {
+            effect,
+            payload_types,
+            ..
+        } => {
+            effect
+                .arguments
+                .iter()
+                .any(|argument| !is_canonical_generic_argument_identity(argument))
+                || payload_types
+                    .iter()
+                    .any(|ty| !is_canonical_type_identity(ty))
+        }
         CoreKind::PatternTest {
             pattern,
             refinement,
@@ -2068,10 +2139,17 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
             .iter()
             .chain(method_arguments)
             .any(|argument| generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])),
-        CoreKind::Perform { effect, .. } => effect
-            .arguments
-            .iter()
-            .any(|argument| generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])),
+        CoreKind::Perform {
+            effect,
+            payload_types,
+            ..
+        } => {
+            effect.arguments.iter().any(|argument| {
+                generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])
+            }) || payload_types
+                .iter()
+                .any(type_contains_out_of_scope_bound_lifetime)
+        }
         CoreKind::PatternTest { pattern, .. } => {
             pattern_contains_out_of_scope_bound_lifetime(pattern)
         }
@@ -5045,6 +5123,7 @@ impl Elaborator<'_> {
             CoreKind::Perform {
                 effect,
                 arguments,
+                payload_types,
                 reference_contract,
                 reference_origin,
                 reference_shape,
@@ -5056,6 +5135,9 @@ impl Elaborator<'_> {
                     .cloned()
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
+                for payload_type in payload_types {
+                    *payload_type = self.zonk_type(payload_type.clone(), span);
+                }
                 // The declared operation relation is determined before
                 // zonking can collapse distinct generic lifetimes into the
                 // same caller-local representation.  Fall back to the
@@ -6816,6 +6898,7 @@ impl Elaborator<'_> {
             CoreKind::Perform {
                 effect: instance,
                 operation: operation_index,
+                payload_types: operation.parameters.clone(),
                 arguments: values,
                 terminal: operation.terminal,
                 reference_origin: reference_contract.clone(),

@@ -3357,6 +3357,45 @@ fn service_checks_callable_lower_bounds_after_branch_hulls() {
 }
 
 #[test]
+fn service_transfers_callable_obligations_through_effect_operation_payloads() {
+    let source = "effect Store { [1,1] save(callback: (i64) -> i64); } pub fn relay(callback: (i64) -> i64) -> () / {Store} { Store::save(callback) } pub fn main() -> i64 { 0 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+}
+
+#[test]
+fn service_checks_handler_payload_callable_obligations_per_selected_arm() {
+    let source = "effect Invoke { [1,1] invoke(callback: (i64) -> i64) -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { handle Invoke::invoke(add_one) { Invoke::invoke(callback) => callback(41) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_keeps_handler_payload_callable_obligations_arm_local_through_closures() {
+    let source = "effect Select { [1,1] first(callback: (i64) -> i64) -> i64; [1,1] second(callback: (i64) -> i64) -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { handle Select::first(add_one) { Select::first(callback) => { let relay = (value: i64) -> i64 { callback(value) }; relay(41) }, Select::second(callback) => callback(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_dropping_an_exact_handler_payload_callable() {
+    let source = "effect Invoke { [1,1] invoke(callback: (i64) -> i64) -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { handle Invoke::invoke(add_one) { Invoke::invoke(callback) => 0 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("discarded exact handler payload callable unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing handler-payload callable-use diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_transfers_callable_obligations_through_a_typed_argument_boundary() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64) -> i64 { function(41) } pub fn relay(function: (i64) -> i64) -> i64 { apply(function) } pub fn main() -> i64 { relay(add_one) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

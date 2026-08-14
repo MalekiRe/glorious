@@ -5,7 +5,7 @@ use grandiose_stage0::{
     EffectRowProjection, EffectTail, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey,
     FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath,
     MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span,
-    StructuralU32Expr, Type, TypedBody, implementation_method_key,
+    StructuralU32Expr, Type, TypedBody, UseFlow, implementation_method_key,
 };
 use std::collections::BTreeSet;
 
@@ -4192,6 +4192,96 @@ fn performed_operations_freeze_generic_reference_provenance() {
             .any(|diagnostic| diagnostic.code == "G5013"),
         "performed reference result hid a body-local return: {escapes:#?}"
     );
+}
+
+#[test]
+fn performed_operations_freeze_payload_callable_contracts_for_quantity_checking() {
+    let package = PackageKey("core-perform-payload-quantity@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let callable_type = |invocation| Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![Type::Scalar(ScalarType::I64)],
+        result: Box::new(Type::Scalar(ScalarType::I64)),
+        effects: EffectRow::empty(),
+        invocation,
+    };
+    for quantity in [Quantity::AFFINE, Quantity::new(2, Some(2)).unwrap()] {
+        let callback = callable_type(quantity);
+        let mut core = TypedBody {
+            parameters: vec![("callback".into(), callback.clone())],
+            expressions: vec![
+                CoreExpr {
+                    kind: CoreKind::Local("callback".into()),
+                    ty: callback.clone(),
+                    span,
+                },
+                CoreExpr {
+                    kind: CoreKind::Perform {
+                        effect: EffectInstance {
+                            definition: DefKey(Digest::of_bytes(b"payload-quantity-effect")),
+                            arguments: vec![],
+                        },
+                        operation: 0,
+                        payload_types: vec![callback.clone()],
+                        arguments: vec![CoreId(0)],
+                        terminal: false,
+                        reference_contract: grandiose_stage0::CallReferenceOrigin::None,
+                        reference_origin: grandiose_stage0::CallReferenceOrigin::None,
+                        reference_shape: grandiose_stage0::CallReferenceShape::None,
+                    },
+                    ty: Type::Unit,
+                    span,
+                },
+            ],
+            root: CoreId(1),
+            diagnostics: vec![],
+            recovered: false,
+        };
+        assert!(core.validate().is_empty(), "{:#?}", core.validate());
+        let flow = PlaceFlow::analyze(&core);
+        assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+        let uses = UseFlow::analyze(&core, &flow);
+        assert!(uses.diagnostics.is_empty(), "{uses:#?}");
+        assert!(uses.callable_escapes.iter().any(|escape| {
+            escape.name == "callback"
+                && escape.required == Some(quantity)
+                && escape.actual == Quantity::ONCE
+        }));
+
+        // A forged ABI may not retarget the transfer to a wider or narrower
+        // payload contract after Core was frozen.
+        {
+            let CoreKind::Perform { payload_types, .. } = &mut core.expressions[1].kind else {
+                unreachable!("forged effect performance")
+            };
+            payload_types[0] = callable_type(Quantity::ONCE);
+        }
+        assert!(
+            core.validate()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G4183"),
+            "forged payload quantity contract was accepted: {:#?}",
+            core.validate()
+        );
+        {
+            let CoreKind::Perform { payload_types, .. } = &mut core.expressions[1].kind else {
+                unreachable!("forged effect performance")
+            };
+            payload_types.clear();
+        }
+        assert!(
+            core.validate().iter().any(|diagnostic| {
+                diagnostic.code == "G4183"
+                    && diagnostic.message.contains("payload contract entries")
+            }),
+            "forged payload arity contract was accepted: {:#?}",
+            core.validate()
+        );
+    }
 }
 
 #[test]

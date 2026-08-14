@@ -581,8 +581,25 @@ impl Analyzer<'_> {
             CoreKind::Binary { left, right, .. } => {
                 self.sequence(vec![left, right], environment, expression.span)
             }
-            CoreKind::Perform { arguments, .. } => {
-                self.sequence(arguments, environment, expression.span)
+            CoreKind::Perform {
+                arguments,
+                payload_types,
+                ..
+            } => {
+                let summary = self.sequence(arguments.clone(), environment, expression.span);
+                // Performing an operation is a typed ownership boundary just
+                // like an ordinary call.  In particular, a callable payload
+                // cannot disappear merely because its consumer is selected
+                // by a handler rather than named by a function value.  Core
+                // has already checked each argument against the frozen
+                // operation signature, so the realized argument type is the
+                // receiver's per-performance callable requirement here.
+                //
+                // Do this after evaluating the payloads: a payload can build
+                // a closure or move an aggregate field while it is evaluated,
+                // and the transfer must observe that exact resulting binding.
+                self.escape_perform_arguments(&arguments, &payload_types, environment);
+                summary
             }
             CoreKind::Call {
                 callee, arguments, ..
@@ -640,11 +657,19 @@ impl Analyzer<'_> {
                 let mut arms = None::<Summary>;
                 for clause in clauses {
                     let mut arm_environment = incoming.clone();
-                    for (name, _) in &clause.bindings {
-                        arm_environment
-                            .bindings
-                            .insert(name.clone(), Binding::Other);
-                    }
+                    // Payload binders own fresh capabilities for the one
+                    // dynamically selected arm.  They are not aliases of
+                    // the performed argument: the outgoing operation
+                    // boundary discharges the sender, while this arm must
+                    // independently consume or transfer its received owner.
+                    // Keep their facts branch-local below, otherwise an arm
+                    // that is not selected would spuriously contribute zero
+                    // use to a different arm's local capability.
+                    let payload_contracts = self.bind_conditional_bindings(
+                        &clause.bindings,
+                        &mut arm_environment,
+                        clause.span,
+                    );
                     let continuation_key = match &clause.resumption {
                         CoreHandlerResumption::Explicit { name, quantity } => {
                             let key = self.contract(name, *quantity, clause.span, true);
@@ -711,6 +736,7 @@ impl Analyzer<'_> {
                             }
                         }
                     }
+                    self.check_conditional_contracts(&mut arm, &payload_contracts);
                     arms = Some(match arms {
                         Some(previous) => previous.branch_hull(arm),
                         None => arm,
@@ -727,12 +753,19 @@ impl Analyzer<'_> {
                 let mut arms = None::<Summary>;
                 for clause in clauses {
                     let mut arm_environment = incoming.clone();
-                    for (name, _) in &clause.bindings {
-                        arm_environment
-                            .bindings
-                            .insert(name.clone(), Binding::Other);
-                    }
+                    // Completion patterns have the same conditional-owner
+                    // shape as operation payload patterns.  A callable result
+                    // is owned only after this completion arm is selected;
+                    // checking it after the arm preserves exact lower bounds
+                    // without contaminating sibling branch hulls.
+                    let completion_contracts = self.bind_conditional_bindings(
+                        &clause.bindings,
+                        &mut arm_environment,
+                        clause.span,
+                    );
                     let arm = self.expression(clause.body, &mut arm_environment);
+                    let mut arm = arm;
+                    self.check_conditional_contracts(&mut arm, &completion_contracts);
                     arms = Some(match arms {
                         Some(previous) => previous.branch_hull(arm),
                         None => arm,
@@ -979,12 +1012,81 @@ impl Analyzer<'_> {
         }
     }
 
+    /// Install the bindings introduced by one conditionally selected arm and
+    /// return every fresh callable contract they own.  Those contracts are
+    /// deliberately checked at the arm boundary, rather than being carried
+    /// through the enclosing branch hull: a payload/result owner does not
+    /// exist on sibling exits where its pattern did not match.
+    fn bind_conditional_bindings(
+        &mut self,
+        bindings: &[(String, Type)],
+        environment: &mut Environment,
+        span: Span,
+    ) -> Vec<ContractKey> {
+        let mut contracts = vec![];
+        for (name, ty) in bindings {
+            let binding = self.binding_for_type(name, ty, span);
+            Self::binding_contract_keys(&binding, &mut contracts);
+            environment.bindings.insert(name.clone(), binding);
+        }
+        contracts
+    }
+
+    fn binding_contract_keys(binding: &Binding, contracts: &mut Vec<ContractKey>) {
+        match binding {
+            Binding::Contract(key) => contracts.push(*key),
+            Binding::Aggregate(fields) => {
+                for binding in fields.values() {
+                    Self::binding_contract_keys(binding, contracts);
+                }
+            }
+            Binding::Closure(_) | Binding::GlobalCallable | Binding::Other => {}
+        }
+    }
+
+    /// Check conditional arm owners before joining the arm summaries.  We
+    /// retain their observed fact for diagnostics/tooling, but remove it from
+    /// the outer summary: the key is fresh for this arm and therefore cannot
+    /// be interpreted as a zero-use owner on an unselected sibling arm.
+    fn check_conditional_contracts(&mut self, arm: &mut Summary, contracts: &[ContractKey]) {
+        for key in contracts {
+            let actual = arm.uses.remove(key).unwrap_or(Quantity::ZERO);
+            self.facts.insert(*key, actual);
+            self.check_contract(*key, actual);
+        }
+    }
+
     fn callable_parameters(&self, callee: CoreId) -> Vec<Option<Quantity>> {
         match &self.body.expression(callee).ty {
             Type::Callable { parameters, .. } => {
                 parameters.iter().map(callable_invocation).collect()
             }
             _ => vec![],
+        }
+    }
+
+    fn escape_perform_arguments(
+        &mut self,
+        arguments: &[CoreId],
+        payload_types: &[Type],
+        environment: &Environment,
+    ) {
+        // `TypedBody::validate` independently proves this arity relation.
+        // Keep the zip explicit nevertheless: malformed imported Core must
+        // fail validation before UseFlow is requested, never manufacture a
+        // payload capability from an unmatched sender expression.
+        for (argument, payload_type) in arguments.iter().zip(payload_types) {
+            // The selected operation declaration, not the sender expression,
+            // owns this contract.  A generic argument may have been inferred
+            // or coerced into the parameter; `payload_types` is the zonked,
+            // instantiated receiver ABI frozen in Core.
+            let required = callable_invocation(payload_type);
+            self.escape_value(
+                *argument,
+                environment,
+                required,
+                CallableEscapeBoundary::Argument,
+            );
         }
     }
 
