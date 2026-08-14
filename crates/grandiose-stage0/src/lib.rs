@@ -63,7 +63,8 @@ pub use identity::{
     DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId, implementation_method_key,
 };
 pub use interface::{
-    Definition, DefinitionNamespace, InterfaceDiagnostic, InterfaceSet, PackageInterface,
+    Definition, DefinitionNamespace, InterfaceCache, InterfaceCacheStats, InterfaceDiagnostic,
+    InterfaceSet, PackageInterface,
 };
 pub use mir::{
     MirBlock, MirBlockId, MirDiagnostic, MirEditor, MirFunction, MirInstruction, MirLocal,

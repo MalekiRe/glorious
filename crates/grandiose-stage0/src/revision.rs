@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     identity::{Digest, RevisionId, fresh_database_id},
+    interface::{InterfaceCache, InterfaceCacheStats},
     request::{CompilationRequest, InputError, NormalizedInputWorld},
 };
 
@@ -56,6 +57,9 @@ struct DatabaseState {
 pub struct CompilerDatabase {
     id: u64,
     state: Mutex<DatabaseState>,
+    /// Validated immutable interface products may span revisions, but only
+    /// through content/schema-qualified cache keys.
+    interface_cache: InterfaceCache,
 }
 
 impl Default for CompilerDatabase {
@@ -74,6 +78,7 @@ impl CompilerDatabase {
                 equivalent_worlds: HashMap::new(),
                 retired: BTreeSet::new(),
             }),
+            interface_cache: InterfaceCache::default(),
         }
     }
 
@@ -117,6 +122,17 @@ impl CompilerDatabase {
         Ok(DatabaseSnapshot {
             record: self.require_active_revision(&state, revision)?,
         })
+    }
+
+    pub(crate) fn interface_cache(&self) -> &InterfaceCache {
+        &self.interface_cache
+    }
+
+    /// Inspection-only accounting for validated frozen interface reuse.  A
+    /// hit never means a whole revision was reused; it records exactly one
+    /// source/module interface whose bytes and schema identity matched.
+    pub fn interface_cache_stats(&self) -> InterfaceCacheStats {
+        self.interface_cache.stats()
     }
 
     /// Stop admitting new sessions for a revision. Existing snapshots retain

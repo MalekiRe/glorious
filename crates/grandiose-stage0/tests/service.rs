@@ -159,6 +159,85 @@ fn service_compiles_explicit_parent_and_child_revisions_without_world_mixing() {
 }
 
 #[test]
+fn service_reuses_only_unchanged_frozen_module_interfaces_across_revisions() {
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(
+            request_with_module(
+                "mod math; pub fn main() -> i64 { math::answer() + 1 }",
+                "pub fn answer() -> i64 { 41 }",
+            ),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    assert_eq!(compiler.interface_cache_stats().hits, 0);
+    assert_eq!(compiler.interface_cache_stats().misses, 2);
+
+    // Replacing only the root source must recollect that interface while the
+    // unchanged external module is validated and reused in the child world.
+    let root_changed = compiler
+        .import_revision(
+            request_with_module(
+                "mod math; pub fn main() -> i64 { math::answer() + 2 }",
+                "pub fn answer() -> i64 { 41 }",
+            ),
+            Some(parent),
+        )
+        .unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(root_changed)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        43
+    );
+    assert_eq!(
+        compiler.interface_cache_stats(),
+        grandiose_stage0::InterfaceCacheStats { hits: 1, misses: 3 }
+    );
+
+    // The next child changes the dependency interface itself. The root can
+    // reuse its exact frozen interface, but `math` must be recollected and the
+    // new executable result proves no old interface/body product leaked.
+    let dependency_changed = compiler
+        .import_revision(
+            request_with_module(
+                "mod math; pub fn main() -> i64 { math::answer() + 2 }",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+            Some(root_changed),
+        )
+        .unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(dependency_changed)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        44
+    );
+    assert_eq!(
+        compiler.interface_cache_stats(),
+        grandiose_stage0::InterfaceCacheStats { hits: 2, misses: 4 }
+    );
+}
+
+#[test]
 fn service_lowers_word_boolean_operators_as_short_circuit_cfg() {
     let false_and = StageZeroCompiler::new()
         .compile(request("pub fn main() -> Bool { false and (1 / 0 == 0) }"))

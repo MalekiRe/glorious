@@ -377,6 +377,13 @@ impl StageZeroCompiler {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Report validated frozen-interface reuse accumulated by this compiler
+    /// database. This is deliberately cache accounting rather than an output
+    /// cache API: callers still compile an exact immutable revision.
+    pub fn interface_cache_stats(&self) -> crate::InterfaceCacheStats {
+        self.database.interface_cache_stats()
+    }
     pub fn compile(&self, request: CompilationRequest) -> Result<CompilationOutcome, ServiceError> {
         self.compile_with_parent(request, None)
     }
@@ -425,7 +432,11 @@ impl StageZeroCompiler {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let graph = ModuleGraph::build(snapshot.world(), &snapshot.world().root_package);
+        let graph = ModuleGraph::build_with_interface_cache(
+            snapshot.world(),
+            &snapshot.world().root_package,
+            self.database.interface_cache(),
+        );
         let mut diagnostics = graph
             .diagnostics
             .into_iter()

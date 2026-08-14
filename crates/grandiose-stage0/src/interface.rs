@@ -6,11 +6,15 @@
 //! A body edit can therefore retain the same public interface and leave a
 //! downstream package green once query invalidation is connected.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Mutex,
+};
 
 use crate::{
     header::{HeaderParse, ParsedHeader},
-    identity::{DefKey, Digest, ModuleKey, PackageKey},
+    identity::{DefKey, Digest, FileKey, ModuleKey, PackageKey},
+    request::CompilerBuildIdentity,
     scanner::{DeclarationKind, DeclarationScan, TokenRange},
     source::{LexedFile, Span},
 };
@@ -67,6 +71,103 @@ pub struct PackageInterface {
 pub struct InterfaceSet {
     pub interface: PackageInterface,
     pub diagnostics: Vec<InterfaceDiagnostic>,
+}
+
+/// A content-validated database-lifetime cache for frozen declaration
+/// interfaces.  This is deliberately narrower than a module graph cache: a
+/// child revision must still rescan its supplied source world to discover the
+/// exact module topology, while an unchanged source/module input may reuse its
+/// immutable header product.
+///
+/// The key contains every identity which makes source headers meaningful. In
+/// particular, a stable logical file name alone is never sufficient: replacing
+/// its bytes, changing its owning module path (as with an inline module), or
+/// changing the compiler's interface schema all force recollection.
+#[derive(Debug, Default)]
+pub struct InterfaceCache {
+    entries: Mutex<HashMap<InterfaceCacheKey, InterfaceSet>>,
+    stats: Mutex<InterfaceCacheStats>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InterfaceCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct InterfaceCacheKey {
+    file: FileKey,
+    source: Digest,
+    package: PackageKey,
+    module_path: String,
+    interface_context: Digest,
+}
+
+/// All immutable inputs observed by frozen interface collection. Grouping
+/// these facts makes the cache boundary auditable: adding a new header input
+/// requires adding it here and to `InterfaceCacheKey` rather than quietly
+/// reaching into a revision from cache code.
+pub(crate) struct InterfaceCacheInput<'a> {
+    pub build: &'a CompilerBuildIdentity,
+    pub package: &'a PackageKey,
+    pub module_path: &'a str,
+    pub file: FileKey,
+    pub source_digest: Digest,
+    pub lexed: &'a LexedFile,
+    pub source: &'a str,
+    pub scan: &'a DeclarationScan,
+}
+
+impl InterfaceCache {
+    pub fn stats(&self) -> InterfaceCacheStats {
+        *self
+            .stats
+            .lock()
+            .expect("interface cache stats mutex poisoned")
+    }
+
+    pub(crate) fn collect(&self, input: InterfaceCacheInput<'_>) -> InterfaceSet {
+        let key = InterfaceCacheKey {
+            file: input.file,
+            source: input.source_digest,
+            package: input.package.clone(),
+            module_path: input.module_path.to_owned(),
+            interface_context: interface_context_fingerprint(input.build),
+        };
+        let mut entries = self.entries.lock().expect("interface cache mutex poisoned");
+        if let Some(interface) = entries.get(&key) {
+            self.stats
+                .lock()
+                .expect("interface cache stats mutex poisoned")
+                .hits += 1;
+            return interface.clone();
+        }
+        let interface = InterfaceSet::collect(
+            input.package.clone(),
+            input.module_path,
+            input.lexed,
+            input.source,
+            input.scan,
+        );
+        entries.insert(key, interface.clone());
+        self.stats
+            .lock()
+            .expect("interface cache stats mutex poisoned")
+            .misses += 1;
+        interface
+    }
+}
+
+fn interface_context_fingerprint(build: &CompilerBuildIdentity) -> Digest {
+    Digest::of_parts([
+        b"grandiose-stage0-interface-cache-v1".as_slice(),
+        build.compiler.as_bytes().as_slice(),
+        &build.language_generation.to_le_bytes(),
+        &build.query_generation.to_le_bytes(),
+        &build.interface_generation.to_le_bytes(),
+        &build.cache_generation.to_le_bytes(),
+    ])
 }
 
 impl InterfaceSet {

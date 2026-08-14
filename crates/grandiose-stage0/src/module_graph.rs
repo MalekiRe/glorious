@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     identity::{FileKey, ModuleKey, PackageKey},
-    interface::InterfaceSet,
+    interface::{InterfaceCache, InterfaceCacheInput, InterfaceSet},
     request::{NormalizedInputWorld, SourceInput},
     scanner::{DeclarationKind, DeclarationScan},
     source::{LexedFile, Span},
@@ -40,6 +40,19 @@ pub struct ModuleGraph {
 
 impl ModuleGraph {
     pub fn build(world: &NormalizedInputWorld, package: &PackageKey) -> Self {
+        let cache = InterfaceCache::default();
+        Self::build_with_interface_cache(world, package, &cache)
+    }
+
+    /// Build this revision's exact module topology while validating every
+    /// frozen module interface through the database-owned cache.  The graph is
+    /// never reused wholesale: a revision may add/remove module declarations
+    /// even when several individual source blobs remain unchanged.
+    pub fn build_with_interface_cache(
+        world: &NormalizedInputWorld,
+        package: &PackageKey,
+        cache: &InterfaceCache,
+    ) -> Self {
         let supplied = world
             .sources
             .iter()
@@ -71,7 +84,15 @@ impl ModuleGraph {
                     "package `{package:?}` has no `src/main.glorious` or `src/lib.glorious` root"
                 ),
             }),
-            [root_path] => graph.visit(root_path, &root, &supplied, &mut claimed, &mut visiting),
+            [root_path] => graph.visit(
+                world,
+                cache,
+                root_path,
+                &root,
+                &supplied,
+                &mut claimed,
+                &mut visiting,
+            ),
             _ => graph.diagnostics.push(ModuleDiagnostic {
                 code: "G3102",
                 span: None,
@@ -105,8 +126,11 @@ impl ModuleGraph {
         graph
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         &mut self,
+        world: &NormalizedInputWorld,
+        cache: &InterfaceCache,
         path: &str,
         key: &ModuleKey,
         supplied: &BTreeMap<String, &SourceInput>,
@@ -159,8 +183,16 @@ impl ModuleGraph {
                     }),
             );
         let scan = DeclarationScan::scan(&lexed, text);
-        let interface =
-            InterfaceSet::collect(self.package.clone(), key.path.clone(), &lexed, text, &scan);
+        let interface = cache.collect(InterfaceCacheInput {
+            build: &world.build,
+            package: &self.package,
+            module_path: &key.path,
+            file: source.key,
+            source_digest: source.digest,
+            lexed: &lexed,
+            source: text,
+            scan: &scan,
+        });
         let external_modules = scan
             .declarations
             .iter()
@@ -182,7 +214,15 @@ impl ModuleGraph {
                 path: module_child_path(&key.path, name),
             };
             children.push(child_key.clone());
-            self.visit(&child_path, &child_key, supplied, claimed, visiting);
+            self.visit(
+                world,
+                cache,
+                &child_path,
+                &child_key,
+                supplied,
+                claimed,
+                visiting,
+            );
         }
         let inline_modules = scan
             .declarations
@@ -215,7 +255,8 @@ impl ModuleGraph {
                 },
             );
             self.visit_inline(
-                path, &child_key, source, &lexed, text, nested, supplied, claimed, visiting,
+                world, cache, path, &child_key, source, &lexed, text, nested, supplied, claimed,
+                visiting,
             );
         }
         children.sort();
@@ -236,6 +277,8 @@ impl ModuleGraph {
     #[allow(clippy::too_many_arguments)]
     fn visit_inline(
         &mut self,
+        world: &NormalizedInputWorld,
+        cache: &InterfaceCache,
         path: &str,
         key: &ModuleKey,
         source: &SourceInput,
@@ -257,8 +300,16 @@ impl ModuleGraph {
             });
             return;
         }
-        let interface =
-            InterfaceSet::collect(self.package.clone(), key.path.clone(), lexed, text, &scan);
+        let interface = cache.collect(InterfaceCacheInput {
+            build: &world.build,
+            package: &self.package,
+            module_path: &key.path,
+            file: source.key,
+            source_digest: source.digest,
+            lexed,
+            source: text,
+            scan: &scan,
+        });
         let mut children = vec![];
         for declaration in scan
             .declarations
@@ -279,6 +330,8 @@ impl ModuleGraph {
             };
             children.push(child_key.clone());
             self.visit(
+                world,
+                cache,
                 &external_module_path(key, name),
                 &child_key,
                 supplied,
@@ -316,7 +369,8 @@ impl ModuleGraph {
                 },
             );
             self.visit_inline(
-                path, &child_key, source, lexed, text, nested, supplied, claimed, visiting,
+                world, cache, path, &child_key, source, lexed, text, nested, supplied, claimed,
+                visiting,
             );
         }
         children.sort();
