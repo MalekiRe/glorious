@@ -47,9 +47,9 @@ pub use bootstrap::{
 };
 pub use coherence::{CoherenceDiagnostic, CoherenceSet, ImplHead};
 pub use core::{
-    CallableId, CaptureMode, ClosureCapture, CoreDiagnostic, CoreExpr, CoreHandlerClause,
-    CoreHandlerContinuationContract, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
-    CorePatternField, CorePlace, TypedBody,
+    CallableBrand, CallableId, CaptureEnvironment, CaptureMode, ClosureCapture, CoreDiagnostic,
+    CoreExpr, CoreHandlerClause, CoreHandlerContinuationContract, CoreHandlerResumption, CoreId,
+    CoreKind, CorePattern, CorePatternField, CorePlace, EnvironmentBrand, TypedBody,
 };
 pub use dependency::{DependencyLedger, DependencyNode, DependencyStatus, DependencyTrace};
 pub use diagnostic::{Diagnostic, DiagnosticClass, DiagnosticCode, Severity, SourceSpan};

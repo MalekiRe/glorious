@@ -2285,6 +2285,7 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
             dst,
             callee,
             captures,
+            ..
         } => VmInstruction::MakeCallable {
             dst: dst.0,
             callee: *callee,

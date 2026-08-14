@@ -329,12 +329,15 @@ impl Analyzer<'_> {
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => Summary::default(),
-            CoreKind::Closure { captures, .. } => {
+            CoreKind::Closure {
+                environment: capture_environment,
+                ..
+            } => {
                 // PlaceFlow supplies the canonical captured root.  The
                 // environment supplies only the obligation carried by that
                 // root, so this records capture transfer without rebuilding
                 // a source projection in UseFlow.
-                for capture in captures {
+                for capture in capture_environment.captures {
                     let binding = environment
                         .bindings
                         .get(&capture.name)
@@ -620,10 +623,11 @@ impl Analyzer<'_> {
             CoreKind::Closure {
                 callable,
                 parameters,
-                captures,
+                environment: closure_environment,
                 body,
             } => {
-                let captures = captures
+                let captures = closure_environment
+                    .captures
                     .iter()
                     .map(|capture| {
                         (
@@ -1226,11 +1230,18 @@ mod tests {
                     kind: CoreKind::Closure {
                         callable: CallableId(0),
                         parameters: vec![],
-                        captures: vec![ClosureCapture {
-                            name: "function".into(),
-                            mode: CaptureMode::SharedBorrow,
-                            ty: function.clone(),
-                        }],
+                        environment: crate::core::CaptureEnvironment {
+                            brand: crate::core::EnvironmentBrand {
+                                owner: crate::DefKey(crate::Digest::of_bytes(b"useflow-test")),
+                                callable: CallableId(0),
+                            },
+                            captures: vec![ClosureCapture {
+                                name: "function".into(),
+                                mode: CaptureMode::SharedBorrow,
+                                ty: function.clone(),
+                            }],
+                            sealed: true,
+                        },
                         body: CoreId(2),
                     },
                     ty: closure,

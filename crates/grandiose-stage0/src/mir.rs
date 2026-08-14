@@ -2,8 +2,9 @@
 
 use crate::{
     core::{
-        CallableId, CaptureMode, ClosureCapture, CoreCompletionClause, CoreHandlerClause,
-        CoreHandlerResumption, CoreId, CoreKind, CorePattern, ResumptionId, TypedBody,
+        CallableId, CaptureEnvironment, CaptureMode, ClosureCapture, CoreCompletionClause,
+        CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern, EnvironmentBrand,
+        ResumptionId, TypedBody,
     },
     identity::{DefKey, Digest},
     placeflow::PlaceFlow,
@@ -373,6 +374,11 @@ pub enum MirInstruction {
         dst: MirLocal,
         callee: DefKey,
         captures: Vec<MirLocal>,
+        /// Sealed source-level environment evidence. It is intentionally
+        /// proof-only at Stage 0: VM closure layout checks capture types and
+        /// count independently, while this prevents a Core environment from
+        /// being replayed into a different lifted callable during lowering.
+        environment: Option<EnvironmentBrand>,
     },
     CallIndirect {
         dst: MirLocal,
@@ -5806,6 +5812,7 @@ impl Lowerer<'_> {
                     dst,
                     callee,
                     captures: vec![],
+                    environment: None,
                 })
             }
             CoreKind::Constant(callee) => {
@@ -6207,15 +6214,22 @@ impl Lowerer<'_> {
             CoreKind::Closure {
                 callable,
                 parameters,
-                captures,
+                environment,
                 body,
             } => {
-                let callee = self.lift_closure(callable, parameters, captures.clone(), body)?;
-                let captures = self.capture_environment(&captures)?;
+                let callee = self.lift_closure(
+                    callable,
+                    &environment,
+                    parameters,
+                    environment.captures.clone(),
+                    body,
+                )?;
+                let captures = self.capture_environment(&environment)?;
                 self.instructions.push(MirInstruction::MakeCallable {
                     dst,
                     callee,
                     captures,
+                    environment: Some(environment.brand),
                 });
             }
             CoreKind::Block(values) => {
@@ -6451,7 +6465,7 @@ impl Lowerer<'_> {
             | CoreKind::Completion { .. }
             | CoreKind::Assign { .. }
             | CoreKind::Move(_) => false,
-            CoreKind::Closure { captures, .. } => captures.iter().all(|capture| {
+            CoreKind::Closure { environment, .. } => environment.captures.iter().all(|capture| {
                 !matches!(capture.mode, CaptureMode::Move | CaptureMode::UniqueBorrow)
             }),
             CoreKind::Borrow { unique, value } => !unique && self.core_is_replay_safe(value),
@@ -6624,9 +6638,19 @@ impl Lowerer<'_> {
             }
         }
     }
-    fn capture_environment(&mut self, captures: &[ClosureCapture]) -> Option<Vec<MirLocal>> {
-        let mut environment = Vec::with_capacity(captures.len());
-        for capture in captures {
+    fn capture_environment(
+        &mut self,
+        capture_environment: &CaptureEnvironment,
+    ) -> Option<Vec<MirLocal>> {
+        if !capture_environment.sealed {
+            self.error(
+                "G6011",
+                "MIR lowering received an unsealed callable environment",
+            );
+            return None;
+        }
+        let mut environment = Vec::with_capacity(capture_environment.captures.len());
+        for capture in &capture_environment.captures {
             let Some(local) = self.named.get(&capture.name).copied() else {
                 self.error("G6007", "closure capture has no MIR local");
                 return None;
@@ -6653,10 +6677,18 @@ impl Lowerer<'_> {
     fn lift_closure(
         &mut self,
         callable: CallableId,
+        environment: &CaptureEnvironment,
         parameters: Vec<(String, Type)>,
         captures: Vec<ClosureCapture>,
         body: CoreId,
     ) -> Option<DefKey> {
+        if environment.brand.owner != self.definition || environment.brand.callable != callable {
+            self.error(
+                "G6011",
+                "callable environment brand does not belong to the closure being lifted",
+            );
+            return None;
+        }
         let callable_bytes = callable.0.to_le_bytes();
         let definition = DefKey(Digest::of_parts([
             b"grandiose-stage0-lifted-callable".as_slice(),

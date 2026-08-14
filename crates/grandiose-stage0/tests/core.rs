@@ -1,8 +1,9 @@
 use grandiose_stage0::{
-    BodySyntax, CallableId, CaptureMode, ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId,
-    CoreKind, DeclarationScan, DefinitionIndex, ElaboratedInterface, EscapeFlow, FileKey,
-    FlowEventKind, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction,
-    MirLowering, PackageKey, PlaceFlow, Quantity, Span, Type, TypedBody, implementation_method_key,
+    BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, ClosureCapture,
+    CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefinitionIndex,
+    ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, InferVar,
+    InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering, PackageKey,
+    PlaceFlow, Quantity, Span, Type, TypedBody, implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -158,11 +159,20 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
                 kind: CoreKind::Closure {
                     callable: CallableId(0),
                     parameters: vec![],
-                    captures: vec![ClosureCapture {
-                        name: "captured".into(),
-                        mode: CaptureMode::SharedBorrow,
-                        ty: Type::Infer(InferVar(7)),
-                    }],
+                    environment: CaptureEnvironment {
+                        brand: EnvironmentBrand {
+                            owner: grandiose_stage0::DefKey(grandiose_stage0::Digest::of_bytes(
+                                b"core-test",
+                            )),
+                            callable: CallableId(0),
+                        },
+                        captures: vec![ClosureCapture {
+                            name: "captured".into(),
+                            mode: CaptureMode::SharedBorrow,
+                            ty: Type::Infer(InferVar(7)),
+                        }],
+                        sealed: true,
+                    },
                     body: CoreId(1),
                 },
                 ty: Type::Unit,
@@ -871,7 +881,7 @@ fn typed_closures_become_callable_core_values_with_explicit_capture_modes() {
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let Some(CoreKind::Closure {
         parameters,
-        captures,
+        environment,
         ..
     }) = core
         .expressions
@@ -884,9 +894,9 @@ fn typed_closures_become_callable_core_values_with_explicit_capture_modes() {
         panic!("typed closure was not elaborated")
     };
     assert_eq!(parameters[0].0, "extra");
-    assert_eq!(captures.len(), 1);
-    assert_eq!(captures[0].name, "value");
-    assert_eq!(captures[0].mode, CaptureMode::SharedBorrow);
+    assert_eq!(environment.captures.len(), 1);
+    assert_eq!(environment.captures[0].name, "value");
+    assert_eq!(environment.captures[0].mode, CaptureMode::SharedBorrow);
 }
 
 #[test]
@@ -1825,7 +1835,7 @@ fn handler_payload_binders_capture_only_when_a_nested_closure_needs_them() {
         .expressions
         .iter()
         .find_map(|expression| match &expression.kind {
-            CoreKind::Closure { captures, .. } => Some(captures),
+            CoreKind::Closure { environment, .. } => Some(&environment.captures),
             _ => None,
         })
         .expect("handler clause closure was not elaborated");
@@ -1866,7 +1876,7 @@ fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
         .expressions
         .iter()
         .find_map(|expression| match &expression.kind {
-            CoreKind::Closure { captures, .. } => Some(captures),
+            CoreKind::Closure { environment, .. } => Some(&environment.captures),
             _ => None,
         })
         .expect("nested closure");
@@ -2002,10 +2012,13 @@ fn a_nested_handler_payload_can_shadow_an_outer_resumption_for_capture_analysis(
         .expressions
         .iter()
         .find_map(|expression| match &expression.kind {
-            CoreKind::Closure { captures, .. }
-                if captures.iter().any(|capture| capture.name == "k") =>
+            CoreKind::Closure { environment, .. }
+                if environment
+                    .captures
+                    .iter()
+                    .any(|capture| capture.name == "k") =>
             {
-                Some(captures)
+                Some(&environment.captures)
             }
             _ => None,
         })
@@ -2042,7 +2055,7 @@ fn handler_payload_binders_do_not_escape_into_the_enclosing_closure() {
         .expressions
         .iter()
         .find_map(|expression| match &expression.kind {
-            CoreKind::Closure { captures, .. } => Some(captures),
+            CoreKind::Closure { environment, .. } => Some(&environment.captures),
             _ => None,
         })
         .expect("enclosing closure was not elaborated");
@@ -2509,5 +2522,120 @@ fn generic_effect_handler_frame_retains_its_nominal_instance_arguments() {
                 ..
             } if effect_arguments == &[grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::I64)]
         )
+    ));
+}
+
+#[test]
+fn closures_seal_distinct_owner_scoped_environment_brands() {
+    let core = core_for(
+        "core-callable-environment-brand@0.1.0",
+        "pub fn main(value: i64) -> i64 { let first = (x: i64) -> i64 { value + x }; let second = (x: i64) -> i64 { value + x }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let environments = core
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(environments.len(), 2);
+    assert!(environments.iter().all(|environment| environment.sealed));
+    assert_eq!(environments[0].brand.owner, environments[1].brand.owner);
+    assert_ne!(environments[0].brand, environments[1].brand);
+    assert_eq!(environments[0].captures[0].name, "value");
+    let flow = PlaceFlow::analyze(&core);
+    let mir = MirLowering::lower(environments[0].brand.owner, &core, &flow)
+        .function
+        .expect("sealed closures lower to MIR");
+    let brands = mir
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            MirInstruction::MakeCallable { environment, .. } => *environment,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        brands,
+        environments
+            .iter()
+            .map(|environment| environment.brand)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn typed_core_rejects_replayed_capture_environment_brand() {
+    let package = PackageKey("core-replayed-environment@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Closure {
+                    callable: CallableId(1),
+                    parameters: vec![],
+                    environment: CaptureEnvironment {
+                        brand: EnvironmentBrand {
+                            owner: grandiose_stage0::DefKey(grandiose_stage0::Digest::of_bytes(
+                                b"foreign-owner",
+                            )),
+                            callable: CallableId(0),
+                        },
+                        captures: vec![],
+                        sealed: true,
+                    },
+                    body: CoreId(1),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("0".into()),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span,
+            },
+        ],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183")
+    );
+}
+
+#[test]
+fn handler_clauses_and_resumptions_receive_distinct_callable_brands() {
+    let core = core_for(
+        "core-handler-callable-brand@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(7) } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let clauses = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Handle { clauses, .. } => Some(clauses),
+            _ => None,
+        })
+        .expect("handler Core node");
+    let clause = &clauses[0];
+    assert!(matches!(clause.brand, CallableBrand::HandlerClause { .. }));
+    assert!(matches!(
+        clause
+            .continuation
+            .as_ref()
+            .map(|continuation| continuation.brand),
+        Some(CallableBrand::Continuation { .. })
     ));
 }

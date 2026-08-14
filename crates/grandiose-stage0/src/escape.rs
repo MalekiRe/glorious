@@ -146,8 +146,9 @@ impl Analyzer<'_> {
                 }
                 result
             }
-            CoreKind::Closure { captures, .. } => Value::Closure(
-                captures
+            CoreKind::Closure { environment, .. } => Value::Closure(
+                environment
+                    .captures
                     .into_iter()
                     .flat_map(|capture| match capture.mode {
                         CaptureMode::Move => Vec::new(),

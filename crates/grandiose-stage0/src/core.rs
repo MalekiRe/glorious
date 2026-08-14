@@ -30,6 +30,24 @@ pub struct CallableId(pub u32);
 /// new continuation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ResumptionId(pub u32);
+/// A generative owner-local identity for a closure environment.  Unlike a
+/// capture spelling, this is proof that a particular callable body owns the
+/// layout; it cannot be reconstructed from a source name in another body.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct EnvironmentBrand {
+    pub owner: DefKey,
+    pub callable: CallableId,
+}
+/// The nominal identity of an executable body.  Named declarations already
+/// have a stable `DefKey`; anonymous and handler-generated bodies mint a
+/// fresh owner-local brand instead of borrowing a user-visible name.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CallableBrand {
+    Named(DefKey),
+    Closure(EnvironmentBrand),
+    HandlerClause { owner: DefKey, clause: u32 },
+    Continuation { owner: DefKey, clause: u32 },
+}
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CaptureMode {
     SharedBorrow,
@@ -41,6 +59,24 @@ pub struct ClosureCapture {
     pub name: String,
     pub mode: CaptureMode,
     pub ty: Type,
+}
+/// A closure's complete, post-inference environment.  Capture mode selection
+/// remains the responsibility of PlaceFlow; this record seals that selected
+/// layout together with the callable that is allowed to consume it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureEnvironment {
+    pub brand: EnvironmentBrand,
+    pub captures: Vec<ClosureCapture>,
+    pub sealed: bool,
+}
+impl CaptureEnvironment {
+    fn seal(owner: DefKey, callable: CallableId, captures: Vec<ClosureCapture>) -> Self {
+        Self {
+            brand: EnvironmentBrand { owner, callable },
+            captures,
+            sealed: true,
+        }
+    }
 }
 /// Fully typed, source-free pattern decision. Field types are carried through
 /// Core so MIR and the independently decoded VM artifact can validate every
@@ -79,6 +115,7 @@ pub struct CorePatternField {
 /// declaration-order operation index are the runtime key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreHandlerClause {
+    pub brand: CallableBrand,
     pub effect: EffectInstance,
     pub operation: u32,
     /// Exact operation payload signature retained after body elaboration.
@@ -102,6 +139,7 @@ pub struct CoreHandlerClause {
 /// deep handlers have subtracted the effects they intercept.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreHandlerContinuationContract {
+    pub brand: CallableBrand,
     pub parameter: Type,
     pub result: Type,
     pub effects: EffectRow,
@@ -262,7 +300,7 @@ pub enum CoreKind {
     Closure {
         callable: CallableId,
         parameters: Vec<(String, Type)>,
-        captures: Vec<ClosureCapture>,
+        environment: CaptureEnvironment,
         body: CoreId,
     },
     Let {
@@ -312,6 +350,20 @@ pub enum CoreKind {
         value: CoreId,
     },
     Error,
+}
+impl CoreKind {
+    /// Return the explicit nominal callable identity carried by executable
+    /// values. Handler clauses and continuations retain their identities in
+    /// their enclosing handler metadata rather than pretending to be ordinary
+    /// named functions.
+    pub fn callable_brand(&self) -> Option<CallableBrand> {
+        match self {
+            Self::Function(definition) => Some(CallableBrand::Named(*definition)),
+            Self::TraitMethod { method, .. } => Some(CallableBrand::Named(*method)),
+            Self::Closure { environment, .. } => Some(CallableBrand::Closure(environment.brand)),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreExpr {
@@ -532,13 +584,13 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Closure {
                 callable,
                 parameters,
-                captures,
+                environment,
                 body,
             } => {
                 self.bytes(b"closure");
                 self.debug(callable);
                 self.debug(parameters);
-                self.debug(captures);
+                self.debug(environment);
                 self.id(*body);
             }
             CoreKind::Let { name, value } => {
@@ -695,6 +747,11 @@ fn core_kind_is_recovered(kind: &CoreKind) -> bool {
 
 fn core_structural_error(kind: &CoreKind) -> Option<String> {
     match kind {
+        CoreKind::Closure {
+            callable,
+            environment,
+            ..
+        } => capture_environment_error(*callable, environment),
         CoreKind::Field {
             index, field_count, ..
         } if index >= field_count => Some(format!(
@@ -702,15 +759,64 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
         )),
         CoreKind::Assign { place, .. } => place_structural_error(place),
         CoreKind::PatternTest { pattern, .. } => pattern_structural_error(pattern),
-        CoreKind::Handle { clauses, .. } => clauses
-            .iter()
-            .flat_map(|clause| clause.patterns.iter())
-            .find_map(pattern_structural_error),
+        CoreKind::Handle { clauses, .. } => handler_clause_error(clauses).or_else(|| {
+            clauses
+                .iter()
+                .flat_map(|clause| clause.patterns.iter())
+                .find_map(pattern_structural_error)
+        }),
         CoreKind::Completion { clauses, .. } => clauses
             .iter()
             .find_map(|clause| pattern_structural_error(&clause.pattern)),
         _ => None,
     }
+}
+
+fn handler_clause_error(clauses: &[CoreHandlerClause]) -> Option<String> {
+    for (index, clause) in clauses.iter().enumerate() {
+        let CallableBrand::HandlerClause {
+            owner,
+            clause: branded,
+        } = clause.brand
+        else {
+            return Some("Typed Core handler arm lacks a handler-clause callable brand".into());
+        };
+        if branded != index as u32 {
+            return Some("Typed Core handler clause brand has a noncanonical clause index".into());
+        }
+        if let Some(continuation) = &clause.continuation
+            && continuation.brand
+                != (CallableBrand::Continuation {
+                    owner,
+                    clause: branded,
+                })
+        {
+            return Some("Typed Core continuation brand does not belong to its handler arm".into());
+        }
+    }
+    None
+}
+
+fn capture_environment_error(
+    callable: CallableId,
+    environment: &CaptureEnvironment,
+) -> Option<String> {
+    if !environment.sealed {
+        return Some("Typed Core closure has an unsealed capture environment".into());
+    }
+    if environment.brand.callable != callable {
+        return Some("Typed Core closure environment brand belongs to another callable".into());
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for capture in &environment.captures {
+        if !names.insert(&capture.name) {
+            return Some(format!(
+                "Typed Core closure environment repeats capture `{}`",
+                capture.name
+            ));
+        }
+    }
+    None
 }
 
 fn place_structural_error(place: &CorePlace) -> Option<String> {
@@ -839,11 +945,12 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
     match kind {
         CoreKind::Closure {
             parameters,
-            captures,
+            environment,
             ..
         } => {
             parameters.iter().any(|(_, ty)| type_contains_inference(ty))
-                || captures
+                || environment
+                    .captures
                     .iter()
                     .any(|capture| type_contains_inference(&capture.ty))
         }
@@ -986,6 +1093,7 @@ impl TypedBody {
             index,
             signatures,
             fixities,
+            definition: definition.key,
             module: &definition.module,
             inference: InferContext::default(),
             locals: ScopeMap::default(),
@@ -1151,6 +1259,11 @@ impl TypedBody {
             index,
             signatures,
             fixities,
+            definition: DefKey(Digest::of_parts([
+                b"grandiose-stage0-implementation-method".as_slice(),
+                implementation.key.0.as_bytes().as_slice(),
+                context.method.name.as_bytes(),
+            ])),
             module: &implementation.module,
             inference: InferContext::default(),
             locals: ScopeMap::default(),
@@ -1283,6 +1396,7 @@ impl TypedBody {
             index,
             signatures,
             fixities,
+            definition: definition.key,
             module: &definition.module,
             inference: InferContext::default(),
             locals: ScopeMap::default(),
@@ -1399,6 +1513,7 @@ struct Elaborator<'a> {
     index: &'a DefinitionIndex,
     signatures: &'a ElaboratedInterface,
     fixities: &'a FixityTable,
+    definition: DefKey,
     module: &'a ModuleKey,
     inference: InferContext,
     locals: ScopeMap<String, Type>,
@@ -1845,7 +1960,7 @@ impl Elaborator<'_> {
             CoreKind::Closure {
                 callable,
                 parameters,
-                captures,
+                environment: CaptureEnvironment::seal(self.definition, callable, captures),
                 body,
             },
             Type::Callable {
@@ -1917,7 +2032,7 @@ impl Elaborator<'_> {
             CoreKind::Closure {
                 callable,
                 parameters: parameters.clone(),
-                captures,
+                environment: CaptureEnvironment::seal(self.definition, callable, captures),
                 body,
             },
             Type::Callable {
@@ -2762,13 +2877,13 @@ impl Elaborator<'_> {
         match &mut kind {
             CoreKind::Closure {
                 parameters,
-                captures,
+                environment,
                 ..
             } => {
                 for (_, ty) in parameters {
                     *ty = self.zonk_type(ty.clone(), span);
                 }
-                for capture in captures {
+                for capture in &mut environment.captures {
                     capture.ty = self.zonk_type(capture.ty.clone(), span);
                 }
             }
@@ -4025,7 +4140,7 @@ impl Elaborator<'_> {
         }
 
         let mut core_clauses = Vec::with_capacity(resolved.len());
-        for clause in resolved {
+        for (clause_index, clause) in resolved.into_iter().enumerate() {
             let mut patterns = Vec::with_capacity(clause.patterns.len());
             let mut bindings = Vec::new();
             self.locals.enter();
@@ -4183,6 +4298,10 @@ impl Elaborator<'_> {
             }
             let continuation =
                 (!clause.operation.terminal).then(|| CoreHandlerContinuationContract {
+                    brand: CallableBrand::Continuation {
+                        owner: self.definition,
+                        clause: clause_index as u32,
+                    },
                     parameter: clause.operation.result.clone(),
                     result: result.clone(),
                     effects: continuation_effects.clone(),
@@ -4204,6 +4323,10 @@ impl Elaborator<'_> {
                 clause.source.span,
             );
             core_clauses.push(CoreHandlerClause {
+                brand: CallableBrand::HandlerClause {
+                    owner: self.definition,
+                    clause: clause_index as u32,
+                },
                 effect: clause.effect,
                 operation: clause.operation_index,
                 payload_types: clause.operation.parameters.clone(),

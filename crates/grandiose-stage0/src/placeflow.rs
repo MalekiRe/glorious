@@ -198,8 +198,8 @@ impl Analyzer<'_> {
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
-            CoreKind::Closure { captures, .. } => {
-                for capture in captures {
+            CoreKind::Closure { environment, .. } => {
+                for capture in &environment.captures {
                     self.capture_reference_loan(&capture.name, e.span);
                     let place = Projection {
                         root: capture.name.clone(),
@@ -209,7 +209,7 @@ impl Analyzer<'_> {
                         CaptureMode::SharedBorrow => {
                             self.borrow(&capture.name, false, e.span);
                             self.place_event(
-                                FlowEventKind::BorrowShared(capture.name),
+                                FlowEventKind::BorrowShared(capture.name.clone()),
                                 place,
                                 e.span,
                             );
@@ -217,14 +217,18 @@ impl Analyzer<'_> {
                         CaptureMode::UniqueBorrow => {
                             self.borrow(&capture.name, true, e.span);
                             self.place_event(
-                                FlowEventKind::BorrowUnique(capture.name),
+                                FlowEventKind::BorrowUnique(capture.name.clone()),
                                 place,
                                 e.span,
                             );
                         }
                         CaptureMode::Move => {
                             self.move_(&capture.name, e.span);
-                            self.place_event(FlowEventKind::Move(capture.name), place, e.span);
+                            self.place_event(
+                                FlowEventKind::Move(capture.name.clone()),
+                                place,
+                                e.span,
+                            );
                         }
                     }
                 }
@@ -445,12 +449,12 @@ impl Analyzer<'_> {
                 self.collect_local_uses(*left, uses);
                 self.collect_local_uses(*right, uses);
             }
-            CoreKind::Closure { captures, .. } => {
+            CoreKind::Closure { environment, .. } => {
                 // Captures are reads at callable construction time.  More
                 // importantly, a captured reference keeps its owning local
                 // live until this closure boundary can reborrow its backing
                 // place in `visit_with_live_after`.
-                for capture in captures {
+                for capture in &environment.captures {
                     uses.insert(capture.name.clone());
                 }
             }
