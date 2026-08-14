@@ -3698,6 +3698,46 @@ fn service_replays_an_ordered_refutable_operation_matrix_across_calls() {
 }
 
 #[test]
+fn service_forwards_a_nested_partial_replay_matrix_to_an_outer_replay_handler() {
+    for (indirect, source) in [
+        (
+            false,
+            "effect Read { [2,2] read(value: Text) -> Text; } pub fn helper() -> i64 / Read { let text = Read::read(\"payload\"); 40 } pub fn partial() -> i64 / Read { handle helper() { Read::read(\"no\") with k => k(\"x\") + k(\"y\") } } pub fn main() -> i64 { handle { let value = partial(); value + 1 } { Read::read(value) with k => k(\"one\") + k(\"two\") } }",
+        ),
+        (
+            true,
+            "effect Read { [2,2] read(value: Text) -> Text; } pub fn helper() -> i64 / Read { let text = Read::read(\"payload\"); 40 } pub fn partial() -> i64 / Read { handle helper() { Read::read(\"no\") with k => k(\"x\") + k(\"y\") } } pub fn main() -> i64 { let action = partial; handle { let value = action(); value + 1 } { Read::read(value) with k => k(\"one\") + k(\"two\") } }",
+        ),
+    ] {
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        let program = decode_program(&artifact.canonical_bytes()).unwrap();
+        assert!(program.functions.values().any(|function| {
+            function
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::Forward))
+        }));
+        let entry = program.functions.get(&program.entry).unwrap();
+        assert_eq!(
+            entry
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            indirect
+        );
+        assert!(
+            entry
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+        );
+        assert_eq!(artifact.run_i64().unwrap(), 82);
+    }
+}
+
+#[test]
 fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

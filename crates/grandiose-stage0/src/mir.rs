@@ -8291,9 +8291,7 @@ impl Lowerer<'_> {
                 .or_insert_with(Vec::new)
                 .push(clause);
         }
-        if grouped.is_empty()
-            || (grouped.len() < 2 && grouped.values().all(|group| group.len() < 2))
-        {
+        if grouped.is_empty() {
             return None;
         }
         let groups = grouped.into_values().collect::<Vec<_>>();
