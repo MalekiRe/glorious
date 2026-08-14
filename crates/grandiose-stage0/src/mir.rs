@@ -1253,6 +1253,35 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) = lowerer
+            .lower_root_interprocedural_multi_operation_replay_resumption(
+                body.root,
+                parameters.clone(),
+            )
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_interprocedural_replay_resumption(body.root, parameters.clone())
         {
@@ -7766,6 +7795,229 @@ impl Lowerer<'_> {
                     terminator: MirTerminator::Return { value: result },
                 },
             ],
+        })
+    }
+
+    /// Lower several exact replayable operations whose suspended performances
+    /// are reached through one direct ordinary callee call.
+    ///
+    /// Every operation receives its own dynamic replay frame and private
+    /// handler target.  This matters when a resumed first operation performs
+    /// a second operation: the VM must retain both the first operation's
+    /// cross-call continuation and the second operation's distinct result
+    /// type, rather than treating a closed effect row as one untyped frame.
+    /// Refutable/ordered rows and indirect calls deliberately remain with
+    /// their dedicated lowering slices.
+    fn lower_root_interprocedural_multi_operation_replay_resumption(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Block(computation_values) = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let first_call = computation_values.iter().position(|candidate| {
+            matches!(
+                self.body.expression(*candidate).kind,
+                CoreKind::Let {
+                    value,
+                    ..
+                } if matches!(self.body.expression(value).kind, CoreKind::Call { .. })
+            )
+        })?;
+        let (prefix, call_and_residual) = computation_values.split_at(first_call);
+        let (binding, residual) = call_and_residual.split_first()?;
+        let CoreKind::Let { name, value: call } = self.body.expression(*binding).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(call).kind.clone()
+        else {
+            return None;
+        };
+        if residual.is_empty() {
+            return None;
+        }
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        // This slice intentionally owns direct named calls only.  An indirect
+        // callee needs a separate capability-preservation proof, and a trait
+        // call carries an independent dictionary identity through the VM.
+        let CoreKind::Function {
+            definition: callee,
+            arguments: generic_arguments,
+        } = self.body.expression(callee).kind.clone()
+        else {
+            return None;
+        };
+        if clauses.len() < 2
+            || clauses.iter().any(|clause| {
+                clause.terminal
+                    || !effects.effects.contains(&clause.effect)
+                    || clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+                    || self.handler_body_uses_snapshot_alias(clause.body)
+                    || !matches!(
+                        clause.resumption,
+                        CoreHandlerResumption::Explicit { quantity, .. }
+                            if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+                    )
+                    || clause.continuation.is_none()
+            })
+        {
+            return None;
+        }
+        // One irrefutable explicit-replay clause per operation is the smallest
+        // sound multi-frame shape.  A duplicate operation requires an ordered
+        // matrix, while a different source operation must never share a frame.
+        let mut operation_keys = BTreeSet::new();
+        if clauses
+            .iter()
+            .any(|clause| !operation_keys.insert((clause.effect.clone(), clause.operation)))
+        {
+            return None;
+        }
+
+        for expression in root_prefix.iter().chain(prefix.iter()) {
+            self.statement(*expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let performed = self.alloc(self.body.expression(call).ty.clone(), call);
+        let payload_destinations = clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), call))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let handler_blocks = (0..clauses.len())
+            .map(|index| MirBlockId(2 + index as u32))
+            .collect::<Vec<_>>();
+
+        let mut entry = std::mem::take(&mut self.instructions);
+        for ((clause, payloads), target) in clauses
+            .iter()
+            .zip(&payload_destinations)
+            .zip(&handler_blocks)
+        {
+            entry.push(MirInstruction::InstallHandler {
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads.clone(),
+                resume_type: clause
+                    .continuation
+                    .as_ref()
+                    .expect("checked explicit replay continuation")
+                    .parameter
+                    .clone(),
+                continuation: MirContinuationPolicy::Replay,
+                target: *target,
+            });
+        }
+        entry.push(MirInstruction::Call {
+            dst: performed,
+            callee,
+            generic_arguments,
+            trait_instance: None,
+            arguments,
+        });
+        for _ in &clauses {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let continuation_named = self.named.clone();
+        self.named.insert(name, performed);
+        self.instructions = Vec::new();
+        let (last, continuation_prefix) = residual.split_last()?;
+        for expression in continuation_prefix {
+            self.statement(*expression)?;
+        }
+        let continuation_result = self.value(*last)?;
+        let continuation_instructions = std::mem::take(&mut self.instructions);
+        self.named = continuation_named;
+
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let mut handler_blocks_instructions = Vec::new();
+        for (clause, payloads) in clauses.iter().zip(&payload_destinations) {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&clause.patterns, payloads)?;
+            let handler_result = self.direct_handler_clause_value(clause)?;
+            self.instructions.push(MirInstruction::Cancel);
+            handler_blocks_instructions
+                .push((handler_result, std::mem::take(&mut self.instructions)));
+        }
+        self.named = boundary_named;
+        self.values = boundary_values;
+
+        let mut blocks = vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: entry,
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![],
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: continuation_instructions,
+                terminator: MirTerminator::Return {
+                    value: continuation_result,
+                },
+            },
+        ];
+        blocks.extend(
+            handler_blocks_instructions
+                .into_iter()
+                .map(|(value, instructions)| MirBlock {
+                    parameters: vec![],
+                    instructions,
+                    terminator: MirTerminator::Return { value },
+                }),
+        );
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
         })
     }
 

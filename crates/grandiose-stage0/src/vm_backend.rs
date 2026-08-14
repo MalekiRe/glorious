@@ -3241,6 +3241,11 @@ struct VerifierState {
     /// Number of dynamic clause-return continuations currently being checked.
     /// Their `Return` is consumed by `ResumeReturn`, not by the function.
     resumption_return_depth: u32,
+    /// Handler brands that may remain active while the current protected
+    /// replay returns to its clause. A nested operation can cancel its own
+    /// frame and still leave an outer replay frame to be restored by that
+    /// clause-return edge; unrelated frames remain an error.
+    resumption_return_handler_ids: Vec<u32>,
 }
 
 impl Deref for VerifierState {
@@ -3297,6 +3302,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             handlers: Vec::new(),
             pending_leave: None,
             resumption_return_depth: 0,
+            resumption_return_handler_ids: Vec::new(),
         });
     }
     let mut worklist = if function.instructions.is_empty() {
@@ -3747,6 +3753,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
+                        resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -3794,12 +3801,15 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     .continuations
                     .clear();
                 resumed_handlers.extend(continuation.above.clone());
+                let resumption_return_handler_ids =
+                    resumed_handlers.iter().map(|frame| frame.id).collect();
                 let mut resumed = VerifierState {
                     registers: continuation.registers,
                     snapshots: continuation.snapshots,
                     handlers: resumed_handlers,
                     pending_leave: continuation.pending_leave,
                     resumption_return_depth: states.resumption_return_depth.saturating_add(1),
+                    resumption_return_handler_ids,
                 };
                 write(&mut resumed, continuation.dst)?;
                 propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -3892,6 +3902,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
+                        resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -4234,11 +4245,18 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::Return { value } => {
                 read(&states, *value)?;
+                if states.resumption_return_depth != 0 {
+                    if states
+                        .handlers
+                        .iter()
+                        .any(|frame| !states.resumption_return_handler_ids.contains(&frame.id))
+                    {
+                        return Err(VmArtifactError::HandlerStillActive);
+                    }
+                    continue;
+                }
                 if !states.handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
-                }
-                if states.resumption_return_depth != 0 {
-                    continue;
                 }
                 let found = register_type(function, *value)?;
                 if let Some(expected) = &returned {
@@ -4374,6 +4392,11 @@ fn propagate_state(
             Ok(())
         }
         Some(existing) => {
+            if existing.resumption_return_depth != state.resumption_return_depth
+                || existing.resumption_return_handler_ids != state.resumption_return_handler_ids
+            {
+                return Err(VmArtifactError::HandlerStateMismatch);
+            }
             let handler_changed = merge_handler_states(&mut existing.handlers, &state.handlers)
                 .ok_or(VmArtifactError::HandlerStateMismatch)?;
             // This is a forward must-analysis: a register is readable at a
@@ -4619,6 +4642,10 @@ struct RuntimeResumptionReturn {
     dst: u32,
     registers: Vec<Option<VmValue>>,
     handlers: Vec<RuntimeHandlerFrame>,
+    /// The protected replay may return with an outer frame still active after
+    /// an inner operation has cancelled. Only frames restored for this exact
+    /// continuation are permitted to cross the clause-return edge.
+    resumed_handler_ids: Vec<u64>,
 }
 
 #[derive(Clone)]
@@ -5521,13 +5548,6 @@ fn execute(
                     .clone()
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 budget.reserve_allocation(registers.len())?;
-                let caller_handlers = handlers.clone();
-                resumption_returns.push(RuntimeResumptionReturn {
-                    pc: pc + 1,
-                    dst,
-                    registers: registers.clone(),
-                    handlers: caller_handlers,
-                });
                 let RuntimeContinuation {
                     target,
                     dst: continuation_dst,
@@ -5539,6 +5559,18 @@ fn execute(
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
+                let resumed_handler_ids = handlers
+                    .iter()
+                    .map(|frame| frame.id)
+                    .chain(above.iter().map(|frame| frame.id))
+                    .collect();
+                resumption_returns.push(RuntimeResumptionReturn {
+                    pc: pc + 1,
+                    dst,
+                    registers: registers.clone(),
+                    handlers: handlers.clone(),
+                    resumed_handler_ids,
+                });
                 // The active execution gets a clean handler frame so its
                 // protected `UninstallHandler` can run. The clause snapshot
                 // above retains the suspended continuation for the next use.
@@ -6069,19 +6101,28 @@ fn execute(
                 continue;
             }
             VmInstruction::Return { value } => {
-                if !handlers.is_empty() {
-                    return Err(VmArtifactError::HandlerStillActive);
-                }
-                if let Some(return_to_clause) = resumption_returns.pop() {
+                if let Some(return_to_clause) = resumption_returns.last() {
+                    if handlers
+                        .iter()
+                        .any(|handler| !return_to_clause.resumed_handler_ids.contains(&handler.id))
+                    {
+                        return Err(VmArtifactError::HandlerStillActive);
+                    }
                     let value = registers[value as usize]
                         .as_ref()
                         .expect("verified register")
                         .clone();
+                    let return_to_clause = resumption_returns
+                        .pop()
+                        .expect("checked clause-return frame exists");
                     registers = return_to_clause.registers;
                     registers[return_to_clause.dst as usize] = Some(value);
                     handlers = return_to_clause.handlers;
                     pc = return_to_clause.pc;
                     continue;
+                }
+                if !handlers.is_empty() {
+                    return Err(VmArtifactError::HandlerStillActive);
                 }
                 return Ok(registers[value as usize]
                     .as_ref()
@@ -7053,12 +7094,6 @@ fn execute_with_arguments(
                     .clone()
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 budget.reserve_allocation(registers.len())?;
-                resumption_returns.push(RuntimeResumptionReturn {
-                    pc: pc + 1,
-                    dst: *dst,
-                    registers: registers.clone(),
-                    handlers: handlers.clone(),
-                });
                 let RuntimeContinuation {
                     target,
                     dst: continuation_dst,
@@ -7071,6 +7106,18 @@ fn execute_with_arguments(
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
+                let resumed_handler_ids = handlers
+                    .iter()
+                    .map(|frame| frame.id)
+                    .chain(above.iter().map(|frame| frame.id))
+                    .collect();
+                resumption_returns.push(RuntimeResumptionReturn {
+                    pc: pc + 1,
+                    dst: *dst,
+                    registers: registers.clone(),
+                    handlers: handlers.clone(),
+                    resumed_handler_ids,
+                });
                 handlers.last_mut().expect("active frame exists").suspended = None;
                 handlers.extend(above);
                 if let Some(program) = program {
@@ -7746,32 +7793,45 @@ fn execute_with_arguments(
                 continue;
             }
             VmInstruction::Return { value } => {
-                // Ancestor handlers remain dynamically active across a
-                // callee return. Only a handler installed by this frame may
-                // make its return ill-formed.
-                if handlers
-                    .iter()
-                    .any(|handler| handler.call_depth == callers.len())
-                {
-                    return Err(VmArtifactError::HandlerStillActive);
-                }
                 let value = registers[*value as usize]
                     .as_ref()
                     .expect("verified register")
                     .clone();
-                if let Some(caller) = callers.pop() {
+                if !callers.is_empty() {
+                    // Ancestor handlers remain dynamically active across a
+                    // callee return. Only a handler installed by this frame
+                    // may make its ordinary return ill-formed.
+                    if handlers
+                        .iter()
+                        .any(|handler| handler.call_depth == callers.len())
+                    {
+                        return Err(VmArtifactError::HandlerStillActive);
+                    }
+                    let caller = callers.pop().expect("checked nonempty call stack");
                     definition = caller.definition;
                     registers = caller.registers;
                     registers[caller.return_destination as usize] = Some(value);
                     pc = caller.pc + 1;
                     continue;
                 }
-                if let Some(return_to_clause) = resumption_returns.pop() {
+                if let Some(return_to_clause) = resumption_returns.last() {
+                    if handlers
+                        .iter()
+                        .any(|handler| !return_to_clause.resumed_handler_ids.contains(&handler.id))
+                    {
+                        return Err(VmArtifactError::HandlerStillActive);
+                    }
+                    let return_to_clause = resumption_returns
+                        .pop()
+                        .expect("checked clause-return frame exists");
                     registers = return_to_clause.registers;
                     registers[return_to_clause.dst as usize] = Some(value);
                     handlers = return_to_clause.handlers;
                     pc = return_to_clause.pc;
                     continue;
+                }
+                if !handlers.is_empty() {
+                    return Err(VmArtifactError::HandlerStillActive);
                 }
                 return Ok(value);
             }
