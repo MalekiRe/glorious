@@ -277,6 +277,16 @@ impl Analyzer<'_> {
         match &self.body.expression(id).kind {
             CoreKind::Local(name) => Some(name.clone()),
             CoreKind::Field { base, .. } => self.place_root(*base),
+            // Reborrowing `&*parent` retains the parent loan's origin; the
+            // dereference is a place projection, not a body-local temporary.
+            CoreKind::Deref(reference) => match &self.body.expression(*reference).kind {
+                CoreKind::Local(name) => self.values.get(name).and_then(|value| {
+                    let mut roots = borrowed_roots(value).into_iter();
+                    let root = roots.next()?;
+                    roots.next().is_none().then_some(root)
+                }),
+                _ => None,
+            },
             _ => None,
         }
     }

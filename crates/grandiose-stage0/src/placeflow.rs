@@ -138,6 +138,7 @@ impl PlaceFlow {
             body,
             states: BTreeMap::new(),
             projection_loans: vec![],
+            reborrow_parents: BTreeMap::new(),
             moved_places: BTreeSet::new(),
             events: vec![],
             refinements: vec![],
@@ -182,6 +183,10 @@ struct Analyzer<'a> {
     /// Every precise source loan, including a whole-local loan.  Whole-local
     /// entries are mirrored in `states` for the legacy compact summary.
     projection_loans: Vec<ProjectionLoan>,
+    /// Child reference binding -> suspended parent binding.  This is kept
+    /// separate from the loan identity because a child may end nonlexically
+    /// while the parent loan remains available again.
+    reborrow_parents: BTreeMap<String, String>,
     /// Canonical paths that have been moved and have not since been
     /// reinitialized. Whole-local moves are mirrored in `states`; field moves
     /// deliberately are not, because their siblings remain usable.
@@ -259,7 +264,9 @@ impl Analyzer<'_> {
                     // live temporary loan. Evaluate the borrowed place first;
                     // its read remains subject to all pre-existing loans.
                     self.visit_with_live_after(value, live_after);
-                    self.borrow_place(value, unique, e.span, Some(name.clone()));
+                    if !self.reborrow_place(value, unique, e.span, name.clone()) {
+                        self.borrow_place(value, unique, e.span, Some(name.clone()));
+                    }
                 } else {
                     self.visit_with_live_after(value, live_after);
                 }
@@ -267,7 +274,17 @@ impl Analyzer<'_> {
                 self.event(FlowEventKind::Initialize(name), e.span)
             }
             CoreKind::Assign { place, value } => {
-                self.visit_with_live_after(value, live_after);
+                // The destination is evaluated after the RHS, but its local
+                // references must keep their loans alive while the RHS is
+                // evaluated.  Otherwise `*parent = rhs` could prematurely
+                // end the parent region before the destination conflict is
+                // checked against a live reborrow.
+                let mut rhs_live = live_after.clone();
+                self.collect_place_uses(&place, &mut rhs_live);
+                self.visit_with_live_after(value, &rhs_live);
+                if let CorePlace::Deref { reference, .. } = &place {
+                    self.use_deref_reference(*reference, e.span, true);
+                }
                 self.assign_place(&place, e.span);
             }
             CoreKind::Move(v) => {
@@ -287,7 +304,10 @@ impl Analyzer<'_> {
                 }
                 self.borrow_place(value, unique, e.span, None)
             }
-            CoreKind::Deref(value) => self.visit_with_live_after(value, live_after),
+            CoreKind::Deref(value) => {
+                self.visit_with_live_after(value, live_after);
+                self.use_deref_reference(value, e.span, false);
+            }
             CoreKind::Call { callee, arguments } => {
                 let mut values = vec![callee];
                 values.extend(arguments);
@@ -449,7 +469,10 @@ impl Analyzer<'_> {
             | CoreKind::Unary { value: base, .. }
             | CoreKind::PatternTest { subject: base, .. } => self.collect_local_uses(*base, uses),
             CoreKind::Let { value, .. } => self.collect_local_uses(*value, uses),
-            CoreKind::Assign { value, .. } => self.collect_local_uses(*value, uses),
+            CoreKind::Assign { place, value } => {
+                self.collect_local_uses(*value, uses);
+                self.collect_place_uses(place, uses);
+            }
             CoreKind::Call { callee, arguments } => {
                 self.collect_local_uses(*callee, uses);
                 for argument in arguments {
@@ -501,6 +524,17 @@ impl Analyzer<'_> {
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
+        }
+    }
+
+    fn collect_place_uses(&self, place: &CorePlace, uses: &mut BTreeSet<String>) {
+        match place {
+            CorePlace::Local { name, .. } => {
+                uses.insert(name.clone());
+            }
+            CorePlace::Field { base, .. } => self.collect_place_uses(base, uses),
+            CorePlace::Deref { reference, .. } => self.collect_local_uses(*reference, uses),
+            CorePlace::Error => {}
         }
     }
 
@@ -919,6 +953,81 @@ impl Analyzer<'_> {
             place,
             span,
         );
+    }
+
+    /// A borrow of `*reference` is a reborrow of the reference's frozen loan,
+    /// not a borrow of a temporary dereference result.  The child owns a
+    /// distinct NLL region and therefore keeps the parent suspended while it
+    /// remains live.
+    fn reborrow_place(&mut self, id: CoreId, unique: bool, span: Span, owner: String) -> bool {
+        let CoreKind::Deref(reference) = self.body.expression(id).kind else {
+            return false;
+        };
+        let CoreKind::Local(parent) = &self.body.expression(reference).kind else {
+            return false;
+        };
+        let Some(parent_loan) = self
+            .projection_loans
+            .iter()
+            .find(|loan| loan.owner.as_deref() == Some(parent.as_str()))
+            .cloned()
+        else {
+            self.error(span, "G5006", "reborrow has no live parent loan".into());
+            return true;
+        };
+        if unique && !parent_loan.unique {
+            self.error(
+                span,
+                "G5006",
+                "unique reborrow requires a unique parent loan".into(),
+            );
+            return true;
+        }
+        self.place_event(
+            FlowEventKind::Reborrow(parent_loan.place.root.clone()),
+            parent_loan.place.clone(),
+            span,
+        );
+        self.projection_loans.push(ProjectionLoan {
+            place: parent_loan.place,
+            unique,
+            owner: Some(owner.clone()),
+        });
+        self.reborrow_parents.insert(owner, parent.clone());
+        true
+    }
+
+    fn use_deref_reference(&mut self, id: CoreId, span: Span, mutation: bool) {
+        let CoreKind::Local(name) = &self.body.expression(id).kind else {
+            return;
+        };
+        let Some(parent) = self
+            .projection_loans
+            .iter()
+            .find(|loan| loan.owner.as_deref() == Some(name.as_str()))
+            .cloned()
+        else {
+            return;
+        };
+        let conflicts = self.projection_loans.iter().any(|loan| {
+            loan.owner.as_deref() != Some(name.as_str())
+                && self
+                    .reborrow_parents
+                    .get(name)
+                    .is_none_or(|parent| loan.owner.as_deref() != Some(parent.as_str()))
+                && loan.place.overlaps(&parent.place)
+                && (mutation || parent.unique || loan.unique)
+        });
+        if conflicts {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot access reborrowed place `{}` through its suspended parent",
+                    parent.place.root
+                ),
+            );
+        }
     }
 
     fn assign_place(&mut self, place: &CorePlace, span: Span) {

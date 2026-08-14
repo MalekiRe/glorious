@@ -6377,6 +6377,17 @@ impl Lowerer<'_> {
                 clauses,
             } => self.lower_terminal_handle(dst, computation, clauses)?,
             CoreKind::Borrow { unique, value } => {
+                if let CoreKind::Deref(reference) = self.body.expression(value).kind.clone() {
+                    let src = self.value(reference)?;
+                    self.instructions.push(MirInstruction::Borrow {
+                        dst,
+                        src,
+                        fields: vec![],
+                        unique,
+                    });
+                    self.values.insert(id, dst);
+                    return Some(dst);
+                }
                 let Some((src, fields)) = self.reference_place(value) else {
                     self.error("G6010", "borrow requires a stable local place");
                     return None;

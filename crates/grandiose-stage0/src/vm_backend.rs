@@ -3817,6 +3817,43 @@ fn store_reference(
     }
 }
 
+fn borrow_value(
+    source: u32,
+    value: &VmValue,
+    fields: &[u32],
+    unique: bool,
+) -> Result<VmValue, VmArtifactError> {
+    if let VmValue::Reference {
+        target,
+        fields: parent_fields,
+        unique: parent_unique,
+        referent: parent_referent,
+    } = value
+    {
+        if unique && !parent_unique {
+            return Err(VmArtifactError::InvalidRegister { register: *target });
+        }
+        let mut path = parent_fields.to_vec();
+        path.extend_from_slice(fields);
+        return Ok(VmValue::Reference {
+            target: *target,
+            fields: path.into(),
+            unique,
+            referent: if fields.is_empty() {
+                parent_referent.clone()
+            } else {
+                project_reference(value, fields)?.ty()
+            },
+        });
+    }
+    Ok(VmValue::Reference {
+        target: source,
+        fields: fields.to_vec().into(),
+        unique,
+        referent: project_reference(value, fields)?.ty(),
+    })
+}
+
 fn format_vm_value(value: &VmValue) -> String {
     match value {
         VmValue::Unit => "()".into(),
@@ -4540,17 +4577,12 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 fields,
                 unique,
             } => {
-                let referent = project_reference(
+                registers[dst as usize] = Some(borrow_value(
+                    src,
                     registers[src as usize].as_ref().expect("verified register"),
                     &fields,
-                )?
-                .ty();
-                registers[dst as usize] = Some(VmValue::Reference {
-                    target: src,
-                    fields: fields.into(),
                     unique,
-                    referent,
-                });
+                )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {
                 let VmValue::Reference { target, fields, .. } = registers[reference as usize]
@@ -5798,19 +5830,14 @@ fn execute_with_arguments(
                 fields,
                 unique,
             } => {
-                let referent = project_reference(
+                registers[*dst as usize] = Some(borrow_value(
+                    *src,
                     registers[*src as usize]
                         .as_ref()
                         .expect("verified register"),
                     fields,
-                )?
-                .ty();
-                registers[*dst as usize] = Some(VmValue::Reference {
-                    target: *src,
-                    fields: fields.clone().into(),
-                    unique: *unique,
-                    referent,
-                });
+                    *unique,
+                )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {
                 let VmValue::Reference { target, fields, .. } = registers[*reference as usize]

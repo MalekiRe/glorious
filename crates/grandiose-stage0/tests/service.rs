@@ -612,6 +612,28 @@ fn unique_field_borrow_preserves_the_projected_place_identity() {
 }
 
 #[test]
+fn unique_reborrow_reuses_the_original_vm_place() {
+    let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = &mut *parent; *child = 42; *parent }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn parent_unique_reference_is_suspended_while_a_unique_reborrow_is_live() {
+    let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = &mut *parent; *parent = 2; *child }";
+    let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("active unique reborrow failed to suspend its parent: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004"),
+        "missing parent-reborrow conflict: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn assignment_reinitializes_a_local_after_a_whole_value_move() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
