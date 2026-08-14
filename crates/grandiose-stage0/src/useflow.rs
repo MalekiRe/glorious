@@ -149,11 +149,11 @@ impl UseFlow {
         }
         let summary = analyzer.expression(body.root, &mut environment);
         analyzer.record(summary);
-        let required = callable_invocation(&body.expression(body.root).ty);
-        analyzer.escape_value(
+        let result_type = body.expression(body.root).ty.clone();
+        analyzer.escape_value_as(
             body.root,
             &environment,
-            required,
+            &result_type,
             CallableEscapeBoundary::Result,
         );
         analyzer.finish()
@@ -1229,11 +1229,9 @@ impl Analyzer<'_> {
         }
     }
 
-    fn callable_parameters(&self, callee: CoreId) -> Vec<Option<Quantity>> {
+    fn callable_parameter_types(&self, callee: CoreId) -> Vec<Type> {
         match &self.body.expression(callee).ty {
-            Type::Callable { parameters, .. } => {
-                parameters.iter().map(callable_invocation).collect()
-            }
+            Type::Callable { parameters, .. } => parameters.clone(),
             _ => vec![],
         }
     }
@@ -1253,11 +1251,10 @@ impl Analyzer<'_> {
             // owns this contract.  A generic argument may have been inferred
             // or coerced into the parameter; `payload_types` is the zonked,
             // instantiated receiver ABI frozen in Core.
-            let required = callable_invocation(payload_type);
-            self.escape_value(
+            self.escape_value_as(
                 *argument,
                 environment,
-                required,
+                payload_type,
                 CallableEscapeBoundary::Argument,
             );
         }
@@ -1526,14 +1523,26 @@ impl Analyzer<'_> {
         arguments: &[CoreId],
         environment: &Environment,
     ) {
-        let parameter_capabilities = self.callable_parameters(callee);
+        let parameter_types = self.callable_parameter_types(callee);
         for (index, argument) in arguments.iter().enumerate() {
-            self.escape_value(
-                *argument,
-                environment,
-                parameter_capabilities.get(index).copied().flatten(),
-                CallableEscapeBoundary::Argument,
-            );
+            if let Some(parameter_type) = parameter_types.get(index) {
+                self.escape_value_as(
+                    *argument,
+                    environment,
+                    parameter_type,
+                    CallableEscapeBoundary::Argument,
+                );
+            } else {
+                // Typed Core validates call arity before this analysis. Keep
+                // malformed frozen input fail-closed rather than assuming an
+                // arbitrary capability for an unmatched argument.
+                self.escape_value(
+                    *argument,
+                    environment,
+                    None,
+                    CallableEscapeBoundary::Argument,
+                );
+            }
         }
     }
 
@@ -1696,6 +1705,115 @@ impl Analyzer<'_> {
                 _ => {}
             },
         }
+    }
+
+    /// Transfer a value into a receiver whose complete structural callable
+    /// contract is known.  Callable capability is recursive: a `Pair<F>` is
+    /// not an untyped shell when `F` is an exactly-once callable.  The old
+    /// top-level-only check lost that receiver proof and rejected ordinary
+    /// forwarding of a parameter-owned record with `G5013`.
+    fn escape_value_as(
+        &mut self,
+        id: CoreId,
+        environment: &Environment,
+        expected: &Type,
+        boundary: CallableEscapeBoundary,
+    ) {
+        // An enum constructor carries its active variant at this expression,
+        // unlike an enum parameter whose variant is genuinely dynamic. Use
+        // that proof to preserve payload capabilities across a call or effect
+        // boundary, including generic substitutions in the selected layout.
+        if let CoreKind::Enum {
+            definition,
+            variant,
+            fields,
+        } = &self.body.expression(id).kind
+            && let Some(field_types) =
+                self.enum_variant_field_types(expected, *definition, *variant)
+            && field_types.len() == fields.len()
+        {
+            for (field, field_type) in fields.iter().zip(field_types.iter()) {
+                self.escape_value_as(*field, environment, field_type, boundary);
+            }
+            return;
+        }
+        let binding = self.binding_for_value(id, environment);
+        if matches!(binding, Binding::GlobalCallable | Binding::Other) {
+            // Preserve the established conservative traversal for computed
+            // forms such as blocks. They do not retain a field-by-field
+            // binding identity, so accepting them as an empty capability
+            // would erase a nested callable obligation.
+            self.escape_value(id, environment, callable_invocation(expected), boundary);
+        } else {
+            self.escape_binding_as(&binding, expected, self.body.expression(id).span, boundary);
+        }
+    }
+
+    fn escape_binding_as(
+        &mut self,
+        binding: &Binding,
+        expected: &Type,
+        span: Span,
+        boundary: CallableEscapeBoundary,
+    ) {
+        match binding {
+            Binding::Contract(key) => {
+                self.escape_contract(*key, callable_invocation(expected), span, boundary)
+            }
+            Binding::Closure(closure) => self.escape_closure(closure.clone(), span),
+            Binding::Aggregate(fields) => {
+                for (index, binding) in fields {
+                    if let Some(field_type) = self.structural_field_type(expected, *index) {
+                        self.escape_binding_as(binding, &field_type, span, boundary);
+                    } else {
+                        // For an aggregate whose active layout cannot be
+                        // proven here (notably a dynamic enum parameter),
+                        // retain the existing conservative diagnostic rather
+                        // than silently treating an affine payload as copied.
+                        self.escape_binding(binding, None, span, boundary);
+                    }
+                }
+            }
+            Binding::GlobalCallable | Binding::Other => {}
+        }
+    }
+
+    fn structural_field_type(&self, expected: &Type, index: u32) -> Option<Type> {
+        match expected {
+            Type::Tuple(fields) => fields.get(index as usize).cloned(),
+            Type::Array(element) => Some((**element).clone()),
+            Type::Nominal {
+                definition,
+                arguments,
+            } => self
+                .signatures?
+                .instantiate_struct_fields_generic(*definition, arguments)
+                .ok()?
+                .get(index as usize)
+                .map(|field| field.ty.clone()),
+            _ => None,
+        }
+    }
+
+    fn enum_variant_field_types(
+        &self,
+        expected: &Type,
+        definition: crate::DefKey,
+        variant: u32,
+    ) -> Option<Vec<Type>> {
+        let Type::Nominal {
+            definition: actual,
+            arguments,
+        } = expected
+        else {
+            return None;
+        };
+        (*actual == definition).then(|| {
+            self.signatures?
+                .instantiate_enum_fields_generic(definition, arguments, variant)
+                .ok()
+                .map(|fields| fields.into_iter().map(|field| field.ty).collect())
+        })?
     }
 
     fn escape_binding(

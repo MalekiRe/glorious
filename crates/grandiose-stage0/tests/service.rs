@@ -4417,6 +4417,54 @@ fn service_allows_one_typed_callable_escape_from_each_completion_branch() {
 }
 
 #[test]
+fn service_rejects_double_use_of_a_callable_extracted_by_a_record_completion_pattern() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn relay(pair: Pair) -> i64 { handle pair { Pair { function, value: _ } => function(20) + pair.function(21) } } pub fn main() -> i64 { relay(Pair { function: add_one, value: 0 }) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("pattern extraction duplicated an affine callable owner");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011" || diagnostic.code == "G5013"),
+        "missing pattern-extraction callable ownership diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_lowers_enum_callable_payload_extraction_through_completion_dispatch() {
+    let source = "pub enum Choice { Some((i64) -> i64), None } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn relay(choice: Choice) -> i64 { handle choice { Choice::Some(function) => function(41), Choice::None => 0 } } pub fn main() -> i64 { relay(Choice::Some(add_one)) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_forwards_a_struct_containing_a_callable_to_a_matching_parameter_contract() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn consume(pair: Pair) -> i64 { pair.function(41) } pub fn relay(pair: Pair) -> i64 { consume(pair) } pub fn main() -> i64 { relay(Pair { function: add_one, value: 0 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_forwards_a_generic_struct_callable_field_with_its_instantiated_contract() {
+    let source = "pub type Callback = (i64) -> i64; pub struct Pair<T> { function: T, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn consume(pair: Pair<Callback>) -> i64 { pair.function(41) } pub fn relay(pair: Pair<Callback>) -> i64 { consume(pair) } pub fn main() -> i64 { relay(Pair<Callback> { function: add_one, value: 0 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_preserves_struct_callable_contracts_through_effect_payload_patterns() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } effect Dispatch { [1, 1] take(pair: Pair) -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn relay(pair: Pair) -> i64 / Dispatch { Dispatch::take(pair) } pub fn main() -> i64 { handle relay(Pair { function: add_one, value: 0 }) { Dispatch::take(Pair { function: callback, value: _ }) => callback(41) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_a_maybe_skipped_exact_callable_escape_at_a_completion_join() {
     let source = "pub enum Choice { Left, Right } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64, value: i64) -> i64 { function(value) } pub fn relay(function: (i64) -> i64, choice: Choice) -> i64 { handle choice { Choice::Left => apply(function, 20), Choice::Right => 0 } } pub fn main() -> i64 { relay(add_one, Choice::Left) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
