@@ -402,6 +402,44 @@ fn manifest_bound_checked_i64_to_i16_converts() {
 }
 
 #[test]
+fn manifest_bound_checked_i64_to_i32_converts_and_rejects_out_of_range_values() {
+    let mut input = request(
+        "fn __g1_int_convert_checked_to_i32<T>(value: T) -> i32 { () } pub fn main() -> i32 { __g1_int_convert_checked_to_i32<i64>(-2147483648) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertCheckedToI32,
+        "__g1_int_convert_checked_to_i32",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i32()
+            .unwrap(),
+        i32::MIN
+    );
+
+    let mut overflow = request(
+        "fn __g1_int_convert_checked_to_i32<T>(value: T) -> i32 { () } pub fn main() -> i32 { __g1_int_convert_checked_to_i32<i64>(2147483648) }",
+    );
+    overflow.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertCheckedToI32,
+        "__g1_int_convert_checked_to_i32",
+    ));
+    assert!(matches!(
+        StageZeroCompiler::new()
+            .compile(overflow)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i32(),
+        Err(VmArtifactError::ArithmeticOverflow)
+    ));
+}
+
+#[test]
 fn manifest_bound_checked_i64_to_u32_converts_and_rejects_out_of_range_values() {
     let source = "fn __g1_int_convert_checked_to_u32<T>(value: T) -> u32 { () } pub fn main() -> u32 { __g1_int_convert_checked_to_u32<i64>(42) }";
     let mut input = request(source);
