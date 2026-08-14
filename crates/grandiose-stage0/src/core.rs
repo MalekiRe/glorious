@@ -1405,7 +1405,9 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
         } => {
             type_contains_inference(subject)
                 || trait_arguments.iter().any(type_contains_inference)
-                || item_arguments.iter().any(generic_argument_contains_inference)
+                || item_arguments
+                    .iter()
+                    .any(generic_argument_contains_inference)
         }
         Type::Array(element)
         | Type::Reference {
@@ -1477,11 +1479,9 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
                 || trait_arguments
                     .iter()
                     .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
-                || item_arguments
-                    .iter()
-                    .any(|argument| {
-                        generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
-                    })
+                || item_arguments.iter().any(|argument| {
+                    generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
+                })
         }
         Type::Array(element) => type_contains_out_of_scope_bound_lifetime_in(element, binders),
         Type::Reference {
@@ -1556,12 +1556,9 @@ fn effect_row_contains_out_of_scope_bound_lifetime(row: &EffectRow, binders: &[u
                 .trait_arguments
                 .iter()
                 .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
-                || projection
-                    .item_arguments
-                    .iter()
-                    .any(|argument| {
-                        generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
-                    })
+            || projection.item_arguments.iter().any(|argument| {
+                generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
+            })
     })
 }
 
@@ -3546,7 +3543,8 @@ impl Elaborator<'_> {
             .index
             .trait_generic_kinds(trait_definition)
             .unwrap_or(&[]);
-        let Some(trait_identity_arguments) = self.header_generic_arguments(trait_arguments, trait_kinds)
+        let Some(trait_identity_arguments) =
+            self.header_generic_arguments(trait_arguments, trait_kinds)
         else {
             return Type::Error;
         };
@@ -3652,13 +3650,11 @@ impl Elaborator<'_> {
                             },
                         ),
                         crate::GenericKind::Const(expected),
-                    ) => match self.associated_const_argument(
+                    ) => self.associated_const_argument(
                         (subject, trait_path, trait_arguments, name, item_arguments),
                         *expected,
                         (self.body.expression(self.body.root).span, "G4158"),
-                    ) {
-                        value => value,
-                    },
+                    ),
                     (
                         crate::header::HeaderGenericArgument::Type(value),
                         crate::GenericKind::Type,
@@ -3695,10 +3691,9 @@ impl Elaborator<'_> {
                     (
                         crate::header::HeaderGenericArgument::EffectRow(value),
                         crate::GenericKind::EffectRow,
-                    ) => GenericArgument::EffectRow(self.closure_effects(
-                        value,
-                        self.body.expression(self.body.root).span,
-                    )),
+                    ) => GenericArgument::EffectRow(
+                        self.closure_effects(value, self.body.expression(self.body.root).span),
+                    ),
                     _ => {
                         self.projection_error("G4158", "generic argument has the wrong kind");
                         GenericArgument::Type(Type::Error)
@@ -3719,7 +3714,9 @@ impl Elaborator<'_> {
                 GenericArgument::ConstU32(value) => Type::ConstU32(value),
                 GenericArgument::ConstQuantity(value) => Type::ConstQuantity(value),
                 GenericArgument::ConstGeneric { index, kind } => Type::ConstGeneric { index, kind },
-                GenericArgument::ConstU32Expr(_) | GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_) => {
+                GenericArgument::ConstU32Expr(_)
+                | GenericArgument::EffectRow(_)
+                | GenericArgument::Lifetime(_) => {
                     self.projection_error(
                         "G4158",
                         "type projection through a non-runtime trait argument is not yet supported",
@@ -8135,13 +8132,7 @@ fn align_lifetime_types(
                     .iter()
                     .zip(actual_item_arguments)
                     .map(|(expected, actual)| {
-                        align_lifetime_generic_argument(
-                            expected,
-                            actual,
-                            substitution,
-                            mode,
-                            depth,
-                        )
+                        align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
                     })
                     .collect::<Result<_, _>>()?,
             })
@@ -8272,8 +8263,7 @@ fn align_lifetime_effect_row(
                     == expected_projection.trait_arguments.len()
                 && actual_projection.item_arguments.len()
                     == expected_projection.item_arguments.len()
-                && actual_projection.item_generic_kinds
-                    == expected_projection.item_generic_kinds
+                && actual_projection.item_generic_kinds == expected_projection.item_generic_kinds
         }) else {
             return Err(LifetimeError::UnsatisfiedOutlives);
         };

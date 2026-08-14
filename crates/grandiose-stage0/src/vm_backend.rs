@@ -534,7 +534,7 @@ pub enum VmArtifactError {
     },
     UnsupportedType {
         local: u32,
-        ty: Type,
+        ty: Box<Type>,
     },
     /// A type nested in an effect identity has no representable VM form. This
     /// is distinct from non-type generic arguments, which the VM preserves.
@@ -1288,7 +1288,7 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
         functions,
     })
 }
-fn vm_type(value: &Type) -> Result<VmType, Type> {
+fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
     match value {
         // Bottom has no inhabitant at runtime. It still needs a structural
         // register type so a terminal `Perform` can cross a caller-installed
@@ -1331,24 +1331,24 @@ fn vm_type(value: &Type) -> Result<VmType, Type> {
             unique: matches!(mutability, crate::types::Mutability::Unique),
             referent: Box::new(vm_type(referent)?),
         }),
-        value => Err(value.clone()),
+        value => Err(Box::new(value.clone())),
     }
 }
 
 /// VM nominal layouts remain type-shaped. Mixed-kind nominal identity is
 /// retained in Core/instance products, but a row or lifetime must never be
 /// coerced into a layout slot while emitting an executable artifact.
-fn vm_nominal_argument(value: &GenericArgument) -> Result<VmType, Type> {
+fn vm_nominal_argument(value: &GenericArgument) -> Result<VmType, Box<Type>> {
     match value {
         GenericArgument::Type(value) => vm_type(value),
         GenericArgument::ConstU32(value) => vm_type(&Type::ConstU32(*value)),
-        GenericArgument::ConstU32Expr(_) => Err(Type::Error),
+        GenericArgument::ConstU32Expr(_) => Err(Box::new(Type::Error)),
         GenericArgument::ConstQuantity(value) => vm_type(&Type::ConstQuantity(*value)),
         GenericArgument::ConstGeneric { index, kind } => vm_type(&Type::ConstGeneric {
             index: *index,
             kind: *kind,
         }),
-        GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_) => Err(Type::Error),
+        GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_) => Err(Box::new(Type::Error)),
     }
 }
 
@@ -1359,12 +1359,10 @@ fn vm_effect_argument(
     use crate::GenericArgument;
 
     Ok(match value {
-        GenericArgument::Type(value) => VmGenericArgument::Type(vm_type(value).map_err(|ty| {
-            VmArtifactError::UnsupportedEffectArgumentType {
-                effect,
-                ty: Box::new(ty),
-            }
-        })?),
+        GenericArgument::Type(value) => VmGenericArgument::Type(
+            vm_type(value)
+                .map_err(|ty| VmArtifactError::UnsupportedEffectArgumentType { effect, ty })?,
+        ),
         GenericArgument::EffectRow(value) => {
             let value = value.clone().canonicalized();
             VmGenericArgument::EffectRow(VmEffectRow {
@@ -1388,10 +1386,7 @@ fn vm_effect_argument(
                     .map(|projection| {
                         Ok(VmEffectRowProjection {
                             subject: vm_type(&projection.subject).map_err(|ty| {
-                                VmArtifactError::UnsupportedEffectArgumentType {
-                                    effect,
-                                    ty: Box::new(ty),
-                                }
+                                VmArtifactError::UnsupportedEffectArgumentType { effect, ty }
                             })?,
                             trait_definition: projection.trait_definition,
                             trait_arguments: projection
@@ -1401,7 +1396,7 @@ fn vm_effect_argument(
                                     vm_type(argument).map_err(|ty| {
                                         VmArtifactError::UnsupportedEffectArgumentType {
                                             effect,
-                                            ty: Box::new(ty),
+                                            ty,
                                         }
                                     })
                                 })
@@ -1410,9 +1405,7 @@ fn vm_effect_argument(
                             item_arguments: projection
                                 .item_arguments
                                 .iter()
-                                .map(|argument| {
-                                    vm_effect_argument(effect, argument)
-                                })
+                                .map(|argument| vm_effect_argument(effect, argument))
                                 .collect::<Result<_, _>>()?,
                         })
                     })

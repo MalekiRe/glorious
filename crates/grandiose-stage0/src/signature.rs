@@ -1975,7 +1975,9 @@ fn normalize_effect_row(
                 item_arguments: projection
                     .item_arguments
                     .into_iter()
-                    .map(|argument| normalize_trait_generic_argument(argument, definitions, diagnostics))
+                    .map(|argument| {
+                        normalize_trait_generic_argument(argument, definitions, diagnostics)
+                    })
                     .collect(),
             })
             .collect(),
@@ -3357,7 +3359,9 @@ fn normalize_alias_type(
             item_generic_kinds,
             item_arguments: item_arguments
                 .into_iter()
-                .map(|argument| normalize_trait_generic_argument(argument, definitions, diagnostics))
+                .map(|argument| {
+                    normalize_trait_generic_argument(argument, definitions, diagnostics)
+                })
                 .collect(),
         },
         Type::Tuple(values) => Type::Tuple(

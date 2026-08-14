@@ -108,6 +108,24 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
         "a forged GAT item argument must not smuggle an unscoped bound lifetime into MIR"
     );
 
+    let mut wrong_gat_kind = graph();
+    wrong_gat_kind.locals[1].ty = Type::Projection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: DefKey(Digest::of_bytes(b"mir-forged-gat-kind")),
+        trait_arguments: vec![],
+        name: "Output".into(),
+        item_generic_kinds: vec![grandiose_stage0::GenericKind::Const(
+            grandiose_stage0::ConstKind::U32,
+        )],
+        item_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    };
+    assert!(
+        wrong_gat_kind
+            .validate()
+            .is_err_and(|error| error.contains("invalid item generic arguments")),
+        "MIR must reject a forged associated-item argument whose identity kind disagrees with its declaration"
+    );
+
     let mut generic_metadata = graph();
     generic_metadata.blocks[0]
         .instructions

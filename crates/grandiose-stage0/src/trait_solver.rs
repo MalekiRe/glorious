@@ -2150,11 +2150,9 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
                 || trait_arguments
                     .iter()
                     .any(|value| has_free_hrtb_placeholder(value, callable_nesting))
-                || item_arguments
-                    .iter()
-                    .any(|value| {
-                        generic_argument_contains_free_hrtb_placeholder(value, callable_nesting)
-                    })
+                || item_arguments.iter().any(|value| {
+                    generic_argument_contains_free_hrtb_placeholder(value, callable_nesting)
+                })
         }
         Type::Tuple(values) => values
             .iter()
@@ -2206,12 +2204,9 @@ fn effect_row_contains_free_hrtb_placeholder(value: &EffectRow, callable_nesting
                 .trait_arguments
                 .iter()
                 .any(|argument| has_free_hrtb_placeholder(argument, callable_nesting))
-            || projection
-                .item_arguments
-                .iter()
-                .any(|argument| {
-                    generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
-                })
+            || projection.item_arguments.iter().any(|argument| {
+                generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
+            })
     })
 }
 

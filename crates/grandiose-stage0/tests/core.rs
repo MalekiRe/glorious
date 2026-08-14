@@ -615,6 +615,24 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
     );
     assert!(canonical.validate().is_empty());
 
+    let forged_gat_kind = body(Type::Projection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: DefKey(Digest::of_bytes(b"core-forged-gat-kind")),
+        trait_arguments: vec![],
+        name: "Output".into(),
+        item_generic_kinds: vec![grandiose_stage0::GenericKind::Const(
+            grandiose_stage0::ConstKind::U32,
+        )],
+        item_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    });
+    assert!(
+        forged_gat_kind
+            .validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4186"),
+        "Core must reject an associated-item argument whose kind does not match the frozen declaration contract"
+    );
+
     let malformed_const = TypedBody {
         parameters: vec![],
         expressions: vec![CoreExpr {

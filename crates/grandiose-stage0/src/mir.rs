@@ -2090,6 +2090,15 @@ impl MirFunction {
 /// walk intentionally reaches type and effect arguments embedded in callable,
 /// nominal, aggregate, pattern, and handler metadata as well as local types.
 fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), String> {
+    if let Type::Projection {
+        item_generic_kinds,
+        item_arguments,
+        ..
+    } = ty
+        && !projection_item_arguments_match_kinds(item_generic_kinds, item_arguments)
+    {
+        return Err("MIR associated type projection has invalid item generic arguments".into());
+    }
     if !is_canonical_type_identity(ty) {
         return Err("MIR semantic type has a non-canonical identity representation".into());
     }
@@ -2102,13 +2111,10 @@ fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), S
         Type::Projection {
             subject,
             trait_arguments,
-            item_generic_kinds,
+            item_generic_kinds: _,
             item_arguments,
             ..
         } => {
-            if !projection_item_arguments_match_kinds(item_generic_kinds, item_arguments) {
-                return Err("MIR associated type projection has invalid item generic arguments".into());
-            }
             validate_mir_type(subject, lifetime_binders)?;
             trait_arguments
                 .iter()

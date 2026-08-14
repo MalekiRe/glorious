@@ -552,17 +552,18 @@ impl InferContext {
                 },
             ) if left_trait == right_trait
                 && left_name == right_name
-                && left_item_kinds == right_item_kinds => Ok(Type::Projection {
-                subject: Box::new(self.unify(*left_subject, *right_subject)?),
-                trait_definition: left_trait,
-                trait_arguments: self.unify_many(left_arguments, right_arguments)?,
-                name: left_name,
-                item_generic_kinds: left_item_kinds,
-                item_arguments: self.unify_generic_arguments(
-                    left_item_arguments,
-                    right_item_arguments,
-                )?,
-            }),
+                && left_item_kinds == right_item_kinds =>
+            {
+                Ok(Type::Projection {
+                    subject: Box::new(self.unify(*left_subject, *right_subject)?),
+                    trait_definition: left_trait,
+                    trait_arguments: self.unify_many(left_arguments, right_arguments)?,
+                    name: left_name,
+                    item_generic_kinds: left_item_kinds,
+                    item_arguments: self
+                        .unify_generic_arguments(left_item_arguments, right_item_arguments)?,
+                })
+            }
             (Type::Tuple(left), Type::Tuple(right)) => {
                 Ok(Type::Tuple(self.unify_many(left, right)?))
             }
@@ -1437,10 +1438,10 @@ impl InferContext {
                     .trait_arguments
                     .iter()
                     .any(|argument| self.occurs(variable, argument))
-                    || projection
-                        .item_arguments
-                        .iter()
-                        .any(|argument| self.generic_argument_occurs(variable, argument))
+                || projection
+                    .item_arguments
+                    .iter()
+                    .any(|argument| self.generic_argument_occurs(variable, argument))
         }) || match effects.tail {
             Some(EffectTail::Infer(tail)) if visited_tails.insert(tail) => self
                 .effect_bindings
@@ -1839,11 +1840,32 @@ pub(crate) fn projection_item_arguments_match_kinds(
                 (GenericKind::Type, GenericArgument::Type(_))
                     | (GenericKind::EffectRow, GenericArgument::EffectRow(_))
                     | (GenericKind::Lifetime, GenericArgument::Lifetime(_))
-                    | (GenericKind::Const(ConstKind::U32), GenericArgument::ConstU32(_))
-                    | (GenericKind::Const(ConstKind::U32), GenericArgument::ConstU32Expr(_))
-                    | (GenericKind::Const(ConstKind::Quantity), GenericArgument::ConstQuantity(_))
-                    | (GenericKind::Const(ConstKind::U32), GenericArgument::ConstGeneric { kind: ConstKind::U32, .. })
-                    | (GenericKind::Const(ConstKind::Quantity), GenericArgument::ConstGeneric { kind: ConstKind::Quantity, .. })
+                    | (
+                        GenericKind::Const(ConstKind::U32),
+                        GenericArgument::ConstU32(_)
+                    )
+                    | (
+                        GenericKind::Const(ConstKind::U32),
+                        GenericArgument::ConstU32Expr(_)
+                    )
+                    | (
+                        GenericKind::Const(ConstKind::Quantity),
+                        GenericArgument::ConstQuantity(_)
+                    )
+                    | (
+                        GenericKind::Const(ConstKind::U32),
+                        GenericArgument::ConstGeneric {
+                            kind: ConstKind::U32,
+                            ..
+                        }
+                    )
+                    | (
+                        GenericKind::Const(ConstKind::Quantity),
+                        GenericArgument::ConstGeneric {
+                            kind: ConstKind::Quantity,
+                            ..
+                        }
+                    )
             )
         })
 }

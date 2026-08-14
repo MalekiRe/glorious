@@ -1524,7 +1524,11 @@ fn generic_associated_type_applications_preserve_lifetime_type_and_const_argumen
     let scan = DeclarationScan::scan(&lexed, source);
     let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
     let signatures = ElaboratedInterface::elaborate(&interface);
-    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
     let view = interface
         .definitions
         .iter()
