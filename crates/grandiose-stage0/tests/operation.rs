@@ -27,3 +27,13 @@ fn cancelled_requests_cannot_publish_staged_products() {
     token.cancel();
     assert!(PublicationGuard::stage("artifact").commit(&token).is_err());
 }
+
+#[test]
+fn budget_leases_release_on_scope_exit() {
+    let budget = Budget::root("request", 3);
+    {
+        let _lease = budget.lease(2).unwrap();
+        assert_eq!(budget.spent(), 2);
+    }
+    assert_eq!(budget.spent(), 0);
+}

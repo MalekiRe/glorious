@@ -4,15 +4,20 @@
 //! `CompilationRequest`; every compiler product derives from its pinned
 //! revision snapshot.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
+use crate::revision::RequestControlError;
 use crate::{
-    BodySyntax, BootstrapManifest, CoherenceSet, CompilationMode, CompilationRequest,
-    CompilerDatabase, DatabaseSnapshot, DefKey, DefinitionIndex, DiagnosticClass, Digest,
-    ElaboratedHeader, ElaboratedInterface, EscapeFlow, FixityTable, InputError, MirFunction,
-    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, RequestSession, RetentionReport,
-    RevisionError, RevisionId, Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody,
-    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
+    BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
+    CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
+    DefinitionIndex, DiagnosticClass, Digest, ElaboratedHeader, ElaboratedInterface, EscapeFlow,
+    FixityTable, InputError, MirFunction, MirLowering, MirProgram, ModuleGraph, ParsedHeader,
+    PlaceFlow, PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId,
+    Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody, UseFlow, VerifiedVmProgram,
+    emit_vm_program, implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,6 +96,10 @@ impl CompileDiagnostic {
 
     fn resource(code: &'static str, message: impl Into<String>) -> Self {
         Self::new(code, message, DiagnosticClass::Resource, None)
+    }
+
+    fn cancellation(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(code, message, DiagnosticClass::Cancellation, None)
     }
 
     fn new(
@@ -309,6 +318,8 @@ pub struct CompilationOutcome {
 #[derive(Debug)]
 pub enum ServiceError {
     Revision(RevisionError),
+    Cancelled,
+    Resource(BudgetError),
     Failed(Vec<CompileDiagnostic>),
 }
 
@@ -342,6 +353,14 @@ impl ServiceError {
                     "requested compilation revision has been retired",
                 )]
             }
+            Self::Cancelled => vec![CompileDiagnostic::cancellation(
+                "G7029",
+                "compilation request was cancelled before publication",
+            )],
+            Self::Resource(BudgetError { name, ceiling, .. }) => vec![CompileDiagnostic::resource(
+                "G7030",
+                format!("compilation request exceeded `{name}` resource limit of {ceiling}"),
+            )],
         }
     }
 }
@@ -366,6 +385,15 @@ impl CompileDiagnostic {
 impl From<RevisionError> for ServiceError {
     fn from(value: RevisionError) -> Self {
         Self::Revision(value)
+    }
+}
+
+impl From<RequestControlError> for ServiceError {
+    fn from(value: RequestControlError) -> Self {
+        match value {
+            RequestControlError::Cancelled => Self::Cancelled,
+            RequestControlError::Resource(error) => Self::Resource(error),
+        }
     }
 }
 
@@ -404,6 +432,20 @@ impl StageZeroCompiler {
     /// alive across subsequent editor/build imports.
     pub fn open_session(&self, revision: RevisionId) -> Result<RequestSession, ServiceError> {
         Ok(self.database.open_session(revision)?)
+    }
+
+    /// Admit a request with explicit host operational controls. They bound or
+    /// cancel work through this session but never select a different semantic
+    /// world than the pinned revision.
+    pub fn open_session_with_controls(
+        &self,
+        revision: RevisionId,
+        cancellation: CancellationToken,
+        budget: Arc<Budget>,
+    ) -> Result<RequestSession, ServiceError> {
+        Ok(self
+            .database
+            .open_session_with_controls(revision, cancellation, budget)?)
     }
 
     /// Retire a world from new request admission. Existing sessions stay
@@ -449,13 +491,28 @@ impl StageZeroCompiler {
         session: &RequestSession,
     ) -> Result<CompilationOutcome, ServiceError> {
         self.database.validate_session(session)?;
-        self.compile_snapshot(session.snapshot())
+        // This lease is held through the final publication boundary and its
+        // Drop settles request accounting on every error/cancellation path.
+        let _request_lease = session.checkpoint(1)?;
+        let mut interfaces = self.database.interface_cache().transaction();
+        let outcome = self.compile_snapshot(session.snapshot(), session, &mut interfaces)?;
+        // One final cancellation check linearizes request publication. Before
+        // it succeeds, dropping the outcome and transaction publishes neither
+        // an artifact nor newly collected frozen interfaces.
+        let outcome = PublicationGuard::stage(outcome)
+            .commit(session.cancellation())
+            .map_err(|_| ServiceError::Cancelled)?;
+        interfaces.commit();
+        Ok(outcome)
     }
 
     fn compile_snapshot(
         &self,
         snapshot: &DatabaseSnapshot,
+        session: &RequestSession,
+        interfaces: &mut crate::interface::InterfaceCacheTransaction<'_>,
     ) -> Result<CompilationOutcome, ServiceError> {
+        session.checkpoint(0)?;
         let input_fingerprint = snapshot.world().fingerprint;
         let source_lengths = snapshot
             .world()
@@ -469,11 +526,12 @@ impl StageZeroCompiler {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let graph = ModuleGraph::build_with_interface_cache(
+        let graph = ModuleGraph::build_with_interface_transaction(
             snapshot.world(),
             &snapshot.world().root_package,
-            self.database.interface_cache(),
+            interfaces,
         );
+        session.checkpoint(0)?;
         let mut diagnostics = graph
             .diagnostics
             .into_iter()
@@ -485,6 +543,7 @@ impl StageZeroCompiler {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
         for node in graph.modules.values() {
+            session.checkpoint(0)?;
             diagnostics.extend(node.interface.diagnostics.iter().map(|diagnostic| {
                 CompileDiagnostic::source(
                     diagnostic.code,
@@ -616,6 +675,7 @@ impl StageZeroCompiler {
         // Core products without reopening source or consulting host state.
         let mut body_products = Vec::<(DefKey, bool, bool, TypedBody, PlaceFlow)>::new();
         for node in graph.modules.values() {
+            session.checkpoint(0)?;
             let Some(source) = snapshot
                 .world()
                 .sources
@@ -882,6 +942,7 @@ impl StageZeroCompiler {
             .map(|(definition, _, _, core, _)| (*definition, core.clone()))
             .collect::<BTreeMap<_, _>>();
         for (definition, is_constant, valid, core, flow) in body_products {
+            session.checkpoint(0)?;
             if !valid {
                 continue;
             }
@@ -947,6 +1008,7 @@ impl StageZeroCompiler {
             CompilationMode::Build | CompilationMode::Test | CompilationMode::Bootstrap(_)
         );
         if !demands_artifact {
+            session.checkpoint(0)?;
             return Ok(CompilationOutcome {
                 diagnostics,
                 artifact: None,
@@ -958,6 +1020,7 @@ impl StageZeroCompiler {
             entry,
             functions: reachable_functions(&functions, entry),
         };
+        session.checkpoint(0)?;
         let mut candidate = emit_vm_program(&program).map_err(|error| {
             failed(
                 input_fingerprint,
@@ -982,6 +1045,7 @@ impl StageZeroCompiler {
                 &source_lengths,
             )
         })?;
+        session.checkpoint(0)?;
         let bootstrap_manifest = match &snapshot.world().mode {
             CompilationMode::Bootstrap(stage) => {
                 if let Some(expected) = stage.expected_artifact

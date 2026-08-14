@@ -48,6 +48,15 @@ pub struct BudgetError {
     pub requested: u64,
 }
 
+/// A bounded reservation against one request-owned budget. It is affine: the
+/// reservation returns automatically on every early return, error, or
+/// cancellation path, so request work accounting cannot outlive its session.
+#[derive(Debug)]
+pub struct BudgetLease {
+    budget: Arc<Budget>,
+    amount: u64,
+}
+
 impl Budget {
     pub fn root(name: &'static str, ceiling: u64) -> Arc<Self> {
         Arc::new(Self {
@@ -82,6 +91,14 @@ impl Budget {
             return Err(error);
         }
         Ok(())
+    }
+
+    pub fn lease(self: &Arc<Self>, amount: u64) -> Result<BudgetLease, BudgetError> {
+        self.charge(amount)?;
+        Ok(BudgetLease {
+            budget: self.clone(),
+            amount,
+        })
     }
 
     pub fn release(&self, amount: u64) {
@@ -119,6 +136,12 @@ impl Budget {
                 Err(observed) => current = observed,
             }
         }
+    }
+}
+
+impl Drop for BudgetLease {
+    fn drop(&mut self) {
+        self.budget.release(self.amount);
     }
 }
 

@@ -119,6 +119,25 @@ pub(crate) struct InterfaceCacheInput<'a> {
     pub scan: &'a DeclarationScan,
 }
 
+/// The narrow interface-collection authority consumed by module graph
+/// construction. A direct cache commits each complete interface immediately;
+/// a request transaction stages them until the enclosing request outcome is
+/// known to be publishable.
+pub(crate) trait InterfaceCollector {
+    fn collect(&mut self, input: InterfaceCacheInput<'_>) -> InterfaceSet;
+}
+
+/// Request-local staging for frozen interface cache entries. Dropping this
+/// value abandons every cache miss collected during the request, making a
+/// failed/cancelled compilation unable to publish a partial cache fact.
+#[derive(Debug)]
+pub(crate) struct InterfaceCacheTransaction<'a> {
+    cache: &'a InterfaceCache,
+    staged: HashMap<InterfaceCacheKey, InterfaceSet>,
+    hits: u64,
+    misses: u64,
+}
+
 impl InterfaceCache {
     pub fn stats(&self) -> InterfaceCacheStats {
         *self
@@ -127,21 +146,75 @@ impl InterfaceCache {
             .expect("interface cache stats mutex poisoned")
     }
 
-    pub(crate) fn collect(&self, input: InterfaceCacheInput<'_>) -> InterfaceSet {
-        let key = InterfaceCacheKey {
+    pub(crate) fn transaction(&self) -> InterfaceCacheTransaction<'_> {
+        InterfaceCacheTransaction {
+            cache: self,
+            staged: HashMap::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    fn cache_key(input: &InterfaceCacheInput<'_>) -> InterfaceCacheKey {
+        InterfaceCacheKey {
             file: input.file,
             source: input.source_digest,
             package: input.package.clone(),
             module_path: input.module_path.to_owned(),
             interface_context: interface_context_fingerprint(input.build),
-        };
-        let mut entries = self.entries.lock().expect("interface cache mutex poisoned");
-        if let Some(interface) = entries.get(&key) {
-            self.stats
-                .lock()
-                .expect("interface cache stats mutex poisoned")
-                .hits += 1;
+        }
+    }
+
+    pub(crate) fn collect(&self, input: InterfaceCacheInput<'_>) -> InterfaceSet {
+        let mut transaction = self.transaction();
+        let interface = transaction.collect(input);
+        transaction.commit();
+        interface
+    }
+}
+
+impl InterfaceCollector for InterfaceCache {
+    fn collect(&mut self, input: InterfaceCacheInput<'_>) -> InterfaceSet {
+        InterfaceCache::collect(self, input)
+    }
+}
+
+impl InterfaceCacheTransaction<'_> {
+    pub(crate) fn commit(self) {
+        let mut entries = self
+            .cache
+            .entries
+            .lock()
+            .expect("interface cache mutex poisoned");
+        let mut stats = self
+            .cache
+            .stats
+            .lock()
+            .expect("interface cache stats mutex poisoned");
+        for (key, interface) in self.staged {
+            entries.entry(key).or_insert(interface);
+        }
+        stats.hits += self.hits;
+        stats.misses += self.misses;
+    }
+}
+
+impl InterfaceCollector for InterfaceCacheTransaction<'_> {
+    fn collect(&mut self, input: InterfaceCacheInput<'_>) -> InterfaceSet {
+        let key = InterfaceCache::cache_key(&input);
+        if let Some(interface) = self.staged.get(&key) {
             return interface.clone();
+        }
+        if let Some(interface) = self
+            .cache
+            .entries
+            .lock()
+            .expect("interface cache mutex poisoned")
+            .get(&key)
+            .cloned()
+        {
+            self.hits += 1;
+            return interface;
         }
         let interface = InterfaceSet::collect(
             input.package.clone(),
@@ -150,11 +223,8 @@ impl InterfaceCache {
             input.source,
             input.scan,
         );
-        entries.insert(key, interface.clone());
-        self.stats
-            .lock()
-            .expect("interface cache stats mutex poisoned")
-            .misses += 1;
+        self.staged.insert(key, interface.clone());
+        self.misses += 1;
         interface
     }
 }

@@ -6,6 +6,7 @@ use std::{
 use crate::{
     identity::{Digest, RevisionId, fresh_database_id},
     interface::{InterfaceCache, InterfaceCacheStats},
+    operation::{Budget, BudgetError, BudgetLease, CancellationToken},
     request::{CompilationRequest, InputError, NormalizedInputWorld},
 };
 
@@ -140,7 +141,27 @@ impl CompilerDatabase {
     /// a host later retires the revision in favour of a newer editor/build
     /// input world.
     pub fn open_session(&self, revision: RevisionId) -> Result<RequestSession, RevisionError> {
-        Ok(RequestSession::new(self.open(revision)?))
+        self.open_session_with_controls(
+            revision,
+            CancellationToken::new(),
+            Budget::root("request", u64::MAX),
+        )
+    }
+
+    /// Admit a request with host-owned operational controls. Cancellation and
+    /// resource budgets affect whether this request is attempted, never the
+    /// identity of its immutable semantic world.
+    pub fn open_session_with_controls(
+        &self,
+        revision: RevisionId,
+        cancellation: CancellationToken,
+        budget: Arc<Budget>,
+    ) -> Result<RequestSession, RevisionError> {
+        Ok(RequestSession::new(
+            self.open(revision)?,
+            cancellation,
+            budget,
+        ))
     }
 
     /// Check that a session was admitted by this database and that its pinned
@@ -303,11 +324,21 @@ impl DatabaseSnapshot {
 #[derive(Debug)]
 pub struct RequestSession {
     snapshot: DatabaseSnapshot,
+    cancellation: CancellationToken,
+    budget: Arc<Budget>,
 }
 
 impl RequestSession {
-    fn new(snapshot: DatabaseSnapshot) -> Self {
-        Self { snapshot }
+    fn new(
+        snapshot: DatabaseSnapshot,
+        cancellation: CancellationToken,
+        budget: Arc<Budget>,
+    ) -> Self {
+        Self {
+            snapshot,
+            cancellation,
+            budget,
+        }
     }
 
     pub fn snapshot(&self) -> &DatabaseSnapshot {
@@ -321,4 +352,27 @@ impl RequestSession {
     pub fn metadata(&self) -> RevisionMetadata {
         self.snapshot.metadata()
     }
+
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    pub fn budget(&self) -> &Arc<Budget> {
+        &self.budget
+    }
+
+    pub(crate) fn checkpoint(&self, cost: u64) -> Result<BudgetLease, RequestControlError> {
+        self.cancellation
+            .check()
+            .map_err(|_| RequestControlError::Cancelled)?;
+        self.budget
+            .lease(cost)
+            .map_err(RequestControlError::Resource)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RequestControlError {
+    Cancelled,
+    Resource(BudgetError),
 }

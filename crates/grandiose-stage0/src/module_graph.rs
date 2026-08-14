@@ -8,7 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     identity::{FileKey, ModuleKey, PackageKey},
-    interface::{InterfaceCache, InterfaceCacheInput, InterfaceSet},
+    interface::{
+        InterfaceCache, InterfaceCacheInput, InterfaceCacheTransaction, InterfaceCollector,
+        InterfaceSet,
+    },
     request::{NormalizedInputWorld, SourceInput},
     scanner::{DeclarationKind, DeclarationScan},
     source::{LexedFile, Span},
@@ -52,6 +55,28 @@ impl ModuleGraph {
         world: &NormalizedInputWorld,
         package: &PackageKey,
         cache: &InterfaceCache,
+    ) -> Self {
+        let mut transaction = cache.transaction();
+        let graph = Self::build_with_interface_transaction(world, package, &mut transaction);
+        transaction.commit();
+        graph
+    }
+
+    /// Build a graph with request-local frozen-interface staging. The caller
+    /// owns publication: dropping the transaction abandons all newly collected
+    /// interfaces along with the rest of a failed request.
+    pub(crate) fn build_with_interface_transaction(
+        world: &NormalizedInputWorld,
+        package: &PackageKey,
+        cache: &mut InterfaceCacheTransaction<'_>,
+    ) -> Self {
+        Self::build_with_interface_collector(world, package, cache)
+    }
+
+    fn build_with_interface_collector<C: InterfaceCollector>(
+        world: &NormalizedInputWorld,
+        package: &PackageKey,
+        cache: &mut C,
     ) -> Self {
         let supplied = world
             .sources
@@ -127,10 +152,10 @@ impl ModuleGraph {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn visit(
+    fn visit<C: InterfaceCollector>(
         &mut self,
         world: &NormalizedInputWorld,
-        cache: &InterfaceCache,
+        cache: &mut C,
         path: &str,
         key: &ModuleKey,
         supplied: &BTreeMap<String, &SourceInput>,
@@ -275,10 +300,10 @@ impl ModuleGraph {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn visit_inline(
+    fn visit_inline<C: InterfaceCollector>(
         &mut self,
         world: &NormalizedInputWorld,
-        cache: &InterfaceCache,
+        cache: &mut C,
         path: &str,
         key: &ModuleKey,
         source: &SourceInput,

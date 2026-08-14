@@ -1,9 +1,9 @@
 use grandiose_stage0::{
     BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
-    BootstrapManifestError, BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic,
-    CompilerBuildIdentity, DiagnosticClass, Digest, LogicalPath, PackageKey, RetentionReport,
-    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
-    decode_and_verify_program, decode_program,
+    BootstrapManifestError, BootstrapStage, Budget, CancellationToken, CompilationMode,
+    CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DiagnosticClass, Digest,
+    LogicalPath, PackageKey, RetentionReport, Severity, SourceInput, StageZeroCompiler,
+    VmArtifactError, VmExecutionLimits, VmInstruction, decode_and_verify_program, decode_program,
 };
 use std::collections::BTreeMap;
 
@@ -239,6 +239,70 @@ fn service_sessions_pin_retired_revisions_without_mixing_live_worlds() {
             .unwrap(),
         43
     );
+}
+
+#[test]
+fn cancelled_service_sessions_discard_staged_cache_artifacts_and_release_pins() {
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler
+        .import_revision(
+            request_with_module(
+                "mod math; pub fn main() -> i64 { math::answer() }",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+            None,
+        )
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    let budget = Budget::root("request", 4);
+    let session = compiler
+        .open_session_with_controls(revision, cancellation.clone(), budget.clone())
+        .unwrap();
+    cancellation.cancel();
+
+    let error = compiler.compile_session(&session).unwrap_err();
+    assert_eq!(error.diagnostics()[0].code, "G7029");
+    // `compile_session` returned no `CompilationOutcome`, so no artifact can
+    // cross the request publication boundary.
+    assert_eq!(compiler.interface_cache_stats().hits, 0);
+    assert_eq!(compiler.interface_cache_stats().misses, 0);
+    assert_eq!(budget.spent(), 0);
+
+    compiler.retire_revision(revision).unwrap();
+    assert_eq!(compiler.collect_retired().retained_pinned, 1);
+    drop(session);
+    assert_eq!(compiler.collect_retired().collected, 1);
+}
+
+#[test]
+fn failed_and_resource_limited_sessions_do_not_publish_staged_interfaces() {
+    let compiler = StageZeroCompiler::new();
+    let failed_revision = compiler
+        .import_revision(
+            request_with_module(
+                "mod math; pub fn helper() -> i64 { math::answer() }",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+            None,
+        )
+        .unwrap();
+    let failed_session = compiler.open_session(failed_revision).unwrap();
+    assert!(compiler.compile_session(&failed_session).is_err());
+    assert_eq!(compiler.interface_cache_stats().hits, 0);
+    assert_eq!(compiler.interface_cache_stats().misses, 0);
+
+    let limited_revision = compiler
+        .import_revision(request("pub fn main() -> i64 { 42 }"), None)
+        .unwrap();
+    let budget = Budget::root("request", 0);
+    let limited_session = compiler
+        .open_session_with_controls(limited_revision, CancellationToken::new(), budget.clone())
+        .unwrap();
+    let error = compiler.compile_session(&limited_session).unwrap_err();
+    assert_eq!(error.diagnostics()[0].code, "G7030");
+    assert_eq!(budget.spent(), 0);
+    assert_eq!(compiler.interface_cache_stats().hits, 0);
+    assert_eq!(compiler.interface_cache_stats().misses, 0);
 }
 
 #[test]
