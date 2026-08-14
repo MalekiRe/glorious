@@ -558,6 +558,37 @@ fn service_lowers_unique_borrow_deref_and_mutation_without_copying_the_place() {
 }
 
 #[test]
+fn shared_dereference_cannot_be_used_as_a_mutation_place() {
+    let diagnostics = match StageZeroCompiler::new().compile(request(
+        "pub fn main() -> i64 { let value = 1; let reference = &value; *reference = 42; value }",
+    )) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("shared-reference mutation unexpectedly compiled: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4141")
+    );
+}
+
+#[test]
+fn reference_to_body_local_cannot_escape_as_a_return_value() {
+    let diagnostics = match StageZeroCompiler::new()
+        .compile(request("pub fn main() -> &i64 { let value = 1; &value }"))
+    {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("body-local reference unexpectedly escaped: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "missing body-local reference escape diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn assignment_reinitializes_a_local_after_a_whole_value_move() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
