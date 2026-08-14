@@ -269,7 +269,17 @@ impl Analyzer<'_> {
                     // `name` owns the region instead of creating a forever
                     // live temporary loan. Evaluate the borrowed place first;
                     // its read remains subject to all pre-existing loans.
-                    self.visit_with_live_after(value, live_after);
+                    // The referent is evaluated before the lexical child is
+                    // installed.  Include its handles in the NLL frontier so
+                    // `let child = &*parent` cannot release `parent` merely
+                    // because only `child` is used after a handler boundary.
+                    let mut borrow_live = live_after.clone();
+                    self.collect_local_uses(value, &mut borrow_live);
+                    if let CoreKind::Deref(reference) = self.body.expression(value).kind {
+                        self.visit_with_live_after(reference, &borrow_live);
+                    } else {
+                        self.visit_with_live_after(value, &borrow_live);
+                    }
                     if !self.reborrow_place(value, unique, e.span, name.clone()) {
                         self.borrow_place(value, unique, e.span, Some(name.clone()));
                     }

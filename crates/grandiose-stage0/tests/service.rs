@@ -641,6 +641,27 @@ fn sibling_shared_reborrows_keep_the_parent_region_live() {
 }
 
 #[test]
+fn handler_join_retains_shared_reborrow_region_provenance() {
+    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 21; let parent = &mut value; let child = & *parent; handle Stop::stop() { Stop::stop() => 0 }; *child + *child }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn handler_join_keeps_shared_reborrow_parent_suspended() {
+    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = & *parent; handle Stop::stop() { Stop::stop() => 0 }; *parent = 2; *child }";
+    let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("handler join reopened a suspended parent: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004")
+    );
+}
+
+#[test]
 fn shared_reborrow_still_suspends_unique_parent_mutation() {
     let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = & *parent; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
