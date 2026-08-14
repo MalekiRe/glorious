@@ -60,3 +60,37 @@ fn scanner_keeps_constant_initializers_as_lazy_expression_body_ranges() {
     let parsed = grandiose_stage0::BodySyntax::parse_expression(&lexed, source, body);
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
 }
+
+#[test]
+fn scanner_keeps_top_level_value_initializer_calls_and_records_as_one_expression_range() {
+    let package = PackageKey("scanner-let@0.1.0".into());
+    let source = "let none = Result::Err { code: wrap(42) };";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/lib.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = grandiose_stage0::DeclarationScan::scan(&lexed, source);
+    let value = &scan.declarations[0];
+    assert_eq!(value.kind, grandiose_stage0::DeclarationKind::ValueAlias);
+    let body = value.body.expect("value initializer range");
+    let parsed = grandiose_stage0::BodySyntax::parse_expression(&lexed, source, body);
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+}
+
+#[test]
+fn scanner_reports_g3221_for_an_unterminated_top_level_value_initializer() {
+    let package = PackageKey("scanner-let-terminator@0.1.0".into());
+    let source = "let answer = add_one(41)";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/lib.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = grandiose_stage0::DeclarationScan::scan(&lexed, source);
+    assert!(
+        scan.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3221"),
+        "{:#?}",
+        scan.diagnostics
+    );
+}

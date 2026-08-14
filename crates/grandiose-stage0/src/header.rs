@@ -441,6 +441,13 @@ pub enum ParsedHeader {
         name: Vec<String>,
         target: Vec<String>,
     },
+    /// A frozen top-level value initializer. Unlike a forwarding alias, the
+    /// expression after `=` is evaluated exactly once by the generated VM
+    /// initializer function; its type is inferred and frozen before ordinary
+    /// callable bodies are elaborated.
+    ValueInitializer {
+        name: Vec<String>,
+    },
     Import(ImportHeader),
     Fixity(FixityHeader),
     Trait(TraitHeader),
@@ -524,11 +531,31 @@ impl HeaderParse {
                 if !parser.operator("=") {
                     parser.error("G3220", "expected `=` in value alias");
                 }
-                let target = parser.path();
-                if !parser.punctuation(';') {
-                    parser.error("G3221", "expected `;` after value alias");
+                // The scanner owns the initializer range so expression
+                // parsing remains demand-driven. A range consisting of one
+                // complete path is the established callable-forwarding form;
+                // every other expression is an evaluated top-level value.
+                let mut initializer = Parser {
+                    lexed,
+                    source,
+                    tokens: shell
+                        .body
+                        .map(|range| significant(lexed, range))
+                        .unwrap_or_default(),
+                    position: 0,
+                    diagnostics: vec![],
+                    recovered: false,
+                };
+                let target = initializer.path();
+                if !target.is_empty() && initializer.current().is_none() {
+                    ParsedHeader::ValueAlias { name, target }
+                } else {
+                    // The expression is deliberately not parsed as header
+                    // syntax. Its scanner-owned range is parsed once by the
+                    // ordinary body frontend, where calls, constructors, and
+                    // their argument contracts are retained in Typed Core.
+                    ParsedHeader::ValueInitializer { name }
                 }
-                ParsedHeader::ValueAlias { name, target }
             }
             DeclarationKind::Import => ParsedHeader::Import(parser.import()),
             DeclarationKind::Fixity => ParsedHeader::Fixity(parser.fixity(keyword.as_deref())),

@@ -3123,6 +3123,65 @@ impl TypedBody {
             recovered: elaborator.recovered,
         }
     }
+
+    /// Elaborate the expression owned by an evaluated top-level `let`.
+    /// These declarations deliberately share the constant lowering model:
+    /// they have no parameter scope and their outward effect row is closed.
+    /// The inferred result type is returned in Typed Core and is frozen by
+    /// the service before any ordinary body can consume the value.
+    pub fn elaborate_value_initializer(
+        definition: &Definition,
+        body: &BodySyntax,
+        index: &DefinitionIndex,
+        signatures: &ElaboratedInterface,
+        fixities: &FixityTable,
+    ) -> Self {
+        let mut elaborator = Elaborator {
+            body,
+            index,
+            signatures,
+            fixities,
+            definition: definition.key,
+            module: &definition.module,
+            inference: InferContext::default(),
+            locals: ScopeMap::default(),
+            expressions: vec![],
+            diagnostics: vec![],
+            recovered: body.recovered,
+            next_callable: 0,
+            next_resumption: 0,
+            next_refinement: 0,
+            next_label: 0,
+            active_refinement_bindings: std::collections::BTreeSet::new(),
+            generic_parameters: std::collections::BTreeMap::new(),
+            effect_row_parameters: std::collections::BTreeMap::new(),
+            lifetime_parameters: std::collections::BTreeMap::new(),
+            bound_lifetime_scopes: vec![],
+            const_parameters: std::collections::BTreeMap::new(),
+            declared_effects: EffectRow::empty(),
+            ambient_where_bounds: vec![],
+            ambient_callable_type_bindings: vec![],
+            ambient_callable_effect_bindings: vec![],
+            handled_effects: std::collections::BTreeSet::new(),
+            handled_operations: std::collections::BTreeSet::new(),
+            active_resumptions: vec![],
+            resumption_bindings: std::collections::BTreeMap::new(),
+            active_labels: vec![],
+            resumption_use_trackers: vec![],
+        };
+        let root = elaborator.expression_expected(body.root, None);
+        elaborator.seal_types();
+        elaborator
+            .diagnostics
+            .sort_by_key(|diagnostic| diagnostic.span.start);
+        Self {
+            parameters: vec![],
+            expressions: elaborator.expressions,
+            root,
+            diagnostics: elaborator.diagnostics,
+            recovered: elaborator.recovered,
+        }
+    }
 }
 
 fn callable(header: &ElaboratedHeader) -> Option<&crate::signature::CallableSignature> {
@@ -6084,6 +6143,14 @@ impl Elaborator<'_> {
                         Some(ElaboratedHeader::Constant(None)) => {
                             self.fail(span, "G4102", "constant value has no frozen type")
                         }
+                        Some(ElaboratedHeader::ValueInitializer(Some(ty))) => {
+                            self.alloc(CoreKind::Constant(definition), ty.clone(), span)
+                        }
+                        Some(ElaboratedHeader::ValueInitializer(None)) => self.fail(
+                            span,
+                            "G4102",
+                            "top-level value initializer has no frozen type",
+                        ),
                         _ => self.fail(span, "G4102", "value does not have a callable signature"),
                     },
                 }

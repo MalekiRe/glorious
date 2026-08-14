@@ -330,6 +330,28 @@ impl Scanner<'_> {
                         .expect("matched delimiter is significant")
                         + 1;
                 }
+                // A top-level `let` is terminated by its semicolon, never
+                // by an expression delimiter. Keep constructor records,
+                // tuples, arrays, and nested call arguments inside the lazy
+                // initializer range instead of mistaking `{ ... }` for a
+                // declaration body.
+                TokenKind::Punctuation('(' | '[' | '{')
+                    if kind == DeclarationKind::ValueAlias && initializer_start.is_some() =>
+                {
+                    let Some(close) = self.lexed.delimiters.matching(token_index) else {
+                        self.diagnostics.push(ScanDiagnostic {
+                            code: "G2001",
+                            span: token.span,
+                            message: "top-level value initializer has an unclosed delimiter",
+                        });
+                        return (token_index + 1, None, cursor + 1);
+                    };
+                    cursor = self
+                        .significant
+                        .binary_search(&close)
+                        .expect("matched delimiter is significant")
+                        + 1;
+                }
                 TokenKind::Punctuation('{') => match self.lexed.delimiters.matching(token_index) {
                     Some(close) => {
                         let close_position = self
@@ -352,7 +374,7 @@ impl Scanner<'_> {
                     }
                 },
                 TokenKind::Punctuation(';') => {
-                    let body = if kind == DeclarationKind::Constant {
+                    let body = if matches!(kind, DeclarationKind::Constant | DeclarationKind::ValueAlias) {
                         initializer_start.map(|start| TokenRange {
                             start,
                             end: token_index,
@@ -364,9 +386,17 @@ impl Scanner<'_> {
                 }
                 TokenKind::End => {
                     self.diagnostics.push(ScanDiagnostic {
-                        code: "G2002",
+                        code: if kind == DeclarationKind::ValueAlias && initializer_start.is_some() {
+                            "G3221"
+                        } else {
+                            "G2002"
+                        },
                         span: self.lexed.tokens[self.significant[declaration_position]].span,
-                        message: "declaration has no body or terminator",
+                        message: if kind == DeclarationKind::ValueAlias && initializer_start.is_some() {
+                            "expected `;` after top-level value declaration"
+                        } else {
+                            "declaration has no body or terminator"
+                        },
                     });
                     return (token_index, None, cursor);
                 }

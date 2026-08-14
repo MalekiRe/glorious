@@ -249,6 +249,10 @@ pub enum ElaboratedHeader {
         target: DefKey,
         signature: CallableSignature,
     },
+    /// A top-level evaluated `let`. The `Option` is `None` only during the
+    /// private elaboration prepass; all consumers require the resulting type
+    /// to be frozen before reading the value.
+    ValueInitializer(Option<Type>),
     /// Aliases retain both their binder arity and their frozen target.  The
     /// normalizer substitutes these at every consuming signature boundary;
     /// aliases therefore never become runtime nominal identities.
@@ -644,6 +648,11 @@ impl ElaboratedInterface {
         }
     }
 
+    pub fn freeze_value_initializer(&mut self, definition: DefKey, ty: Type) {
+        self.definitions
+            .insert(definition, ElaboratedHeader::ValueInitializer(Some(ty)));
+    }
+
     fn resolve_value_aliases(&mut self, interface: &PackageInterface, index: &DefinitionIndex) {
         let aliases = interface
             .definitions
@@ -1024,7 +1033,8 @@ impl ElaboratedInterface {
                 ElaboratedHeader::Alias { target, .. } => {
                     self.validate_type_projection_obligations(target, &[], &mut diagnostics);
                 }
-                ElaboratedHeader::Constant(Some(ty)) => {
+                ElaboratedHeader::Constant(Some(ty))
+                | ElaboratedHeader::ValueInitializer(Some(ty)) => {
                     self.validate_type_projection_obligations(ty, &[], &mut diagnostics);
                 }
                 ElaboratedHeader::Nominal { layout, .. } => match layout {
@@ -1192,7 +1202,9 @@ impl ElaboratedInterface {
                         );
                     }
                 }
-                ElaboratedHeader::Constant(None) | ElaboratedHeader::Opaque => {}
+                ElaboratedHeader::Constant(None)
+                | ElaboratedHeader::ValueInitializer(None)
+                | ElaboratedHeader::Opaque => {}
             }
         }
         self.diagnostics.extend(diagnostics);
@@ -2118,7 +2130,8 @@ impl ElaboratedInterface {
                         &mut diagnostics,
                     );
                 }
-                ElaboratedHeader::Constant(Some(ty)) => {
+                ElaboratedHeader::Constant(Some(ty))
+                | ElaboratedHeader::ValueInitializer(Some(ty)) => {
                     *ty = normalize_alias_type(ty.clone(), &aliases, &mut vec![], &mut diagnostics);
                 }
                 ElaboratedHeader::Nominal { layout, .. } => {
@@ -2197,7 +2210,9 @@ impl ElaboratedInterface {
                         );
                     }
                 }
-                ElaboratedHeader::Constant(None) | ElaboratedHeader::Opaque => {}
+                ElaboratedHeader::Constant(None)
+                | ElaboratedHeader::ValueInitializer(None)
+                | ElaboratedHeader::Opaque => {}
             }
         }
         self.diagnostics.extend(diagnostics);
@@ -3166,6 +3181,7 @@ impl Elaborator<'_> {
                 ElaboratedHeader::Constant(ty.as_ref().map(|value| self.ty(value)))
             }
             ParsedHeader::ValueAlias { .. } => ElaboratedHeader::Opaque,
+            ParsedHeader::ValueInitializer { .. } => ElaboratedHeader::ValueInitializer(None),
             ParsedHeader::Nominal { generics, layout } => {
                 self.bind_generics(generics);
                 ElaboratedHeader::Nominal {

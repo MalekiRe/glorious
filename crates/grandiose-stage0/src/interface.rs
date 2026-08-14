@@ -45,7 +45,8 @@ pub struct Definition {
     pub host_capability: Option<String>,
     pub header_fingerprint: Digest,
     /// Function bodies do not affect public interface identity, but a public
-    /// constant's initializer is an exported semantic value and must.
+    /// constant or evaluated top-level `let` initializer is an exported
+    /// semantic value and must.
     pub constant_value_fingerprint: Option<Digest>,
     /// Structured header syntax is frozen with the declaration interface.
     /// This lets later semantic queries elaborate the same signatures without
@@ -298,7 +299,8 @@ impl InterfaceSet {
                 ),
                 _ => header_fingerprint(lexed, source, fingerprint_range),
             };
-            let constant_value_fingerprint = (shell.kind == DeclarationKind::Constant)
+            let constant_value_fingerprint = (shell.kind == DeclarationKind::Constant
+                || (shell.kind == DeclarationKind::ValueAlias && shell.body.is_some()))
                 .then(|| {
                     shell
                         .body

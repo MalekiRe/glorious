@@ -827,12 +827,53 @@ impl StageZeroCompiler {
                 None => diagnostic,
             }
         }));
-        let signatures = ElaboratedInterface::merge(graph.modules.values().map(|node| {
+        let mut signatures = ElaboratedInterface::merge(graph.modules.values().map(|node| {
             ElaboratedInterface::elaborate_with_index(&node.interface.interface, &index)
         }));
         diagnostics.extend(signatures.diagnostics.iter().map(|diagnostic| {
             CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), None)
         }));
+        // An evaluated top-level `let` has no declared result annotation.
+        // Freeze its inferred Core result before ordinary bodies are read, so
+        // all later value paths have a deterministic, interface-owned type.
+        // Path-only `let target = callable;` declarations are intentionally
+        // excluded: those retain the forwarding-alias contract frozen above.
+        for node in graph.modules.values() {
+            let Some(source) = snapshot
+                .world()
+                .sources
+                .iter()
+                .find(|source| source.key == node.file)
+            else {
+                continue;
+            };
+            let text = std::str::from_utf8(&source.bytes)
+                .expect("normalized world only contains UTF-8");
+            let lexed = crate::LexedFile::lex(source.key, text);
+            let fixities = FixityTable::for_module(&node.interface.interface);
+            for declaration in node.interface.interface.definitions.iter().filter(|definition| {
+                matches!(definition.syntax.header, ParsedHeader::ValueInitializer { .. })
+            }) {
+                let Some(body_range) = declaration.body else {
+                    continue;
+                };
+                let body = BodySyntax::parse_expression(&lexed, text, body_range);
+                if !body.diagnostics.is_empty() || body.recovered {
+                    continue;
+                }
+                let core = TypedBody::elaborate_value_initializer(
+                    declaration,
+                    &body,
+                    &index,
+                    &signatures,
+                    &fixities,
+                );
+                if core.diagnostics.is_empty() && !core.recovered {
+                    let ty = core.expression(core.root).ty.clone();
+                    signatures.freeze_value_initializer(declaration.key, ty);
+                }
+            }
+        }
         // Host declarations are source-visible only when their exact frozen
         // capability is present in this request world.  This check happens
         // before bodies/Core are produced, so an unauthorized import can
@@ -1018,6 +1059,10 @@ impl StageZeroCompiler {
                     (definition.callable_header().is_some()
                         && definition.kind != crate::DeclarationKind::HostImport)
                         || definition.kind == crate::DeclarationKind::Constant
+                        || matches!(
+                            definition.syntax.header,
+                            ParsedHeader::ValueInitializer { .. }
+                        )
                 })
             {
                 session.checkpoint(1)?;
@@ -1032,7 +1077,11 @@ impl StageZeroCompiler {
                     ));
                     continue;
                 };
-                let is_constant = declaration.kind == crate::DeclarationKind::Constant;
+                let is_constant = declaration.kind == crate::DeclarationKind::Constant
+                    || matches!(
+                        declaration.syntax.header,
+                        ParsedHeader::ValueInitializer { .. }
+                    );
                 let body = if is_constant {
                     BodySyntax::parse_expression(&lexed, text, body_range)
                 } else {
@@ -1060,8 +1109,19 @@ impl StageZeroCompiler {
                         Some(declaration.span),
                     ));
                 }
-                let core = if is_constant {
+                let core = if declaration.kind == crate::DeclarationKind::Constant {
                     TypedBody::elaborate_constant(
+                        declaration,
+                        &body,
+                        &index,
+                        &signatures,
+                        &fixities,
+                    )
+                } else if matches!(
+                    declaration.syntax.header,
+                    ParsedHeader::ValueInitializer { .. }
+                ) {
+                    TypedBody::elaborate_value_initializer(
                         declaration,
                         &body,
                         &index,

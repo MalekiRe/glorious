@@ -106,6 +106,40 @@ fn typed_core_opens_intrinsic_fn_where_contract_for_generic_local_calls() {
 }
 
 #[test]
+fn typed_core_rejects_a_forged_unfrozen_top_level_value_initializer() {
+    let package = PackageKey("core-forged-let-initializer@0.1.0".into());
+    let source = "let answer = 40 + 2; pub fn main() -> i64 { answer }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    // `elaborate` alone is the pre-initialization frozen interface. The
+    // service normally fills this value's inferred type before bodies are
+    // read; retaining the incomplete map simulates forged metadata.
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4102"),
+        "unfrozen top-level value metadata reached executable Core: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn declared_result_expectations_flow_through_blocks_and_structured_values() {
     let core = core_for(
         "core-structured-expected-types@0.1.0",

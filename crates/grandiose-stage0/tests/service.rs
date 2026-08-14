@@ -5978,6 +5978,70 @@ fn service_rejects_constant_initializer_cycles_before_vm_emission() {
 }
 
 #[test]
+fn service_executes_frozen_top_level_value_initializer_calls() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } let answer = add_one(41); pub fn main() -> i64 { answer }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_freezes_constructor_top_level_value_initializers() {
+    let source = "pub enum Result { Err(()) } let None = Result::Err(()); pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_accepts_canonical_boolean_value_initializer_spellings() {
+    let source = "pub fn __g1_bool_true() -> Bool { true } pub fn __g1_bool_false() -> Bool { false } let true = __g1_bool_true(); let false = __g1_bool_false(); pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_resolves_public_top_level_value_initializers_across_modules() {
+    let root = "mod math; let answer = math::value(); pub fn main() -> i64 { answer }";
+    let child = "pub fn value() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_module(root, child))
+        .unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_resolves_exported_top_level_value_initializers_from_another_module() {
+    let root = "mod math; pub fn main() -> i64 { math::answer }";
+    let child = "pub fn value() -> i64 { 42 } pub let answer = value();";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_module(root, child))
+        .unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_bad_top_level_value_initializer_call_arguments() {
+    let source = "pub fn identity(value: i64) -> i64 { value } let broken = identity(true); pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4107"),
+        "initializer call argument mismatch was accepted: {:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn service_rejects_effectful_top_level_value_initializers() {
+    let source = "effect Ask { ask() -> i64; } let answer = Ask::ask(); pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4155"),
+        "effectful top-level initializer was accepted: {:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
 fn service_executes_transparent_type_alias_contracts() {
     let source = "type Count = i64; pub fn add_two(value: Count) -> Count { value + 2 } pub fn main() -> Count { add_two(40) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

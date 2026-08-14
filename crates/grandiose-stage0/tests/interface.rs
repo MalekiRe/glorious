@@ -192,3 +192,13 @@ fn public_constant_values_participate_in_interface_fingerprints() {
         changed.interface.public_fingerprint
     );
 }
+
+#[test]
+fn public_evaluated_top_level_let_values_participate_in_interface_fingerprints() {
+    let first = collect("pub let answer = add_one(40);");
+    let changed = collect("pub let answer = add_one(41);");
+    assert_ne!(
+        first.interface.public_fingerprint,
+        changed.interface.public_fingerprint
+    );
+}
