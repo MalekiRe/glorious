@@ -10,10 +10,9 @@ use crate::{
     BodySyntax, BootstrapManifest, CoherenceSet, CompilationMode, CompilationRequest,
     CompilerDatabase, DatabaseSnapshot, DefKey, DefinitionIndex, DiagnosticClass, Digest,
     ElaboratedHeader, ElaboratedInterface, EscapeFlow, FixityTable, InputError, MirFunction,
-    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, RequestSession,
-    RetentionReport, RevisionError, RevisionId, Severity, SourceSpan, Span,
-    TrustedRuntimeManifest, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program,
-    implementation_method_key, verify_vm_program,
+    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, RequestSession, RetentionReport,
+    RevisionError, RevisionId, Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody,
+    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
