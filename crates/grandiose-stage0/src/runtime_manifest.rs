@@ -142,6 +142,7 @@ pub enum PrimitiveRole {
     IntConvertWrappingToIsize,
     IntConvertCheckedToU128,
     IntConvertWrappingToU128,
+    IntConvertCheckedToI128,
 }
 
 impl PrimitiveRole {
@@ -214,6 +215,7 @@ impl PrimitiveRole {
             Self::IntConvertWrappingToIsize => "int-convert-wrapping-to-isize",
             Self::IntConvertCheckedToU128 => "int-convert-checked-to-u128",
             Self::IntConvertWrappingToU128 => "int-convert-wrapping-to-u128",
+            Self::IntConvertCheckedToI128 => "int-convert-checked-to-i128",
         }
     }
 
@@ -286,6 +288,7 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-isize" => Self::IntConvertWrappingToIsize,
             "int-convert-checked-to-u128" => Self::IntConvertCheckedToU128,
             "int-convert-wrapping-to-u128" => Self::IntConvertWrappingToU128,
+            "int-convert-checked-to-i128" => Self::IntConvertCheckedToI128,
             _ => return None,
         })
     }
@@ -850,6 +853,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntConvertCheckedToI128 => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Scalar(crate::ScalarType::I128),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntConvertWrappingToIsize => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
@@ -1029,6 +1043,7 @@ fn manifest_digest(
             PrimitiveRole::IntConvertWrappingToIsize => 64,
             PrimitiveRole::IntConvertCheckedToU128 => 65,
             PrimitiveRole::IntConvertWrappingToU128 => 66,
+            PrimitiveRole::IntConvertCheckedToI128 => 67,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

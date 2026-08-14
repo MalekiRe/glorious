@@ -535,6 +535,27 @@ fn manifest_bound_checked_i64_to_u128_converts_and_rejects_negative_values() {
 }
 
 #[test]
+fn manifest_bound_checked_i64_to_i128_preserves_signed_value() {
+    let mut input = request(
+        "fn __g1_int_convert_checked_to_i128<T>(value: T) -> i128 { () } pub fn main() -> i128 { __g1_int_convert_checked_to_i128<i64>(-42) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertCheckedToI128,
+        "__g1_int_convert_checked_to_i128",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i128()
+            .unwrap(),
+        -42
+    );
+}
+
+#[test]
 fn manifest_bound_wrapping_i64_to_u128_retains_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_u128<T>(value: T) -> u128 { () } pub fn main() -> u128 { __g1_int_convert_wrapping_to_u128<i64>(-1) }",
