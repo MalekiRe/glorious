@@ -10,6 +10,62 @@ use grandiose_stage0::{
 };
 use std::collections::BTreeMap;
 
+/// One small schema-26 artifact whose payload contains every fixed `Leave`
+/// header field plus both parallel register vectors and a cleanup proof. Tests
+/// mutate this canonical byte image rather than relying on Debug formatting.
+fn encoded_leave_fixture() -> Vec<u8> {
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"hostile-leave-fixture")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 7 },
+                VmInstruction::Leave {
+                    brand_owner: DefKey(Digest::of_bytes(b"hostile-leave-owner")),
+                    brand_label: 9,
+                    target: 2,
+                    arguments: vec![0],
+                    destinations: vec![1],
+                    cleanup: VmCleanupProof {
+                        moved_places: vec![VmCleanupPlace {
+                            root: "value".into(),
+                            fields: vec![0],
+                        }],
+                        active_loans: vec![],
+                    },
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"hostile-leave-fixture-fingerprint"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    encode_artifact(&artifact)
+}
+
+#[test]
+fn schema_26_leave_bytes_reject_every_truncation_and_fingerprint_tampering() {
+    let bytes = encoded_leave_fixture();
+    assert!(decode_and_verify_artifact(&bytes).is_ok());
+    for length in 0..bytes.len() {
+        assert!(
+            decode_artifact(&bytes[..length]).is_err(),
+            "truncated Leave artifact at byte {length} decoded"
+        );
+    }
+    // Magic (8) + schema (4) precede the semantic artifact fingerprint.
+    let mut tampered = bytes;
+    tampered[12] ^= 1;
+    assert!(matches!(
+        decode_and_verify_artifact(&tampered),
+        Err(VmArtifactError::FingerprintMismatch)
+    ));
+}
+
 #[test]
 fn verified_stage_zero_vm_artifact_executes_lowered_mir() {
     let package = PackageKey("vm@0.1.0".into());
