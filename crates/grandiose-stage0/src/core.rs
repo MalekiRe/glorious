@@ -1014,9 +1014,10 @@ fn pattern_is_recovered(pattern: &CorePattern) -> bool {
 fn type_contains_inference(ty: &Type) -> bool {
     match ty {
         Type::Infer(_) => true,
-        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
-            arguments.iter().any(type_contains_inference)
+        Type::Nominal { arguments, .. } => {
+            arguments.iter().any(generic_argument_contains_inference)
         }
+        Type::Tuple(arguments) => arguments.iter().any(type_contains_inference),
         Type::Projection {
             subject,
             trait_arguments,
@@ -2803,38 +2804,20 @@ impl Elaborator<'_> {
                 }
                 Type::Nominal {
                     definition,
-                    arguments: arguments
-                        .iter()
-                        .zip(kinds)
-                        .map(|(argument, kind)| match (argument, kind) {
-                            (
-                                crate::header::HeaderGenericArgument::Type(value),
-                                crate::GenericKind::Type,
-                            ) => self.header_type(value),
-                            (
-                                crate::header::HeaderGenericArgument::U32(value),
-                                crate::GenericKind::Const(crate::ConstKind::U32),
-                            ) => Type::ConstU32(*value),
-                            (
-                                crate::header::HeaderGenericArgument::Quantity(value),
-                                crate::GenericKind::Const(crate::ConstKind::Quantity),
-                            ) => Type::ConstQuantity(*value),
-                            (
-                                crate::header::HeaderGenericArgument::Type(
-                                    crate::header::HeaderType::Path(path),
-                                ),
-                                crate::GenericKind::Const(kind),
-                            ) if path.len() == 1 => self
-                                .const_parameters
-                                .get(&path[0])
-                                .filter(|(_, found)| found == kind)
-                                .map_or(Type::Error, |(index, kind)| Type::ConstGeneric {
-                                    index: *index,
-                                    kind: *kind,
-                                }),
-                            _ => Type::Error,
-                        })
-                        .collect(),
+                    arguments: self
+                        .body_generic_arguments(
+                            arguments,
+                            kinds,
+                            self.body.expression(self.body.root).span,
+                            "G4158",
+                            "nominal generic arguments do not match its declaration",
+                        )
+                        .unwrap_or_else(|| {
+                            arguments
+                                .iter()
+                                .map(|_| GenericArgument::Type(Type::Error))
+                                .collect()
+                        }),
                 }
             }
             ResolutionState::Ambiguous(_) => Type::Error,
@@ -3679,7 +3662,8 @@ impl Elaborator<'_> {
                 };
                 let Some(layout) = self
                     .signatures
-                    .instantiate_struct_fields(actual, &arguments)
+                    .instantiate_struct_fields_generic(actual, &arguments)
+                    .ok()
                 else {
                     self.error(
                         span,
@@ -3744,7 +3728,8 @@ impl Elaborator<'_> {
                 };
                 let Some(layout) = self
                     .signatures
-                    .instantiate_enum_fields(actual, &arguments, variant)
+                    .instantiate_enum_fields_generic(actual, &arguments, variant)
+                    .ok()
                 else {
                     self.error(
                         span,
@@ -4048,7 +4033,8 @@ impl Elaborator<'_> {
                 };
                 let Some(fields) = self
                     .signatures
-                    .instantiate_struct_fields(definition, &arguments)
+                    .instantiate_struct_fields_generic(definition, &arguments)
+                    .ok()
                 else {
                     self.error(
                         span,
@@ -4182,7 +4168,7 @@ impl Elaborator<'_> {
         }
         let ty = Type::Nominal {
             definition,
-            arguments,
+            arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
         };
         self.alloc(
             CoreKind::Record {
@@ -4315,7 +4301,7 @@ impl Elaborator<'_> {
             },
             Type::Nominal {
                 definition,
-                arguments,
+                arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
             },
             span,
         ))
@@ -4332,7 +4318,8 @@ impl Elaborator<'_> {
         };
         let Some(fields) = self
             .signatures
-            .instantiate_struct_fields(definition, &arguments)
+            .instantiate_struct_fields_generic(definition, &arguments)
+            .ok()
         else {
             return self.fail(span, "G4128", "field projection requires a struct value");
         };
@@ -4414,7 +4401,7 @@ impl Elaborator<'_> {
             },
             Type::Nominal {
                 definition,
-                arguments,
+                arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
             },
             span,
         ))
@@ -5445,7 +5432,8 @@ impl Elaborator<'_> {
                 } => {
                     let fields = self
                         .signatures
-                        .instantiate_struct_fields(*definition, arguments)?;
+                        .instantiate_struct_fields_generic(*definition, arguments)
+                        .ok()?;
                     let values = fields
                         .iter()
                         .map(|field| self.finite_pattern_values(&field.ty, depth + 1))
@@ -5466,11 +5454,10 @@ impl Elaborator<'_> {
                 } => {
                     let mut values = vec![];
                     for (variant, _) in variants.iter().enumerate() {
-                        let fields = self.signatures.instantiate_enum_fields(
-                            *definition,
-                            arguments,
-                            variant as u32,
-                        )?;
+                        let fields = self
+                            .signatures
+                            .instantiate_enum_fields_generic(*definition, arguments, variant as u32)
+                            .ok()?;
                         let fields = fields
                             .iter()
                             .map(|field| self.finite_pattern_values(&field.ty, depth + 1))
@@ -6383,7 +6370,7 @@ fn align_lifetime_types(
                     .iter()
                     .zip(actual_arguments)
                     .map(|(expected, actual)| {
-                        align_lifetime_types(expected, actual, substitution, mode, depth)
+                        align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
                     })
                     .collect::<Result<_, _>>()?,
             })
@@ -6481,6 +6468,27 @@ fn align_lifetime_types(
     }
 }
 
+fn align_lifetime_generic_argument(
+    expected: &GenericArgument,
+    actual: &GenericArgument,
+    substitution: &mut CallLifetimeSubstitution,
+    mode: LifetimeMode,
+    depth: u32,
+) -> Result<GenericArgument, LifetimeError> {
+    match (expected, actual) {
+        (GenericArgument::Type(expected), GenericArgument::Type(actual)) => {
+            align_lifetime_types(expected, actual, substitution, mode, depth)
+                .map(GenericArgument::Type)
+        }
+        (GenericArgument::Lifetime(expected), GenericArgument::Lifetime(actual)) => {
+            bind_lifetime(*expected, *actual, substitution, mode, depth)?;
+            Ok(GenericArgument::Lifetime(*actual))
+        }
+        (expected, actual) if expected == actual => Ok(expected.clone()),
+        _ => Err(LifetimeError::UnsatisfiedOutlives),
+    }
+}
+
 fn bind_lifetime(
     expected: Lifetime,
     actual: Lifetime,
@@ -6540,7 +6548,7 @@ fn substitute_call_lifetimes(
             definition,
             arguments: arguments
                 .into_iter()
-                .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                .map(|value| substitute_call_generic_argument(value, substitution, depth))
                 .collect::<Result<_, _>>()?,
         }),
         Type::Projection {
@@ -6708,9 +6716,8 @@ fn substitute_call_generic_argument(
 fn projection_is_concrete(value: &Type) -> bool {
     match value {
         Type::Generic(_) | Type::Infer(_) => false,
-        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
-            arguments.iter().all(projection_is_concrete)
-        }
+        Type::Nominal { arguments, .. } => arguments.iter().all(generic_argument_is_concrete),
+        Type::Tuple(arguments) => arguments.iter().all(projection_is_concrete),
         Type::Projection {
             subject,
             trait_arguments,
@@ -6735,6 +6742,25 @@ fn projection_is_concrete(value: &Type) -> bool {
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Error => true,
+    }
+}
+
+fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => projection_is_concrete(value),
+        GenericArgument::EffectRow(value) => {
+            value.tail.is_none()
+                && value
+                    .effects
+                    .iter()
+                    .all(|effect| effect.arguments.iter().all(generic_argument_is_concrete))
+                && value.projections.is_empty()
+        }
+        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_) => true,
+        GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. })
+        | GenericArgument::ConstGeneric { .. } => false,
     }
 }
 
@@ -6921,7 +6947,7 @@ fn pattern_decision_matches_value(
     }
 }
 
-fn nominal_parts(subject: &Type) -> Option<(DefKey, Vec<Type>)> {
+fn nominal_parts(subject: &Type) -> Option<(DefKey, Vec<GenericArgument>)> {
     match subject {
         Type::Nominal {
             definition,

@@ -1081,11 +1081,11 @@ fn typed_closures_normalize_structural_const_arithmetic_in_type_contracts() {
     };
     assert!(matches!(
         parameters.as_slice(),
-        [Type::Nominal { arguments, .. }] if arguments == &vec![Type::ConstU32(3)]
+        [Type::Nominal { arguments, .. }] if arguments == &vec![GenericArgument::ConstU32(3)]
     ));
     assert!(matches!(
         result.as_ref(),
-        Type::Nominal { arguments, .. } if arguments == &vec![Type::ConstU32(3)]
+        Type::Nominal { arguments, .. } if arguments == &vec![GenericArgument::ConstU32(3)]
     ));
 }
 

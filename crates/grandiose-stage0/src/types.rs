@@ -207,7 +207,10 @@ pub enum Type {
     Scalar(ScalarType),
     Nominal {
         definition: DefKey,
-        arguments: Vec<Type>,
+        /// Nominal identity spans every declared generic kind. Keeping rows,
+        /// lifetimes, and structural constants here prevents a source slot
+        /// from being erased merely because its runtime layout is type-only.
+        arguments: Vec<GenericArgument>,
     },
     /// A delayed associated-type normalization. Generic interfaces retain this
     /// term until a concrete trait goal can select implementation evidence.
@@ -352,7 +355,7 @@ impl InferContext {
                 },
             ) if left == right => Ok(Type::Nominal {
                 definition: left,
-                arguments: self.unify_many(left_arguments, right_arguments)?,
+                arguments: self.unify_generic_arguments(left_arguments, right_arguments)?,
             }),
             (
                 Type::Projection {
@@ -442,7 +445,7 @@ impl InferContext {
                 definition,
                 arguments: arguments
                     .into_iter()
-                    .map(|argument| self.zonk(argument))
+                    .map(|argument| self.zonk_generic_argument(argument))
                     .collect::<Result<_, _>>()?,
             }),
             Type::Projection {
@@ -548,12 +551,7 @@ impl InferContext {
                         arguments: effect
                             .arguments
                             .into_iter()
-                            .map(|argument| match argument {
-                                GenericArgument::Type(argument) => {
-                                    self.zonk(argument).map(GenericArgument::Type)
-                                }
-                                argument => Ok(argument),
-                            })
+                            .map(|argument| self.zonk_generic_argument(argument))
                             .collect::<Result<_, _>>()?,
                     })
                 })
@@ -601,28 +599,26 @@ impl InferContext {
         &mut self,
         left: Vec<GenericArgument>,
         right: Vec<GenericArgument>,
-    ) -> Result<(), TypeError> {
+    ) -> Result<Vec<GenericArgument>, TypeError> {
         if left.len() != right.len() {
             return Err(TypeError::Arity {
                 expected: left.len(),
                 found: right.len(),
             });
         }
-        for (left, right) in left.into_iter().zip(right) {
-            match (left, right) {
+        left.into_iter()
+            .zip(right)
+            .map(|(left, right)| match (left, right) {
                 (GenericArgument::Type(left), GenericArgument::Type(right)) => {
-                    self.unify(left, right)?;
+                    self.unify(left, right).map(GenericArgument::Type)
                 }
-                (left, right) if left == right => {}
-                _ => {
-                    return Err(TypeError::Mismatch {
-                        expected: Box::new(Type::Error),
-                        found: Box::new(Type::Error),
-                    });
-                }
-            }
-        }
-        Ok(())
+                (left, right) if left == right => Ok(left),
+                _ => Err(TypeError::Mismatch {
+                    expected: Box::new(Type::Error),
+                    found: Box::new(Type::Error),
+                }),
+            })
+            .collect()
     }
 
     fn unify_effect_rows(
@@ -803,7 +799,7 @@ impl InferContext {
                 continue;
             }
             let index = candidates[0];
-            self.unify_generic_arguments(
+            let _ = self.unify_generic_arguments(
                 effect.arguments.clone(),
                 right_values[index].arguments.clone(),
             )?;
@@ -836,7 +832,7 @@ impl InferContext {
                 left_arguments
                     .iter()
                     .zip(&right_arguments)
-                    .all(|(left, right)| self.types_may_unify(left, right))
+                    .all(|(left, right)| self.generic_arguments_may_unify(left, right))
             }
             (
                 Type::Projection {
@@ -939,7 +935,10 @@ impl InferContext {
     fn occurs(&mut self, variable: InferVar, value: &Type) -> bool {
         match self.resolve(value.clone()) {
             Type::Infer(found) => found == variable,
-            Type::Nominal { arguments, .. } | Type::Tuple(arguments) => arguments
+            Type::Nominal { arguments, .. } => arguments
+                .iter()
+                .any(|argument| self.generic_argument_occurs(variable, argument)),
+            Type::Tuple(arguments) => arguments
                 .iter()
                 .any(|argument| self.occurs(variable, argument)),
             Type::Projection {
@@ -984,6 +983,47 @@ impl InferContext {
             _ => left == right,
         }
     }
+
+    fn zonk_generic_argument(
+        &mut self,
+        argument: GenericArgument,
+    ) -> Result<GenericArgument, TypeError> {
+        match argument {
+            GenericArgument::Type(value) => self.zonk(value).map(GenericArgument::Type),
+            GenericArgument::EffectRow(value) => self
+                .zonk_effects_allowing_generic_tail(value)
+                .map(GenericArgument::EffectRow),
+            argument => Ok(argument),
+        }
+    }
+
+    fn generic_argument_occurs(&mut self, variable: InferVar, argument: &GenericArgument) -> bool {
+        match argument {
+            GenericArgument::Type(value) => self.occurs(variable, value),
+            GenericArgument::EffectRow(value) => {
+                value.effects.iter().any(|effect| {
+                    effect
+                        .arguments
+                        .iter()
+                        .any(|argument| self.generic_argument_occurs(variable, argument))
+                }) || value.projections.iter().any(|projection| {
+                    self.occurs(variable, &projection.subject)
+                        || projection
+                            .trait_arguments
+                            .iter()
+                            .any(|argument| self.occurs(variable, argument))
+                        || projection
+                            .item_arguments
+                            .iter()
+                            .any(|argument| self.occurs(variable, argument))
+                })
+            }
+            GenericArgument::Lifetime(_)
+            | GenericArgument::ConstU32(_)
+            | GenericArgument::ConstQuantity(_)
+            | GenericArgument::ConstGeneric { .. } => false,
+        }
+    }
 }
 
 fn encode_type(value: &Type, output: &mut Vec<u8>) {
@@ -1019,7 +1059,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
         } => {
             output.push(3);
             output.extend_from_slice(&definition.0.as_bytes());
-            encode_types(arguments, output);
+            encode_generic_arguments(arguments, output);
         }
         Type::Projection {
             subject,

@@ -44,7 +44,7 @@ fn tabled_solver_proves_generic_impls_after_where_obligations() {
         },
         subject: Type::Nominal {
             definition: boxed,
-            arguments: vec![Type::Scalar(ScalarType::I64)],
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
         },
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
@@ -187,7 +187,7 @@ fn tabled_solver_substitutes_structural_const_impl_binders_into_where_obligation
         },
         subject: Type::Nominal {
             definition: tag,
-            arguments: vec![Type::ConstU32(7)],
+            arguments: vec![GenericArgument::ConstU32(7)],
         },
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
@@ -207,7 +207,7 @@ fn tabled_solver_matches_structural_const_trait_arguments() {
         },
         subject: Type::Nominal {
             definition: tag,
-            arguments: vec![Type::ConstU32(7)],
+            arguments: vec![GenericArgument::ConstU32(7)],
         },
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
@@ -232,7 +232,7 @@ fn trait_solver_rejects_cross_kind_const_substitution() {
         },
         subject: Type::Nominal {
             definition: tag,
-            arguments: vec![Type::ConstU32(1)],
+            arguments: vec![GenericArgument::ConstU32(1)],
         },
     });
     assert!(matches!(answer, TraitAnswer::NoSolution), "{answer:#?}");
@@ -254,7 +254,7 @@ fn tabled_solver_does_not_bind_const_impl_binders_to_ordinary_types() {
         // boundary too.
         subject: Type::Nominal {
             definition: tag,
-            arguments: vec![Type::Scalar(ScalarType::I64)],
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
         },
     });
     assert_eq!(answer, TraitAnswer::NoSolution);
@@ -276,7 +276,7 @@ fn tabled_solver_distinguishes_negative_evidence_and_missing_evidence() {
             relation: relation.clone(),
             subject: Type::Nominal {
                 definition: boxed,
-                arguments: vec![Type::Scalar(ScalarType::Text)],
+                arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))],
             },
         }),
         TraitAnswer::Refuted { .. }
@@ -286,7 +286,7 @@ fn tabled_solver_distinguishes_negative_evidence_and_missing_evidence() {
             relation,
             subject: Type::Nominal {
                 definition: boxed,
-                arguments: vec![Type::Scalar(ScalarType::I64)],
+                arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
             },
         }),
         TraitAnswer::NoSolution
@@ -321,7 +321,7 @@ fn negative_impls_must_prove_their_where_bounds_before_refuting_a_goal() {
         },
         subject: Type::Nominal {
             definition: boxed,
-            arguments: vec![Type::Scalar(ScalarType::I64)],
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
         },
     };
     assert_eq!(
@@ -345,7 +345,7 @@ fn associated_type_normalization_uses_the_selected_impl_substitution() {
             },
             subject: Type::Nominal {
                 definition: range,
-                arguments: vec![Type::Scalar(ScalarType::Text)],
+                arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))],
             },
         },
         "Item",
@@ -558,7 +558,7 @@ fn method_selection_substitutes_impl_and_method_generic_arguments() {
             },
             subject: Type::Nominal {
                 definition: boxed,
-                arguments: vec![Type::Scalar(ScalarType::I64)],
+                arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
             },
         },
         "convert",

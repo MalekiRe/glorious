@@ -2054,7 +2054,7 @@ fn type_contract_matches(
             if definition == actual_definition
                 && arguments.len() == actual_arguments.len()
                 && arguments.iter().zip(actual_arguments).all(|(expected, actual)| {
-                    type_contract_matches(expected, actual, substitutions)
+                    generic_contract_matches(expected, actual, substitutions)
                 }))
         }
         Type::Tuple(values) => matches!(actual, Type::Tuple(actual_values)
@@ -9001,7 +9001,8 @@ fn collect_generic_substitutions(
                 .iter()
                 .zip(actual_arguments)
                 .try_for_each(|(template, actual)| {
-                    collect_generic_substitutions(template, actual, substitutions).ok_or(())
+                    collect_generic_argument_substitutions(template, actual, substitutions)
+                        .ok_or(())
                 })
                 .ok()
         }
@@ -9051,7 +9052,7 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
             definition,
             arguments: arguments
                 .into_iter()
-                .map(|argument| substitute_generic_type(argument, substitutions))
+                .map(|argument| substitute_generic_argument(argument, substitutions))
                 .collect::<Option<_>>()?,
         }),
         Type::Projection {
@@ -9109,6 +9110,33 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
             invocation,
         }),
         value => Some(value),
+    }
+}
+
+fn generic_contract_matches(
+    expected: &GenericArgument,
+    actual: &GenericArgument,
+    substitutions: &mut BTreeMap<u32, Type>,
+) -> bool {
+    match (expected, actual) {
+        (GenericArgument::Type(expected), GenericArgument::Type(actual)) => {
+            type_contract_matches(expected, actual, substitutions)
+        }
+        _ => expected == actual,
+    }
+}
+
+fn collect_generic_argument_substitutions(
+    template: &GenericArgument,
+    actual: &GenericArgument,
+    substitutions: &mut BTreeMap<u32, Type>,
+) -> Option<()> {
+    match (template, actual) {
+        (GenericArgument::Type(template), GenericArgument::Type(actual)) => {
+            collect_generic_substitutions(template, actual, substitutions)
+        }
+        (template, actual) if template == actual => Some(()),
+        _ => None,
     }
 }
 

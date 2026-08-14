@@ -1130,7 +1130,7 @@ fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
             definition,
             arguments: arguments
                 .into_iter()
-                .map(|value| replace_trait_self_type(value, self_ty))
+                .map(|value| replace_trait_self_generic_argument(value, self_ty))
                 .collect(),
         },
         Type::Projection {
@@ -1270,7 +1270,7 @@ fn rebase_method_lifetimes(
             arguments: arguments
                 .into_iter()
                 .map(|value| {
-                    rebase_method_lifetimes(
+                    rebase_method_lifetime_generic_argument(
                         value,
                         trait_generic_count,
                         implementation_generic_count,
@@ -1690,7 +1690,6 @@ impl Elaborator<'_> {
                 ElaboratedHeader::Constant(ty.as_ref().map(|value| self.ty(value)))
             }
             ParsedHeader::Nominal { generics, layout } => {
-                self.require_type_generics(generics, "nominal declarations");
                 self.bind_generics(generics);
                 ElaboratedHeader::Nominal {
                     generics: generics.len() as u32,
@@ -2122,7 +2121,7 @@ impl Elaborator<'_> {
                         trait_definition: relation.definition,
                         trait_arguments: self.type_only_trait_arguments(name, relation.arguments),
                         name: name.clone(),
-                        item_arguments: self.elaborate_type_generic_arguments(
+                        item_arguments: self.elaborate_runtime_type_arguments(
                             name,
                             item_arguments,
                             item_kinds,
@@ -2374,7 +2373,7 @@ impl Elaborator<'_> {
                     trait_definition: relation.definition,
                     trait_arguments: self.type_only_trait_arguments(name, relation.arguments),
                     name: name.clone(),
-                    item_arguments: self.elaborate_type_generic_arguments(
+                    item_arguments: self.elaborate_runtime_type_arguments(
                         name,
                         item_arguments,
                         item_kinds,
@@ -2504,97 +2503,24 @@ impl Elaborator<'_> {
         name: &str,
         arguments: &[HeaderGenericArgument],
         kinds: &[GenericKind],
+    ) -> Vec<GenericArgument> {
+        self.elaborate_trait_generic_arguments(name, arguments, kinds)
+    }
+
+    /// Associated-type projections retain their historical type-only carrier.
+    /// Nominal identity does not: callers use `elaborate_type_generic_arguments`
+    /// directly and retain every source kind. This adapter is therefore an
+    /// explicit runtime-layout boundary rather than a silent representation
+    /// conversion.
+    fn elaborate_runtime_type_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[HeaderGenericArgument],
+        kinds: &[GenericKind],
     ) -> Vec<Type> {
-        arguments
-            .iter()
-            .zip(kinds)
-            .map(|(argument, kind)| match (argument, kind) {
-                (HeaderGenericArgument::Type(value), GenericKind::Type) => self.ty(value),
-                (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
-                    Type::ConstU32(*value)
-                }
-                (
-                    HeaderGenericArgument::Quantity(value),
-                    GenericKind::Const(ConstKind::Quantity),
-                ) => Type::ConstQuantity(*value),
-                (HeaderGenericArgument::Type(HeaderType::Path(path)), GenericKind::Const(kind))
-                    if path.len() == 1 =>
-                {
-                    let const_name = &path[0];
-                    match self.const_generics.get(const_name) {
-                        Some((index, found)) if found == kind => Type::ConstGeneric {
-                            index: *index,
-                            kind: *kind,
-                        },
-                        Some((_, found)) => {
-                            self.error(
-                                "G3318",
-                                format!(
-                                    "const generic `{const_name}` of kind `{}` cannot fill `{}` slot of `{name}`",
-                                    const_kind_name(*found),
-                                    const_kind_name(*kind),
-                                ),
-                            );
-                            Type::Error
-                        }
-                        None => {
-                            self.error(
-                                "G3318",
-                                format!(
-                                    "generic argument for `{name}` must be a structural `{}` constant",
-                                    const_kind_name(*kind),
-                                ),
-                            );
-                            Type::Error
-                        }
-                    }
-                }
-                (HeaderGenericArgument::U32(_), GenericKind::Type) => {
-                    self.error(
-                        "G3318",
-                        format!("type slot of `{name}` cannot receive a non-type generic argument"),
-                    );
-                    Type::Error
-                }
-                (HeaderGenericArgument::Quantity(_), GenericKind::Type) => {
-                    self.error(
-                        "G3318",
-                        format!("type slot of `{name}` cannot receive a structural constant"),
-                    );
-                    Type::Error
-                }
-                (HeaderGenericArgument::Lifetime(_), GenericKind::Type) => {
-                    self.error(
-                        "G3318",
-                        format!("type slot of `{name}` cannot receive a lifetime"),
-                    );
-                    Type::Error
-                }
-                (HeaderGenericArgument::EffectRow(_), GenericKind::Type) => {
-                    self.error(
-                        "G3318",
-                        format!("type slot of `{name}` cannot receive an effect row"),
-                    );
-                    Type::Error
-                }
-                (_, GenericKind::Const(kind)) => {
-                    self.error(
-                        "G3318",
-                        format!(
-                            "generic argument for `{name}` must be a structural `{}` constant",
-                            const_kind_name(*kind),
-                        ),
-                    );
-                    Type::Error
-                }
-                (_, GenericKind::EffectRow) | (_, GenericKind::Lifetime) => {
-                    self.error(
-                        "G3318",
-                        format!("generic argument for `{name}` has an unsupported non-type kind"),
-                    );
-                    Type::Error
-                }
-            })
+        self.elaborate_type_generic_arguments(name, arguments, kinds)
+            .into_iter()
+            .map(generic_argument_as_runtime_type)
             .collect()
     }
 
@@ -2755,6 +2681,46 @@ fn const_kind_name(kind: ConstKind) -> &'static str {
     }
 }
 
+fn normalize_alias_generic_argument(
+    argument: GenericArgument,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    stack: &mut Vec<DefKey>,
+    diagnostics: &mut Vec<SignatureDiagnostic>,
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(normalize_alias_type(value, definitions, stack, diagnostics))
+        }
+        GenericArgument::EffectRow(value) => GenericArgument::EffectRow(
+            EffectRow {
+                effects: value
+                    .effects
+                    .into_iter()
+                    .map(|effect| EffectInstance {
+                        definition: effect.definition,
+                        arguments: effect
+                            .arguments
+                            .into_iter()
+                            .map(|argument| {
+                                normalize_alias_generic_argument(
+                                    argument,
+                                    definitions,
+                                    stack,
+                                    diagnostics,
+                                )
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                projections: value.projections,
+                tail: value.tail,
+            }
+            .canonicalized(),
+        ),
+        argument => argument,
+    }
+}
+
 fn normalize_alias_type(
     value: Type,
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
@@ -2768,7 +2734,9 @@ fn normalize_alias_type(
         } => {
             let arguments = arguments
                 .into_iter()
-                .map(|argument| normalize_alias_type(argument, definitions, stack, diagnostics))
+                .map(|argument| {
+                    normalize_alias_generic_argument(argument, definitions, stack, diagnostics)
+                })
                 .collect::<Vec<_>>();
             let Some(ElaboratedHeader::Alias { generics, target }) = definitions.get(&definition)
             else {
@@ -2796,6 +2764,7 @@ fn normalize_alias_type(
                 return Type::Error;
             }
             stack.push(definition);
+            let arguments = generic_arguments_as_runtime_types(&arguments);
             let substituted = substitute_alias_generics(target.clone(), &arguments);
             let normalized = normalize_alias_type(substituted, definitions, stack, diagnostics);
             stack.pop();
@@ -2921,6 +2890,24 @@ fn normalize_nominal_fields(
 
 /// The legacy nominal/callable instantiation boundary is explicitly
 /// type-only. Trait references use `substitute_trait_type_generics` instead.
+fn generic_argument_as_runtime_type(argument: GenericArgument) -> Type {
+    match argument {
+        GenericArgument::Type(value) => value,
+        GenericArgument::ConstU32(value) => Type::ConstU32(value),
+        GenericArgument::ConstQuantity(value) => Type::ConstQuantity(value),
+        GenericArgument::ConstGeneric { index, kind } => Type::ConstGeneric { index, kind },
+        GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_) => Type::Error,
+    }
+}
+
+fn generic_arguments_as_runtime_types(arguments: &[GenericArgument]) -> Vec<Type> {
+    arguments
+        .iter()
+        .cloned()
+        .map(generic_argument_as_runtime_type)
+        .collect()
+}
+
 fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
     match value {
         Type::Generic(TRAIT_SELF_GENERIC) => Type::Generic(TRAIT_SELF_GENERIC),
@@ -2935,7 +2922,7 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
             definition,
             arguments: values
                 .into_iter()
-                .map(|value| substitute_alias_generics(value, arguments))
+                .map(|value| substitute_alias_effect_generic_argument(value, arguments))
                 .collect(),
         },
         Type::Projection {
@@ -3042,6 +3029,22 @@ fn substitute_alias_effect_generic_argument(
         GenericArgument::EffectRow(value) => {
             GenericArgument::EffectRow(substitute_effect_row(value, arguments))
         }
+        GenericArgument::ConstGeneric { index, kind } => arguments
+            .get(index as usize)
+            .and_then(|value| match (value, kind) {
+                (Type::ConstU32(value), ConstKind::U32) => Some(GenericArgument::ConstU32(*value)),
+                (Type::ConstQuantity(value), ConstKind::Quantity) => {
+                    Some(GenericArgument::ConstQuantity(*value))
+                }
+                (Type::ConstGeneric { index, kind: found }, expected) if found == &expected => {
+                    Some(GenericArgument::ConstGeneric {
+                        index: *index,
+                        kind: expected,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or(GenericArgument::ConstGeneric { index, kind }),
         argument => argument,
     }
 }
@@ -3070,7 +3073,7 @@ fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) ->
             definition,
             arguments: values
                 .into_iter()
-                .map(|value| substitute_trait_type_generics(value, arguments))
+                .map(|value| substitute_trait_generic_argument(value, arguments))
                 .collect(),
         },
         Type::Projection {

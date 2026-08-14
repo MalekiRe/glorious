@@ -419,7 +419,7 @@ impl TraitSolver {
                 definition,
                 arguments: arguments
                     .into_iter()
-                    .map(|argument| self.normalize_type_projections(argument, active))
+                    .map(|argument| self.normalize_trait_argument(argument, active))
                     .collect::<Result<_, _>>()?,
             }),
             Type::Projection {
@@ -1075,7 +1075,9 @@ fn match_type(
                 arguments
                     .iter()
                     .zip(actual_arguments)
-                    .try_for_each(|(template, actual)| match_type(template, actual, substitution))
+                    .try_for_each(|(template, actual)| {
+                        match_generic_argument(template, actual, substitution)
+                    })
             }
             _ => None,
         },
@@ -1267,7 +1269,7 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             definition: *definition,
             arguments: arguments
                 .iter()
-                .map(|value| substitute_type(value, substitution))
+                .map(|value| substitute_generic_argument(value, substitution))
                 .collect(),
         },
         Type::Projection {
@@ -1446,9 +1448,8 @@ fn associated_effect_row_projection_key(
 fn projection_is_concrete(value: &Type) -> bool {
     match value {
         Type::Generic(_) | Type::Infer(_) | Type::Error => false,
-        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
-            arguments.iter().all(projection_is_concrete)
-        }
+        Type::Nominal { arguments, .. } => arguments.iter().all(generic_argument_is_concrete),
+        Type::Tuple(arguments) => arguments.iter().all(projection_is_concrete),
         Type::Projection {
             subject,
             trait_arguments,
@@ -1470,5 +1471,24 @@ fn projection_is_concrete(value: &Type) -> bool {
         | Type::ConstU32(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. } => true,
+    }
+}
+
+fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => projection_is_concrete(value),
+        GenericArgument::EffectRow(value) => {
+            value.tail.is_none()
+                && value.projections.is_empty()
+                && value
+                    .effects
+                    .iter()
+                    .all(|effect| effect.arguments.iter().all(generic_argument_is_concrete))
+        }
+        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_) => true,
+        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. })
+        | GenericArgument::ConstGeneric { .. } => false,
     }
 }

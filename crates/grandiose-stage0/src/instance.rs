@@ -173,9 +173,8 @@ fn closed_effect_row_fingerprint(
 fn is_concrete_type(value: &Type) -> bool {
     match value {
         Type::Generic(_) | Type::ConstGeneric { .. } | Type::Infer(_) | Type::Error => false,
-        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
-            arguments.iter().all(is_concrete_type)
-        }
+        Type::Nominal { arguments, .. } => arguments.iter().all(is_concrete_generic_argument),
+        Type::Tuple(arguments) => arguments.iter().all(is_concrete_type),
         Type::Projection { .. } => false,
         Type::Array(element) => is_concrete_type(element),
         Type::Reference {

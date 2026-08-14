@@ -221,7 +221,8 @@ impl Elaborator<'_> {
             && self.resolve_type(enum_path) == Some(definition)
             && let Some((variant_index, layout)) = self
                 .signatures
-                .instantiate_enum_record_variant(definition, &arguments, variant)
+                .instantiate_enum_record_variant_generic(definition, &arguments, variant)
+                .ok()
         {
             return self.record_fields(span, definition, fields, layout, Some(variant_index));
         }
@@ -247,7 +248,8 @@ impl Elaborator<'_> {
         }
         let Some(layout) = self
             .signatures
-            .instantiate_struct_fields(definition, &arguments)
+            .instantiate_struct_fields_generic(definition, &arguments)
+            .ok()
         else {
             self.error(
                 span,
@@ -327,7 +329,8 @@ impl Elaborator<'_> {
         }
         let Some((variant_index, types)) = self
             .signatures
-            .instantiate_enum_variant(definition, &arguments, variant)
+            .instantiate_enum_variant_generic(definition, &arguments, variant)
+            .ok()
         else {
             self.error(span, "G4213", "enum variant has no matching tuple payload");
             return PatternDecision::Error;
@@ -368,7 +371,7 @@ impl Elaborator<'_> {
     }
 }
 
-fn nominal_subject(subject: &Type) -> Option<(DefKey, Vec<Type>)> {
+fn nominal_subject(subject: &Type) -> Option<(DefKey, Vec<crate::GenericArgument>)> {
     match subject {
         Type::Nominal {
             definition,

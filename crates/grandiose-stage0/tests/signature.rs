@@ -44,7 +44,7 @@ fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
 #[test]
 fn generic_instantiation_validates_kinds_before_type_only_lowering() {
     let package = PackageKey("signature-generic-instantiation-boundary@0.1.0".into());
-    let source = "pub fn typed<T>(value: T) -> T { value } pub fn region<'a>() -> i64 { 0 } pub fn row<e: EffectRow>() -> i64 { 0 } pub fn count<n: u32>() -> i64 { 0 }";
+    let source = "pub fn typed<T>(value: T) -> T { value } pub fn region<'a>() -> i64 { 0 } pub fn row<e: EffectRow>() -> i64 { 0 } pub fn count<n: u32>() -> i64 { 0 } pub struct region_record<'a> {}";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -76,6 +76,14 @@ fn generic_instantiation_validates_kinds_before_type_only_lowering() {
             Err(InstantiationError::RequiresType { slot: 0, argument: found }) if *found == argument
         ));
     }
+    let argument = GenericArgument::Lifetime(Lifetime::Static);
+    assert!(matches!(
+        signatures.instantiate_struct_fields_generic(
+            definition("region_record"),
+            std::slice::from_ref(&argument),
+        ),
+        Err(InstantiationError::RequiresType { slot: 0, argument: found }) if *found == argument
+    ));
 }
 
 #[test]
@@ -223,16 +231,16 @@ fn nominal_const_applications_preserve_literals_and_binder_identity() {
     };
     assert!(matches!(
         lookup("literal"),
-        Type::Nominal { arguments, .. } if arguments == vec![Type::ConstU32(7)]
+        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstU32(7)]
     ));
     assert!(matches!(
         lookup("inherited"),
         Type::Nominal { arguments, .. }
-            if arguments == vec![Type::ConstGeneric { index: 0, kind: ConstKind::U32 }]
+            if arguments == vec![GenericArgument::ConstGeneric { index: 0, kind: ConstKind::U32 }]
     ));
     assert!(matches!(
         lookup("through_alias"),
-        Type::Nominal { arguments, .. } if arguments == vec![Type::ConstU32(9)]
+        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstU32(9)]
     ));
 }
 
@@ -267,12 +275,12 @@ fn nominal_const_applications_normalize_literal_arithmetic() {
     };
     assert!(matches!(
         result("tag"),
-        Type::Nominal { arguments, .. } if arguments == vec![Type::ConstU32(7)]
+        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstU32(7)]
     ));
     assert!(matches!(
         result("budget"),
         Type::Nominal { arguments, .. }
-            if arguments == vec![Type::ConstQuantity(Quantity::new(5, Some(12)).unwrap())]
+            if arguments == vec![GenericArgument::ConstQuantity(Quantity::new(5, Some(12)).unwrap())]
     ));
 }
 
@@ -305,22 +313,22 @@ fn nominal_quantity_const_applications_preserve_intervals_and_binder_identity() 
     assert!(matches!(
         lookup("exact"),
         Type::Nominal { arguments, .. }
-            if arguments == vec![Type::ConstQuantity(Quantity::ONCE)]
+            if arguments == vec![GenericArgument::ConstQuantity(Quantity::ONCE)]
     ));
     assert!(matches!(
         lookup("open"),
         Type::Nominal { arguments, .. }
-            if arguments == vec![Type::ConstQuantity(Quantity::new(2, None).unwrap())]
+            if arguments == vec![GenericArgument::ConstQuantity(Quantity::new(2, None).unwrap())]
     ));
     assert!(matches!(
         lookup("inherited"),
         Type::Nominal { arguments, .. }
-            if arguments == vec![Type::ConstGeneric { index: 0, kind: ConstKind::Quantity }]
+            if arguments == vec![GenericArgument::ConstGeneric { index: 0, kind: ConstKind::Quantity }]
     ));
     assert!(matches!(
         lookup("through_alias"),
         Type::Nominal { arguments, .. }
-            if arguments == vec![Type::ConstQuantity(Quantity::AFFINE)]
+            if arguments == vec![GenericArgument::ConstQuantity(Quantity::AFFINE)]
     ));
 }
 
@@ -343,6 +351,46 @@ fn nominal_quantity_const_applications_reject_wrong_slot_kinds() {
         "{:#?}",
         signatures.diagnostics
     );
+}
+
+#[test]
+fn nominal_headers_preserve_mixed_kind_argument_identity() {
+    let package = PackageKey("signature-mixed-nominal@0.1.0".into());
+    let source = "effect Trace { note(); } pub struct Mixed<'a, e: EffectRow, n: u32, q: Quantity, T> {} pub fn value() -> Mixed<'static, {Trace}, 7, [1, 2], i64> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("value"))
+        .expect("value definition");
+    let ElaboratedHeader::Callable(signature) = signatures
+        .definitions
+        .get(&definition.key)
+        .expect("value signature")
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        &signature.result,
+        Type::Nominal { arguments, .. }
+            if matches!(arguments.as_slice(), [
+                GenericArgument::Lifetime(Lifetime::Static),
+                GenericArgument::EffectRow(row),
+                GenericArgument::ConstU32(7),
+                GenericArgument::ConstQuantity(quantity),
+                GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+            ] if row.effects.len() == 1 && row.tail.is_none()
+                && *quantity == Quantity::new(1, Some(2)).unwrap())
+    ));
 }
 
 #[test]
@@ -744,7 +792,7 @@ fn interfaces_elaborate_generic_callable_signatures_without_bodies() {
     };
     assert_eq!(signature.parameters, [Type::Generic(0)]);
     assert!(
-        matches!(&signature.result, Type::Nominal { arguments, .. } if arguments == &vec![Type::Generic(0)])
+        matches!(&signature.result, Type::Nominal { arguments, .. } if arguments == &vec![GenericArgument::Type(Type::Generic(0))])
     );
     assert_ne!(Type::Scalar(ScalarType::I64), signature.result);
 }
@@ -1484,7 +1532,7 @@ fn generic_kinds_reject_crossing_type_and_effect_row_positions() {
 }
 
 #[test]
-fn effect_row_binders_are_rejected_for_nominal_and_alias_declarations() {
+fn effect_row_binders_are_preserved_for_nominals_but_rejected_for_aliases() {
     let package = PackageKey("signature-effect-row-binder-context@0.1.0".into());
     let source = "struct Invalid<e: EffectRow> {} trait AlsoInvalid<e: EffectRow> {} type Alias<e: EffectRow> = i64;";
     let file = FileKey::new(&package, "src/lib.glorious");
@@ -1498,7 +1546,7 @@ fn effect_row_binders_are_rejected_for_nominal_and_alias_declarations() {
             .iter()
             .filter(|diagnostic| diagnostic.code == "G3314")
             .count(),
-        2,
+        1,
         "{:#?}",
         signatures.diagnostics
     );

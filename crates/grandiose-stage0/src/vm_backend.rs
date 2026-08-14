@@ -18,7 +18,7 @@ use crate::{
         MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern, MirPatternField,
         MirProgram, MirTerminator,
     },
-    types::{ConstKind, EffectTail, Lifetime, ScalarType, Type},
+    types::{ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, Type},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1300,7 +1300,7 @@ fn vm_type(value: &Type) -> Result<VmType, Type> {
             definition: *definition,
             arguments: arguments
                 .iter()
-                .map(vm_type)
+                .map(vm_nominal_argument)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         Type::Callable {
@@ -1321,6 +1321,22 @@ fn vm_type(value: &Type) -> Result<VmType, Type> {
             referent: Box::new(vm_type(referent)?),
         }),
         value => Err(value.clone()),
+    }
+}
+
+/// VM nominal layouts remain type-shaped. Mixed-kind nominal identity is
+/// retained in Core/instance products, but a row or lifetime must never be
+/// coerced into a layout slot while emitting an executable artifact.
+fn vm_nominal_argument(value: &GenericArgument) -> Result<VmType, Type> {
+    match value {
+        GenericArgument::Type(value) => vm_type(value),
+        GenericArgument::ConstU32(value) => vm_type(&Type::ConstU32(*value)),
+        GenericArgument::ConstQuantity(value) => vm_type(&Type::ConstQuantity(*value)),
+        GenericArgument::ConstGeneric { index, kind } => vm_type(&Type::ConstGeneric {
+            index: *index,
+            kind: *kind,
+        }),
+        GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_) => Err(Type::Error),
     }
 }
 

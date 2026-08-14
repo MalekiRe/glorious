@@ -1543,9 +1543,55 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
             definition: *definition,
             arguments: fields
                 .iter()
-                .map(|field| specialize_type(field, arguments))
+                .map(|field| specialize_generic_argument(field, arguments))
                 .collect(),
         },
+        value => value.clone(),
+    }
+}
+
+fn specialize_generic_argument(
+    value: &GenericArgument,
+    arguments: &[GenericArgument],
+) -> GenericArgument {
+    match value {
+        GenericArgument::Type(value) => GenericArgument::Type(specialize_type(value, arguments)),
+        GenericArgument::EffectRow(value) => GenericArgument::EffectRow(
+            crate::EffectRow {
+                effects: value
+                    .effects
+                    .iter()
+                    .map(|effect| crate::EffectInstance {
+                        definition: effect.definition,
+                        arguments: effect
+                            .arguments
+                            .iter()
+                            .map(|argument| specialize_generic_argument(argument, arguments))
+                            .collect(),
+                    })
+                    .collect(),
+                projections: value.projections.clone(),
+                tail: value.tail,
+            }
+            .canonicalized(),
+        ),
+        GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => arguments
+            .get(*index as usize)
+            .and_then(|argument| match argument {
+                GenericArgument::Lifetime(value) => Some(GenericArgument::Lifetime(*value)),
+                _ => None,
+            })
+            .unwrap_or_else(|| value.clone()),
+        GenericArgument::ConstGeneric { index, kind } => arguments
+            .get(*index as usize)
+            .filter(|argument| match (argument, kind) {
+                (GenericArgument::ConstU32(_), crate::ConstKind::U32)
+                | (GenericArgument::ConstQuantity(_), crate::ConstKind::Quantity) => true,
+                (GenericArgument::ConstGeneric { kind: found, .. }, expected) => found == expected,
+                _ => false,
+            })
+            .cloned()
+            .unwrap_or_else(|| value.clone()),
         value => value.clone(),
     }
 }

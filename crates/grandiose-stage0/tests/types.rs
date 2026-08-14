@@ -385,7 +385,10 @@ fn type_fingerprints_are_canonical_and_reject_unresolved_semantics() {
     let definition = DefKey(Digest::of_bytes(b"Pair"));
     let value = Type::Nominal {
         definition,
-        arguments: vec![Type::Tuple(vec![Type::Scalar(ScalarType::I64), Type::Unit])],
+        arguments: vec![GenericArgument::Type(Type::Tuple(vec![
+            Type::Scalar(ScalarType::I64),
+            Type::Unit,
+        ]))],
     };
     let mut first = InferContext::default();
     let mut second = InferContext::default();
@@ -398,6 +401,38 @@ fn type_fingerprints_are_canonical_and_reject_unresolved_semantics() {
         second.type_fingerprint(unresolved),
         Err(TypeError::Unresolved(_))
     ));
+}
+
+#[test]
+fn nominal_identity_preserves_mixed_kind_generic_arguments() {
+    let definition = DefKey(Digest::of_bytes(b"mixed-nominal"));
+    let quantity = Quantity::new(1, Some(2)).unwrap();
+    let mixed = Type::Nominal {
+        definition,
+        arguments: vec![
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::EffectRow(EffectRow::empty()),
+            GenericArgument::ConstU32(7),
+            GenericArgument::ConstQuantity(quantity),
+            GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+        ],
+    };
+    let distinct = Type::Nominal {
+        definition,
+        arguments: vec![
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::EffectRow(EffectRow::empty()),
+            GenericArgument::ConstU32(8),
+            GenericArgument::ConstQuantity(quantity),
+            GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+        ],
+    };
+    assert_ne!(mixed, distinct);
+    let mut inference = InferContext::default();
+    assert_ne!(
+        inference.type_fingerprint(mixed).unwrap(),
+        InferContext::default().type_fingerprint(distinct).unwrap()
+    );
 }
 
 #[test]
