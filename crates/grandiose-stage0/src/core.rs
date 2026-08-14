@@ -522,6 +522,19 @@ impl TypedBody {
                 message: "Typed Core root refers to an expression outside its body arena".into(),
             });
         }
+        let parameter_span = self
+            .expressions
+            .get(self.root.0 as usize)
+            .map(|expression| expression.span);
+        for (_, parameter) in &self.parameters {
+            if type_contains_out_of_scope_bound_lifetime(parameter) {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4184",
+                    span: parameter_span.unwrap_or_else(invalid_typed_core_span),
+                    message: "Typed Core parameter contains a higher-ranked lifetime outside its callable binder".into(),
+                });
+            }
+        }
         for (index, expression) in self.expressions.iter().enumerate() {
             let owner = CoreId(index as u32);
             let mut check = |child: CoreId| {
@@ -546,6 +559,15 @@ impl TypedBody {
                     code: "G4181",
                     span: expression.span,
                     message: "Typed Core expression or embedded metadata retains an unresolved inference variable".into(),
+                });
+            }
+            if type_contains_out_of_scope_bound_lifetime(&expression.ty)
+                || core_metadata_contains_out_of_scope_bound_lifetime(&expression.kind)
+            {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4184",
+                    span: expression.span,
+                    message: "Typed Core expression or embedded metadata contains a higher-ranked lifetime outside its callable binder".into(),
                 });
             }
             if core_kind_is_recovered(&expression.kind) {
@@ -1131,6 +1153,118 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
     }
 }
 
+/// A bound lifetime is meaningful only beneath the callable type that
+/// introduces it.  Source elaboration maintains that invariant while opening
+/// higher-ranked calls, but frozen Core is also an import boundary: persisted
+/// or forged products must not be able to smuggle a rigid placeholder into a
+/// local, capture, effect argument, or MIR type after its binder has gone
+/// away.
+pub(crate) fn type_contains_out_of_scope_bound_lifetime(ty: &Type) -> bool {
+    type_contains_out_of_scope_bound_lifetime_in(ty, &[])
+}
+
+fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> bool {
+    match ty {
+        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| {
+            generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
+        }),
+        Type::Tuple(arguments) => arguments
+            .iter()
+            .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders)),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            type_contains_out_of_scope_bound_lifetime_in(subject, binders)
+                || trait_arguments
+                    .iter()
+                    .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
+                || item_arguments
+                    .iter()
+                    .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
+        }
+        Type::Array(element) => type_contains_out_of_scope_bound_lifetime_in(element, binders),
+        Type::Reference {
+            lifetime, referent, ..
+        } => {
+            lifetime_is_out_of_scope_bound(*lifetime, binders)
+                || type_contains_out_of_scope_bound_lifetime_in(referent, binders)
+        }
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            let mut nested_binders = Vec::with_capacity(binders.len() + 1);
+            nested_binders.push(*lifetime_binders);
+            nested_binders.extend_from_slice(binders);
+            parameters.iter().any(|parameter| {
+                type_contains_out_of_scope_bound_lifetime_in(parameter, &nested_binders)
+            }) || type_contains_out_of_scope_bound_lifetime_in(result, &nested_binders)
+                || effect_row_contains_out_of_scope_bound_lifetime(effects, &nested_binders)
+        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_)
+        | Type::Infer(_)
+        | Type::Error => false,
+    }
+}
+
+fn lifetime_is_out_of_scope_bound(lifetime: Lifetime, binders: &[u32]) -> bool {
+    match lifetime {
+        Lifetime::Bound { depth, index } => binders
+            .get(depth as usize)
+            .is_none_or(|binder_count| index >= *binder_count),
+        Lifetime::Static | Lifetime::Generic(_) | Lifetime::Elided => false,
+    }
+}
+
+fn generic_argument_contains_out_of_scope_bound_lifetime(
+    argument: &GenericArgument,
+    binders: &[u32],
+) -> bool {
+    match argument {
+        GenericArgument::Type(value) => {
+            type_contains_out_of_scope_bound_lifetime_in(value, binders)
+        }
+        GenericArgument::EffectRow(value) => {
+            effect_row_contains_out_of_scope_bound_lifetime(value, binders)
+        }
+        GenericArgument::Lifetime(value) => lifetime_is_out_of_scope_bound(*value, binders),
+        GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => false,
+    }
+}
+
+fn effect_row_contains_out_of_scope_bound_lifetime(row: &EffectRow, binders: &[u32]) -> bool {
+    row.effects.iter().any(|effect| {
+        effect.arguments.iter().any(|argument| {
+            generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
+        })
+    }) || row.projections.iter().any(|projection| {
+        type_contains_out_of_scope_bound_lifetime_in(&projection.subject, binders)
+            || projection
+                .trait_arguments
+                .iter()
+                .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
+            || projection
+                .item_arguments
+                .iter()
+                .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
+    })
+}
+
 fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
     match argument {
         GenericArgument::Type(value) => type_contains_inference(value),
@@ -1225,6 +1359,102 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
     }
 }
 
+fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
+    match kind {
+        CoreKind::Closure {
+            parameters,
+            environment,
+            ..
+        } => {
+            parameters
+                .iter()
+                .any(|(_, ty)| type_contains_out_of_scope_bound_lifetime(ty))
+                || environment
+                    .captures
+                    .iter()
+                    .any(|capture| type_contains_out_of_scope_bound_lifetime(&capture.ty))
+        }
+        CoreKind::Assign { place, .. } => place_contains_out_of_scope_bound_lifetime(place),
+        CoreKind::Function { arguments, .. } => arguments
+            .iter()
+            .any(|argument| generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])),
+        CoreKind::TraitMethod {
+            trait_arguments,
+            method_arguments,
+            ..
+        } => trait_arguments
+            .iter()
+            .chain(method_arguments)
+            .any(|argument| generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])),
+        CoreKind::Perform { effect, .. } => effect
+            .arguments
+            .iter()
+            .any(|argument| generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])),
+        CoreKind::PatternTest { pattern, .. } => {
+            pattern_contains_out_of_scope_bound_lifetime(pattern)
+        }
+        CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause| {
+            clause.effect.arguments.iter().any(|argument| {
+                generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])
+            }) || clause
+                .payload_types
+                .iter()
+                .any(type_contains_out_of_scope_bound_lifetime)
+                || clause
+                    .patterns
+                    .iter()
+                    .any(pattern_contains_out_of_scope_bound_lifetime)
+                || clause
+                    .bindings
+                    .iter()
+                    .any(|(_, ty)| type_contains_out_of_scope_bound_lifetime(ty))
+                || clause.continuation.as_ref().is_some_and(|continuation| {
+                    type_contains_out_of_scope_bound_lifetime(&continuation.parameter)
+                        || type_contains_out_of_scope_bound_lifetime(&continuation.result)
+                        || effect_row_contains_out_of_scope_bound_lifetime(
+                            &continuation.effects,
+                            &[],
+                        )
+                })
+        }),
+        CoreKind::Completion { clauses, .. } => clauses.iter().any(|clause| {
+            pattern_contains_out_of_scope_bound_lifetime(&clause.pattern)
+                || clause
+                    .bindings
+                    .iter()
+                    .any(|(_, ty)| type_contains_out_of_scope_bound_lifetime(ty))
+                || clause.refinement.as_ref().is_some_and(|refinement| {
+                    pattern_contains_out_of_scope_bound_lifetime(&refinement.pattern)
+                        || refinement
+                            .environment
+                            .binding_types
+                            .iter()
+                            .any(|(_, ty)| type_contains_out_of_scope_bound_lifetime(ty))
+                })
+        }),
+        CoreKind::Literal(_)
+        | CoreKind::Local(_)
+        | CoreKind::Resumption { .. }
+        | CoreKind::Constant(_)
+        | CoreKind::Tuple(_)
+        | CoreKind::Array(_)
+        | CoreKind::Record { .. }
+        | CoreKind::Field { .. }
+        | CoreKind::Enum { .. }
+        | CoreKind::Let { .. }
+        | CoreKind::Label { .. }
+        | CoreKind::Transfer { .. }
+        | CoreKind::Call { .. }
+        | CoreKind::Binary { .. }
+        | CoreKind::Block(_)
+        | CoreKind::Borrow { .. }
+        | CoreKind::Deref(_)
+        | CoreKind::Move(_)
+        | CoreKind::Unary { .. }
+        | CoreKind::Error => false,
+    }
+}
+
 fn effect_row_contains_inference(row: &EffectRow) -> bool {
     row.effects.iter().any(|effect| {
         effect
@@ -1256,6 +1486,18 @@ fn place_contains_inference(place: &CorePlace) -> bool {
     }
 }
 
+fn place_contains_out_of_scope_bound_lifetime(place: &CorePlace) -> bool {
+    match place {
+        CorePlace::Local { ty, .. } => type_contains_out_of_scope_bound_lifetime(ty),
+        CorePlace::Field { base, ty, .. } => {
+            type_contains_out_of_scope_bound_lifetime(ty)
+                || place_contains_out_of_scope_bound_lifetime(base)
+        }
+        CorePlace::Deref { ty, .. } => type_contains_out_of_scope_bound_lifetime(ty),
+        CorePlace::Error => false,
+    }
+}
+
 fn pattern_contains_inference(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Tuple(values) => values.iter().any(pattern_contains_inference),
@@ -1268,6 +1510,34 @@ fn pattern_contains_inference(pattern: &CorePattern) -> bool {
         | CorePattern::Bind { .. }
         | CorePattern::Literal(_)
         | CorePattern::Error => false,
+    }
+}
+
+fn pattern_contains_out_of_scope_bound_lifetime(pattern: &CorePattern) -> bool {
+    match pattern {
+        CorePattern::Tuple(values) => values
+            .iter()
+            .any(pattern_contains_out_of_scope_bound_lifetime),
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+            fields.iter().any(|field| {
+                type_contains_out_of_scope_bound_lifetime(&field.ty)
+                    || pattern_contains_out_of_scope_bound_lifetime(&field.pattern)
+            })
+        }
+        CorePattern::Any
+        | CorePattern::Bind { .. }
+        | CorePattern::Literal(_)
+        | CorePattern::Error => false,
+    }
+}
+
+fn invalid_typed_core_span() -> Span {
+    Span {
+        file: crate::FileKey(crate::Digest::of_bytes(
+            b"invalid-typed-core-bound-lifetime",
+        )),
+        start: 0,
+        end: 0,
     }
 }
 

@@ -1239,6 +1239,27 @@ fn service_instantiates_non_type_direct_callable_arguments_at_the_contract_bound
 }
 
 #[test]
+fn service_opens_higher_ranked_callback_lifetimes_without_leaking_them() {
+    let accepted = "pub fn apply(callback: for<'a> (&'a i64) -> &'a i64) -> i64 { let value = 42; let loan = &value; callback(loan); value } pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let escaping = "pub fn escapes(callback: for<'a> () -> &'a i64) -> i64 { callback(); 0 } pub fn main() -> i64 { 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(escaping))
+    else {
+        panic!("an escaped higher-ranked callback lifetime unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5019"),
+        "missing higher-ranked lifetime leak diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_proves_and_enforces_direct_callable_trait_bounds() {
     let accepted = "trait Sendable {} impl Sendable for i64 {} pub fn identity<T>(value: T) -> T where T: Sendable { value } pub fn main() -> i64 { identity(42) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();

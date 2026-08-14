@@ -3038,6 +3038,86 @@ fn higher_ranked_call_opens_its_bound_lifetime_without_leaking_it() {
 }
 
 #[test]
+fn frozen_core_rejects_bound_lifetimes_that_escape_callable_binders() {
+    let package = PackageKey("core-forged-hrtb-escape@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let escaped = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Shared,
+        lifetime: Lifetime::Bound { depth: 0, index: 0 },
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    };
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Literal("0".into()),
+            ty: escaped,
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4184"),
+        "a bound lifetime outside a callable binder passed frozen Core validation"
+    );
+    let flow = PlaceFlow::analyze(&body);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-hrtb-bound-lifetime")),
+        &body,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR accepted an escaped higher-ranked lifetime: {lowered:#?}"
+    );
+
+    let scoped = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Literal("0".into()),
+            ty: Type::Callable {
+                lifetime_binders: 1,
+                parameters: vec![Type::Reference {
+                    mutability: grandiose_stage0::Mutability::Shared,
+                    lifetime: Lifetime::Bound { depth: 0, index: 0 },
+                    referent: Box::new(Type::Scalar(ScalarType::I64)),
+                }],
+                result: Box::new(Type::Reference {
+                    mutability: grandiose_stage0::Mutability::Shared,
+                    lifetime: Lifetime::Bound { depth: 0, index: 0 },
+                    referent: Box::new(Type::Scalar(ScalarType::I64)),
+                }),
+                effects: EffectRow::empty(),
+                invocation: Quantity::ONCE,
+            },
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(
+        !scoped
+            .validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4184"),
+        "a bound lifetime under its callable binder was rejected"
+    );
+}
+
+#[test]
 fn typed_closures_elaborate_stacked_higher_ranked_binders() {
     let core = core_for(
         "core-stacked-hrtb-closure@0.1.0",
