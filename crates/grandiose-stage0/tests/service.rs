@@ -1528,7 +1528,7 @@ fn public_text_bytes_helpers_trap_on_invalid_utf8_and_byte_bounds() {
                 .instructions
                 .iter()
                 .find_map(|instruction| match instruction {
-                    VmInstruction::ConstU8 { dst, .. } => Some((key.clone(), *dst)),
+                    VmInstruction::ConstU8 { dst, .. } => Some((*key, *dst)),
                     _ => None,
                 })
         })
