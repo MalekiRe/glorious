@@ -51,6 +51,10 @@ pub struct ElaboratedTrait {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedAssociatedType {
     pub generics: u32,
+    /// Kinds of the associated item's binders in source-slot order.  Arity
+    /// alone is not a sufficient GAT contract: `Item<'a>` and `Item<T>` have
+    /// distinct substitution domains even though each has one binder.
+    pub generic_kinds: Vec<GenericKind>,
     pub effect_row: bool,
 }
 
@@ -72,6 +76,10 @@ pub struct ElaboratedImplementation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedAssociatedTypeDefinition {
     pub generics: u32,
+    /// The implementation-side item binder kinds.  These must exactly match
+    /// the trait declaration before a projection can safely substitute its
+    /// arguments into this value.
+    pub generic_kinds: Vec<GenericKind>,
     pub value: Type,
 }
 
@@ -80,6 +88,10 @@ pub struct ElaboratedAssociatedTypeDefinition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedAssociatedEffectRowDefinition {
     pub generics: u32,
+    /// The implementation-side item binder kinds for a row-kinded associated
+    /// item.  Keeping this separately from `generics` prevents a future
+    /// const/region argument elaborator from treating every slot as a type.
+    pub generic_kinds: Vec<GenericKind>,
     pub value: EffectRow,
 }
 
@@ -162,6 +174,25 @@ pub struct ElaboratedInterface {
     pub diagnostics: Vec<SignatureDiagnostic>,
 }
 
+fn associated_item_contract_mismatch(
+    item_kind: &str,
+    name: &str,
+    found_arity: u32,
+    found_kinds: &[GenericKind],
+    expected_arity: u32,
+    expected_kinds: &[GenericKind],
+) -> String {
+    if found_arity != expected_arity {
+        format!(
+            "{item_kind} `{name}` has arity {found_arity}, but the trait requires {expected_arity}"
+        )
+    } else {
+        format!(
+            "{item_kind} `{name}` has generic kinds {found_kinds:?}, but the trait requires {expected_kinds:?}"
+        )
+    }
+}
+
 impl ElaboratedInterface {
     pub fn elaborate(interface: &PackageInterface) -> Self {
         let index = DefinitionIndex::from_interface(interface);
@@ -231,12 +262,18 @@ impl ElaboratedInterface {
                             ),
                         })
                     }
-                    Some(expected) if expected.generics == item.generics => {}
+                    Some(expected)
+                        if expected.generics == item.generics
+                            && expected.generic_kinds == item.generic_kinds => {}
                     Some(expected) => diagnostics.push(SignatureDiagnostic {
                         code: "G4114",
-                        message: format!(
-                            "associated type `{name}` has arity {}, but the trait requires {}",
-                            item.generics, expected.generics
+                        message: associated_item_contract_mismatch(
+                            "associated type",
+                            name,
+                            item.generics,
+                            &item.generic_kinds,
+                            expected.generics,
+                            &expected.generic_kinds,
                         ),
                     }),
                     None => diagnostics.push(SignatureDiagnostic {
@@ -251,12 +288,18 @@ impl ElaboratedInterface {
                         code: "G4116",
                         message: format!("associated type `{name}` cannot be defined with an effect-row literal"),
                     }),
-                    Some(expected) if expected.generics == item.generics => {}
+                    Some(expected)
+                        if expected.generics == item.generics
+                            && expected.generic_kinds == item.generic_kinds => {}
                     Some(expected) => diagnostics.push(SignatureDiagnostic {
                         code: "G4114",
-                        message: format!(
-                            "associated effect row `{name}` has arity {}, but the trait requires {}",
-                            item.generics, expected.generics
+                        message: associated_item_contract_mismatch(
+                            "associated effect row",
+                            name,
+                            item.generics,
+                            &item.generic_kinds,
+                            expected.generics,
+                            &expected.generic_kinds,
                         ),
                     }),
                     None => diagnostics.push(SignatureDiagnostic {
@@ -1224,6 +1267,7 @@ impl Elaborator<'_> {
                         item.name.clone(),
                         ElaboratedAssociatedType {
                             generics: item.generics.len() as u32,
+                            generic_kinds: item.generics.kinds(),
                             effect_row: item.effect_row,
                         },
                     )
@@ -1268,6 +1312,7 @@ impl Elaborator<'_> {
                     item.name.clone(),
                     ElaboratedAssociatedTypeDefinition {
                         generics: item.generics.len() as u32,
+                        generic_kinds: item.generics.kinds(),
                         value,
                     },
                 )
@@ -1299,6 +1344,7 @@ impl Elaborator<'_> {
                     item.name.clone(),
                     ElaboratedAssociatedEffectRowDefinition {
                         generics: item.generics.len() as u32,
+                        generic_kinds: item.generics.kinds(),
                         value,
                     },
                 ))

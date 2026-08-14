@@ -686,6 +686,40 @@ fn generic_associated_item_arguments_are_preserved_in_frozen_signatures() {
 }
 
 #[test]
+fn generic_associated_items_preserve_binder_kinds_and_reject_mismatched_impls() {
+    let package = PackageKey("signature-gat-binder-kinds@0.1.0".into());
+    let source = "trait Borrow { type View<'a, T, n: u32>; } impl Borrow for i64 { type View<'a, T, n: u32> = T; } trait Invalid { type View<'a>; } impl Invalid for i64 { type View<T> = T; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let borrow = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Borrow"))
+        .expect("Borrow definition");
+    let ElaboratedHeader::Trait(header) = signatures.definitions.get(&borrow.key).unwrap() else {
+        panic!("expected trait")
+    };
+    assert_eq!(
+        header.associated_types["View"].generic_kinds,
+        [
+            GenericKind::Lifetime,
+            GenericKind::Type,
+            GenericKind::Const(ConstKind::U32),
+        ]
+    );
+    assert!(
+        signatures.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G4114" && diagnostic.message.contains("generic kinds")
+        }),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn associated_effect_row_projections_are_preserved_in_frozen_signatures() {
     let package = PackageKey("signature-associated-effect-row@0.1.0".into());
     let source = "trait Capability { type Effects: EffectRow; } pub fn consume<T>(value: T) -> i64 / { <T as Capability>::Effects } { 0 }";
