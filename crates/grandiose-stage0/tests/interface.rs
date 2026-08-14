@@ -1,5 +1,6 @@
 use grandiose_stage0::{
-    DeclarationScan, Digest, FileKey, InterfaceSet, LexedFile, LogicalPath, PackageKey,
+    DeclarationKind, DeclarationScan, Digest, FileKey, InterfaceSet, LexedFile, LogicalPath,
+    PackageKey,
 };
 
 fn collect(source: &str) -> InterfaceSet {
@@ -66,6 +67,36 @@ fn public_nominal_layout_changes_invalidate_the_exported_interface() {
     assert_ne!(
         interface(first).public_fingerprint,
         interface(second).public_fingerprint
+    );
+}
+
+#[test]
+fn implementation_identity_ignores_method_body_but_tracks_method_contracts() {
+    let first = collect(
+        "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> i64 { value } }",
+    );
+    let body_changed = collect(
+        "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> i64 { value + 1 } }",
+    );
+    let contract_changed = collect(
+        "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> Text { \"changed\" } }",
+    );
+    let implementation_key = |interface: &InterfaceSet| {
+        interface
+            .interface
+            .definitions
+            .iter()
+            .find(|definition| definition.kind == DeclarationKind::Implementation)
+            .expect("implementation definition")
+            .key
+    };
+    assert_eq!(
+        implementation_key(&first),
+        implementation_key(&body_changed)
+    );
+    assert_ne!(
+        implementation_key(&first),
+        implementation_key(&contract_changed)
     );
 }
 

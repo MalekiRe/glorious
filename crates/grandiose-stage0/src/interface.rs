@@ -114,7 +114,16 @@ impl InterfaceSet {
                 }
                 _ => shell.header,
             };
-            let header_digest = header_fingerprint(lexed, source, fingerprint_range);
+            let syntax = HeaderParse::parse(lexed, source, shell);
+            let header_digest = match &syntax.header {
+                ParsedHeader::Implementation(implementation) => implementation_header_fingerprint(
+                    lexed,
+                    source,
+                    fingerprint_range,
+                    implementation,
+                ),
+                _ => header_fingerprint(lexed, source, fingerprint_range),
+            };
             let constant_value_fingerprint = (shell.kind == DeclarationKind::Constant)
                 .then(|| {
                     shell
@@ -122,7 +131,6 @@ impl InterfaceSet {
                         .map(|range| header_fingerprint(lexed, source, range))
                 })
                 .flatten();
-            let syntax = HeaderParse::parse(lexed, source, shell);
             diagnostics.extend(
                 syntax
                     .diagnostics
@@ -225,6 +233,45 @@ fn header_fingerprint(lexed: &LexedFile, source: &str, range: TokenRange) -> Dig
     let start = lexed.tokens[range.start].start as usize;
     let end = lexed.tokens[range.end - 1].end as usize;
     Digest::of_bytes(&source.as_bytes()[start..end])
+}
+
+/// An implementation's contract includes its head, associated definitions,
+/// and method signatures, but never a method's executable body.  The body
+/// ranges are retained for demand-driven compilation; excluding them here
+/// prevents a private implementation-body edit from churning coherence
+/// evidence, selected method identities, or downstream query keys.
+fn implementation_header_fingerprint(
+    lexed: &LexedFile,
+    source: &str,
+    range: TokenRange,
+    implementation: &crate::header::ImplementationHeader,
+) -> Digest {
+    if range.start >= range.end {
+        return Digest::of_bytes(b"");
+    }
+    let start = lexed.tokens[range.start].start as usize;
+    let end = lexed.tokens[range.end - 1].end as usize;
+    let mut cursor = start;
+    let mut bytes = Vec::new();
+    for body in implementation
+        .methods
+        .iter()
+        .filter_map(|method| method.body)
+    {
+        let body_start = lexed.tokens[body.start].start as usize;
+        let body_end = lexed.tokens[body.end - 1].end as usize;
+        if body_start < cursor || body_end > end {
+            // A malformed range cannot become a cache-key omission. Header
+            // recovery already emitted the source diagnostic; retain the full
+            // text here so the identity fails closed.
+            return header_fingerprint(lexed, source, range);
+        }
+        bytes.extend_from_slice(&source.as_bytes()[cursor..body_start]);
+        bytes.extend_from_slice(b"\0grandiose-stage0-method-body\0");
+        cursor = body_end;
+    }
+    bytes.extend_from_slice(&source.as_bytes()[cursor..end]);
+    Digest::of_bytes(&bytes)
 }
 
 fn definition_key(
