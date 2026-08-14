@@ -266,7 +266,26 @@ fn body_parser_preserves_compact_and_typed_closure_syntax_without_elaboration() 
     assert!(body.expressions.iter().any(|expression| matches!(
         expression.kind,
         ExprKind::TypedClosure { ref parameters, ref result, ref effects, .. }
-            if parameters.len() == 1 && result.is_some() && effects.len() == 1
+            if parameters.len() == 1 && result.is_some() && effects.effects.len() == 1
+    )));
+}
+
+#[test]
+fn body_parser_preserves_open_effect_row_tails_in_typed_closures() {
+    let package = PackageKey("body-open-closure-row@0.1.0".into());
+    let source = "pub fn main() { () -> i64 / {Trace | e} { 0 } }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let body = BodySyntax::parse(&lexed, source, scan.declarations[0].body.unwrap());
+    assert!(body.diagnostics.is_empty(), "{body:#?}");
+    assert!(body.expressions.iter().any(|expression| matches!(
+        &expression.kind,
+        ExprKind::TypedClosure { effects, .. }
+            if effects.effects.len() == 1 && effects.tail.as_deref() == Some("e")
     )));
 }
 

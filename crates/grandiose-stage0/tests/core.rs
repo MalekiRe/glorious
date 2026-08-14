@@ -431,6 +431,124 @@ fn typed_closure_contracts_preserve_generic_effect_instances() {
 }
 
 #[test]
+fn typed_closure_contracts_preserve_enclosing_open_effect_row_tails() {
+    let package = PackageKey("core-closure-open-effect-row@0.1.0".into());
+    let source = "pub fn relay<e: EffectRow>() -> i64 / { | e } { let worker = () -> i64 / { | e } { 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let relay = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .expect("relay definition");
+    let body = BodySyntax::parse(&lexed, source, relay.body.expect("relay body"));
+    let core = TypedBody::elaborate(
+        relay,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        &expression.ty,
+        grandiose_stage0::Type::Callable { effects, .. }
+            if effects.tail == Some(grandiose_stage0::EffectTail::Generic(0))
+    )));
+}
+
+#[test]
+fn typed_closure_rejects_ordinary_generic_as_effect_row_tail() {
+    let package = PackageKey("core-closure-invalid-effect-row@0.1.0".into());
+    let source = "pub fn relay<T>() -> i64 { let worker = () -> i64 / { | T } { 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let relay = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .expect("relay definition");
+    let body = BodySyntax::parse(&lexed, source, relay.body.expect("relay body"));
+    let core = TypedBody::elaborate(
+        relay,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4115"),
+        "{:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
+fn typed_closure_body_checks_against_its_own_effect_contract() {
+    let package = PackageKey("core-closure-effect-boundary@0.1.0".into());
+    let source = "effect Trace { note(); } pub fn outer() -> i64 { let worker = () -> i64 / {Trace} { Trace::note(); 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let outer = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("outer"))
+        .expect("outer definition");
+    let body = BodySyntax::parse(&lexed, source, outer.body.expect("outer body"));
+    let core = TypedBody::elaborate(
+        outer,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn typed_closure_body_rejects_effects_missing_from_its_own_contract() {
+    let package = PackageKey("core-closure-closed-effect-boundary@0.1.0".into());
+    let source = "effect Trace { note(); } pub fn outer() -> i64 / {Trace} { let worker = () -> i64 { Trace::note(); 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let outer = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("outer"))
+        .expect("outer definition");
+    let body = BodySyntax::parse(&lexed, source, outer.body.expect("outer body"));
+    let core = TypedBody::elaborate(
+        outer,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4155"),
+        "{:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn concrete_associated_effect_rows_normalize_at_call_boundaries() {
     let package = PackageKey("core-associated-effect-row-normalization@0.1.0".into());
     let source = "effect Trace { note(); } trait Capability { type Effects: EffectRow; } struct Value {} impl Capability for Value { type Effects = {Trace}; } pub fn worker() -> i64 / { <Value as Capability>::Effects } { 1 } pub fn main() -> i64 / { Trace } { worker() }";

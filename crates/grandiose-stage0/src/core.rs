@@ -312,6 +312,18 @@ impl TypedBody {
             next_callable: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
+            effect_row_parameters: definition
+                .callable_header()
+                .map(|header| {
+                    header
+                        .generics
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, name)| header.generics.is_effect_row(name))
+                        .map(|(index, name)| (name.clone(), index as u32))
+                        .collect()
+                })
+                .unwrap_or_default(),
             declared_effects: signatures
                 .definitions
                 .get(&definition.key)
@@ -410,6 +422,21 @@ impl TypedBody {
             next_callable: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
+            effect_row_parameters: {
+                let mut parameters = std::collections::BTreeMap::new();
+                for (index, name) in context.implementation_header.generics.iter().enumerate() {
+                    if context.implementation_header.generics.is_effect_row(name) {
+                        parameters.insert(name.clone(), index as u32);
+                    }
+                }
+                let method_base = context.implementation_header.generics.len() as u32;
+                for (offset, name) in context.method.signature.generics.iter().enumerate() {
+                    if context.method.signature.generics.is_effect_row(name) {
+                        parameters.insert(name.clone(), method_base + offset as u32);
+                    }
+                }
+                parameters
+            },
             declared_effects: context.signature.effects.clone(),
             handled_effects: std::collections::BTreeSet::new(),
         };
@@ -475,6 +502,7 @@ impl TypedBody {
             next_callable: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters: std::collections::BTreeMap::new(),
+            effect_row_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             handled_effects: std::collections::BTreeSet::new(),
         };
@@ -582,6 +610,10 @@ struct Elaborator<'a> {
     /// remain stable `Type::Generic` slots; inference variables are reserved
     /// for instantiations at a call site.
     generic_parameters: std::collections::BTreeMap<String, u32>,
+    /// Lexically visible row-kind binders. These intentionally remain
+    /// separate from `generic_parameters`: an effect row can be a callable
+    /// tail but can never be elaborated as a value type.
+    effect_row_parameters: std::collections::BTreeMap<String, u32>,
     declared_effects: EffectRow,
     /// Protocol instances exhaustively intercepted by lexically active deep
     /// handlers.  A partial handler never enters this set, so forwarding still
@@ -867,7 +899,7 @@ impl Elaborator<'_> {
                     })
                     .collect(),
                 None,
-                vec![],
+                crate::header::EffectRowHeader::default(),
                 body,
                 expression.span,
             ),
@@ -924,10 +956,18 @@ impl Elaborator<'_> {
         span: Span,
     ) -> CoreId {
         self.locals.enter();
+        // A contextual block is a callable body, not an eager continuation
+        // of its enclosing expression. Its expected callable row therefore
+        // governs any operations in the block, and enclosing handlers cannot
+        // be captured as though they would still be active when it runs.
+        let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
+        let previous_handled = std::mem::take(&mut self.handled_effects);
         let values = values
             .into_iter()
             .map(|value| self.expression(value))
             .collect::<Vec<_>>();
+        self.declared_effects = previous_effects;
+        self.handled_effects = previous_handled;
         let body_ty = values
             .last()
             .map(|value| self.expressions[value.0 as usize].ty.clone())
@@ -966,7 +1006,7 @@ impl Elaborator<'_> {
         &mut self,
         parameters: Vec<ClosureParameter>,
         declared_result: Option<crate::header::HeaderType>,
-        effects: Vec<crate::header::HeaderType>,
+        effects: crate::header::EffectRowHeader,
         body: ExprId,
         span: Span,
     ) -> CoreId {
@@ -981,11 +1021,19 @@ impl Elaborator<'_> {
                 (parameter.name, ty)
             })
             .collect::<Vec<_>>();
+        let effects = self.closure_effects(&effects, span);
         self.locals.enter();
         for (name, ty) in &parameters {
             self.locals.define(name.clone(), ty.clone());
         }
+        // A typed closure freezes an independent callable contract. Check
+        // its body against that contract and do not let an enclosing handler
+        // discharge effects that may escape with the closure value.
+        let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
+        let previous_handled = std::mem::take(&mut self.handled_effects);
         let body = self.expression(body);
+        self.declared_effects = previous_effects;
+        self.handled_effects = previous_handled;
         self.locals.leave();
         let actual_result = self.expressions[body.0 as usize].ty.clone();
         let result = declared_result
@@ -1000,7 +1048,6 @@ impl Elaborator<'_> {
             );
             self.recovered = true;
         }
-        let effects = self.closure_effects(&effects, span);
         let captures = self.closure_captures(body, &parameters);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -1251,11 +1298,11 @@ impl Elaborator<'_> {
     }
     fn closure_effects(
         &mut self,
-        effects: &[crate::header::HeaderType],
+        effects: &crate::header::EffectRowHeader,
         span: Span,
     ) -> crate::types::EffectRow {
         let mut resolved = crate::types::EffectRow::empty();
-        for effect in effects {
+        for effect in &effects.effects {
             match effect {
                 crate::header::HeaderType::Path(path) => {
                     match self
@@ -1419,6 +1466,19 @@ impl Elaborator<'_> {
                 }
                 _ => {
                     self.error(span, "G4115", "closure effect is not a named effect");
+                    self.recovered = true;
+                }
+            }
+        }
+        if let Some(tail) = &effects.tail {
+            match self.effect_row_parameters.get(tail).copied() {
+                Some(index) => resolved.tail = Some(crate::EffectTail::Generic(index)),
+                None => {
+                    self.error(
+                        span,
+                        "G4115",
+                        "typed closure effect-row tail requires an enclosing `EffectRow` binder",
+                    );
                     self.recovered = true;
                 }
             }

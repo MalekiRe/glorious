@@ -6,7 +6,7 @@
 //! belong to later semantic queries, not parser heuristics.
 
 use crate::{
-    header::HeaderType,
+    header::{EffectRowHeader, HeaderType},
     scanner::TokenRange,
     source::{LexedFile, Span, TokenKind},
 };
@@ -103,13 +103,13 @@ pub enum ExprKind {
         parameters: Vec<String>,
         body: ExprId,
     },
-    /// Explicit callable syntax: `(x: T, y: U) -> R / {E} { body }`.
+    /// Explicit callable syntax: `(x: T, y: U) -> R / {E | e} { body }`.
     /// Header terms remain syntactic here; signature/type elaboration owns
     /// their semantic meaning and any contextual callable selection.
     TypedClosure {
         parameters: Vec<ClosureParameter>,
         result: Option<HeaderType>,
-        effects: Vec<HeaderType>,
+        effects: EffectRowHeader,
         body: ExprId,
     },
     Let {
@@ -1007,21 +1007,35 @@ impl Parser<'_> {
         } else {
             None
         };
-        let mut effects = vec![];
+        let mut effects = EffectRowHeader::default();
         if self.at_operator("/") {
             self.position += 1;
             if self.at_punctuation('{') {
                 self.position += 1;
                 while !self.at_punctuation('}') && self.current().is_some() {
-                    effects.push(self.closure_type()?);
+                    if self.at_operator("|") {
+                        self.position += 1;
+                        effects.tail = Some(self.expect_identifier()?);
+                        break;
+                    }
+                    effects.effects.push(self.closure_type()?);
+                    if self.at_operator("|") {
+                        continue;
+                    }
                     if !self.at_punctuation(',') {
+                        if !self.at_punctuation('}') {
+                            self.error_current(
+                                "G4017",
+                                "expected `,` between typed closure effect-row members",
+                            );
+                        }
                         break;
                     }
                     self.position += 1;
                 }
                 self.expect_punctuation('}')?;
             } else {
-                effects.push(self.closure_type()?);
+                effects.effects.push(self.closure_type()?);
             }
         }
         let body = self.parse_block(false)?;
