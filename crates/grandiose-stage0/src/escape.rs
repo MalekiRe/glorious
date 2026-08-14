@@ -11,6 +11,7 @@ use crate::{
     core::{CoreId, CoreKind, CorePlace, EnvironmentBrand, TypedBody},
     placeflow::PlaceFlow,
     source::Span,
+    types::Type,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,6 +52,14 @@ impl EscapeFlow {
             values: BTreeMap::new(),
             diagnostics: vec![],
         };
+        // Parameters may carry references through structural aggregates. They
+        // originate outside this body, but their shape must still be present
+        // so a later assignment of `&local` into (for example) `slot.0`
+        // replaces that exact projection rather than disappearing from the
+        // boundary provenance model.
+        for (name, ty) in &body.parameters {
+            analyzer.values.insert(name.clone(), parameter_value(ty));
+        }
         let root = analyzer.value(body.root);
         analyzer.report_return_escape(&root, body.expression(body.root).span);
         analyzer
@@ -71,6 +80,10 @@ impl EscapeFlow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     None,
+    /// A reference supplied by the caller. It may be returned or carried
+    /// across suspension, but can be overwritten by a body-local borrow in
+    /// an aggregate projection.
+    ExternalBorrowed,
     Borrowed {
         root: String,
     },
@@ -80,6 +93,27 @@ enum Value {
         captures: Vec<Capture>,
     },
     Joined(Vec<Value>),
+}
+
+fn parameter_value(ty: &Type) -> Value {
+    match ty {
+        Type::Reference { .. } => Value::ExternalBorrowed,
+        Type::Tuple(values) => Value::Aggregate(values.iter().map(parameter_value).collect()),
+        // Array length is not retained in `Type`, and nominal field layouts
+        // intentionally remain interface-owned. Preserve the sound subset
+        // whose projection layout is explicit in frozen Core.
+        Type::Array(_) | Type::Nominal { .. } | Type::Projection { .. } => Value::None,
+        Type::Callable { .. }
+        | Type::Generic(_)
+        | Type::Infer(_)
+        | Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Error => Value::None,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -298,12 +332,27 @@ impl Analyzer<'_> {
             CorePlace::Local { name, .. } => {
                 self.values.insert(name, value);
             }
-            CorePlace::Field { base, index, .. } => {
-                if let Some(name) = base.root_local().map(|(name, _)| name.to_owned())
-                    && let Some(Value::Aggregate(fields)) = self.values.get_mut(&name)
-                    && let Some(field) = fields.get_mut(index as usize)
-                {
-                    *field = value;
+            CorePlace::Field {
+                base,
+                index,
+                field_count,
+                ..
+            } => {
+                if let Some(name) = base.root_local().map(|(name, _)| name.to_owned()) {
+                    let entry = self.values.entry(name).or_insert(Value::None);
+                    // A parameter nominal layout is intentionally not stored
+                    // in EscapeFlow. The frozen Core projection nevertheless
+                    // carries its exact arity, which is sufficient to open a
+                    // conservative structural provenance shell on first
+                    // write and retain the assigned reference thereafter.
+                    if matches!(entry, Value::None) {
+                        *entry = Value::Aggregate(vec![Value::None; field_count as usize]);
+                    }
+                    if let Value::Aggregate(fields) = entry
+                        && let Some(field) = fields.get_mut(index as usize)
+                    {
+                        *field = value;
+                    }
                 }
             }
             CorePlace::Deref { reference, .. } => {
@@ -392,8 +441,7 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
                 collect_borrowed_roots(value, roots);
             }
         }
-        Value::Closure { .. } => {}
-        Value::None => {}
+        Value::Closure { .. } | Value::None | Value::ExternalBorrowed => {}
     }
 }
 
@@ -415,6 +463,6 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
                 collect_closure_captures(value, captures);
             }
         }
-        Value::None | Value::Borrowed { .. } => {}
+        Value::None | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
     }
 }

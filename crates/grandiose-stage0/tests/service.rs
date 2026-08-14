@@ -3825,6 +3825,41 @@ fn service_rejects_references_to_body_locals_in_returned_aggregates() {
 }
 
 #[test]
+fn service_tracks_outlives_through_assigned_tuple_reference_projections() {
+    let incoming = StageZeroCompiler::new()
+        .compile(request(
+            "pub struct Slot { value: &i64, tag: i64 } pub fn relay(slot: Slot) -> &i64 { slot.value } pub fn main() -> i64 { 0 }",
+        ))
+        .expect("an incoming aggregate reference must remain returnable");
+    assert!(
+        incoming.diagnostics.is_empty(),
+        "{:#?}",
+        incoming.diagnostics
+    );
+
+    let local_escape = r#"
+        pub struct Slot { value: &i64, tag: i64 }
+        pub fn bad(slot: Slot) -> &i64 {
+            let value = 1;
+            slot.value = &value;
+            slot.value
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(local_escape))
+    else {
+        panic!("body-local aggregate projection unexpectedly escaped")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "missing aggregate projection escape diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_closure_and_effect_payload_lifetime_escapes() {
     let closure = r#"
         pub fn bad() -> () -> &i64 {
