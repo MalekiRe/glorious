@@ -5652,11 +5652,29 @@ fn service_reborrows_a_refined_enum_payload_by_position() {
                 false => Result::Err(()),
             }
         }
-        pub fn main() -> i64 { 42 }
+        pub fn main() -> i64 {
+            let result_ok = Result<i64, i64>::Ok(10);
+            let result_err = Result<i64, i64>::Err(20);
+            let option_some = Result<i64, ()>::Ok(30);
+            let option_none = Result<i64, ()>::Err(());
+            handle result_as_ref(&result_ok) {
+                Result::Ok(value) => *value,
+                Result::Err(value) => *value,
+            } + handle result_as_mut(&mut result_err) {
+                Result::Ok(value) => *value,
+                Result::Err(value) => *value,
+            } + handle option_as_ref(&option_some) {
+                Result::Ok(value) => *value,
+                Result::Err(_) => 0,
+            } + handle option_as_mut(&mut option_none) {
+                Result::Ok(value) => *value,
+                Result::Err(_) => 0,
+            }
+        }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 60);
 }
 
 #[test]
