@@ -80,7 +80,7 @@ pub const STAGE0_LANGUAGE_GENERATION: u32 = 1;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 1;
 pub const STAGE0_CACHE_GENERATION: u32 = 2;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 23;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 24;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 6;
 
 impl CompilerBuildIdentity {
@@ -426,6 +426,7 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
                     crate::PrimitiveRole::IntBitXor => 41,
                     crate::PrimitiveRole::IntBitNot => 42,
                     crate::PrimitiveRole::IntShr => 44,
+                    crate::PrimitiveRole::IntShl => 43,
                 }],
             );
             put(&mut bytes, selector.module_path.as_bytes());

@@ -510,6 +510,12 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    /// Exact manifest-bound i64 left shift with a u32 wrapping count.
+    ShlI64 {
+        dst: MirLocal,
+        value: MirLocal,
+        count: MirLocal,
+    },
     SubI64 {
         dst: MirLocal,
         left: MirLocal,
@@ -1099,6 +1105,7 @@ fn fold_block(
             | MirInstruction::BitXorI64 { .. }
             | MirInstruction::IntShrI64 { .. }
             | MirInstruction::BitNotI64 { .. } => None,
+            MirInstruction::ShlI64 { .. } => None,
             MirInstruction::SubI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_sub)
             }
@@ -1339,6 +1346,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::IntShrI64 { dst, .. }
         | MirInstruction::BitOrI64 { dst, .. }
         | MirInstruction::BitNotI64 { dst, .. }
+        | MirInstruction::ShlI64 { dst, .. }
         | MirInstruction::SubI64 { dst, .. }
         | MirInstruction::MulI64 { dst, .. }
         | MirInstruction::DivI64 { dst, .. }
@@ -3344,6 +3352,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::IntShrI64 { .. }
         | MirInstruction::BitOrI64 { .. }
         | MirInstruction::BitNotI64 { .. }
+        | MirInstruction::ShlI64 { .. }
         | MirInstruction::SubI64 { .. }
         | MirInstruction::MulI64 { .. }
         | MirInstruction::DivI64 { .. }
@@ -4078,6 +4087,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::DerefStore { reference, src } => vec![*reference, *src],
         MirInstruction::NotBool { dst, value } => vec![*dst, *value],
         MirInstruction::BitNotI64 { dst, value } => vec![*dst, *value],
+        MirInstruction::ShlI64 { dst, value, count } => vec![*dst, *value, *count],
         MirInstruction::AddI64 { dst, left, right }
         | MirInstruction::WrappingAddI64 { dst, left, right }
         | MirInstruction::WrappingSubI64 { dst, left, right }
@@ -13749,6 +13759,37 @@ impl Lowerer<'_> {
                                     dst,
                                     left: *left,
                                     right: *right,
+                                });
+                            }
+                            Some(PrimitiveRole::IntShl) => {
+                                let [value, count] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic int shift-left requires a value and count",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.locals[count.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic int shift-left is only VM-specialized for frozen i64 with a u32 count",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::ShlI64 {
+                                    dst,
+                                    value: *value,
+                                    count: *count,
                                 });
                             }
                             Some(
