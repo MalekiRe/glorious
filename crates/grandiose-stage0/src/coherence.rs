@@ -497,7 +497,7 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
             left_arguments
                 .iter()
                 .zip(right_arguments)
-                .map(|(left, right)| unify_overlap_type(left, right, bindings))
+                .map(|(left, right)| unify_overlap_argument(left, right, bindings))
                 .collect::<Option<Vec<_>>>()
                 .map(|arguments| Type::Nominal {
                     definition: *left_definition,
@@ -591,7 +591,10 @@ fn bind_overlap_type(index: u32, value: Type, bindings: &mut OverlapBindings) ->
 fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings) -> bool {
     match resolve_overlap_type(value, bindings) {
         Type::Generic(found) => found == index,
-        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => arguments
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .any(|argument| contains_overlap_argument_generic(argument, index, bindings)),
+        Type::Tuple(arguments) => arguments
             .iter()
             .any(|argument| contains_overlap_generic(argument, index, bindings)),
         Type::Array(value) => contains_overlap_generic(&value, index, bindings),
@@ -624,6 +627,21 @@ fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings
         | Type::ConstGeneric { .. }
         | Type::Infer(_)
         | Type::Error => false,
+    }
+}
+
+fn contains_overlap_argument_generic(
+    argument: &GenericArgument,
+    index: u32,
+    bindings: &OverlapBindings,
+) -> bool {
+    match argument {
+        GenericArgument::Type(value) => contains_overlap_generic(value, index, bindings),
+        GenericArgument::EffectRow(_)
+        | GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => false,
     }
 }
 
@@ -667,7 +685,7 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
             definition: *definition,
             arguments: arguments
                 .iter()
-                .map(|argument| resolve_overlap_type(argument, bindings))
+                .map(|argument| resolve_overlap_argument(argument, bindings))
                 .collect(),
         },
         Type::Tuple(values) => Type::Tuple(
@@ -774,7 +792,7 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
             definition: *definition,
             arguments: arguments
                 .iter()
-                .map(|argument| rebase_overlap_type(argument, offset))
+                .map(|argument| rebase_overlap_argument(argument, offset))
                 .collect(),
         },
         Type::Tuple(values) => Type::Tuple(
@@ -829,6 +847,17 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
             invocation: *invocation,
         },
         value => value.clone(),
+    }
+}
+
+fn rebase_overlap_argument(argument: &GenericArgument, offset: u32) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => GenericArgument::Type(rebase_overlap_type(value, offset)),
+        GenericArgument::ConstGeneric { index, kind } => GenericArgument::ConstGeneric {
+            index: index.saturating_add(offset),
+            kind: *kind,
+        },
+        argument => argument.clone(),
     }
 }
 
