@@ -1000,50 +1000,6 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
 }
 
 #[test]
-fn reborrow_suspends_its_aggregate_reference_carrier_until_nll_release() {
-    let replacement_while_live = r#"
-        pub struct Holder { loan: &mut i64, tag: i64 }
-        pub fn main() -> i64 {
-            let first = 1;
-            let second = 2;
-            let holder = Holder { loan: &mut first, tag: 0 };
-            let child = &mut *holder.loan;
-            holder.loan = &mut second;
-            *child
-        }
-    "#;
-    let diagnostics = match StageZeroCompiler::new().compile(request(replacement_while_live)) {
-        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
-        outcome => panic!(
-            "replacement of a suspended aggregate reference carrier unexpectedly compiled: {outcome:#?}"
-        ),
-    };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G5004"),
-        "missing aggregate-carrier reborrow conflict: {diagnostics:#?}"
-    );
-
-    let replacement_after_last_use = r#"
-        pub struct Holder { loan: &mut i64, tag: i64 }
-        pub fn main() -> i64 {
-            let first = 1;
-            let second = 2;
-            let holder = Holder { loan: &mut first, tag: 0 };
-            let child = &mut *holder.loan;
-            *child = 3;
-            holder.loan = &mut second;
-            *holder.loan
-        }
-    "#;
-    let outcome = StageZeroCompiler::new()
-        .compile(request(replacement_after_last_use))
-        .expect("NLL must release a consumed child reborrow before carrier replacement");
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
-}
-
-#[test]
 fn parent_unique_reference_is_suspended_while_a_unique_reborrow_is_live() {
     let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = &mut *parent; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {

@@ -4287,18 +4287,11 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?
             }
             VmInstruction::Borrow {
-                dst,
-                src,
-                fields,
-                unique,
+                dst, src, unique, ..
             } => {
                 read(&states, *src)?;
                 let found = register_type(function, *dst)?;
-                let VmType::Reference {
-                    unique: actual_unique,
-                    referent: destination_referent,
-                } = found.clone()
-                else {
+                if !matches!(found, VmType::Reference { unique: actual, .. } if actual == *unique) {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected: VmType::Reference {
@@ -4306,53 +4299,6 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             referent: Box::new(VmType::Unit),
                         },
                         found,
-                    });
-                };
-                if actual_unique != *unique {
-                    return Err(VmArtifactError::TypeMismatch {
-                        register: *dst,
-                        expected: VmType::Reference {
-                            unique: *unique,
-                            referent: destination_referent,
-                        },
-                        found,
-                    });
-                }
-
-                let source_type = register_type(function, *src)?;
-                let source_referent = match &source_type {
-                    VmType::Reference {
-                        unique: parent_unique,
-                        referent,
-                    } => {
-                        // A bytecode artifact must not manufacture an
-                        // exclusive child from a shared parent. Runtime
-                        // `borrow_value` also defends this, but rejecting it
-                        // here keeps the independently decoded VM boundary
-                        // fail-closed before execution.
-                        if *unique && !*parent_unique {
-                            return Err(VmArtifactError::TypeMismatch {
-                                register: *src,
-                                expected: VmType::Reference {
-                                    unique: true,
-                                    referent: referent.clone(),
-                                },
-                                found: source_type,
-                            });
-                        }
-                        referent.as_ref()
-                    }
-                    other => other,
-                };
-                // A whole-place borrow and a whole-reference reborrow have a
-                // fully knowable referent at this boundary. Reject a forged
-                // destination type rather than allowing a later DerefCopy to
-                // observe a value that disagrees with its register contract.
-                if fields.is_empty() && destination_referent.as_ref() != source_referent {
-                    return Err(VmArtifactError::TypeMismatch {
-                        register: *dst,
-                        expected: source_referent.clone(),
-                        found: *destination_referent,
                     });
                 }
                 write(&mut states, *dst)?

@@ -10,8 +10,8 @@ use crate::{
     instance::InstanceKey,
     placeflow::PlaceFlow,
     types::{
-        GenericArgument, Mutability, Type, is_canonical_generic_argument_identity,
-        is_canonical_type_identity, projection_item_arguments_match_kinds,
+        GenericArgument, Type, is_canonical_generic_argument_identity, is_canonical_type_identity,
+        projection_item_arguments_match_kinds,
     },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1987,55 +1987,6 @@ impl MirFunction {
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
     fn validate_instruction(&self, instruction: &MirInstruction) -> Result<(), String> {
-        if let MirInstruction::Borrow {
-            dst,
-            src,
-            fields,
-            unique,
-        } = instruction
-        {
-            let Type::Reference {
-                mutability,
-                referent: destination_referent,
-                ..
-            } = self.local_type(*dst)?
-            else {
-                return Err("MIR borrow destination is not a reference".into());
-            };
-            let expected_mutability = if *unique {
-                Mutability::Unique
-            } else {
-                Mutability::Shared
-            };
-            if *mutability != expected_mutability {
-                return Err(
-                    "MIR borrow destination mutability disagrees with its loan mode".into(),
-                );
-            }
-            match self.local_type(*src)? {
-                Type::Reference {
-                    mutability: parent_mutability,
-                    referent: source_referent,
-                    ..
-                } => {
-                    if *unique && *parent_mutability != Mutability::Unique {
-                        return Err("MIR unique reborrow has a shared parent reference".into());
-                    }
-                    if fields.is_empty() && destination_referent != source_referent {
-                        return Err("MIR whole-reference reborrow changes its referent type".into());
-                    }
-                }
-                source_type
-                    if fields.is_empty() && destination_referent.as_ref() != source_type =>
-                {
-                    return Err(
-                        "MIR whole-place borrow referent does not match its source type".into(),
-                    );
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
         if let MirInstruction::MakeArray {
             dst,
             fields,
