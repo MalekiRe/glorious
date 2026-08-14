@@ -1160,6 +1160,7 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::U32ToUsize,
                         crate::PrimitiveRole::UsizeToU32Checked,
                         crate::PrimitiveRole::IntCheckedAdd,
+                        crate::PrimitiveRole::IntWrappingAdd,
                     ]
                     .iter()
                     .any(|role| manifest.primitives.get(role) == Some(&declaration.key))
@@ -1690,14 +1691,18 @@ impl StageZeroCompiler {
                 }
             }
         }
-        let instances =
-            match materialize_concrete_instances(&mut functions, &instance_graph, &signatures) {
-                Ok(instances) => instances,
-                Err(message) => {
-                    diagnostics.push(CompileDiagnostic::invariant("G7032", message));
-                    BTreeMap::new()
-                }
-            };
+        let instances = match materialize_concrete_instances(
+            &mut functions,
+            &instance_graph,
+            &signatures,
+            runtime_primitives.as_ref(),
+        ) {
+            Ok(instances) => instances,
+            Err(message) => {
+                diagnostics.push(CompileDiagnostic::invariant("G7032", message));
+                BTreeMap::new()
+            }
+        };
         if !diagnostics.is_empty() {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         }
@@ -1846,14 +1851,18 @@ fn materialize_concrete_instances(
     functions: &mut BTreeMap<DefKey, MirFunction>,
     graph: &InstanceGraph,
     signatures: &ElaboratedInterface,
+    runtime_primitives: Option<&BTreeMap<DefKey, crate::PrimitiveRole>>,
 ) -> Result<BTreeMap<DefKey, MirInstance>, String> {
     let mut instances = BTreeMap::new();
     let mut targets = BTreeMap::new();
-    for key in graph
-        .ordered()
-        .into_iter()
-        .filter(|key| !key.arguments().is_empty())
-    {
+    for key in graph.ordered().into_iter().filter(|key| {
+        !key.arguments().is_empty()
+                // Generic runtime leaves lower directly from frozen call
+                // sites. Their source bodies are opaque and must never be
+                // requested as ordinary materialized callable instances.
+                && !runtime_primitives
+                    .is_some_and(|primitives| primitives.contains_key(&key.callable))
+    }) {
         let executable = DefKey(key.fingerprint());
         if functions.contains_key(&executable) {
             return Err(

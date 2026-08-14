@@ -436,6 +436,13 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// Distinct from `AddI64`: this exact runtime leaf wraps two's-complement
+    /// i64 overflow and is never selected for ordinary checked `+` source.
+    WrappingAddI64 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
     SubI64 {
         dst: MirLocal,
         left: MirLocal,
@@ -1014,6 +1021,7 @@ fn fold_block(
             MirInstruction::AddI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_add)
             }
+            MirInstruction::WrappingAddI64 { .. } => None,
             MirInstruction::SubI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_sub)
             }
@@ -1243,6 +1251,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::DerefCopy { dst, .. }
         | MirInstruction::NotBool { dst, .. }
         | MirInstruction::AddI64 { dst, .. }
+        | MirInstruction::WrappingAddI64 { dst, .. }
         | MirInstruction::SubI64 { dst, .. }
         | MirInstruction::MulI64 { dst, .. }
         | MirInstruction::DivI64 { dst, .. }
@@ -3237,6 +3246,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::DerefStore { .. }
         | MirInstruction::NotBool { .. }
         | MirInstruction::AddI64 { .. }
+        | MirInstruction::WrappingAddI64 { .. }
         | MirInstruction::SubI64 { .. }
         | MirInstruction::MulI64 { .. }
         | MirInstruction::DivI64 { .. }
@@ -3971,6 +3981,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::DerefStore { reference, src } => vec![*reference, *src],
         MirInstruction::NotBool { dst, value } => vec![*dst, *value],
         MirInstruction::AddI64 { dst, left, right }
+        | MirInstruction::WrappingAddI64 { dst, left, right }
         | MirInstruction::SubI64 { dst, left, right }
         | MirInstruction::MulI64 { dst, left, right }
         | MirInstruction::DivI64 { dst, left, right }
@@ -13579,7 +13590,10 @@ impl Lowerer<'_> {
                                     arguments,
                                 });
                             }
-                            Some(PrimitiveRole::IntCheckedAdd) => {
+                            Some(
+                                role @ (PrimitiveRole::IntCheckedAdd
+                                | PrimitiveRole::IntWrappingAdd),
+                            ) => {
                                 let [left, right] = arguments.as_slice() else {
                                     self.error(
                                         "G6005",
@@ -13598,13 +13612,23 @@ impl Lowerer<'_> {
                                     || self.body.expression(id).ty
                                         != Type::Scalar(crate::types::ScalarType::I64)
                                 {
-                                    self.error("G6005", "generic int checked-add is only VM-specialized for frozen i64");
+                                    self.error("G6005", "generic int primitive is only VM-specialized for frozen i64");
                                     return None;
                                 }
-                                self.instructions.push(MirInstruction::AddI64 {
-                                    dst,
-                                    left: *left,
-                                    right: *right,
+                                self.instructions.push(match role {
+                                    PrimitiveRole::IntCheckedAdd => MirInstruction::AddI64 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::IntWrappingAdd => {
+                                        MirInstruction::WrappingAddI64 {
+                                            dst,
+                                            left: *left,
+                                            right: *right,
+                                        }
+                                    }
+                                    _ => unreachable!("int primitive role was narrowed above"),
                                 });
                             }
                             None => match host_import {

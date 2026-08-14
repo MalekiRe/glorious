@@ -64,6 +64,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_checked_add<T>` in distributed std.
     /// Lowering may specialize it only after the frozen type argument is i64.
     IntCheckedAdd,
+    /// Exact generic declaration `__g1_int_wrapping_add<T>` in distributed
+    /// std. Its i64 specialization has wrapping, not checked, overflow.
+    IntWrappingAdd,
 }
 
 impl PrimitiveRole {
@@ -102,6 +105,7 @@ impl PrimitiveRole {
             Self::U32ToUsize => "u32-to-usize",
             Self::UsizeToU32Checked => "usize-to-u32-checked",
             Self::IntCheckedAdd => "int-checked-add",
+            Self::IntWrappingAdd => "int-wrapping-add",
         }
     }
 
@@ -140,6 +144,7 @@ impl PrimitiveRole {
             "u32-to-usize" => Self::U32ToUsize,
             "usize-to-u32-checked" => Self::UsizeToU32Checked,
             "int-checked-add" => Self::IntCheckedAdd,
+            "int-wrapping-add" => Self::IntWrappingAdd,
             _ => return None,
         })
     }
@@ -500,7 +505,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
-        PrimitiveRole::IntCheckedAdd => crate::CallableSignature {
+        PrimitiveRole::IntCheckedAdd | PrimitiveRole::IntWrappingAdd => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0), Type::Generic(0)],
@@ -555,6 +560,7 @@ fn manifest_digest(
             PrimitiveRole::U32ToUsize => 30,
             PrimitiveRole::UsizeToU32Checked => 31,
             PrimitiveRole::IntCheckedAdd => 32,
+            PrimitiveRole::IntWrappingAdd => 33,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
