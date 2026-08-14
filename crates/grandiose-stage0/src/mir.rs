@@ -1941,6 +1941,7 @@ struct Lowerer<'a> {
 
 #[derive(Clone, Debug)]
 struct DirectResumptionState {
+    name: String,
     quantity: crate::quantity::Quantity,
     calls: u64,
     plan: DirectResumptionPlan,
@@ -4204,6 +4205,9 @@ impl Lowerer<'_> {
             let CoreHandlerResumption::Explicit { quantity, .. } = &clause.resumption else {
                 return true;
             };
+            // This static replayer is reserved for genuinely multi-shot
+            // finite continuation contracts. Exact one-shot residuals use
+            // the VM handler-frame lowering below.
             quantity.upper.is_none_or(|upper| upper < 2)
                 || clause.patterns.len() != argument_ids.len()
         }) {
@@ -4238,6 +4242,7 @@ impl Lowerer<'_> {
             // local or a payload binder.
             self.named.remove(continuation);
             let previous = self.direct_resumption.replace(DirectResumptionState {
+                name: continuation.clone(),
                 quantity: *quantity,
                 calls: 0,
                 plan: DirectResumptionPlan::PureResidual {
@@ -5435,7 +5440,7 @@ impl Lowerer<'_> {
                 }
                 self.value(clause.body)
             }
-            CoreHandlerResumption::Explicit { quantity, .. } => {
+            CoreHandlerResumption::Explicit { name, quantity } => {
                 if !quantity.contains(crate::quantity::Quantity::ONCE) {
                     self.error(
                         "G6005",
@@ -5444,6 +5449,7 @@ impl Lowerer<'_> {
                     return None;
                 }
                 let previous = self.direct_resumption.replace(DirectResumptionState {
+                    name: name.clone(),
                     quantity: *quantity,
                     calls: 0,
                     plan: DirectResumptionPlan::Identity,
@@ -5491,6 +5497,7 @@ impl Lowerer<'_> {
                 // `let name = ...` prevents direct-resumption recognition.
                 let shadowed = self.named.remove(name);
                 let previous = self.direct_resumption.replace(DirectResumptionState {
+                    name: name.clone(),
                     quantity: *quantity,
                     calls: 0,
                     plan: DirectResumptionPlan::Identity,
@@ -5615,10 +5622,16 @@ impl Lowerer<'_> {
         // registers, but a `let` cannot merely alias its initializer: later
         // assignment must overwrite this same destination.
         if let CoreKind::Let { name, value } = &e.kind {
-            if matches!(
-                self.body.expression(*value).kind,
-                CoreKind::Resumption { .. }
-            ) {
+            let aliases_direct_resumption = match &self.body.expression(*value).kind {
+                CoreKind::Resumption { .. } => true,
+                CoreKind::Local(source) => {
+                    self.direct_resumption.as_ref().is_some_and(|resumption| {
+                        resumption.name == *source && !self.named.contains_key(source)
+                    })
+                }
+                _ => false,
+            };
+            if aliases_direct_resumption {
                 if self.direct_resumption.is_none() {
                     self.error(
                         "G6005",
@@ -6031,11 +6044,20 @@ impl Lowerer<'_> {
                 self.instructions.push(instruction);
             }
             CoreKind::Call { callee, arguments } => {
-                if matches!(
-                    self.body.expression(callee).kind,
-                    CoreKind::Resumption { .. }
-                ) && self.direct_resumption.is_some()
-                {
+                let direct_resumption = match &self.body.expression(callee).kind {
+                    // An identity-bearing Core node can only be produced for
+                    // a lexical alias of the currently active continuation.
+                    // The direct lowering retains that snapshot in its state
+                    // rather than materializing a callable register.
+                    CoreKind::Resumption { .. } => self.direct_resumption.is_some(),
+                    CoreKind::Local(name) => {
+                        self.direct_resumption.as_ref().is_some_and(|resumption| {
+                            resumption.name == *name && !self.named.contains_key(name)
+                        })
+                    }
+                    _ => false,
+                };
+                if direct_resumption {
                     let [argument] = arguments.as_slice() else {
                         self.error("G6005", "direct resumption must be invoked with one value");
                         return None;

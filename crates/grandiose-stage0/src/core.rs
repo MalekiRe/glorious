@@ -873,6 +873,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         }),
         CoreKind::Literal(_)
         | CoreKind::Local(_)
+        | CoreKind::Resumption { .. }
         | CoreKind::Function(_)
         | CoreKind::TraitMethod { .. }
         | CoreKind::Constant(_)
@@ -1450,7 +1451,7 @@ struct Elaborator<'a> {
     /// Every lexical alias of an active snapshot points to its original
     /// generated identity. Scope generations are never reused, so stale
     /// entries cannot make a shadowing local resumptive.
-    resumption_bindings: std::collections::BTreeMap<usize, ActiveResumption>,
+    resumption_bindings: std::collections::BTreeMap<(String, usize), ActiveResumption>,
     /// Installed only while one explicit handler arm is elaborated. Nested
     /// handler arms replace and restore it, preserving lexical continuation
     /// identity rather than counting an accidentally shadowed spelling.
@@ -1477,10 +1478,11 @@ impl Elaborator<'_> {
                 let value = self.expression(value);
                 let ty = self.expressions[value.0 as usize].ty.clone();
                 self.locals.define(name.clone(), ty.clone());
-                if let Some(identity) = self.resumption_identity(value) {
-                    if let Some(generation) = self.locals.binding_generation(&name) {
-                        self.resumption_bindings.insert(generation, identity);
-                    }
+                if let Some(identity) = self.resumption_identity(value)
+                    && let Some(generation) = self.locals.binding_generation(&name)
+                {
+                    self.resumption_bindings
+                        .insert((name.clone(), generation), identity);
                 }
                 self.alloc(CoreKind::Let { name, value }, Type::Unit, expression.span)
             }
@@ -2820,6 +2822,7 @@ impl Elaborator<'_> {
             }
             CoreKind::Literal(_)
             | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
@@ -3233,17 +3236,21 @@ impl Elaborator<'_> {
     }
     fn active_resumption(&self, name: &str) -> Option<ActiveResumption> {
         let generation = self.locals.binding_generation(&name.to_owned())?;
-        self.resumption_bindings.get(&generation).cloned()
+        self.resumption_bindings
+            .get(&(name.to_owned(), generation))
+            .cloned()
     }
     fn resumption_identity(&self, id: CoreId) -> Option<ActiveResumption> {
-        let CoreKind::Resumption { id, .. } = &self.expressions[id.0 as usize].kind else {
-            return None;
-        };
-        self.active_resumptions
-            .iter()
-            .rev()
-            .find(|resumption| resumption.id == *id)
-            .cloned()
+        match &self.expressions[id.0 as usize].kind {
+            CoreKind::Resumption { id, .. } => self
+                .active_resumptions
+                .iter()
+                .rev()
+                .find(|resumption| resumption.id == *id)
+                .cloned(),
+            CoreKind::Local(name) => self.active_resumption(name),
+            _ => None,
+        }
     }
     fn record_resumption_call(&mut self, id: CoreId) {
         let Some(identity) = self.resumption_identity(id) else {
@@ -4121,7 +4128,7 @@ impl Elaborator<'_> {
                         };
                         self.next_resumption = self.next_resumption.saturating_add(1);
                         self.resumption_bindings
-                            .insert(binding_generation, identity.clone());
+                            .insert((name.clone(), binding_generation), identity.clone());
                         self.active_resumptions.push(identity.clone());
                         active_identity = Some(identity);
                     }
