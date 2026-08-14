@@ -210,6 +210,35 @@ fn service_compact_label_result_annotations_constrain_transfers() {
 }
 
 #[test]
+fn service_compact_label_transfer_is_terminal_but_preserves_its_typed_result() {
+    // The suffix is intentionally incompatible with the label result.  A
+    // transfer exits the label, so neither type checking nor VM execution may
+    // treat that suffix as a normal continuation of `@done(42)`.
+    let source = "pub fn main() -> i64 { @done: i64 { @done(42); true } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("terminal compact label transfer must not type-check its dead suffix");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_compact_label_cannot_escape_through_a_closure() {
+    let source = "pub fn main() -> i64 { @done: i64 { let delayed = (value: i64) -> i64 { @done(value) }; 0 } }";
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect_err("a compact label brand must not escape its lexical scope");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4179"),
+        "compact label escape was accepted: {:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
 fn service_accepts_symbolic_structural_const_layout_contracts() {
     let source = "pub struct Tag<n: u32> {} pub fn identity<n: u32>(value: Tag<n + 1>) -> Tag<1 + n> { value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new()

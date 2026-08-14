@@ -751,9 +751,8 @@ impl Analyzer<'_> {
     /// allowing an inner label to propagate a transfer to an enclosing label.
     fn abrupt_exit(body: &TypedBody, id: CoreId) -> Option<AbruptExit> {
         let expression = body.expression(id);
-        match &expression.kind {
+        let structural_exit = match &expression.kind {
             CoreKind::Transfer { brand, .. } => Some(AbruptExit::Transfer(*brand)),
-            _ if matches!(expression.ty, Type::Never) => Some(AbruptExit::Never),
             CoreKind::Label { brand, body: child } => match Self::abrupt_exit(body, *child) {
                 Some(AbruptExit::Transfer(target)) if target == *brand => None,
                 exit => exit,
@@ -793,7 +792,13 @@ impl Analyzer<'_> {
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => None,
-        }
+        };
+        // Inspect structural children before trusting the frozen bottom type.
+        // In particular, a block containing `transfer done value` is `Never`
+        // at the source site, but the enclosing `label done` consumes that
+        // exact branded edge and continues with the transferred value.
+        structural_exit
+            .or_else(|| matches!(expression.ty, Type::Never).then_some(AbruptExit::Never))
     }
 
     fn first_abrupt_exit(body: &TypedBody, values: &[CoreId]) -> Option<AbruptExit> {

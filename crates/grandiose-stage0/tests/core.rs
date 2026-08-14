@@ -6320,6 +6320,9 @@ fn transfers_are_scoped_and_lower_to_a_verified_nonlocal_mir_edge() {
         "pub fn main() -> i64 { label done { transfer done 42; 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(expression.kind, CoreKind::Transfer { .. }) && expression.ty == Type::Never
+    }));
     let flow = PlaceFlow::analyze(&core);
     let owner = core
         .expressions

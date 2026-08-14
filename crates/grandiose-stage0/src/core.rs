@@ -3455,7 +3455,21 @@ impl Elaborator<'_> {
                     .pop()
                     .expect("label scope must outlive its body");
                 let body_type = self.expressions[body.0 as usize].ty.clone();
-                if self.inference.unify(result.clone(), body_type).is_err() {
+                let mut transfers = Vec::new();
+                collect_transfer_brands(&self.expressions, body, &mut transfers);
+                let rejoined_by_own_transfer = transfers.into_iter().any(|target| target == brand);
+                // A transfer does not produce the label result at its source
+                // location: it abandons that continuation.  Its payload was
+                // unified with `result` while elaborating the transfer, so a
+                // terminal body must not subsequently constrain the result
+                // with `Never`.  This also keeps dead suffixes after a
+                // transfer out of the label's result contract.
+                if !matches!(body_type, Type::Never)
+                    && self
+                        .inference
+                        .unify(result.clone(), body_type.clone())
+                        .is_err()
+                {
                     self.error(
                         expression.span,
                         "G4178",
@@ -3463,7 +3477,17 @@ impl Elaborator<'_> {
                     );
                     self.recovered = true;
                 }
-                self.alloc(CoreKind::Label { brand, body }, result, expression.span)
+                // A label re-establishes a normal value only when a transfer
+                // reaches *its own* destination.  An inner label whose body
+                // exits through an enclosing brand remains terminal; leaving
+                // its fresh result variable in the frozen Core would turn a
+                // valid nested transfer into an inference-hole diagnostic.
+                let label_type = if matches!(body_type, Type::Never) && !rejoined_by_own_transfer {
+                    Type::Never
+                } else {
+                    result
+                };
+                self.alloc(CoreKind::Label { brand, body }, label_type, expression.span)
             }
             ExprKind::Transfer { name, value } => {
                 let value = self.expression(value);
@@ -3498,7 +3522,12 @@ impl Elaborator<'_> {
                         brand: label.brand,
                         value,
                     },
-                    label.result,
+                    // A label transfer is a nonlocal edge, not an expression
+                    // that returns the destination's payload locally.  The
+                    // payload type remains attached to the branded target;
+                    // `Never` prevents strict enclosing forms and dead
+                    // suffixes from being typed as reachable work.
+                    Type::Never,
                     expression.span,
                 )
             }
