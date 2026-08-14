@@ -104,8 +104,14 @@ impl Analyzer<'_> {
             CoreKind::Unary { value, .. } => self.visit(value),
             CoreKind::Borrow { unique, value } => {
                 self.visit(value);
-                if let CoreKind::Local(n) = &self.body.expression(value).kind {
-                    self.borrow(n, unique, e.span)
+                // A field projection is still a borrow of storage owned by
+                // its root local.  Until PlaceFlow has projection-disjoint
+                // loans, retain a loan on that root rather than silently
+                // treating `&record.field` as a borrow of a temporary value.
+                // This is conservative, but prevents moving or overwriting
+                // the enclosing record while a reference into it is live.
+                if let Some(name) = self.root_local(value).map(str::to_owned) {
+                    self.borrow(&name, unique, e.span)
                 }
             }
             CoreKind::Call { callee, arguments } => {
@@ -193,6 +199,11 @@ impl Analyzer<'_> {
     fn read(&mut self, n: &str, s: Span) {
         match self.states.get(n) {
             Some(LocalState::Moved) => self.error(s, "G5001", format!("use of moved local `{n}`")),
+            Some(LocalState::UniquelyBorrowed) => self.error(
+                s,
+                "G5008",
+                format!("cannot read uniquely borrowed local `{n}`"),
+            ),
             Some(_) => self.event(FlowEventKind::Read(n.into()), s),
             None => self.error(s, "G5002", format!("unknown local `{n}` in PlaceFlow")),
         }
@@ -247,6 +258,18 @@ impl Analyzer<'_> {
     fn event(&mut self, kind: FlowEventKind, span: Span) {
         self.events.push(FlowEvent { kind, span })
     }
+
+    /// Return the root local for a readable place expression.  Borrow
+    /// expressions are only emitted for values, but field expressions remain
+    /// addressable projections of their local base.
+    fn root_local(&self, id: CoreId) -> Option<&str> {
+        match &self.body.expression(id).kind {
+            CoreKind::Local(name) => Some(name),
+            CoreKind::Field { base, .. } => self.root_local(*base),
+            _ => None,
+        }
+    }
+
     fn error(&mut self, span: Span, code: &'static str, message: String) {
         self.diagnostics.push(FlowDiagnostic {
             code,

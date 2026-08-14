@@ -234,6 +234,72 @@ fn placeflow_rejects_use_after_move_from_typed_core() {
 }
 
 #[test]
+fn placeflow_rejects_read_while_a_unique_borrow_is_live() {
+    let package = PackageKey("core-unique-borrow-read@0.1.0".into());
+    let source = "pub fn main() -> i64 { let value = 1; let loan = &mut value; value }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = &interface.definitions[0];
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5008"),
+        "a unique loan must exclude reads: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_tracks_a_field_borrow_back_to_its_root_local() {
+    let package = PackageKey("core-projection-borrow@0.1.0".into());
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; move pair; 0 }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004"),
+        "a projection loan must keep its root from moving: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
 fn typed_core_and_placeflow_lower_to_validated_mir() {
     let package = PackageKey("core@0.1.0".into());
     let source = "pub fn main() -> i64 { let value = 1; value + 2 }";
