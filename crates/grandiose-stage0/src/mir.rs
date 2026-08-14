@@ -3,7 +3,7 @@
 use crate::{
     core::{
         CallableId, CaptureMode, ClosureCapture, CoreCompletionClause, CoreHandlerClause,
-        CoreHandlerResumption, CoreId, CoreKind, CorePattern, TypedBody,
+        CoreHandlerResumption, CoreId, CoreKind, CorePattern, ResumptionId, TypedBody,
     },
     identity::{DefKey, Digest},
     placeflow::PlaceFlow,
@@ -151,7 +151,21 @@ pub enum MirInstruction {
         target: MirBlockId,
     },
     UninstallHandler,
+    /// Materialize the identity of the innermost suspended continuation as a
+    /// first-class, frame-safe callable snapshot.  The verifier binds this to
+    /// an active handler frame; runtime aliases carry the same token rather
+    /// than relying on a source binder spelling.
+    CaptureResumption {
+        dst: MirLocal,
+    },
     Resume {
+        value: MirLocal,
+    },
+    /// Consume the continuation denoted by an explicit snapshot.  This is
+    /// distinct from legacy `Resume`, which consumes the innermost frame and
+    /// remains useful for tail-resumption lowering.
+    ResumeSnapshot {
+        snapshot: MirLocal,
         value: MirLocal,
     },
     /// Decline the innermost suspended handler clause and re-perform its
@@ -872,10 +886,12 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::GeChar { dst, .. }
         | MirInstruction::Call { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
-        | MirInstruction::CallIndirect { dst, .. } => Some(*dst),
+        | MirInstruction::CallIndirect { dst, .. }
+        | MirInstruction::CaptureResumption { dst } => Some(*dst),
         MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
         | MirInstruction::Resume { .. }
+        | MirInstruction::ResumeSnapshot { .. }
         | MirInstruction::Forward
         | MirInstruction::Cancel => None,
     }
@@ -951,6 +967,7 @@ impl MirLowering {
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],
+            resumption_snapshots: BTreeMap::new(),
             direct_resumption: None,
         };
         let parameters = body
@@ -1792,7 +1809,9 @@ fn handler_region_exits(function: &MirFunction, start: MirBlockId) -> HandlerReg
         };
         for instruction in &block.instructions {
             match instruction {
-                MirInstruction::Resume { .. } => exits.resume = true,
+                MirInstruction::Resume { .. } | MirInstruction::ResumeSnapshot { .. } => {
+                    exits.resume = true
+                }
                 MirInstruction::Forward => exits.forward = true,
                 MirInstruction::Cancel => exits.cancel = true,
                 _ => {}
@@ -1866,7 +1885,9 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             ..
         } => payload_destinations.clone(),
         MirInstruction::UninstallHandler => Vec::new(),
+        MirInstruction::CaptureResumption { dst } => vec![*dst],
         MirInstruction::Resume { value } => vec![*value],
+        MirInstruction::ResumeSnapshot { snapshot, value } => vec![*snapshot, *value],
         MirInstruction::Forward => Vec::new(),
         MirInstruction::Cancel => Vec::new(),
         MirInstruction::Copy { dst, src }
@@ -1932,6 +1953,10 @@ struct Lowerer<'a> {
     lifted: BTreeMap<DefKey, MirFunction>,
     instructions: Vec<MirInstruction>,
     diagnostics: Vec<MirDiagnostic>,
+    /// First-class snapshots materialized in the current handler clause.
+    /// Multiple aliases of the same Core identity must share this register so
+    /// a stale copy cannot silently target a different frame.
+    resumption_snapshots: BTreeMap<ResumptionId, MirLocal>,
     /// Active only while lowering a statically specialized handler clause.
     /// The plan makes the captured continuation explicit even when its
     /// representation can be eliminated: either the root identity or a
@@ -5448,27 +5473,34 @@ impl Lowerer<'_> {
                     );
                     return None;
                 }
-                let previous = self.direct_resumption.replace(DirectResumptionState {
-                    name: name.clone(),
-                    quantity: *quantity,
-                    calls: 0,
-                    plan: DirectResumptionPlan::Identity,
-                });
-                let result = self.value(clause.body);
-                let state = self
-                    .direct_resumption
-                    .take()
-                    .expect("direct resumption state must outlive its clause body");
-                self.direct_resumption = previous;
-                let result = result?;
-                if state.calls != 1 {
-                    self.error(
-                        "G6005",
-                        "direct resumptive handler must invoke its continuation exactly once",
-                    );
-                    return None;
+                if !self.handler_body_uses_snapshot_alias(clause.body) {
+                    let previous = self.direct_resumption.replace(DirectResumptionState {
+                        name: name.clone(),
+                        quantity: *quantity,
+                        calls: 0,
+                        plan: DirectResumptionPlan::Identity,
+                    });
+                    let result = self.value(clause.body);
+                    let state = self
+                        .direct_resumption
+                        .take()
+                        .expect("direct resumption state must outlive its clause body");
+                    self.direct_resumption = previous;
+                    let result = result?;
+                    if state.calls != 1 {
+                        self.error(
+                            "G6005",
+                            "direct resumptive handler must invoke its continuation exactly once",
+                        );
+                        return None;
+                    }
+                    return Some(result);
                 }
-                Some(result)
+                // The dynamic handler path deliberately retains a real
+                // snapshot operand instead of relying on the legacy implicit
+                // top-of-stack `Resume`. This is the boundary where aliasing
+                // becomes executable bytecode rather than a Core-only fact.
+                self.value(clause.body)
             }
             CoreHandlerResumption::Discard { quantity } => {
                 if quantity.requires_positive_use() {
@@ -5480,6 +5512,21 @@ impl Lowerer<'_> {
                 }
                 self.value(clause.body)
             }
+        }
+    }
+    fn handler_body_uses_snapshot_alias(&self, id: CoreId) -> bool {
+        match &self.body.expression(id).kind {
+            CoreKind::Let { value, .. } => {
+                matches!(
+                    self.body.expression(*value).kind,
+                    CoreKind::Resumption { .. }
+                )
+            }
+            CoreKind::Block(values) => values
+                .iter()
+                .copied()
+                .any(|value| self.handler_body_uses_snapshot_alias(value)),
+            _ => false,
         }
     }
     /// Lower a clause whose captured continuation is the direct root return.
@@ -5632,16 +5679,22 @@ impl Lowerer<'_> {
                 _ => false,
             };
             if aliases_direct_resumption {
-                if self.direct_resumption.is_none() {
-                    self.error(
-                        "G6005",
-                        "first-class continuation snapshot requires handler-frame lowering",
-                    );
-                    return None;
+                if self.direct_resumption.is_some() {
+                    // Static replay owns its snapshot directly. An alias has
+                    // no independent runtime storage in that specialization.
+                    let unit = self.alloc(Type::Unit, id);
+                    self.instructions
+                        .push(MirInstruction::ConstUnit { dst: unit });
+                    self.values.insert(id, unit);
+                    return Some(unit);
                 }
-                // The direct specialization keeps the snapshot in its
-                // explicit resumption state; aliases are identity-preserving
-                // Core bindings and therefore need no ordinary register copy.
+                let snapshot = self.value(*value)?;
+                let local = self.alloc(self.body.expression(*value).ty.clone(), id);
+                self.instructions.push(MirInstruction::Copy {
+                    dst: local,
+                    src: snapshot,
+                });
+                self.named.insert(name.clone(), local);
                 let unit = self.alloc(Type::Unit, id);
                 self.instructions
                     .push(MirInstruction::ConstUnit { dst: unit });
@@ -5733,12 +5786,17 @@ impl Lowerer<'_> {
                 let src = *self.named.get(&name).or_else(|| self.values.get(&id))?;
                 self.instructions.push(MirInstruction::Copy { dst, src });
             }
-            CoreKind::Resumption { .. } => {
-                self.error(
-                    "G6005",
-                    "first-class continuation snapshot requires handler-frame lowering",
-                );
-                return None;
+            CoreKind::Resumption { id, .. } => {
+                if let Some(snapshot) = self.resumption_snapshots.get(&id) {
+                    self.instructions.push(MirInstruction::Copy {
+                        dst,
+                        src: *snapshot,
+                    });
+                } else {
+                    self.instructions
+                        .push(MirInstruction::CaptureResumption { dst });
+                    self.resumption_snapshots.insert(id, dst);
+                }
             }
             // Named callables are first-class values just like anonymous
             // closures. Their environment is statically empty, while the
@@ -6103,6 +6161,24 @@ impl Lowerer<'_> {
                                 .push(MirInstruction::Copy { dst, src: resumed });
                         }
                     }
+                    self.values.insert(id, dst);
+                    return Some(dst);
+                }
+                if matches!(
+                    self.body.expression(callee).kind,
+                    CoreKind::Resumption { .. }
+                ) {
+                    let [argument] = arguments.as_slice() else {
+                        self.error(
+                            "G6005",
+                            "resumption snapshot must be invoked with one value",
+                        );
+                        return None;
+                    };
+                    let snapshot = self.value(callee)?;
+                    let value = self.value(*argument)?;
+                    self.instructions
+                        .push(MirInstruction::ResumeSnapshot { snapshot, value });
                     self.values.insert(id, dst);
                     return Some(dst);
                 }
@@ -6600,6 +6676,7 @@ impl Lowerer<'_> {
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],
+            resumption_snapshots: BTreeMap::new(),
             direct_resumption: None,
         };
         let mut lifted_parameters = Vec::with_capacity(captures.len() + parameters.len());

@@ -177,6 +177,16 @@ pub enum VmInstruction {
     Resume {
         value: u32,
     },
+    /// Materialize an explicit token for the innermost suspended handler
+    /// continuation. The token is callable-typed but frame-branded at runtime.
+    CaptureResumption {
+        dst: u32,
+    },
+    /// Resume the exact frame named by an explicit snapshot token.
+    ResumeSnapshot {
+        snapshot: u32,
+        value: u32,
+    },
     /// Decline the innermost suspended handler clause. The original effect
     /// transfer is retried at the next matching outer frame; the declined
     /// frame is retained in the continuation for deep reinstatement.
@@ -1458,6 +1468,11 @@ impl<'a> Decoder<'a> {
             46 => Ok(VmInstruction::Resume { value: self.u32()? }),
             47 => Ok(VmInstruction::Forward),
             48 => Ok(VmInstruction::Cancel),
+            49 => Ok(VmInstruction::CaptureResumption { dst: self.u32()? }),
+            50 => Ok(VmInstruction::ResumeSnapshot {
+                snapshot: self.u32()?,
+                value: self.u32()?,
+            }),
             3 => self.i64_arithmetic(|dst, left, right| VmInstruction::AddI64 { dst, left, right }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
@@ -2102,7 +2117,14 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
                 .expect("validated MIR handler target exists"),
         },
         MirInstruction::UninstallHandler => VmInstruction::UninstallHandler,
+        MirInstruction::CaptureResumption { dst } => {
+            VmInstruction::CaptureResumption { dst: dst.0 }
+        }
         MirInstruction::Resume { value } => VmInstruction::Resume { value: value.0 },
+        MirInstruction::ResumeSnapshot { snapshot, value } => VmInstruction::ResumeSnapshot {
+            snapshot: snapshot.0,
+            value: value.0,
+        },
         MirInstruction::Forward => VmInstruction::Forward,
         MirInstruction::Cancel => VmInstruction::Cancel,
         MirInstruction::Copy { dst, src } => VmInstruction::Copy {
@@ -2894,6 +2916,61 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 advances = false;
             }
+            VmInstruction::CaptureResumption { dst } => {
+                let Some(frame) = states.handlers.last() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.continuations.is_empty() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let VmType::Callable { parameters, .. } = register_type(function, *dst)? else {
+                    return Err(VmArtifactError::NotCallable { register: *dst });
+                };
+                if parameters.as_slice() != [frame.resume_type.clone()] {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: VmType::Callable {
+                            parameters: vec![frame.resume_type.clone()],
+                            result: Box::new(VmType::Unit),
+                        },
+                        found: register_type(function, *dst)?,
+                    });
+                }
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ResumeSnapshot { snapshot, value } => {
+                read(&states, *snapshot)?;
+                read(&states, *value)?;
+                let Some(frame) = states.handlers.last_mut() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.continuations.is_empty() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let VmType::Callable { parameters, .. } = register_type(function, *snapshot)?
+                else {
+                    return Err(VmArtifactError::NotCallable {
+                        register: *snapshot,
+                    });
+                };
+                if parameters.as_slice() != [frame.resume_type.clone()]
+                    || register_type(function, *value)? != frame.resume_type
+                {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                let continuations = std::mem::take(&mut frame.continuations);
+                for continuation in continuations {
+                    let mut resumed_handlers = states.handlers.clone();
+                    resumed_handlers.extend(continuation.above);
+                    let mut resumed = VerifierState {
+                        registers: continuation.registers,
+                        handlers: resumed_handlers,
+                    };
+                    write(&mut resumed, continuation.dst)?;
+                    propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                }
+                advances = false;
+            }
             VmInstruction::Forward => {
                 let Some(mut declined) = states.handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -3368,10 +3445,17 @@ enum VmValue {
         captures: Arc<[VmValue]>,
         signature: VmType,
     },
+    /// A frame-branded callable token. Only `ResumeSnapshot` may consume it;
+    /// ordinary indirect calls reject it.
+    Resumption {
+        frame: u64,
+        signature: VmType,
+    },
 }
 
 #[derive(Clone)]
 struct RuntimeHandlerFrame {
+    id: u64,
     effect: DefKey,
     effect_arguments: Vec<VmType>,
     operation: u32,
@@ -3413,6 +3497,7 @@ impl VmValue {
             Self::Record { signature, .. } => signature.clone(),
             Self::Enum { signature, .. } => signature.clone(),
             Self::Callable { signature, .. } => signature.clone(),
+            Self::Resumption { signature, .. } => signature.clone(),
         }
     }
 }
@@ -3467,6 +3552,7 @@ fn format_vm_value(value: &VmValue) -> String {
         VmValue::Callable {
             callee, captures, ..
         } => format!("callable@{callee:?}[captures={}]", captures.len()),
+        VmValue::Resumption { frame, .. } => format!("resumption@{frame}"),
     }
 }
 fn expect_unit(value: impl Borrow<VmValue>) -> Result<(), VmArtifactError> {
@@ -3720,6 +3806,7 @@ fn parse_pattern_text(text: &str) -> Option<String> {
 fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
     let mut registers = vec![None; function.registers.len()];
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
+    let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc).cloned() {
         match instruction {
@@ -3984,6 +4071,11 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 target,
                 ..
             } => handlers.push(RuntimeHandlerFrame {
+                id: {
+                    let id = next_handler_id;
+                    next_handler_id = next_handler_id.saturating_add(1);
+                    id
+                },
                 effect,
                 effect_arguments,
                 operation,
@@ -4009,6 +4101,46 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                registers = continuation.registers;
+                registers[continuation.dst as usize] = Some(resumed);
+                handlers.extend(continuation.above);
+                pc = continuation.target;
+                continue;
+            }
+            VmInstruction::CaptureResumption { dst } => {
+                let Some(frame) = handlers.last() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.suspended.is_none() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let signature = register_type(function, dst)?;
+                if !matches!(signature, VmType::Callable { .. }) {
+                    return Err(VmArtifactError::NotCallable { register: dst });
+                }
+                registers[dst as usize] = Some(VmValue::Resumption {
+                    frame: frame.id,
+                    signature,
+                });
+            }
+            VmInstruction::ResumeSnapshot { snapshot, value } => {
+                let resumed = registers[value as usize]
+                    .clone()
+                    .ok_or(VmArtifactError::ReadBeforeWrite { register: value })?;
+                let VmValue::Resumption { frame: id, .. } =
+                    registers[snapshot as usize]
+                        .as_ref()
+                        .ok_or(VmArtifactError::ReadBeforeWrite { register: snapshot })?
+                else {
+                    return Err(VmArtifactError::NotCallable { register: snapshot });
+                };
+                let Some(index) = handlers.iter().rposition(|frame| frame.id == *id) else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let continuation = handlers[index]
+                    .suspended
+                    .take()
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
@@ -4570,6 +4702,15 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         }
         VmInstruction::Forward => output.push(47),
         VmInstruction::Cancel => output.push(48),
+        VmInstruction::CaptureResumption { dst } => {
+            output.push(49);
+            output.extend_from_slice(&dst.to_le_bytes());
+        }
+        VmInstruction::ResumeSnapshot { snapshot, value } => {
+            output.push(50);
+            output.extend_from_slice(&snapshot.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::MakeEnum {
             dst,
             definition,
@@ -4820,6 +4961,7 @@ fn execute_with_arguments(
         registers[index] = Some(value.clone());
     }
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
+    let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc) {
         budget.tick()?;
@@ -5092,6 +5234,11 @@ fn execute_with_arguments(
                     });
                 }
                 handlers.push(RuntimeHandlerFrame {
+                    id: {
+                        let id = next_handler_id;
+                        next_handler_id = next_handler_id.saturating_add(1);
+                        id
+                    },
                     effect: *effect,
                     effect_arguments: effect_arguments.clone(),
                     operation: *operation,
@@ -5118,6 +5265,49 @@ fn execute_with_arguments(
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                registers = continuation.registers;
+                registers[continuation.dst as usize] = Some(resumed);
+                handlers.extend(continuation.above);
+                pc = continuation.target;
+                continue;
+            }
+            VmInstruction::CaptureResumption { dst } => {
+                let Some(frame) = handlers.last() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.suspended.is_none() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let signature = register_type(function, *dst)?;
+                if !matches!(signature, VmType::Callable { .. }) {
+                    return Err(VmArtifactError::NotCallable { register: *dst });
+                }
+                registers[*dst as usize] = Some(VmValue::Resumption {
+                    frame: frame.id,
+                    signature,
+                });
+            }
+            VmInstruction::ResumeSnapshot { snapshot, value } => {
+                let resumed = registers[*value as usize]
+                    .clone()
+                    .ok_or(VmArtifactError::ReadBeforeWrite { register: *value })?;
+                let VmValue::Resumption { frame: id, .. } = registers[*snapshot as usize]
+                    .as_ref()
+                    .ok_or(VmArtifactError::ReadBeforeWrite {
+                        register: *snapshot,
+                    })?
+                else {
+                    return Err(VmArtifactError::NotCallable {
+                        register: *snapshot,
+                    });
+                };
+                let Some(index) = handlers.iter().rposition(|frame| frame.id == *id) else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let continuation = handlers[index]
+                    .suspended
+                    .take()
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);

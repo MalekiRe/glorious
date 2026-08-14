@@ -263,6 +263,79 @@ fn verified_vm_executes_a_deep_one_shot_handler_frame() {
 }
 
 #[test]
+fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
+    let effect = DefKey(Digest::of_bytes(b"snapshot-ask"));
+    let continuation = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"explicit-snapshot")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, continuation, VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    target: 4,
+                },
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 2 },
+                VmInstruction::CaptureResumption { dst: 1 },
+                VmInstruction::ConstI64 { dst: 3, value: 42 },
+                VmInstruction::ResumeSnapshot {
+                    snapshot: 1,
+                    value: 3,
+                },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"explicit-snapshot-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"orphan-snapshot")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::Callable {
+                parameters: vec![VmType::I64],
+                result: Box::new(VmType::I64),
+            }],
+            instructions: vec![VmInstruction::CaptureResumption { dst: 0 }],
+        },
+        fingerprint: Digest::of_bytes(b"orphan-snapshot-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
 fn resumed_handler_frame_reinstalls_for_the_next_matching_operation() {
     let effect = DefKey(Digest::of_bytes(b"Ask-deep"));
     let mut candidate = CandidateVmArtifact {

@@ -1879,7 +1879,7 @@ fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
 #[test]
 fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
     let package = PackageKey("core-handler-resumption-alias@0.1.0".into());
-    let source = "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => { let saved = k; saved(42) } } }";
+    let source = "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle { let answer = Ask::ask(); answer + 1 } { Ask::ask() with k => { let saved = k; saved(41) } } }";
     let file = FileKey::new(&package, "src/main.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -1916,6 +1916,24 @@ fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
     let mir = MirLowering::lower(definition.key, &core, &flow);
     assert!(mir.diagnostics.is_empty(), "{:#?}", mir.diagnostics);
+    let function = mir.function.expect("aliased snapshot must lower");
+    let instructions = function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .collect::<Vec<_>>();
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::CaptureResumption { .. })),
+        "MIR erased the first-class snapshot: {instructions:#?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::ResumeSnapshot { .. })),
+        "MIR resumed through an implicit frame instead of the snapshot: {instructions:#?}"
+    );
 }
 
 #[test]
