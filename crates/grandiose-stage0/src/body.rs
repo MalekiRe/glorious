@@ -145,6 +145,9 @@ pub enum ExprKind {
         unique: bool,
         value: ExprId,
     },
+    /// Read or assign through a reference place.  This is separate from the
+    /// binary multiplication token: a leading `*` is always a dereference.
+    Deref(ExprId),
     Assign {
         place: ExprId,
         value: ExprId,
@@ -462,6 +465,16 @@ impl Parser<'_> {
                 .unwrap_or_else(|| self.recover_expression());
             return Some(self.alloc(
                 ExprKind::Borrow { unique, value },
+                join(self.lexed.tokens[start].span, self.expression(value).span),
+            ));
+        }
+        if self.at_operator("*") {
+            let start = self.advance()?;
+            let value = self
+                .parse_prefix()
+                .unwrap_or_else(|| self.recover_expression());
+            return Some(self.alloc(
+                ExprKind::Deref(value),
                 join(self.lexed.tokens[start].span, self.expression(value).span),
             ));
         }

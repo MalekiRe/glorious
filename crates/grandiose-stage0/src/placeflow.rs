@@ -287,6 +287,7 @@ impl Analyzer<'_> {
                 }
                 self.borrow_place(value, unique, e.span, None)
             }
+            CoreKind::Deref(value) => self.visit_with_live_after(value, live_after),
             CoreKind::Call { callee, arguments } => {
                 let mut values = vec![callee];
                 values.extend(arguments);
@@ -443,6 +444,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Field { base, .. }
             | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
             | CoreKind::Move(base)
             | CoreKind::Unary { value: base, .. }
             | CoreKind::PatternTest { subject: base, .. } => self.collect_local_uses(*base, uses),
@@ -741,6 +743,10 @@ impl Analyzer<'_> {
                 projection.fields.push(*index);
                 Some(projection)
             }
+            // Dynamic aliasing through a reference is represented by the
+            // reference loan, not conflated with a statically disjoint field
+            // projection.  The loan checker remains conservative here.
+            CorePlace::Deref { .. } => None,
             CorePlace::Error => None,
         }
     }

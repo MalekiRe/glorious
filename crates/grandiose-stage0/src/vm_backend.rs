@@ -42,6 +42,10 @@ pub enum VmType {
         parameters: Vec<VmType>,
         result: Box<VmType>,
     },
+    Reference {
+        unique: bool,
+        referent: Box<VmType>,
+    },
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmCompare {
@@ -207,6 +211,20 @@ pub enum VmInstruction {
     },
     Move {
         dst: u32,
+        src: u32,
+    },
+    Borrow {
+        dst: u32,
+        src: u32,
+        fields: Vec<u32>,
+        unique: bool,
+    },
+    DerefCopy {
+        dst: u32,
+        reference: u32,
+    },
+    DerefStore {
+        reference: u32,
         src: u32,
     },
     NotBool {
@@ -1072,6 +1090,14 @@ fn vm_type(value: &Type) -> Result<VmType, Type> {
                 .collect::<Result<Vec<_>, _>>()?,
             result: Box::new(vm_type(result)?),
         }),
+        Type::Reference {
+            mutability,
+            referent,
+            ..
+        } => Ok(VmType::Reference {
+            unique: matches!(mutability, crate::types::Mutability::Unique),
+            referent: Box::new(vm_type(referent)?),
+        }),
         value => Err(value.clone()),
     }
 }
@@ -1088,6 +1114,7 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Callable { .. } => 6,
         VmType::Tuple(_) => 7,
         VmType::Nominal { .. } => 8,
+        VmType::Reference { .. } => 11,
     });
     match value {
         VmType::Callable { parameters, result } => {
@@ -1114,6 +1141,10 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
             }
         }
         VmType::Generic(index) => output.extend_from_slice(&index.to_le_bytes()),
+        VmType::Reference { unique, referent } => {
+            output.push(*unique as u8);
+            encode_type(referent, output);
+        }
         VmType::Array(element) => encode_type(element, output),
         _ => {}
     }
@@ -1268,6 +1299,18 @@ impl<'a> Decoder<'a> {
             }
             9 => Ok(VmType::Generic(self.u32()?)),
             10 => Ok(VmType::Array(Box::new(self.vm_type_at_depth(depth + 1)?))),
+            11 => Ok(VmType::Reference {
+                unique: match self.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid reference mutability",
+                        });
+                    }
+                },
+                referent: Box::new(self.vm_type_at_depth(depth + 1)?),
+            }),
             _ => Err(VmArtifactError::MalformedEncoding {
                 message: "unknown VM register type",
             }),
@@ -1396,6 +1439,38 @@ impl<'a> Decoder<'a> {
                 let (dst, src) = self.register_pair()?;
                 Ok(VmInstruction::Store { dst, src })
             }
+            49 => {
+                let dst = self.u32()?;
+                let src = self.u32()?;
+                let unique = match self.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid borrow mutability",
+                        });
+                    }
+                };
+                let count = self.count("borrow field projections", MAX_DECODE_REGISTERS)?;
+                let mut fields = Vec::with_capacity(count);
+                for _ in 0..count {
+                    fields.push(self.u32()?);
+                }
+                Ok(VmInstruction::Borrow {
+                    dst,
+                    src,
+                    fields,
+                    unique,
+                })
+            }
+            50 => Ok(VmInstruction::DerefCopy {
+                dst: self.u32()?,
+                reference: self.u32()?,
+            }),
+            51 => Ok(VmInstruction::DerefStore {
+                reference: self.u32()?,
+                src: self.u32()?,
+            }),
             39 => Ok(VmInstruction::UpdateRecord {
                 dst: self.u32()?,
                 base: self.u32()?,
@@ -1923,6 +1998,10 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
                 .collect(),
             result: Box::new(instantiate_vm_type(result, bindings)),
         },
+        VmType::Reference { unique, referent } => VmType::Reference {
+            unique: *unique,
+            referent: Box::new(instantiate_vm_type(referent, bindings)),
+        },
         value => value.clone(),
     }
 }
@@ -2137,6 +2216,25 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
         },
         MirInstruction::Move { dst, src } => VmInstruction::Move {
             dst: dst.0,
+            src: src.0,
+        },
+        MirInstruction::Borrow {
+            dst,
+            src,
+            fields,
+            unique,
+        } => VmInstruction::Borrow {
+            dst: dst.0,
+            src: src.0,
+            fields: fields.clone(),
+            unique: *unique,
+        },
+        MirInstruction::DerefCopy { dst, reference } => VmInstruction::DerefCopy {
+            dst: dst.0,
+            reference: reference.0,
+        },
+        MirInstruction::DerefStore { reference, src } => VmInstruction::DerefStore {
+            reference: reference.0,
             src: src.0,
         },
         MirInstruction::NotBool { dst, value } => VmInstruction::NotBool {
@@ -3052,6 +3150,56 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states[*src as usize] = Some(false);
                 write(&mut states, *dst)?
             }
+            VmInstruction::Borrow {
+                dst, src, unique, ..
+            } => {
+                read(&states, *src)?;
+                let referent = register_type(function, *src)?;
+                expect_type(
+                    function,
+                    *dst,
+                    VmType::Reference {
+                        unique: *unique,
+                        referent: Box::new(referent),
+                    },
+                )?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::DerefCopy { dst, reference } => {
+                read(&states, *reference)?;
+                let VmType::Reference { referent, .. } = register_type(function, *reference)?
+                else {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *reference,
+                        expected: VmType::Reference {
+                            unique: false,
+                            referent: Box::new(VmType::Unit),
+                        },
+                        found: register_type(function, *reference)?,
+                    });
+                };
+                expect_type(function, *dst, *referent)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::DerefStore { reference, src } => {
+                read(&states, *reference)?;
+                read(&states, *src)?;
+                let VmType::Reference {
+                    unique: true,
+                    referent,
+                } = register_type(function, *reference)?
+                else {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *reference,
+                        expected: VmType::Reference {
+                            unique: true,
+                            referent: Box::new(register_type(function, *src)?),
+                        },
+                        found: register_type(function, *reference)?,
+                    });
+                };
+                expect_type(function, *src, *referent)?;
+            }
             VmInstruction::NotBool { dst, value } => {
                 read(&states, *value)?;
                 expect_type(function, *dst, VmType::Bool)?;
@@ -3435,6 +3583,12 @@ enum VmValue {
         fields: Arc<[VmValue]>,
         signature: VmType,
     },
+    Reference {
+        target: u32,
+        fields: Arc<[u32]>,
+        unique: bool,
+        referent: VmType,
+    },
     Enum {
         definition: DefKey,
         variant: u32,
@@ -3499,7 +3653,99 @@ impl VmValue {
             Self::Enum { signature, .. } => signature.clone(),
             Self::Callable { signature, .. } => signature.clone(),
             Self::Resumption { signature, .. } => signature.clone(),
+            Self::Reference {
+                unique, referent, ..
+            } => VmType::Reference {
+                unique: *unique,
+                referent: Box::new(referent.clone()),
+            },
         }
+    }
+}
+
+fn project_reference(value: &VmValue, fields: &[u32]) -> Result<VmValue, VmArtifactError> {
+    let Some((field, rest)) = fields.split_first() else {
+        return Ok(value.clone());
+    };
+    let values: &[VmValue] = match value {
+        VmValue::Tuple(values) | VmValue::Array(values) => values,
+        VmValue::Record { fields, .. } | VmValue::Enum { fields, .. } => fields,
+        value => {
+            return Err(VmArtifactError::ResultType {
+                expected: VmType::Tuple(Vec::new()),
+                found: value.ty(),
+            });
+        }
+    };
+    let value = values
+        .get(*field as usize)
+        .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
+    project_reference(value, rest)
+}
+
+fn store_reference(
+    value: &VmValue,
+    fields: &[u32],
+    replacement: VmValue,
+) -> Result<VmValue, VmArtifactError> {
+    let Some((field, rest)) = fields.split_first() else {
+        return Ok(replacement);
+    };
+    match value {
+        VmValue::Tuple(values) => {
+            let mut values = values.to_vec();
+            let slot = values
+                .get_mut(*field as usize)
+                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
+            *slot = store_reference(slot, rest, replacement)?;
+            Ok(VmValue::Tuple(values.into()))
+        }
+        VmValue::Array(values) => {
+            let mut values = values.to_vec();
+            let slot = values
+                .get_mut(*field as usize)
+                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
+            *slot = store_reference(slot, rest, replacement)?;
+            Ok(VmValue::Array(values.into()))
+        }
+        VmValue::Record {
+            definition,
+            fields: old,
+            signature,
+        } => {
+            let mut fields = old.to_vec();
+            let slot = fields
+                .get_mut(*field as usize)
+                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
+            *slot = store_reference(slot, rest, replacement)?;
+            Ok(VmValue::Record {
+                definition: *definition,
+                fields: fields.into(),
+                signature: signature.clone(),
+            })
+        }
+        VmValue::Enum {
+            definition,
+            variant,
+            fields: old,
+            signature,
+        } => {
+            let mut fields = old.to_vec();
+            let slot = fields
+                .get_mut(*field as usize)
+                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
+            *slot = store_reference(slot, rest, replacement)?;
+            Ok(VmValue::Enum {
+                definition: *definition,
+                variant: *variant,
+                fields: fields.into(),
+                signature: signature.clone(),
+            })
+        }
+        value => Err(VmArtifactError::ResultType {
+            expected: VmType::Tuple(Vec::new()),
+            found: value.ty(),
+        }),
     }
 }
 
@@ -3554,6 +3800,9 @@ fn format_vm_value(value: &VmValue) -> String {
             callee, captures, ..
         } => format!("callable@{callee:?}[captures={}]", captures.len()),
         VmValue::Resumption { frame, .. } => format!("resumption@{frame}"),
+        VmValue::Reference { target, fields, .. } => {
+            format!("reference@{target}[fields={}]", fields.len())
+        }
     }
 }
 fn expect_unit(value: impl Borrow<VmValue>) -> Result<(), VmArtifactError> {
@@ -4212,6 +4461,68 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
             VmInstruction::Move { dst, src } => {
                 registers[dst as usize] = registers[src as usize].take()
             }
+            VmInstruction::Borrow {
+                dst,
+                src,
+                fields,
+                unique,
+            } => {
+                let referent = project_reference(
+                    registers[src as usize].as_ref().expect("verified register"),
+                    &fields,
+                )?
+                .ty();
+                registers[dst as usize] = Some(VmValue::Reference {
+                    target: src,
+                    fields: fields.into(),
+                    unique,
+                    referent,
+                });
+            }
+            VmInstruction::DerefCopy { dst, reference } => {
+                let VmValue::Reference { target, fields, .. } = registers[reference as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister {
+                        register: reference,
+                    });
+                };
+                registers[dst as usize] = Some(project_reference(
+                    registers[*target as usize]
+                        .as_ref()
+                        .expect("live reference target"),
+                    fields,
+                )?);
+            }
+            VmInstruction::DerefStore { reference, src } => {
+                let VmValue::Reference {
+                    target,
+                    fields,
+                    unique: true,
+                    ..
+                } = registers[reference as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister {
+                        register: reference,
+                    });
+                };
+                let (target, fields) = (*target, fields.clone());
+                let replacement = registers[src as usize]
+                    .as_ref()
+                    .expect("verified register")
+                    .clone();
+                let updated = store_reference(
+                    registers[target as usize]
+                        .as_ref()
+                        .expect("live reference target"),
+                    &fields,
+                    replacement,
+                )?;
+                registers[target as usize] = Some(updated);
+            }
             VmInstruction::NotBool { dst, value } => {
                 registers[dst as usize] = Some(VmValue::Bool(!expect_bool(
                     registers[value as usize]
@@ -4740,6 +5051,31 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&src.to_le_bytes())
+        }
+        VmInstruction::Borrow {
+            dst,
+            src,
+            fields,
+            unique,
+        } => {
+            output.push(49);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&src.to_le_bytes());
+            output.push(*unique as u8);
+            output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
+            for field in fields {
+                output.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        VmInstruction::DerefCopy { dst, reference } => {
+            output.push(50);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&reference.to_le_bytes());
+        }
+        VmInstruction::DerefStore { reference, src } => {
+            output.push(51);
+            output.extend_from_slice(&reference.to_le_bytes());
+            output.extend_from_slice(&src.to_le_bytes());
         }
         VmInstruction::NotBool { dst, value } => {
             output.push(19);
@@ -5378,6 +5714,70 @@ fn execute_with_arguments(
             }
             VmInstruction::Move { dst, src } => {
                 registers[*dst as usize] = registers[*src as usize].take()
+            }
+            VmInstruction::Borrow {
+                dst,
+                src,
+                fields,
+                unique,
+            } => {
+                let referent = project_reference(
+                    registers[*src as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                    fields,
+                )?
+                .ty();
+                registers[*dst as usize] = Some(VmValue::Reference {
+                    target: *src,
+                    fields: fields.clone().into(),
+                    unique: *unique,
+                    referent,
+                });
+            }
+            VmInstruction::DerefCopy { dst, reference } => {
+                let VmValue::Reference { target, fields, .. } = registers[*reference as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister {
+                        register: *reference,
+                    });
+                };
+                registers[*dst as usize] = Some(project_reference(
+                    registers[*target as usize]
+                        .as_ref()
+                        .expect("live reference target"),
+                    fields,
+                )?);
+            }
+            VmInstruction::DerefStore { reference, src } => {
+                let VmValue::Reference {
+                    target,
+                    fields,
+                    unique: true,
+                    ..
+                } = registers[*reference as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister {
+                        register: *reference,
+                    });
+                };
+                let (target, fields) = (*target, fields.clone());
+                let replacement = registers[*src as usize]
+                    .as_ref()
+                    .expect("verified register")
+                    .clone();
+                let updated = store_reference(
+                    registers[target as usize]
+                        .as_ref()
+                        .expect("live reference target"),
+                    &fields,
+                    replacement,
+                )?;
+                registers[target as usize] = Some(updated);
             }
             VmInstruction::NotBool { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::Bool(!expect_bool(

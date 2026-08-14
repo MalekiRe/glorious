@@ -400,6 +400,7 @@ impl Analyzer<'_> {
                 }
                 summary
             }
+            CoreKind::Deref(value) => self.expression(value, environment),
             CoreKind::Move(value)
             | CoreKind::Unary { value, .. }
             | CoreKind::Field { base: value, .. }
@@ -747,6 +748,7 @@ impl Analyzer<'_> {
                     _ => Binding::Other,
                 }
             }
+            CorePlace::Deref { .. } => Binding::Other,
             CorePlace::Error => Binding::Other,
         }
     }
@@ -768,6 +770,7 @@ impl Analyzer<'_> {
                     self.assign_binding(base, aggregate, environment);
                 }
             }
+            CorePlace::Deref { .. } => {}
             CorePlace::Error => {}
         }
     }

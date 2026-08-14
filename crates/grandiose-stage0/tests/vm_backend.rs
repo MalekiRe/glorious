@@ -1452,3 +1452,55 @@ fn generic_vm_programs_round_trip_and_execute_after_call_instantiation() {
     assert_eq!(decode_program(&bytes).unwrap(), program);
     assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
 }
+
+#[test]
+fn unique_reference_mutates_its_live_register_and_round_trips() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"unique-reference-store")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::I64),
+                },
+                VmType::I64,
+                VmType::I64,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 40 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: true,
+                },
+                VmInstruction::ConstI64 { dst: 2, value: 42 },
+                VmInstruction::DerefStore {
+                    reference: 1,
+                    src: 2,
+                },
+                VmInstruction::DerefCopy {
+                    dst: 3,
+                    reference: 1,
+                },
+                VmInstruction::Return { value: 3 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"reference-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert_eq!(
+        decode_and_verify_artifact(&bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}

@@ -193,6 +193,24 @@ pub enum MirInstruction {
         dst: MirLocal,
         src: MirLocal,
     },
+    /// Create a runtime loan to one root local and its statically selected
+    /// field path.  The path is authoritative Typed Core place evidence.
+    Borrow {
+        dst: MirLocal,
+        src: MirLocal,
+        fields: Vec<u32>,
+        unique: bool,
+    },
+    /// Copy through a live loan without consuming it.
+    DerefCopy {
+        dst: MirLocal,
+        reference: MirLocal,
+    },
+    /// Mutate through a unique live loan without replacing the reference.
+    DerefStore {
+        reference: MirLocal,
+        src: MirLocal,
+    },
     NotBool {
         dst: MirLocal,
         value: MirLocal,
@@ -856,6 +874,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Copy { dst, .. }
         | MirInstruction::Store { dst, .. }
         | MirInstruction::Move { dst, .. }
+        | MirInstruction::Borrow { dst, .. }
+        | MirInstruction::DerefCopy { dst, .. }
         | MirInstruction::NotBool { dst, .. }
         | MirInstruction::AddI64 { dst, .. }
         | MirInstruction::SubI64 { dst, .. }
@@ -899,7 +919,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Resume { .. }
         | MirInstruction::ResumeSnapshot { .. }
         | MirInstruction::Forward
-        | MirInstruction::Cancel => None,
+        | MirInstruction::Cancel
+        | MirInstruction::DerefStore { .. } => None,
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1929,6 +1950,9 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
+        MirInstruction::Borrow { dst, src, .. } => vec![*dst, *src],
+        MirInstruction::DerefCopy { dst, reference } => vec![*dst, *reference],
+        MirInstruction::DerefStore { reference, src } => vec![*reference, *src],
         MirInstruction::NotBool { dst, value } => vec![*dst, *value],
         MirInstruction::AddI64 { dst, left, right }
         | MirInstruction::SubI64 { dst, left, right }
@@ -6066,6 +6090,23 @@ impl Lowerer<'_> {
                 computation,
                 clauses,
             } => self.lower_terminal_handle(dst, computation, clauses)?,
+            CoreKind::Borrow { unique, value } => {
+                let Some((src, fields)) = self.reference_place(value) else {
+                    self.error("G6010", "borrow requires a stable local place");
+                    return None;
+                };
+                self.instructions.push(MirInstruction::Borrow {
+                    dst,
+                    src,
+                    fields,
+                    unique,
+                });
+            }
+            CoreKind::Deref(value) => {
+                let reference = self.value(value)?;
+                self.instructions
+                    .push(MirInstruction::DerefCopy { dst, reference });
+            }
             CoreKind::Move(value) => {
                 let src = self.value(value)?;
                 self.instructions.push(MirInstruction::Move { dst, src });
@@ -6619,6 +6660,7 @@ impl Lowerer<'_> {
                 !matches!(capture.mode, CaptureMode::Move | CaptureMode::UniqueBorrow)
             }),
             CoreKind::Borrow { unique, value } => !unique && self.core_is_replay_safe(value),
+            CoreKind::Deref(value) => self.core_is_replay_safe(value),
             CoreKind::Unary { value, .. }
             | CoreKind::Field { base: value, .. }
             | CoreKind::PatternTest { subject: value, .. } => self.core_is_replay_safe(value),
@@ -6669,6 +6711,7 @@ impl Lowerer<'_> {
             | CoreKind::PatternTest { subject: base, .. }
             | CoreKind::Move(base)
             | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
             | CoreKind::Unary { value: base, .. } => self.core_is_effect_free(base),
             CoreKind::Let { value, .. } | CoreKind::Assign { value, .. } => {
                 self.core_is_effect_free(value)
@@ -6728,6 +6771,20 @@ impl Lowerer<'_> {
     fn statement(&mut self, id: CoreId) -> Option<()> {
         self.value(id).map(|_| ())
     }
+    /// Resolve a Typed Core value place to its stable runtime root and field
+    /// path.  This refuses computed values: a borrow may never be lowered as
+    /// a hidden copy of a temporary.
+    fn reference_place(&mut self, id: CoreId) -> Option<(MirLocal, Vec<u32>)> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Local(name) => self.named.get(&name).copied().map(|local| (local, vec![])),
+            CoreKind::Field { base, index, .. } => {
+                let (root, mut fields) = self.reference_place(base)?;
+                fields.push(index);
+                Some((root, fields))
+            }
+            _ => None,
+        }
+    }
     fn read_place(&mut self, place: &crate::CorePlace) -> Option<MirLocal> {
         match place {
             crate::CorePlace::Local { name, .. } => self.named.get(name).copied().or_else(|| {
@@ -6749,6 +6806,13 @@ impl Lowerer<'_> {
                     field_count: *field_count,
                     field_type: ty.clone(),
                 });
+                Some(dst)
+            }
+            crate::CorePlace::Deref { reference, .. } => {
+                let reference = self.value(*reference)?;
+                let dst = self.alloc(place.ty(), CoreId(u32::MAX));
+                self.instructions
+                    .push(MirInstruction::DerefCopy { dst, reference });
                 Some(dst)
             }
             crate::CorePlace::Error => {
@@ -6785,6 +6849,20 @@ impl Lowerer<'_> {
                     field_type: ty.clone(),
                 });
                 self.store_place(base, updated)
+            }
+            crate::CorePlace::Deref {
+                reference, unique, ..
+            } => {
+                if !unique {
+                    self.error("G6010", "MIR store through shared reference");
+                    return None;
+                }
+                let reference = self.value(*reference)?;
+                self.instructions.push(MirInstruction::DerefStore {
+                    reference,
+                    src: value,
+                });
+                Some(())
             }
             crate::CorePlace::Error => {
                 self.error("G6009", "MIR assignment place is recovered");

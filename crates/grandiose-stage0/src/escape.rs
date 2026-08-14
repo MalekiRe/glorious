@@ -113,6 +113,10 @@ impl Analyzer<'_> {
             | CoreKind::Binary { .. } => Value::None,
             CoreKind::Local(name) => self.values.get(&name).cloned().unwrap_or(Value::None),
             CoreKind::Borrow { value, .. } => self.borrowed_value(value),
+            CoreKind::Deref(value) => {
+                self.value(value);
+                Value::None
+            }
             CoreKind::Move(value) => self.value(value),
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
                 Value::Aggregate(values.into_iter().map(|value| self.value(value)).collect())
@@ -289,6 +293,9 @@ impl Analyzer<'_> {
                 {
                     *field = value;
                 }
+            }
+            CorePlace::Deref { reference, .. } => {
+                self.value(reference);
             }
             CorePlace::Error => {}
         }

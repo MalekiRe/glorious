@@ -268,6 +268,14 @@ pub enum CorePlace {
         field_count: u32,
         ty: Type,
     },
+    /// A dereferenced unique reference place.  The reference expression is
+    /// retained as Typed Core rather than reconstructed from a spelling so
+    /// every later ownership phase sees the same referent contract.
+    Deref {
+        reference: CoreId,
+        ty: Type,
+        unique: bool,
+    },
     Error,
 }
 impl CorePlace {
@@ -275,6 +283,7 @@ impl CorePlace {
         match self {
             Self::Local { ty, .. } => ty.clone(),
             Self::Field { ty, .. } => ty.clone(),
+            Self::Deref { ty, .. } => ty.clone(),
             Self::Error => Type::Error,
         }
     }
@@ -282,6 +291,7 @@ impl CorePlace {
         match self {
             Self::Local { name, ty } => Some((name, ty)),
             Self::Field { base, .. } => base.root_local(),
+            Self::Deref { .. } => None,
             Self::Error => None,
         }
     }
@@ -386,6 +396,8 @@ pub enum CoreKind {
         unique: bool,
         value: CoreId,
     },
+    /// Read through a shared or unique reference without consuming the loan.
+    Deref(CoreId),
     Move(CoreId),
     Unary {
         operator: String,
@@ -728,6 +740,10 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(&[*unique as u8]);
                 self.id(*value);
             }
+            CoreKind::Deref(value) => {
+                self.bytes(b"deref");
+                self.id(*value);
+            }
             CoreKind::Move(value) => {
                 self.bytes(b"move");
                 self.id(*value);
@@ -751,13 +767,20 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         CoreKind::Field { base, .. }
         | CoreKind::PatternTest { subject: base, .. }
         | CoreKind::Borrow { value: base, .. }
+        | CoreKind::Deref(base)
         | CoreKind::Unary { value: base, .. }
         | CoreKind::Move(base) => vec![*base],
         CoreKind::Closure { body, .. }
         | CoreKind::Let { value: body, .. }
         | CoreKind::Label { body, .. }
         | CoreKind::Transfer { value: body, .. } => vec![*body],
-        CoreKind::Assign { value, .. } => vec![*value],
+        CoreKind::Assign { place, value } => {
+            let mut children = vec![*value];
+            if let CorePlace::Deref { reference, .. } = place {
+                children.push(*reference);
+            }
+            children
+        }
         CoreKind::Call { callee, arguments } => std::iter::once(*callee)
             .chain(arguments.iter().copied())
             .collect(),
@@ -909,6 +932,7 @@ fn place_structural_error(place: &CorePlace) -> Option<String> {
             "Typed Core assignment field index {index} is outside structural arity {field_count}"
         )),
         CorePlace::Field { base, .. } => place_structural_error(base),
+        CorePlace::Deref { .. } => None,
         CorePlace::Local { .. } | CorePlace::Error => None,
     }
 }
@@ -1075,6 +1099,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         | CoreKind::Binary { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
+        | CoreKind::Deref(_)
         | CoreKind::Move(_)
         | CoreKind::Unary { .. }
         | CoreKind::Error => false,
@@ -1105,6 +1130,7 @@ fn place_contains_inference(place: &CorePlace) -> bool {
         CorePlace::Field { base, ty, .. } => {
             type_contains_inference(ty) || place_contains_inference(base)
         }
+        CorePlace::Deref { ty, .. } => type_contains_inference(ty),
         CorePlace::Error => false,
     }
 }
@@ -2014,6 +2040,22 @@ impl Elaborator<'_> {
                     },
                     expression.span,
                 )
+            }
+            ExprKind::Deref(value) => {
+                let value = self.expression(value);
+                let Type::Reference {
+                    referent,
+                    mutability: _,
+                    lifetime: _,
+                } = self.expressions[value.0 as usize].ty.clone()
+                else {
+                    return self.fail(
+                        expression.span,
+                        "G4140",
+                        "dereference requires a shared or unique reference",
+                    );
+                };
+                self.alloc(CoreKind::Deref(value), *referent, expression.span)
             }
             ExprKind::Move(value) => {
                 let value = self.expression(value);
@@ -2966,7 +3008,9 @@ impl Elaborator<'_> {
                     self.collect_captures(*value, locals, captures);
                 }
             }
-            CoreKind::Unary { value, .. } => self.collect_captures(*value, locals, captures),
+            CoreKind::Unary { value, .. } | CoreKind::Deref(value) => {
+                self.collect_captures(*value, locals, captures)
+            }
             CoreKind::Borrow { unique, value } => {
                 if let CoreKind::Local(name) = &self.expressions[value.0 as usize].kind {
                     record_capture(
@@ -3173,6 +3217,7 @@ impl Elaborator<'_> {
             | CoreKind::Binary { .. }
             | CoreKind::Block(_)
             | CoreKind::Borrow { .. }
+            | CoreKind::Deref(_)
             | CoreKind::Move(_)
             | CoreKind::Unary { .. }
             | CoreKind::Error => {}
@@ -3187,6 +3232,7 @@ impl Elaborator<'_> {
                 self.zonk_place(base, span);
                 *ty = self.zonk_type(ty.clone(), span);
             }
+            CorePlace::Deref { ty, .. } => *ty = self.zonk_type(ty.clone(), span),
             CorePlace::Error => {}
         }
     }
@@ -3665,6 +3711,37 @@ impl Elaborator<'_> {
                     index: index as u32,
                     field_count,
                     ty: field.ty,
+                }
+            }
+            ExprKind::Deref(reference) => {
+                let reference = self.expression(*reference);
+                let Type::Reference {
+                    mutability,
+                    referent,
+                    ..
+                } = self.expressions[reference.0 as usize].ty.clone()
+                else {
+                    self.error(
+                        span,
+                        "G4140",
+                        "assignment through dereference requires a reference",
+                    );
+                    self.recovered = true;
+                    return CorePlace::Error;
+                };
+                if !matches!(mutability, Mutability::Unique) {
+                    self.error(
+                        span,
+                        "G4141",
+                        "assignment through a shared reference is not permitted",
+                    );
+                    self.recovered = true;
+                    return CorePlace::Error;
+                }
+                CorePlace::Deref {
+                    reference,
+                    ty: *referent,
+                    unique: true,
                 }
             }
             _ => {
