@@ -6502,6 +6502,15 @@ impl Elaborator<'_> {
                             .map(|parameter| self.normalize_concrete_type_projections(parameter))
                             .collect();
                         let result = self.normalize_concrete_type_projections(signature.result);
+                        // A concrete associated effect-row projection is a
+                        // selected callable contract, not deferred metadata.
+                        // Retain symbolic projections under declaration
+                        // binders, but normalize concrete rows before the
+                        // function value reaches `call` and MIR. Otherwise
+                        // source checking accepts a handler while VM-frame
+                        // lowering cannot see the operation identity it must
+                        // install.
+                        let effects = self.normalize_concrete_effect_row(signature.effects);
                         self.alloc(
                             CoreKind::Function {
                                 definition,
@@ -6512,7 +6521,7 @@ impl Elaborator<'_> {
                                 lifetime_binders: 0,
                                 parameters,
                                 result: Box::new(result),
-                                effects: signature.effects,
+                                effects,
                                 invocation: signature.invocation,
                             },
                             span,
@@ -6659,6 +6668,7 @@ impl Elaborator<'_> {
             .map(|parameter| self.normalize_concrete_type_projections(parameter))
             .collect();
         let result = self.normalize_concrete_type_projections(signature.result);
+        let effects = self.normalize_concrete_effect_row(signature.effects);
         self.alloc(
             CoreKind::Function {
                 definition,
@@ -6669,7 +6679,7 @@ impl Elaborator<'_> {
                 lifetime_binders: 0,
                 parameters,
                 result: Box::new(result),
-                effects: signature.effects,
+                effects,
                 invocation: signature.invocation,
             },
             span,

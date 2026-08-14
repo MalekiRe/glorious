@@ -3907,6 +3907,14 @@ fn service_instantiates_nominal_field_associated_type_projections() {
 }
 
 #[test]
+fn service_lowers_concrete_gat_type_projections_through_vm_layouts() {
+    let source = "trait Family { type Item<T>; } impl Family for i64 { type Item<T> = T; } pub struct Packet { value: <i64 as Family>::Item<i64> } pub fn increment(value: <i64 as Family>::Item<i64>) -> i64 { value + 1 } pub fn main() -> i64 { let packet = Packet { value: 41 }; increment(packet.value) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_instantiates_structural_const_nominal_layouts_at_record_construction() {
     let source = "pub struct Carrier<n: u32, T> { value: T } pub fn main() -> i64 { let value = Carrier<7, i64> { value: 41 }; value.value + 1 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -3925,6 +3933,14 @@ fn service_specializes_trait_method_effect_identities_with_quantity_generics() {
 #[test]
 fn service_normalizes_concrete_associated_effect_rows_on_trait_method_values() {
     let source = "effect Trace { note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { handle apply(Relay::relay) { Trace::note() with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_lowers_concrete_associated_effect_gats_through_vm_handlers() {
+    let source = "effect Trace<T> { [1,1] note(value: T) -> i64; } trait Capability { type Effects<T>: EffectRow; } impl Capability for i64 { type Effects<T> = {Trace<T>}; } pub fn worker() -> i64 / { <i64 as Capability>::Effects<i64> } { Trace<i64>::note(41) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
