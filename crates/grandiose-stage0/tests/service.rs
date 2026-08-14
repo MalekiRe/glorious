@@ -6421,6 +6421,262 @@ fn service_refutable_handler_label_transfers_keep_source_order() {
 }
 
 #[test]
+fn service_label_transfer_exits_every_strict_aggregate_constructor() {
+    let cases = [
+        (
+            "pub fn main() -> i64 { label done { (1, transfer done 42); 0 } }",
+            "tuple",
+        ),
+        (
+            "pub fn main() -> i64 { label done { [1, transfer done 42]; 0 } }",
+            "array",
+        ),
+        (
+            "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { label done { Pair { left: 1, right: transfer done 42 }; 0 } }",
+            "record",
+        ),
+        (
+            "pub enum Result { Pair(i64, i64) } pub fn main() -> i64 { label done { Result::Pair(1, transfer done 42); 0 } }",
+            "enum",
+        ),
+    ];
+    for (source, shape) in cases {
+        let outcome = StageZeroCompiler::new()
+            .compile(request(source))
+            .unwrap_or_else(|error| panic!("{shape} label transfer failed to compile: {error:#?}"));
+        assert!(
+            outcome.diagnostics.is_empty(),
+            "{shape} label transfer diagnostics: {:#?}",
+            outcome.diagnostics
+        );
+        assert_eq!(
+            outcome.artifact.unwrap().run_i64().unwrap(),
+            42,
+            "{shape} constructor must not evaluate its strict suffix after transfer"
+        );
+    }
+}
+
+#[test]
+fn service_label_transfer_exits_from_an_effect_argument_before_performance() {
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn main() -> i64 {
+            label done {
+                handle Ask::ask(transfer done 42) {
+                    Ask::ask(value) => value,
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_refutable_handler_mixes_normal_and_label_transfer_outcomes() {
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn choose(value: i64) -> i64 {
+            label done {
+                handle Ask::ask(value) {
+                    Ask::ask(0) => 1,
+                    Ask::ask(other) => transfer done other,
+                }
+            }
+        }
+        pub fn main() -> i64 { choose(0) + choose(41) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_resumption_result_may_transfer_to_an_enclosing_label() {
+    let source = r#"
+        effect Ask { [1, 1] ask() -> i64; }
+        pub fn worker() -> i64 / Ask {
+            let value = Ask::ask();
+            value + 1
+        }
+        pub fn main() -> i64 {
+            label done {
+                handle worker() {
+                    Ask::ask() with k => transfer done k(41),
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_allows_an_immediately_invoked_closure_to_capture_a_resumption() {
+    let source = r#"
+        effect Ask { [1, 1] ask() -> i64; }
+        pub fn main() -> i64 {
+            handle Ask::ask() {
+                Ask::ask() with k => {
+                    let resume = (value: i64) -> i64 { k(value) };
+                    resume(42)
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_allows_an_immediately_invoked_closure_to_capture_a_refinement_binder() {
+    let source = r#"
+        pub enum Result { Ok(i64), Err }
+        pub fn main() -> i64 {
+            let result = Result::Ok(42);
+            handle result is Result::Ok(value) {
+                true => {
+                    let read = () -> i64 { value };
+                    read()
+                },
+                false => 0,
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_materializes_trait_methods_with_independent_impl_head_generics() {
+    let source = r#"
+        trait Select<T> { fn select(receiver: Self, value: T) -> T; }
+        struct Box<T> { payload: T }
+        impl<T, U> Select<T> for Box<U> {
+            fn select(receiver: Self, value: T) -> T { value }
+        }
+        pub fn main() -> i64 {
+            Select<i64>::select(Box { payload: "tag" }, 42)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_multi_operation_handler_may_cancel_to_an_enclosing_label_after_a_resume() {
+    let source = r#"
+        effect Console {
+            [1, 1] read(value: i64) -> i64;
+            [0, 1] write(value: i64) -> i64;
+        }
+        pub fn worker() -> i64 / Console {
+            let value = Console::read(40);
+            Console::write(value)
+        }
+        pub fn main() -> i64 {
+            label done {
+                handle worker() {
+                    Console::read(value) with k => k(value + 2),
+                    Console::write(value, _) => transfer done value,
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_partial_handler_forwarding_may_reach_an_outer_label_transfer() {
+    let source = r#"
+        effect Ask { [0, 1] ask(value: i64) -> i64; }
+        pub fn worker() -> i64 / Ask { Ask::ask(42) }
+        pub fn main() -> i64 {
+            label done {
+                handle {
+                    handle worker() {
+                        Ask::ask(0, _) => 0,
+                    }
+                } {
+                    Ask::ask(value, _) => transfer done value,
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_replayed_resumption_result_may_transfer_to_an_enclosing_label() {
+    let source = r#"
+        effect Ask { [2, 2] ask() -> i64; }
+        pub fn worker() -> i64 / Ask {
+            let value = Ask::ask();
+            value + 1
+        }
+        pub fn main() -> i64 {
+            label done {
+                handle worker() {
+                    Ask::ask(k) => {
+                        let total = k(20) + k(21);
+                        transfer done total
+                    },
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
+fn service_completion_after_a_resumption_may_transfer_to_an_enclosing_label() {
+    let source = r#"
+        effect Ask { [1, 1] ask() -> i64; }
+        pub fn main() -> i64 {
+            label done {
+                handle Ask::ask() {
+                    value => transfer done value + 1,
+                    Ask::ask(k) => k(41),
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn manifest_bound_generic_int_bit_and_specializes_u8() {
+    let mut input = request(
+        "fn __g1_int_bit_and<T>(left: T, right: T) -> T { () } \
+         pub fn main() -> u8 { __g1_int_bit_and<u8>(42, 15) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntBitAnd,
+        "__g1_int_bit_and",
+    ));
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("generic integer primitives must materialize for every concrete integer width")
+        .artifact
+        .expect("a successful build must publish an artifact");
+    assert_eq!(artifact.run_u8().unwrap(), 10);
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }
