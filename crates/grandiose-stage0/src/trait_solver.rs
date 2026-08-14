@@ -58,6 +58,31 @@ pub enum TraitProjectionAnswer {
     },
 }
 
+/// The row-kinded counterpart of [`TraitProjectionAnswer`]. Keeping it
+/// separate makes it impossible for an associated effect row to cross a
+/// value-type normalization boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraitEffectRowProjectionAnswer {
+    Normalized {
+        evidence: DefKey,
+        row: EffectRow,
+    },
+    Refuted {
+        evidence: DefKey,
+    },
+    NoSolution,
+    Ambiguous,
+    Overflow,
+    MissingAssociatedEffectRow {
+        evidence: DefKey,
+    },
+    AssociatedEffectRowArity {
+        evidence: DefKey,
+        expected: u32,
+        found: u32,
+    },
+}
+
 /// Selected implementation method evidence with all implementation and method
 /// generic slots substituted for one concrete call site.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,6 +255,50 @@ impl TraitSolver {
             TraitAnswer::NoSolution => TraitProjectionAnswer::NoSolution,
             TraitAnswer::Ambiguous => TraitProjectionAnswer::Ambiguous,
             TraitAnswer::Overflow => TraitProjectionAnswer::Overflow,
+        }
+    }
+
+    pub fn normalize_associated_effect_row_application(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[Type],
+    ) -> TraitEffectRowProjectionAnswer {
+        match self.solve(goal.clone()) {
+            TraitAnswer::Proven { evidence } => {
+                let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
+                    return TraitEffectRowProjectionAnswer::NoSolution;
+                };
+                let Some(mut substitution) = match_rule(&rule.implementation, &goal) else {
+                    return TraitEffectRowProjectionAnswer::NoSolution;
+                };
+                match rule.implementation.associated_effect_rows.get(name) {
+                    Some(item) if item.generics != arguments.len() as u32 => {
+                        TraitEffectRowProjectionAnswer::AssociatedEffectRowArity {
+                            evidence,
+                            expected: item.generics,
+                            found: arguments.len() as u32,
+                        }
+                    }
+                    Some(item) => {
+                        let base = rule.implementation.generics;
+                        for (offset, argument) in arguments.iter().cloned().enumerate() {
+                            substitution.insert(base + offset as u32, argument);
+                        }
+                        TraitEffectRowProjectionAnswer::Normalized {
+                            evidence,
+                            row: substitute_effect_row(&item.value, &substitution),
+                        }
+                    }
+                    None => TraitEffectRowProjectionAnswer::MissingAssociatedEffectRow { evidence },
+                }
+            }
+            TraitAnswer::Refuted { evidence } => {
+                TraitEffectRowProjectionAnswer::Refuted { evidence }
+            }
+            TraitAnswer::NoSolution => TraitEffectRowProjectionAnswer::NoSolution,
+            TraitAnswer::Ambiguous => TraitEffectRowProjectionAnswer::Ambiguous,
+            TraitAnswer::Overflow => TraitEffectRowProjectionAnswer::Overflow,
         }
     }
 

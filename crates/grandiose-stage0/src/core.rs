@@ -10,7 +10,10 @@ use crate::{
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface},
     source::Span,
-    trait_solver::{TraitAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer, TraitSolver},
+    trait_solver::{
+        TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer,
+        TraitProjectionAnswer, TraitSolver,
+    },
     types::{EffectInstance, EffectRow, InferContext, Mutability, ScalarType, Type},
 };
 
@@ -3023,14 +3026,54 @@ impl Elaborator<'_> {
                 return;
             }
         };
-        if !effects.projections.is_empty() {
-            self.error(
-                span,
-                "G4155",
-                "call has an associated effect-row projection that has not been normalized",
-            );
-            self.recovered = true;
-            return;
+        let mut effects = effects;
+        let mut projections = std::mem::take(&mut effects.projections);
+        while let Some(projection) = projections.pop() {
+            if !projection_is_concrete(&projection.subject)
+                || !projection
+                    .trait_arguments
+                    .iter()
+                    .all(projection_is_concrete)
+                || !projection.item_arguments.iter().all(projection_is_concrete)
+            {
+                self.error(
+                    span,
+                    "G4155",
+                    "call has an unresolved associated effect-row projection",
+                );
+                self.recovered = true;
+                return;
+            }
+            match TraitSolver::new(self.signatures).normalize_associated_effect_row_application(
+                TraitGoal {
+                    relation: crate::ElaboratedTraitReference {
+                        definition: projection.trait_definition,
+                        arguments: projection.trait_arguments,
+                    },
+                    subject: *projection.subject,
+                },
+                &projection.name,
+                &projection.item_arguments,
+            ) {
+                TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
+                    effects.effects.extend(row.effects);
+                    projections.extend(row.projections);
+                    if row.tail.is_some() {
+                        self.error(span, "G4155", "normalized effect row remains open");
+                        self.recovered = true;
+                        return;
+                    }
+                }
+                _ => {
+                    self.error(
+                        span,
+                        "G4155",
+                        "associated effect-row projection cannot be normalized",
+                    );
+                    self.recovered = true;
+                    return;
+                }
+            }
         }
         for effect in &effects.effects {
             self.check_effect_instance(effect, span);

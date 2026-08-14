@@ -104,6 +104,9 @@ pub struct AssociatedTypeDefinitionHeader {
     pub name: String,
     pub generics: Vec<String>,
     pub value: HeaderType,
+    /// An implementation-side associated effect row uses a row literal, for
+    /// example `type Effects = {Ask, Trace};`, rather than a value type.
+    pub effect_row_value: Option<EffectRowHeader>,
     pub span: Span,
 }
 
@@ -553,7 +556,14 @@ impl Parser<'_> {
                     if !body_parser.operator("=") {
                         body_parser.error("G3243", "expected `=` in associated type definition");
                     }
-                    let value = body_parser.ty();
+                    let (value, effect_row_value) = if body_parser.at_punctuation('{') {
+                        (
+                            HeaderType::Recovered,
+                            Some(body_parser.effect_row_literal()),
+                        )
+                    } else {
+                        (body_parser.ty(), None)
+                    };
                     if !body_parser.punctuation(';') {
                         body_parser.error("G3244", "expected `;` after associated type definition");
                         body_parser.skip_to_item_end();
@@ -566,6 +576,7 @@ impl Parser<'_> {
                         name,
                         generics: item_generics,
                         value,
+                        effect_row_value,
                         span: body_parser.span(start, end),
                     });
                     continue;
@@ -1044,11 +1055,18 @@ impl Parser<'_> {
         if !self.operator("/") {
             return EffectRowHeader::default();
         }
-        if !self.punctuation('{') {
+        if !self.at_punctuation('{') {
             return EffectRowHeader {
                 effects: vec![self.ty()],
                 tail: None,
             };
+        }
+        self.effect_row_literal()
+    }
+    fn effect_row_literal(&mut self) -> EffectRowHeader {
+        if !self.punctuation('{') {
+            self.error("G3264", "expected `{` before effect row");
+            return EffectRowHeader::default();
         }
         let mut effects = vec![];
         let mut tail = None;

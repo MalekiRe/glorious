@@ -55,6 +55,7 @@ pub struct ElaboratedImplementation {
     pub self_ty: Type,
     pub where_bounds: Vec<(Type, ElaboratedTraitReference)>,
     pub associated_types: BTreeMap<String, ElaboratedAssociatedTypeDefinition>,
+    pub associated_effect_rows: BTreeMap<String, ElaboratedAssociatedEffectRowDefinition>,
     pub methods: BTreeMap<String, CallableSignature>,
 }
 
@@ -65,6 +66,14 @@ pub struct ElaboratedImplementation {
 pub struct ElaboratedAssociatedTypeDefinition {
     pub generics: u32,
     pub value: Type,
+}
+
+/// A trait implementation's associated effect-row body. It mirrors ordinary
+/// associated type binders while retaining row kind through normalization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElaboratedAssociatedEffectRowDefinition {
+    pub generics: u32,
+    pub value: EffectRow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -202,6 +211,14 @@ impl ElaboratedInterface {
             };
             for (name, item) in &implementation.associated_types {
                 match trait_header.associated_types.get(name) {
+                    Some(expected) if expected.effect_row => {
+                        diagnostics.push(SignatureDiagnostic {
+                            code: "G4116",
+                            message: format!(
+                                "associated effect row `{name}` requires a row literal definition"
+                            ),
+                        })
+                    }
                     Some(expected) if expected.generics == item.generics => {}
                     Some(expected) => diagnostics.push(SignatureDiagnostic {
                         code: "G4114",
@@ -216,8 +233,30 @@ impl ElaboratedInterface {
                     }),
                 }
             }
+            for (name, item) in &implementation.associated_effect_rows {
+                match trait_header.associated_types.get(name) {
+                    Some(expected) if !expected.effect_row => diagnostics.push(SignatureDiagnostic {
+                        code: "G4116",
+                        message: format!("associated type `{name}` cannot be defined with an effect-row literal"),
+                    }),
+                    Some(expected) if expected.generics == item.generics => {}
+                    Some(expected) => diagnostics.push(SignatureDiagnostic {
+                        code: "G4114",
+                        message: format!(
+                            "associated effect row `{name}` has arity {}, but the trait requires {}",
+                            item.generics, expected.generics
+                        ),
+                    }),
+                    None => diagnostics.push(SignatureDiagnostic {
+                        code: "G4115",
+                        message: format!("implementation defines unknown associated effect row `{name}`"),
+                    }),
+                }
+            }
             for name in trait_header.associated_types.keys() {
-                if !implementation.associated_types.contains_key(name) {
+                if !implementation.associated_types.contains_key(name)
+                    && !implementation.associated_effect_rows.contains_key(name)
+                {
                     diagnostics.push(SignatureDiagnostic {
                         code: "G4116",
                         message: format!("implementation omits associated type `{name}`"),
@@ -869,6 +908,7 @@ impl Elaborator<'_> {
         let associated_types = header
             .associated_types
             .iter()
+            .filter(|item| item.effect_row_value.is_none())
             .map(|item| {
                 let outer_generics = self.generics.clone();
                 let base = outer_generics.len() as u32;
@@ -893,6 +933,37 @@ impl Elaborator<'_> {
                         value,
                     },
                 )
+            })
+            .collect();
+        let associated_effect_rows = header
+            .associated_types
+            .iter()
+            .filter_map(|item| {
+                let row = item.effect_row_value.as_ref()?;
+                let outer_generics = self.generics.clone();
+                let base = outer_generics.len() as u32;
+                for (offset, name) in item.generics.iter().enumerate() {
+                    if self
+                        .generics
+                        .insert(name.clone(), base + offset as u32)
+                        .is_some()
+                    {
+                        self.diagnostics.push(SignatureDiagnostic {
+                            code: "G4113",
+                            message: "associated effect-row generic shadows an outer generic"
+                                .into(),
+                        });
+                    }
+                }
+                let value = self.effect_row(row);
+                self.generics = outer_generics;
+                Some((
+                    item.name.clone(),
+                    ElaboratedAssociatedEffectRowDefinition {
+                        generics: item.generics.len() as u32,
+                        value,
+                    },
+                ))
             })
             .collect();
         let methods = header
@@ -948,6 +1019,7 @@ impl Elaborator<'_> {
             self_ty,
             where_bounds,
             associated_types,
+            associated_effect_rows,
             methods,
         }
     }
