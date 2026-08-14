@@ -329,10 +329,68 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
         fingerprint: Digest::of_bytes(b"orphan-snapshot-candidate"),
     };
     candidate.fingerprint = candidate.computed_fingerprint();
-    assert!(matches!(
-        verify_vm(candidate),
-        Err(VmArtifactError::HandlerResumeUnavailable)
-    ));
+    let error = verify_vm(candidate).unwrap_err();
+    assert!(
+        matches!(error, VmArtifactError::HandlerResumeUnavailable),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
+    let effect = DefKey(Digest::of_bytes(b"forged-snapshot-effect"));
+    let continuation = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"forged-snapshot")),
+            captures: 0,
+            // Register zero is a well-typed ordinary callable. It must not
+            // gain the authority of `CaptureResumption`.
+            parameters: 0,
+            registers: vec![continuation, VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::MakeCallable {
+                    dst: 0,
+                    callee: DefKey(Digest::of_bytes(b"ordinary-callable")),
+                    captures: vec![],
+                },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    target: 5,
+                },
+                VmInstruction::Perform {
+                    dst: 1,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 1 },
+                VmInstruction::ConstI64 { dst: 2, value: 42 },
+                VmInstruction::ResumeSnapshot {
+                    snapshot: 0,
+                    value: 2,
+                },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-snapshot-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let error = verify_vm(candidate).unwrap_err();
+    assert!(
+        matches!(error, VmArtifactError::HandlerResumeUnavailable),
+        "{error:?}"
+    );
 }
 
 #[test]

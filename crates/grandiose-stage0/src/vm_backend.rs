@@ -2524,6 +2524,11 @@ fn literal_vm_type(value: &str) -> VmType {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierHandlerFrame {
+    /// The installing instruction is a stable function-local frame brand.
+    /// Callable shape alone cannot authorize `ResumeSnapshot`: an ordinary
+    /// callable with the same signature must never be mistaken for a captured
+    /// continuation.
+    id: u32,
     effect: DefKey,
     effect_arguments: Vec<VmType>,
     operation: u32,
@@ -2540,6 +2545,7 @@ struct VerifierContinuation {
     target: u32,
     dst: u32,
     registers: Vec<Option<bool>>,
+    snapshots: Vec<Option<u32>>,
     performed: VerifierPerformed,
     /// Frames crossed while looking for the selected outer handler. They are
     /// absent while its clause runs and are restored when the continuation
@@ -2558,6 +2564,11 @@ struct VerifierPerformed {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierState {
     registers: Vec<Option<bool>>,
+    /// Provenance for first-class continuation values. `Some(frame)` means
+    /// this register was produced by `CaptureResumption` for that exact live
+    /// frame. The type system still sees a callable; this parallel proof fact
+    /// is what prevents capability forgery through an equally typed callable.
+    snapshots: Vec<Option<u32>>,
     handlers: Vec<VerifierHandlerFrame>,
 }
 
@@ -2596,6 +2607,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     if let Some(entry) = incoming.first_mut() {
         *entry = Some(VerifierState {
             registers: initial,
+            snapshots: vec![None; function.registers.len()],
             handlers: Vec::new(),
         });
     }
@@ -2930,6 +2942,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         target: (pc + 1) as u32,
                         dst: *dst,
                         registers: saved,
+                        snapshots: states.snapshots.clone(),
                         performed: VerifierPerformed {
                             effect: *effect,
                             effect_arguments: effect_arguments.clone(),
@@ -2969,6 +2982,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     }
                 }
                 states.handlers.push(VerifierHandlerFrame {
+                    id: pc as u32,
                     effect: *effect,
                     effect_arguments: effect_arguments.clone(),
                     operation: *operation,
@@ -3008,6 +3022,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
+                        snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
                     };
                     write(&mut resumed, continuation.dst)?;
@@ -3025,6 +3040,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let VmType::Callable { parameters, .. } = register_type(function, *dst)? else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
                 };
+                let frame_id = frame.id;
                 if parameters.as_slice() != [frame.resume_type.clone()] {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
@@ -3036,13 +3052,24 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     });
                 }
                 write(&mut states, *dst)?;
+                states.snapshots[*dst as usize] = Some(frame_id);
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
                 read(&states, *snapshot)?;
                 read(&states, *value)?;
-                let Some(frame) = states.handlers.last_mut() else {
+                let Some(frame_id) = states.snapshots[*snapshot as usize] else {
+                    // The callable type is necessary but not sufficient: the
+                    // value must originate in this live handler stack.
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                let Some(index) = states
+                    .handlers
+                    .iter()
+                    .rposition(|frame| frame.id == frame_id)
+                else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                let frame = &mut states.handlers[index];
                 if frame.continuations.is_empty() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
@@ -3058,11 +3085,17 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 let continuations = std::mem::take(&mut frame.continuations);
+                // A non-local snapshot transfer abandons frames installed
+                // after the captured frame, then reinstates precisely the
+                // frames saved with its continuation. This is the verifier
+                // counterpart of the VM's deep-handler restoration rule.
+                let prefix = states.handlers[..=index].to_vec();
                 for continuation in continuations {
-                    let mut resumed_handlers = states.handlers.clone();
+                    let mut resumed_handlers = prefix.clone();
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
+                        snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
                     };
                     write(&mut resumed, continuation.dst)?;
@@ -3116,6 +3149,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         target: continuation.target,
                         dst: continuation.dst,
                         registers: continuation.registers,
+                        snapshots: continuation.snapshots,
                         performed: continuation.performed,
                         above: crossed,
                     }];
@@ -3134,7 +3168,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::Copy { dst, src } => {
                 read(&states, *src)?;
                 same_type(function, *dst, *src)?;
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.snapshots[*dst as usize] = states.snapshots[*src as usize];
             }
             VmInstruction::Store { dst, src } => {
                 read(&states, *src)?;
@@ -3143,11 +3178,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     .get_mut(*dst as usize)
                     .ok_or(VmArtifactError::InvalidRegister { register: *dst })?;
                 *state = Some(true);
+                states.snapshots[*dst as usize] = states.snapshots[*src as usize];
             }
             VmInstruction::Move { dst, src } => {
                 read(&states, *src)?;
                 same_type(function, *dst, *src)?;
                 states[*src as usize] = Some(false);
+                states.snapshots[*dst as usize] = states.snapshots[*src as usize];
+                states.snapshots[*src as usize] = None;
                 write(&mut states, *dst)?
             }
             VmInstruction::Borrow {
@@ -3471,8 +3509,15 @@ fn propagate_state(
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            if existing.registers != joined || handler_changed {
+            let snapshots = existing
+                .snapshots
+                .iter()
+                .zip(&state.snapshots)
+                .map(|(left, right)| if left == right { *left } else { None })
+                .collect::<Vec<_>>();
+            if existing.registers != joined || existing.snapshots != snapshots || handler_changed {
                 existing.registers = joined;
+                existing.snapshots = snapshots;
                 worklist.push(target as usize);
             }
             Ok(())
@@ -3488,7 +3533,8 @@ fn merge_handler_states(
     }
     let mut changed = false;
     for (left, right) in existing.iter_mut().zip(incoming) {
-        if left.effect != right.effect
+        if left.id != right.id
+            || left.effect != right.effect
             || left.effect_arguments != right.effect_arguments
             || left.operation != right.operation
             || left.payload_destinations != right.payload_destinations
@@ -4391,6 +4437,11 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                     .suspended
                     .take()
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                // Resumption is a non-local transfer. Frames installed after
+                // the captured frame belong to the abandoned clause path;
+                // only the deep frames recorded at the original `Perform`
+                // are reinstated with the continuation.
+                handlers.truncate(index + 1);
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
@@ -5645,6 +5696,10 @@ fn execute_with_arguments(
                     .suspended
                     .take()
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                // See the standalone-artifact interpreter above: an explicit
+                // snapshot abandons dynamically newer frames before restoring
+                // the continuation's original deep-frame suffix.
+                handlers.truncate(index + 1);
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
