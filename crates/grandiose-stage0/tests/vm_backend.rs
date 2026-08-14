@@ -2285,6 +2285,64 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
 }
 
 #[test]
+fn suspended_handler_frames_cannot_intercept_fresh_clause_effects() {
+    let effect = DefKey(Digest::of_bytes(b"suspended-clause-effect"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"suspended-clause-effect-entry")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 3],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 4,
+                },
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::Perform {
+                    dst: 1,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::Return { value: 1 },
+                // This instruction is hostile artifact input: the selected
+                // handler is suspended while its clause runs, so the fresh
+                // operation cannot re-enter that same frame.
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::Cancel,
+                VmInstruction::Return { value: 2 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"suspended-clause-effect-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate).unwrap().run_i64(),
+        Err(VmArtifactError::UnhandledEffect {
+            effect: found,
+            effect_arguments,
+            operation: 0,
+        }) if found == effect && effect_arguments.is_empty()
+    ));
+}
+
+#[test]
 fn verified_vm_executes_a_deep_one_shot_handler_frame() {
     let effect = DefKey(Digest::of_bytes(b"Ask"));
     let mut candidate = CandidateVmArtifact {

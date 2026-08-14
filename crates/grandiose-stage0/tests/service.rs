@@ -6900,6 +6900,22 @@ fn service_returns_interprocedural_one_shot_continuation_results_to_the_handler_
 }
 
 #[test]
+fn service_does_not_treat_a_suspended_handler_as_covering_its_own_clause_effects() {
+    let source = "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() => Ask::ask() } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("a suspended handler incorrectly discharged its own clause effect")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4155"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_follows_dependency_module_declarations_within_their_own_package_world() {
     let mut request = request("use math::api::answer; pub fn main() -> i64 { answer() }");
     let package = PackageKey("math@0.1.0".into());

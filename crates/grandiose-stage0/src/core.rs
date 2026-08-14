@@ -7859,7 +7859,19 @@ impl Elaborator<'_> {
                     direct_uses: 0,
                 });
             }
+            // A deep handler is reinstated only around a resumed protected
+            // continuation.  While its clause itself runs the selected frame
+            // is suspended, so a fresh operation of this protocol must flow
+            // to an enclosing handler (or the callable's outward row), never
+            // be discharged by this same frame.  Retain the enclosing handler
+            // facts, but temporarily remove this handler's total/partial
+            // coverage while elaborating the clause body.
+            let clause_effects = std::mem::replace(&mut self.handled_effects, previous.clone());
+            let clause_operations =
+                std::mem::replace(&mut self.handled_operations, previous_operations.clone());
             let body = self.expression(clause.source.body);
+            self.handled_effects = clause_effects;
+            self.handled_operations = clause_operations;
             let direct_uses = if active_identity.is_some() {
                 self.resumption_use_trackers
                     .pop()

@@ -3471,6 +3471,34 @@ fn nested_partial_handlers_compose_to_discharge_a_callable_effect_contract() {
 }
 
 #[test]
+fn handler_clause_reintroduces_its_effect_while_preserving_an_open_continuation_row() {
+    let core = core_for(
+        "core-handler-clause-open-row@0.1.0",
+        "effect Ask { [0,1] ask() -> i64; } pub fn main<e: EffectRow>() -> i64 / {Ask | e} { handle Ask::ask() { Ask::ask() => Ask::ask() } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let clauses = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Handle { clauses, .. } => Some(clauses),
+            _ => None,
+        })
+        .expect("handler Core node");
+    let clause = clauses.first().expect("Ask clause");
+    let continuation = clause
+        .continuation
+        .as_ref()
+        .expect("nonterminal continuation contract");
+    assert!(continuation.effects.effects.is_empty());
+    assert_eq!(continuation.effects.tail, Some(EffectTail::Generic(0)));
+    assert!(matches!(
+        core.expression(clause.body).kind,
+        CoreKind::Perform { .. }
+    ));
+}
+
+#[test]
 fn handler_contract_rejects_implicit_or_explicit_resume_when_zero_uses_are_required() {
     let tail = core_for(
         "core-handler-zero-tail@0.1.0",
