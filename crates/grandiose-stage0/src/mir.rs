@@ -993,6 +993,19 @@ impl MirLowering {
         flow: &PlaceFlow,
         bodies: &BTreeMap<DefKey, TypedBody>,
     ) -> Self {
+        // Recovered syntax and Core errors are deliberately editor-only
+        // products.  Do not let an otherwise empty ownership analysis make a
+        // malformed body look executable to MIR consumers.
+        if body.recovered {
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: vec![MirDiagnostic {
+                    code: "G6000",
+                    message: "cannot lower recovered Typed Core".into(),
+                }],
+            };
+        }
         if !flow.diagnostics.is_empty() {
             return Self {
                 function: None,

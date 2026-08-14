@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, ClosureCapture,
-    CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefinitionIndex,
-    ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, InferVar,
+    CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefKey, DefinitionIndex,
+    Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, InferVar,
     InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering, PackageKey,
     PlaceFlow, Quantity, Span, Type, TypedBody, implementation_method_key,
 };
@@ -83,6 +83,41 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
         core.expressions
             .iter()
             .any(|expression| matches!(expression.kind, CoreKind::Binary { .. }))
+    );
+}
+
+#[test]
+fn recovered_source_elaborates_to_core_error_and_is_rejected_before_mir() {
+    let source = "pub fn main() -> i64 { let = ; }";
+    let core = core_for("core-recovered-source@0.1.0", source);
+    assert!(core.recovered);
+    assert!(
+        core.expressions
+            .iter()
+            .any(|expression| matches!(expression.kind, CoreKind::Error))
+    );
+    assert!(
+        !core
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4101"),
+        "parser recovery must not become an unsupported-Core diagnostic: {:#?}",
+        core.diagnostics
+    );
+
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"core-recovered-source")),
+        &core,
+        &flow,
+    );
+    assert!(lowered.function.is_none());
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6000")
     );
 }
 

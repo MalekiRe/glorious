@@ -2083,11 +2083,15 @@ impl Elaborator<'_> {
                 effects,
                 body,
             } => self.closure(parameters, result, effects, body, expression.span),
-            _ => self.fail(
-                expression.span,
-                "G4101",
-                "syntax form is not yet elaborated into Typed Core",
-            ),
+            // Recovery is a first-class parser outcome, rather than an
+            // unsupported source construct. Preserve it as the Core error
+            // sentinel so every downstream semantic pass can remain total
+            // without turning editor syntax damage into a spurious feature
+            // diagnostic.
+            ExprKind::Recovered => {
+                self.recovered = true;
+                self.alloc(CoreKind::Error, Type::Error, expression.span)
+            }
         }
     }
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
