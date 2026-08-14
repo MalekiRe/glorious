@@ -91,6 +91,54 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
 }
 
 #[test]
+fn typed_core_contextualizes_late_generic_integer_literals_from_prior_arguments() {
+    for (name, float, bits, mask, scalar) in [
+        (
+            "f32",
+            "f32",
+            "__g1_f32_to_bits",
+            "2139095040",
+            ScalarType::U32,
+        ),
+        (
+            "f64",
+            "f64",
+            "__g1_f64_to_bits",
+            "9218868437227405312",
+            ScalarType::U64,
+        ),
+    ] {
+        let source = format!(
+            "fn {bits}(value: {float}) -> {scalar_name} {{ () }}\
+             fn __g1_int_bit_and<T>(left: T, right: T) -> T {{ () }}\
+             bit_and<T>(left: T, right: T) -> T {{ __g1_int_bit_and(move left, move right) }}\
+             pub fn main(value: {float}) -> Bool {{\
+                 bit_and({bits}(move value), {mask}) != {mask}\
+             }}",
+            scalar_name = match scalar {
+                ScalarType::U32 => "u32",
+                ScalarType::U64 => "u64",
+                _ => unreachable!(),
+            },
+        );
+        let core = core_for(&format!("core-canonical-{name}-finite"), &source);
+        assert!(
+            core.diagnostics.is_empty(),
+            "{name}: {:#?}",
+            core.diagnostics
+        );
+        assert_eq!(
+            core.expression(core.root).ty,
+            Type::Scalar(ScalarType::Bool)
+        );
+        assert!(core.expressions.iter().any(|expression| {
+            matches!(&expression.kind, CoreKind::Literal(value) if value == mask)
+                && expression.ty == Type::Scalar(scalar)
+        }));
+    }
+}
+
+#[test]
 fn typed_core_opens_intrinsic_fn_where_contract_for_generic_local_calls() {
     let core = core_for(
         "core-intrinsic-fn-contract",

@@ -3818,27 +3818,11 @@ impl Elaborator<'_> {
                 }
                 let callee = self.expression(callee);
                 self.record_resumption_call(callee);
-                let expected = match self.expressions[callee.0 as usize].ty.clone() {
-                    Type::Callable { parameters, .. } => Some(parameters),
-                    _ => None,
+                let parameters = match self.expressions[callee.0 as usize].ty.clone() {
+                    Type::Callable { parameters, .. } => parameters,
+                    _ => vec![],
                 };
-                let arguments = arguments
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, value)| {
-                        let parameter = expected
-                            .as_ref()
-                            .and_then(|parameters| parameters.get(index));
-                        self.expression_expected(
-                            value,
-                            parameter
-                                .and_then(|parameter| {
-                                    self.direct_bound_callable_contract(callee, parameter)
-                                })
-                                .or_else(|| parameter.cloned()),
-                        )
-                    })
-                    .collect();
+                let arguments = self.call_arguments_with_context(callee, &parameters, arguments);
                 self.call(callee, arguments, expression.span)
             }
             ExprKind::OperatorChain {
@@ -3991,21 +3975,7 @@ impl Elaborator<'_> {
                 // that can soundly turn it into the caller-local region.
                 let expected = expected.expect("guarded above");
                 let _ = self.inference.unify(*result, expected.clone());
-                let arguments = arguments
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, value)| {
-                        let parameter = parameters.get(index);
-                        self.expression_expected(
-                            value,
-                            parameter
-                                .and_then(|parameter| {
-                                    self.direct_bound_callable_contract(callee, parameter)
-                                })
-                                .or_else(|| parameter.cloned()),
-                        )
-                    })
-                    .collect();
+                let arguments = self.call_arguments_with_context(callee, &parameters, arguments);
                 let call = self.call(callee, arguments, expression.span);
                 let actual = self.expressions[call.0 as usize].ty.clone();
                 if self
@@ -7578,6 +7548,11 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
         }
+        // Arguments may have just fixed a generic return type. Publish that
+        // concrete result to the enclosing expression now: otherwise a
+        // subsequent scalar operator observes a stale inference variable and
+        // incorrectly falls through to trait selection.
+        let result = self.inference.zonk(result.clone()).unwrap_or(result);
         let strict_operands = std::iter::once(callee)
             .chain(arguments.iter().copied())
             .collect::<Vec<_>>();
@@ -7598,6 +7573,45 @@ impl Elaborator<'_> {
             result,
             span,
         )
+    }
+
+    /// Elaborate direct-call operands left-to-right while carrying each
+    /// successful unification into the next operand's contextual type. A
+    /// generic scalar callable such as `bit_and<T>(T, T)` learns `T = u64`
+    /// from `f64_to_bits(value)`; the following unsuffixed mask literal must
+    /// then be a `u64`, rather than prematurely defaulting to `i64`.
+    ///
+    /// Keep the user-facing mismatch diagnostic in `call`. This provisional
+    /// unification is only evidence for contextual elaboration, so it cannot
+    /// conceal a genuine incompatible argument.
+    fn call_arguments_with_context(
+        &mut self,
+        callee: CoreId,
+        parameters: &[Type],
+        arguments: Vec<ExprId>,
+    ) -> Vec<CoreId> {
+        arguments
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let parameter = parameters.get(index).cloned();
+                let expected = parameter.as_ref().map(|parameter| {
+                    self.direct_bound_callable_contract(callee, parameter)
+                        .unwrap_or_else(|| parameter.clone())
+                });
+                // Generic parameters begin as inference variables. Expose a
+                // scalar shape fixed by an earlier operand to literals, while
+                // retaining the unresolved parameter for contextual closures.
+                let expected = expected
+                    .map(|expected| self.inference.zonk(expected.clone()).unwrap_or(expected));
+                let argument = self.expression_expected(value, expected);
+                if let Some(parameter) = parameter {
+                    let actual = self.expressions[argument.0 as usize].ty.clone();
+                    let _ = self.inference.unify(parameter, actual);
+                }
+                argument
+            })
+            .collect()
     }
 
     /// Open the compiler-owned `Fn` evidence attached to the declaration
