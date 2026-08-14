@@ -291,6 +291,192 @@ pub struct TypedBody {
     pub recovered: bool,
 }
 
+impl TypedBody {
+    /// Independently validate the frozen Core graph before any ownership or
+    /// lowering pass consumes it.  Elaboration normally constructs these
+    /// facts directly, but this boundary is also where a future persisted or
+    /// imported Core product must fail closed rather than relying on that
+    /// producer's implementation details.
+    pub fn validate(&self) -> Vec<CoreDiagnostic> {
+        let mut diagnostics = Vec::new();
+        if !self.contains(self.root) {
+            diagnostics.push(CoreDiagnostic {
+                code: "G4180",
+                span: Span {
+                    file: crate::FileKey(crate::Digest::of_bytes(b"invalid-typed-core-root")),
+                    start: 0,
+                    end: 0,
+                },
+                message: "Typed Core root refers to an expression outside its body arena".into(),
+            });
+        }
+        for (index, expression) in self.expressions.iter().enumerate() {
+            let owner = CoreId(index as u32);
+            let mut check = |child: CoreId| {
+                if !self.contains(child) {
+                    diagnostics.push(CoreDiagnostic {
+                        code: "G4180",
+                        span: expression.span,
+                        message: format!(
+                            "Typed Core expression {} refers to missing expression {}",
+                            owner.0, child.0
+                        ),
+                    });
+                }
+            };
+            for child in core_children(&expression.kind) {
+                check(child);
+            }
+            if type_contains_inference(&expression.ty) {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4181",
+                    span: expression.span,
+                    message: "Typed Core expression retains an unresolved inference variable"
+                        .into(),
+                });
+            }
+            if core_kind_is_recovered(&expression.kind) {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4182",
+                    span: expression.span,
+                    message: "Typed Core contains a recovered structural form".into(),
+                });
+            }
+        }
+        diagnostics
+    }
+
+    fn contains(&self, id: CoreId) -> bool {
+        (id.0 as usize) < self.expressions.len()
+    }
+}
+
+fn core_children(kind: &CoreKind) -> Vec<CoreId> {
+    match kind {
+        CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+            values.clone()
+        }
+        CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields.clone(),
+        CoreKind::Field { base, .. }
+        | CoreKind::PatternTest { subject: base, .. }
+        | CoreKind::Borrow { value: base, .. }
+        | CoreKind::Unary { value: base, .. }
+        | CoreKind::Move(base) => vec![*base],
+        CoreKind::Closure { body, .. } | CoreKind::Let { value: body, .. } => vec![*body],
+        CoreKind::Assign { value, .. } => vec![*value],
+        CoreKind::Call { callee, arguments } => std::iter::once(*callee)
+            .chain(arguments.iter().copied())
+            .collect(),
+        CoreKind::Perform { arguments, .. } => arguments.clone(),
+        CoreKind::Handle {
+            computation,
+            clauses,
+        } => std::iter::once(*computation)
+            .chain(clauses.iter().map(|clause| clause.body))
+            .collect(),
+        CoreKind::Completion {
+            computation,
+            clauses,
+        } => std::iter::once(*computation)
+            .chain(clauses.iter().map(|clause| clause.body))
+            .collect(),
+        CoreKind::Binary { left, right, .. } => vec![*left, *right],
+        CoreKind::Literal(_)
+        | CoreKind::Local(_)
+        | CoreKind::Function(_)
+        | CoreKind::TraitMethod { .. }
+        | CoreKind::Constant(_)
+        | CoreKind::Error => vec![],
+    }
+}
+
+fn core_kind_is_recovered(kind: &CoreKind) -> bool {
+    match kind {
+        CoreKind::Error => true,
+        CoreKind::Assign {
+            place: CorePlace::Error,
+            ..
+        } => true,
+        CoreKind::PatternTest { pattern, .. } => pattern_is_recovered(pattern),
+        CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause| {
+            clause.patterns.iter().any(pattern_is_recovered)
+                || matches!(clause.resumption, CoreHandlerResumption::Terminal)
+                    && clause.continuation.is_some()
+        }),
+        CoreKind::Completion { clauses, .. } => clauses
+            .iter()
+            .any(|clause| pattern_is_recovered(&clause.pattern)),
+        _ => false,
+    }
+}
+
+fn pattern_is_recovered(pattern: &CorePattern) -> bool {
+    match pattern {
+        CorePattern::Error => true,
+        CorePattern::Tuple(values) => values.iter().any(pattern_is_recovered),
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => fields
+            .iter()
+            .any(|field| pattern_is_recovered(&field.pattern)),
+        CorePattern::Any | CorePattern::Bind { .. } | CorePattern::Literal(_) => false,
+    }
+}
+
+fn type_contains_inference(ty: &Type) -> bool {
+    match ty {
+        Type::Infer(_) => true,
+        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
+            arguments.iter().any(type_contains_inference)
+        }
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            type_contains_inference(subject)
+                || trait_arguments.iter().any(type_contains_inference)
+                || item_arguments.iter().any(type_contains_inference)
+        }
+        Type::Array(element)
+        | Type::Reference {
+            referent: element, ..
+        } => type_contains_inference(element),
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            parameters.iter().any(type_contains_inference)
+                || type_contains_inference(result)
+                || effects
+                    .effects
+                    .iter()
+                    .any(|effect| effect.arguments.iter().any(type_contains_inference))
+                || matches!(effects.tail, Some(crate::types::EffectTail::Infer(_)))
+                || effects.projections.iter().any(|projection| {
+                    type_contains_inference(&projection.subject)
+                        || projection
+                            .trait_arguments
+                            .iter()
+                            .any(type_contains_inference)
+                        || projection
+                            .item_arguments
+                            .iter()
+                            .any(type_contains_inference)
+                })
+        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_)
+        | Type::Error => false,
+    }
+}
+
 /// Frozen method facts that must travel together while one implementation
 /// body is elaborated.
 pub(crate) struct ImplementationMethodContext<'a> {

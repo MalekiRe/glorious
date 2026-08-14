@@ -1,8 +1,8 @@
 use grandiose_stage0::{
-    BodySyntax, CaptureMode, CoreHandlerResumption, CoreKind, DeclarationScan, DefinitionIndex,
-    ElaboratedInterface, EscapeFlow, FileKey, FlowEventKind, InterfaceSet, LexedFile, Lifetime,
-    LogicalPath, MirInstruction, MirLowering, PackageKey, PlaceFlow, Quantity, Type, TypedBody,
-    implementation_method_key,
+    BodySyntax, CaptureMode, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan,
+    DefinitionIndex, ElaboratedInterface, EscapeFlow, FileKey, FlowEventKind, InterfaceSet,
+    LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering, PackageKey, PlaceFlow, Quantity,
+    Span, Type, TypedBody, implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -82,6 +82,33 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
         core.expressions
             .iter()
             .any(|expression| matches!(expression.kind, CoreKind::Binary { .. }))
+    );
+}
+
+#[test]
+fn typed_core_validation_rejects_dangling_expression_edges() {
+    let package = PackageKey("core-validation@0.1.0".into());
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Block(vec![CoreId(1)]),
+            ty: Type::Unit,
+            span: Span {
+                file: FileKey::new(&package, "src/main.glorious"),
+                start: 0,
+                end: 1,
+            },
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4180"),
+        "dangling Typed Core edge must be rejected at the Core boundary"
     );
 }
 
