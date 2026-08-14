@@ -7601,6 +7601,21 @@ impl Elaborator<'_> {
             }
         }
 
+        // An enum's constructor set is finite even when one or more payload
+        // domains are not.  Do not require us to enumerate every `i64` or
+        // `Text` merely to prove that `Ok(_)` and `Err(_)` cover their two
+        // complete variants.  This proof is intentionally narrower than the
+        // finite-value matrix below: one source row must cover every payload
+        // slot of its constructor.  More refined partitions (such as
+        // `Ok(true)` plus `Ok(false)`) remain the responsibility of the
+        // bounded structural enumeration when their payload domain is known.
+        if self.enum_constructor_patterns_exhaustive(patterns, subject) {
+            analysis.exhaustive = true;
+            analysis.unreachable.sort_unstable();
+            analysis.unreachable.dedup();
+            return analysis;
+        }
+
         let Some(values) = self.finite_pattern_values(subject, 0) else {
             return analysis;
         };
@@ -7623,6 +7638,32 @@ impl Elaborator<'_> {
         analysis.unreachable.sort_unstable();
         analysis.unreachable.dedup();
         analysis
+    }
+
+    /// Prove a nominal enum exhaustive by complete constructor rows without
+    /// descending into unbounded payload types.  Runtime dispatch always
+    /// selects a declaration-order variant before projecting payload fields,
+    /// so this mirrors the Core/MIR/VM decision boundary precisely.
+    fn enum_constructor_patterns_exhaustive(
+        &self,
+        patterns: &[CorePattern],
+        subject: &Type,
+    ) -> bool {
+        let Type::Nominal { definition, .. } = subject else {
+            return false;
+        };
+        let Some(ElaboratedHeader::Nominal {
+            layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
+            ..
+        }) = self.signatures.definitions.get(definition)
+        else {
+            return false;
+        };
+        variants.iter().enumerate().all(|(variant, _)| {
+            patterns.iter().any(|pattern| {
+                core_pattern_covers_enum_constructor(pattern, *definition, variant as u32)
+            })
+        })
     }
 
     /// Enumerate a closed structural domain with a deliberately modest cap.
@@ -8156,6 +8197,12 @@ impl Elaborator<'_> {
                 analysis.unreachable.push(index);
             }
         }
+        if self.handler_enum_constructor_patterns_exhaustive(rows) {
+            analysis.exhaustive = true;
+            analysis.unreachable.sort_unstable();
+            analysis.unreachable.dedup();
+            return analysis;
+        }
         let domains = first
             .patterns
             .iter()
@@ -8195,6 +8242,64 @@ impl Elaborator<'_> {
         analysis.unreachable.sort_unstable();
         analysis.unreachable.dedup();
         analysis
+    }
+
+    /// The operation analogue of enum constructor coverage.  A payload tuple
+    /// is total when one enum column is partitioned by complete constructor
+    /// rows and every other payload column is irrefutable in every row.  This
+    /// is safe for unbounded sibling payloads without pretending to solve the
+    /// general unbounded pattern-matrix problem.
+    fn handler_enum_constructor_patterns_exhaustive(
+        &self,
+        rows: &[&ResolvedHandlerClause],
+    ) -> bool {
+        let Some(first) = rows.first() else {
+            return false;
+        };
+        for column in 0..first.patterns.len() {
+            if !rows.iter().all(|row| {
+                row.patterns
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != column)
+                    .all(|(_, pattern)| !pattern.plan.refutable)
+            }) {
+                continue;
+            }
+            let patterns = rows
+                .iter()
+                .map(|row| &row.patterns[column].plan.decision)
+                .collect::<Vec<_>>();
+            if self.enum_constructor_decisions_exhaustive(
+                &patterns,
+                &first.patterns[column].plan.subject,
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn enum_constructor_decisions_exhaustive(
+        &self,
+        patterns: &[&crate::pattern::PatternDecision],
+        subject: &Type,
+    ) -> bool {
+        let Type::Nominal { definition, .. } = subject else {
+            return false;
+        };
+        let Some(ElaboratedHeader::Nominal {
+            layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
+            ..
+        }) = self.signatures.definitions.get(definition)
+        else {
+            return false;
+        };
+        variants.iter().enumerate().all(|(variant, _)| {
+            patterns.iter().any(|pattern| {
+                pattern_decision_covers_enum_constructor(pattern, *definition, variant as u32)
+            })
+        })
     }
 
     fn check_effects(&mut self, effects: &EffectRow, span: Span) {
@@ -9355,6 +9460,27 @@ fn core_pattern_irrefutable(pattern: &CorePattern) -> bool {
     }
 }
 
+/// A row covers a whole enum constructor only when every explicitly selected
+/// payload field is itself irrefutable. Omitted named fields are wildcards by
+/// construction, so they need no synthetic Core node here.
+fn core_pattern_covers_enum_constructor(
+    pattern: &CorePattern,
+    definition: DefKey,
+    variant: u32,
+) -> bool {
+    matches!(
+        pattern,
+        CorePattern::Enum {
+            definition: actual_definition,
+            variant: actual_variant,
+            fields,
+            ..
+        } if *actual_definition == definition
+            && *actual_variant == variant
+            && fields.iter().all(|field| core_pattern_irrefutable(&field.pattern))
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CorePatternMatrixAnalysis {
     exhaustive: bool,
@@ -9615,6 +9741,40 @@ fn pattern_decision_subsumes(
         }
         _ => false,
     }
+}
+
+fn pattern_decision_irrefutable(decision: &crate::pattern::PatternDecision) -> bool {
+    use crate::pattern::PatternDecision;
+    match decision {
+        PatternDecision::Any | PatternDecision::Bind(_) => true,
+        PatternDecision::Tuple(values) => values.iter().all(pattern_decision_irrefutable),
+        PatternDecision::Record { fields, .. } => fields
+            .iter()
+            .all(|(_, pattern)| pattern_decision_irrefutable(pattern)),
+        PatternDecision::Literal(_)
+        | PatternDecision::Array(_)
+        | PatternDecision::Enum { .. }
+        | PatternDecision::Error => false,
+    }
+}
+
+fn pattern_decision_covers_enum_constructor(
+    decision: &crate::pattern::PatternDecision,
+    definition: DefKey,
+    variant: u32,
+) -> bool {
+    matches!(
+        decision,
+        crate::pattern::PatternDecision::Enum {
+            definition: actual_definition,
+            variant: actual_variant,
+            fields,
+        } if *actual_definition == definition
+            && *actual_variant == variant
+            && fields
+                .iter()
+                .all(|(_, pattern)| pattern_decision_irrefutable(pattern))
+    )
 }
 
 fn pattern_decision_matches_value(

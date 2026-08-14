@@ -3153,6 +3153,49 @@ fn service_proves_enum_normal_completion_coverage_without_a_wildcard() {
 }
 
 #[test]
+fn service_proves_enum_constructor_coverage_with_unbounded_payloads() {
+    let completion = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> i64 { handle Result::Ok(41) { Result::Ok(_) => 41, Result::Err(_) => 42 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(completion))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+
+    // The same constructor-total proof discharges a handled operation. MIR
+    // still retains the structural patterns and the verified VM selects the
+    // matching payload row at runtime.
+    let handler = "pub enum Result { Ok(i64), Err(Text) } effect Inspect { [1, 1] inspect(value: Result) -> i64; } pub fn worker(value: Result) -> i64 / Inspect { Inspect::inspect(value) } pub fn main() -> i64 { handle worker(Result::Ok(41)) { Inspect::inspect(Result::Ok(_)) => 41, Inspect::inspect(Result::Err(_)) => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(handler)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+
+    // Unbounded sibling payloads remain safe when every row treats them
+    // irrefutably; the symbolic proof partitions only the enum column.
+    let multi_payload = "pub enum Result { Ok(i64), Err(Text) } effect Inspect { [1, 1] inspect(value: Result, context: i64) -> i64; } pub fn worker(value: Result, context: i64) -> i64 / Inspect { Inspect::inspect(value, context) } pub fn main() -> i64 { handle worker(Result::Ok(41), 7) { Inspect::inspect(Result::Ok(_), _) => 41, Inspect::inspect(Result::Err(_), _) => 42 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(multi_payload))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_does_not_treat_a_refined_unbounded_enum_constructor_as_total() {
+    let source = "pub enum Result { Ok(Bool), Err(i64) } pub fn main() -> i64 { handle Result::Ok(true) { Result::Ok(true) => 41, Result::Err(_) => 42 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("a partially covered constructor unexpectedly proved exhaustive");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4166"),
+        "constructor coverage must require an irrefutable payload row: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_proves_bool_normal_completion_coverage_without_a_wildcard() {
     let source = "pub fn main() -> i64 { handle false { true => 41, false => 42 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
