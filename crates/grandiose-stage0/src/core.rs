@@ -2135,34 +2135,63 @@ impl Elaborator<'_> {
     }
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
         let expression = self.body.expression(id).clone();
-        let ExprKind::ContextualBlock(values) = expression.kind else {
-            return self.expression(id);
-        };
-        match expected {
-            Some(Type::Callable {
-                parameters,
-                result,
-                effects,
-                invocation,
-                ..
-            }) if parameters.is_empty() => self.contextual_zero_arg_closure(
-                values,
-                *result,
-                effects,
-                invocation,
-                expression.span,
-            ),
-            Some(Type::Callable { .. }) => self.fail(
-                expression.span,
-                "G4118",
-                "contextual block requires explicit parameters for a nonzero-argument callable",
-            ),
-            Some(_) => self.expression(id),
-            None => self.fail(
-                expression.span,
-                "G4118",
-                "contextual block has no resolved expected type",
-            ),
+        match expression.kind {
+            // A qualified trait method is a genuine callable value, not only
+            // special syntax for an immediately-applied call.  Its receiver
+            // type comes from the contextual callable contract, which is the
+            // same source of information an ordinary generic function value
+            // uses to close its substitution.
+            ExprKind::Path(path) => {
+                if let Some(value) =
+                    self.trait_method_value(path, vec![], vec![], expected, expression.span)
+                {
+                    return value;
+                }
+                self.expression(id)
+            }
+            ExprKind::GenericPath {
+                path,
+                effect_arguments,
+                operation_arguments,
+            } if operation_arguments.is_empty() => {
+                if let Some(value) = self.trait_method_value(
+                    path,
+                    effect_arguments,
+                    operation_arguments,
+                    expected,
+                    expression.span,
+                ) {
+                    return value;
+                }
+                self.expression(id)
+            }
+            ExprKind::ContextualBlock(values) => match expected {
+                Some(Type::Callable {
+                    parameters,
+                    result,
+                    effects,
+                    invocation,
+                    ..
+                }) if parameters.is_empty() => self.contextual_zero_arg_closure(
+                    values,
+                    *result,
+                    effects,
+                    invocation,
+                    expression.span,
+                ),
+                Some(Type::Callable { .. }) => self.fail(
+                    expression.span,
+                    "G4118",
+                    "contextual block requires explicit parameters for a nonzero-argument callable",
+                ),
+                Some(_) => self.expression(id),
+                None => self.fail(
+                    expression.span,
+                    "G4118",
+                    "contextual block has no resolved expected type",
+                ),
+            },
+            _ => self.expression(id),
         }
     }
     fn contextual_zero_arg_closure(
@@ -3327,6 +3356,22 @@ impl Elaborator<'_> {
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
             }
+            CoreKind::TraitMethod {
+                trait_arguments,
+                method_arguments,
+                ..
+            } => {
+                *trait_arguments = trait_arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| self.zonk_generic_argument_if_resolved(argument))
+                    .collect();
+                *method_arguments = method_arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| self.zonk_generic_argument_if_resolved(argument))
+                    .collect();
+            }
             CoreKind::Perform { effect, .. } => {
                 effect.arguments = effect
                     .arguments
@@ -3377,7 +3422,6 @@ impl Elaborator<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Tuple(_)
             | CoreKind::Array(_)
@@ -3460,6 +3504,26 @@ impl Elaborator<'_> {
             GenericArgument::EffectRow(value) => {
                 GenericArgument::EffectRow(self.zonk_effect_row(value, span))
             }
+            argument => argument,
+        }
+    }
+
+    /// Trait-method metadata may carry intentionally open lifetime binders
+    /// until a call opens them.  Canonicalize every closed substitution while
+    /// preserving those binders; reporting an inference error here would turn
+    /// a valid lifetime-polymorphic method value into recovered Core.
+    fn zonk_generic_argument_if_resolved(&mut self, argument: GenericArgument) -> GenericArgument {
+        match argument {
+            GenericArgument::Type(value) => self
+                .inference
+                .zonk(value.clone())
+                .map(GenericArgument::Type)
+                .unwrap_or(GenericArgument::Type(value)),
+            GenericArgument::EffectRow(value) => self
+                .inference
+                .zonk_effects_allowing_generic_tail(value.clone())
+                .map(GenericArgument::EffectRow)
+                .unwrap_or(GenericArgument::EffectRow(value)),
             argument => argument,
         }
     }
@@ -4416,6 +4480,185 @@ impl Elaborator<'_> {
         self.check_call_where_bounds(callee, span);
         self.alloc(CoreKind::Call { callee, arguments }, result, span)
     }
+    /// Resolve a qualified trait method used as a first-class callable.  A
+    /// trait selection needs a concrete subject, so unlike an immediately
+    /// applied method the subject is supplied by the expected callable's
+    /// first parameter.  This keeps `Trait::method` principled: an
+    /// unconstrained bare path remains an error rather than guessing among
+    /// implementations.
+    fn trait_method_value(
+        &mut self,
+        path: Vec<String>,
+        trait_arguments: Vec<crate::header::HeaderGenericArgument>,
+        operation_arguments: Vec<crate::header::HeaderGenericArgument>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Option<CoreId> {
+        let (name, trait_path) = path.split_last()?;
+        if trait_path.is_empty() {
+            return None;
+        }
+        let trait_definition =
+            match self
+                .index
+                .resolve_path(DefinitionNamespace::Trait, self.module, trait_path)
+            {
+                ResolutionState::Resolved(definition) => definition,
+                _ => return None,
+            };
+        let Some(ElaboratedHeader::Trait(trait_header)) =
+            self.signatures.definitions.get(&trait_definition)
+        else {
+            return Some(self.fail(
+                span,
+                "G4168",
+                "qualified method path does not name a frozen trait",
+            ));
+        };
+        let Type::Callable {
+            parameters: expected_parameters,
+            ..
+        } = expected.clone().unwrap_or(Type::Error)
+        else {
+            return Some(self.fail(
+                span,
+                "G4168",
+                "qualified trait method values require a contextual callable type",
+            ));
+        };
+        let Some(subject) = expected_parameters.first().cloned() else {
+            return Some(self.fail(
+                span,
+                "G4168",
+                "qualified trait method values require a receiver parameter",
+            ));
+        };
+        let trait_arguments = self.body_generic_arguments(
+            &trait_arguments,
+            &trait_header.generic_kinds,
+            span,
+            "G4168",
+            "trait method qualification generic arguments do not match its declaration",
+        )?;
+        let Some(method_header) = trait_header.methods.get(name) else {
+            return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
+        };
+        let method_arguments = if operation_arguments.is_empty() {
+            (0..method_header.generics)
+                .map(|_| GenericArgument::Type(self.inference.fresh()))
+                .collect::<Vec<_>>()
+        } else {
+            if operation_arguments.len() != method_header.generics as usize {
+                return Some(self.fail(
+                    span,
+                    "G4168",
+                    "trait method operation arguments do not match its declaration",
+                ));
+            }
+            self.body_generic_arguments(
+                &operation_arguments,
+                &method_header.generic_kinds,
+                span,
+                "G4168",
+                "trait method operation arguments do not match its declaration",
+            )?
+        };
+        let method_types = self.generic_arguments_as_types(
+            method_arguments.clone(),
+            span,
+            "G4168",
+            "qualified trait methods require type-valued operation arguments",
+        )?;
+        let answer = TraitSolver::new(self.signatures).select_method(
+            TraitGoal {
+                relation: crate::ElaboratedTraitReference {
+                    definition: trait_definition,
+                    arguments: trait_arguments.clone(),
+                },
+                subject: self.zonk_type(subject, span),
+            },
+            name,
+            &method_types,
+        );
+        let (evidence, method, signature) = match answer {
+            TraitMethodAnswer::Selected {
+                evidence,
+                method,
+                signature,
+            } => (evidence, method, signature),
+            TraitMethodAnswer::Refuted { .. } => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method is refuted by a negative implementation",
+                ));
+            }
+            TraitMethodAnswer::NoSolution => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "no implementation provides the qualified trait method",
+                ));
+            }
+            TraitMethodAnswer::Ambiguous => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method implementation is ambiguous",
+                ));
+            }
+            TraitMethodAnswer::Overflow => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method selection exceeded the solver limit",
+                ));
+            }
+            TraitMethodAnswer::MissingMethod { .. } => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "selected implementation omits the qualified trait method",
+                ));
+            }
+            TraitMethodAnswer::MethodArity { .. } => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method generic arguments could not be inferred",
+                ));
+            }
+        };
+        let callable = Type::Callable {
+            lifetime_binders: 0,
+            parameters: signature.parameters.clone(),
+            result: Box::new(signature.result.clone()),
+            effects: signature.effects.clone(),
+            invocation: signature.invocation,
+        };
+        let Some(expected) = expected else {
+            unreachable!("the contextual callable was checked above");
+        };
+        if self.inference.unify(expected, callable.clone()).is_err() {
+            return Some(self.fail(
+                span,
+                "G4168",
+                "qualified trait method value does not match its contextual callable type",
+            ));
+        }
+        self.check_where_bounds(signature.where_bounds.clone(), span);
+        Some(self.alloc(
+            CoreKind::TraitMethod {
+                evidence,
+                method,
+                trait_arguments,
+                method_arguments,
+            },
+            callable,
+            span,
+        ))
+    }
+
     /// Resolve an explicitly-qualified trait method call. The method's first
     /// declared parameter is the receiver; qualification keeps this initial
     /// surface free of accidental field-vs-method ambiguity while preserving

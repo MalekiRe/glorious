@@ -1267,6 +1267,38 @@ fn service_selects_generic_qualified_trait_instances() {
 }
 
 #[test]
+fn service_materializes_selected_trait_method_values_from_callable_context() {
+    let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn apply(function: (i64) -> i64) -> i64 { function(41) } pub fn main() -> i64 { apply(Increment::increment) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert!(
+        outcome
+            .instance_graph
+            .expect("selected trait method value must materialize an instance")
+            .ordered()
+            .iter()
+            .any(|instance| !instance.arguments().is_empty())
+    );
+}
+
+#[test]
+fn service_materializes_generic_selected_trait_method_values_from_callable_context() {
+    let source = "trait Replace { fn replace<T>(value: i64, replacement: T) -> T; } impl Replace for i64 { fn replace<T>(value: i64, replacement: T) -> T { replacement } } pub fn apply(function: (i64, Text) -> Text) -> Text { function(0, \"selected\") } pub fn main() -> Text { apply(Replace::replace) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_text().unwrap(), "selected");
+    assert!(
+        outcome
+            .instance_graph
+            .expect("generic selected trait method value must materialize an instance")
+            .ordered()
+            .iter()
+            .any(|instance| !instance.arguments().is_empty())
+    );
+}
+
+#[test]
 fn service_enforces_selected_trait_method_where_bounds() {
     let accepted = "trait Mark {} trait Convert { fn convert<T>(receiver: i64, value: T) -> T where T: Mark; } impl Mark for i64 {} impl Convert for i64 { fn convert<T>(receiver: i64, value: T) -> T where T: Mark { value } } pub fn main() -> i64 { Convert::convert(0, 42) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
