@@ -8,6 +8,24 @@ compiler-completion percentages and are tracked separately below.
 Further VM hardening is out of the active product scope. Optimizer breadth is
 retained below but scheduled after the core language and tooling tranche.
 
+## 2. Runtime scalar primitive closure
+
+The canonical distributed standard library declares every leaf below. They
+must be manifest-bound by exact declaration identity, lowered through typed
+MIR, encoded as distinct verified VM operations where their behavior is not
+an identity, and exercised through the self-host bootstrap world. The frozen
+`i64` specializations for `u8`, `u16`, `u32`, `usize`, `i16`, `i32`, and `i64`
+are complete for both checked and wrapping conversion. Remaining:
+
+- checked and wrapping `i64` conversion to `u64`, `u128`, `i8`, `i128`, and
+  `isize`;
+- first-class VM scalar representations, artifact decode/encode tags,
+  verifier typing, execution values, and public result accessors needed by
+  those targets;
+- exact ABI-rejection, overflow/truncation, forged-bytecode type-confusion,
+  and serialized round-trip coverage for each leaf;
+- canonical self-host runtime-manifest bindings for each completed leaf.
+
 ## 3. Effects, handlers, and resumptions
 
 ### 3.3 Handler optimizer specialization
