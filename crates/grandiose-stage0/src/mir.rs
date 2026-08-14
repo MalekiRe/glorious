@@ -985,6 +985,22 @@ impl MirLowering {
                 local
             })
             .collect::<Vec<_>>();
+        // Labels must claim their nonlocal edge before handler-specialization
+        // probes inspect the body as an ordinary value expression.
+        if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer.lower_root_linear_resumptions(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -1305,6 +1321,20 @@ impl MirLowering {
                         }],
                     };
                 }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
+            if lowerer.diagnostics.is_empty() {
                 return Self {
                     function: Some(function),
                     lifted: lowerer.lifted,
@@ -2003,6 +2033,65 @@ struct SiblingHandlerDispatch<'a> {
 }
 
 impl Lowerer<'_> {
+    /// Lower the initial label-transfer kernel to an explicit CFG edge. This
+    /// covers a complete lexical label body and proves that no currently
+    /// modeled loan or moved place crosses the edge; future cleanup plans can
+    /// extend this same edge rather than changing label identity semantics.
+    fn lower_root_label_transfer(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let label = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => root,
+            CoreKind::Block(values) if values.len() == 1 => values[0],
+            _ => return None,
+        };
+        let CoreKind::Label { body, .. } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let CoreKind::Block(values) = self.body.expression(body).kind.clone() else {
+            // A non-block label is still a valid static label and is handled
+            // by ordinary value lowering/erasure below.
+            return None;
+        };
+        let transfer = values.iter().position(|value| {
+            matches!(self.body.expression(*value).kind, CoreKind::Transfer { .. })
+        })?;
+        for value in values.iter().take(transfer) {
+            self.statement(*value)?;
+        }
+        let CoreKind::Transfer { value, .. } = self.body.expression(values[transfer]).kind.clone()
+        else {
+            unreachable!("located transfer must retain its Core form")
+        };
+        let value = self.value(value)?;
+        let result = self.body.expression(root).ty.clone();
+        let join = self.alloc(result.clone(), CoreId(u32::MAX));
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result,
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: self.instructions.clone(),
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![value],
+                    },
+                },
+                MirBlock {
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+            ],
+        })
+    }
     /// Generalize nested setup frames from a single ordered sibling operation
     /// to several independent operation-key dispatch matrices. Each matrix
     /// preserves its own source-order pattern fallthrough and forwards only

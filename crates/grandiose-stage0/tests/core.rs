@@ -2685,7 +2685,7 @@ fn labels_mint_owner_scoped_brands_and_erase_when_no_transfer_is_taken() {
 }
 
 #[test]
-fn transfers_are_scoped_in_core_and_fail_closed_before_unchecked_mir_erasure() {
+fn transfers_are_scoped_and_lower_to_a_verified_nonlocal_mir_edge() {
     let core = core_for(
         "core-label-transfer@0.1.0",
         "pub fn main() -> i64 { label done { transfer done 42; 0 } }",
@@ -2700,10 +2700,18 @@ fn transfers_are_scoped_in_core_and_fail_closed_before_unchecked_mir_erasure() {
             _ => None,
         })
         .expect("label Core node");
-    let mir = MirLowering::lower(owner, &core, &flow);
-    assert!(
-        mir.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G6012")
-    );
+    let lowered = MirLowering::lower(owner, &core, &flow);
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "direct lexical transfer lowers to MIR: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    assert!(matches!(
+        mir.blocks[0].terminator,
+        grandiose_stage0::MirTerminator::Goto { .. }
+    ));
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("emit label edge");
+    let verified = grandiose_stage0::verify_vm(artifact).expect("verify label edge");
+    assert_eq!(verified.run_i64().expect("run label edge"), 42);
 }

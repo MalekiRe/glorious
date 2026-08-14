@@ -8,7 +8,7 @@
 //! completion exits all use the same provenance model.
 
 use crate::{
-    core::{CaptureMode, CoreId, CoreKind, CorePlace, TypedBody},
+    core::{CaptureMode, CoreId, CoreKind, CorePlace, EnvironmentBrand, TypedBody},
     placeflow::PlaceFlow,
     source::Span,
 };
@@ -71,16 +71,24 @@ impl EscapeFlow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     None,
-    Borrowed { root: String },
+    Borrowed {
+        root: String,
+    },
     Aggregate(Vec<Value>),
-    Closure(Vec<Capture>),
+    Closure {
+        environment: EnvironmentBrand,
+        captures: Vec<Capture>,
+    },
     Joined(Vec<Value>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Capture {
     /// A reference value whose backing place is body-local.
-    Borrowed { root: String },
+    Borrowed {
+        root: String,
+        environment: EnvironmentBrand,
+    },
 }
 
 struct Analyzer<'a> {
@@ -149,8 +157,9 @@ impl Analyzer<'_> {
                 }
                 result
             }
-            CoreKind::Closure { environment, .. } => Value::Closure(
-                environment
+            CoreKind::Closure { environment, .. } => Value::Closure {
+                environment: environment.brand,
+                captures: environment
                     .captures
                     .into_iter()
                     .flat_map(|capture| match capture.mode {
@@ -166,12 +175,15 @@ impl Analyzer<'_> {
                             // reference slot, for diagnostics.
                             borrowed_roots(&value)
                                 .into_iter()
-                                .map(|root| Capture::Borrowed { root })
+                                .map(|root| Capture::Borrowed {
+                                    root,
+                                    environment: environment.brand,
+                                })
                                 .collect()
                         }
                     })
                     .collect(),
-            ),
+            },
             CoreKind::Call { callee, arguments } => {
                 // Calls are not escape boundaries by themselves: their
                 // callable contract owns the outlives relationship. Still
@@ -297,10 +309,11 @@ impl Analyzer<'_> {
         }
         for capture in closure_captures(value) {
             let (code, message) = match capture {
-                Capture::Borrowed { root } => (
+                Capture::Borrowed { root, environment } => (
                     "G5014",
                     format!(
-                        "escaping closure captures a reference backed by body-local place `{root}`"
+                        "escaping closure environment {:?} captures a reference backed by body-local place `{root}`",
+                        environment
                     ),
                 ),
             };
@@ -318,11 +331,11 @@ impl Analyzer<'_> {
                 format!("effect payload carries reference to body-local place `{root}` across a suspension boundary"),
             );
         }
-        for Capture::Borrowed { root } in closure_captures(value) {
+        for Capture::Borrowed { root, environment } in closure_captures(value) {
             self.error(
                 span,
                 "G5015",
-                format!("effect payload carries closure borrowing body-local place `{root}` across a suspension boundary"),
+                format!("effect payload carries closure environment {environment:?} borrowing body-local place `{root}` across a suspension boundary"),
             );
         }
     }
@@ -360,7 +373,7 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
                 collect_borrowed_roots(value, roots);
             }
         }
-        Value::Closure(_) => {}
+        Value::Closure { .. } => {}
         Value::None => {}
     }
 }
@@ -375,7 +388,9 @@ fn closure_captures(value: &Value) -> Vec<Capture> {
 
 fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
     match value {
-        Value::Closure(values) => captures.extend(values.clone()),
+        Value::Closure {
+            captures: values, ..
+        } => captures.extend(values.clone()),
         Value::Aggregate(values) | Value::Joined(values) => {
             for value in values {
                 collect_closure_captures(value, captures);
