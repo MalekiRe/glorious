@@ -2750,6 +2750,41 @@ fn service_reinstates_an_outer_finite_handler_across_a_nested_dynamic_suspension
 }
 
 #[test]
+fn service_resumes_an_outer_handler_from_a_nested_handler_arm() {
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping() { Ping::ping() with inner => { let value = inner(41); outer(value) } } } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_preserves_generic_effect_identity_across_nested_arm_resumption() {
+    let source = "effect Ask<T> { [1,1] ask(value: T) -> T; } effect Ping<T> { [1,1] ping(value: T) -> T; } pub fn main() -> i64 { handle Ask<i64>::ask(0) { Ask<i64>::ask(_) with outer => handle Ping<i64>::ping(41) { Ping<i64>::ping(_) with inner => { let value = inner(41); outer(value) } } } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_resumes_an_outer_handler_after_an_inner_effectful_function_value_call() {
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn invoke() -> i64 / Ping { Ping::ping() } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => { let operation = invoke; handle operation() { Ping::ping() with inner => { let value = inner(41); outer(value) } } } } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "the nested computation must retain the function-value call"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_rejects_an_underused_outer_finite_resumption_through_nested_suspension() {
     let source = "effect Ops { [2,2] outer() -> i64; [1,1] inner() -> i64; } pub fn main() -> i64 { handle { handle Ops::outer() { Ops::inner(k) => k(40) } } { Ops::outer(k) => k(20) } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

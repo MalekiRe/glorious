@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use grandiose_stage0::{
     CoreId, DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument,
-    InferVar, Lifetime, MirBlock, MirBlockId, MirEditor, MirFunction, MirInstruction, MirLocal,
-    MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator, Quantity, ScalarType,
-    Type, optimize_mir,
+    InferVar, Lifetime, MirBlock, MirBlockId, MirContinuationPolicy, MirEditor, MirFunction,
+    MirInstruction, MirLocal, MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator,
+    Quantity, ScalarType, Type, VmArtifactError, emit_vm, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -104,6 +104,80 @@ fn mir_validation_rejects_nominal_pattern_fields_outside_frozen_arity() {
             .is_err_and(|error| error.contains("outside its structural arity")),
         "forged nominal field projections must not become executable MIR"
     );
+}
+
+#[test]
+fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
+    let outer = DefKey(Digest::of_bytes(b"forged-mir-nested-outer"));
+    let inner = DefKey(Digest::of_bytes(b"forged-mir-nested-inner"));
+    let forged = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-nested-resume")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(Type::Scalar(ScalarType::I64)),
+            local(Type::Scalar(ScalarType::I64)),
+        ],
+        result: Type::Scalar(ScalarType::I64),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::InstallHandler {
+                        effect: outer,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        payload_destinations: vec![],
+                        resume_type: Type::Scalar(ScalarType::I64),
+                        continuation: MirContinuationPolicy::Consume,
+                        target: MirBlockId(1),
+                    },
+                    MirInstruction::Perform {
+                        dst: MirLocal(0),
+                        effect: outer,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        arguments: vec![],
+                    },
+                    MirInstruction::UninstallHandler,
+                ],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::InstallHandler {
+                        effect: inner,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        payload_destinations: vec![],
+                        resume_type: Type::Scalar(ScalarType::I64),
+                        continuation: MirContinuationPolicy::Consume,
+                        target: MirBlockId(2),
+                    },
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(1),
+                        value: 41,
+                    },
+                    // The topmost frame is the unsuspended inner frame, so
+                    // this forged outer-resume edge has no valid target.
+                    MirInstruction::Resume { value: MirLocal(1) },
+                ],
+                terminator: MirTerminator::Unreachable,
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            },
+        ],
+    };
+    let artifact = emit_vm(&forged).expect("well-formed structural MIR emits");
+    assert!(matches!(
+        verify_vm(artifact),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
 }
 
 #[test]

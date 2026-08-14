@@ -2023,6 +2023,65 @@ fn nested_partial_handler_forwards_to_an_outer_frame_and_restores_it_on_resume()
 }
 
 #[test]
+fn verifier_rejects_a_forged_nested_arm_that_skips_the_inner_continuation() {
+    let outer = DefKey(Digest::of_bytes(b"nested-arm-outer"));
+    let inner = DefKey(Digest::of_bytes(b"nested-arm-inner"));
+    // A nested arm must resume the topmost (inner) suspended frame first.
+    // Forged bytecode cannot use `Resume` to skip it and reach the older
+    // outer frame: the verifier observes that the active inner frame has no
+    // captured continuation and rejects the edge.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"forged-nested-arm-resume")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 2],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect: outer,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 5,
+                },
+                VmInstruction::Perform {
+                    dst: 0,
+                    effect: outer,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 0 },
+                VmInstruction::Trap,
+                VmInstruction::InstallHandler {
+                    effect: inner,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 8,
+                },
+                VmInstruction::ConstI64 { dst: 1, value: 41 },
+                VmInstruction::Resume { value: 1 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-nested-arm-resume-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
 fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame() {
     let effect = DefKey(Digest::of_bytes(b"Console-decline"));
     let mut candidate = CandidateVmArtifact {
