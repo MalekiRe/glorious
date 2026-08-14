@@ -306,6 +306,7 @@ impl Analyzer<'_> {
                     self.visit_with_live_after(value, live_after);
                 }
                 self.states.insert(name.clone(), LocalState::Initialized);
+                self.record_aggregate_reference_origins(&name, value);
                 self.event(FlowEventKind::Initialize(name), e.span)
             }
             CoreKind::Assign { place, value } => {
@@ -1040,7 +1041,7 @@ impl Analyzer<'_> {
         let CoreKind::Deref(reference) = self.body.expression(id).kind else {
             return false;
         };
-        let CoreKind::Local(parent) = &self.body.expression(reference).kind else {
+        let Some(parent) = self.reference_origin_key(reference) else {
             return false;
         };
         let parent_loan = self
@@ -1048,6 +1049,7 @@ impl Analyzer<'_> {
             .iter()
             .find(|loan| loan.owner.as_deref() == Some(parent.as_str()))
             .cloned()
+            .or_else(|| self.reference_origins.get(&parent).cloned())
             .or_else(|| {
                 self.projection_loans
                     .iter()
@@ -1061,7 +1063,7 @@ impl Analyzer<'_> {
                         }
                         false
                     })
-                    .then(|| self.reference_origins.get(parent).cloned())
+                    .then(|| self.reference_origins.get(&parent).cloned())
                     .flatten()
             });
         let Some(parent_loan) = parent_loan else {
@@ -1088,8 +1090,44 @@ impl Analyzer<'_> {
         };
         self.reference_origins.insert(owner.clone(), loan.clone());
         self.projection_loans.push(loan);
-        self.reborrow_parents.insert(owner, parent.clone());
+        self.reborrow_parents.insert(owner, parent);
         true
+    }
+
+    fn reference_origin_key(&self, id: CoreId) -> Option<String> {
+        match &self.body.expression(id).kind {
+            CoreKind::Local(name) => Some(name.clone()),
+            CoreKind::Field { base, index, .. } => {
+                let mut key = self.reference_origin_key(*base)?;
+                key.push('.');
+                key.push_str(&index.to_string());
+                Some(key)
+            }
+            _ => None,
+        }
+    }
+
+    fn record_aggregate_reference_origins(&mut self, name: &str, id: CoreId) {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Record { fields, .. } | CoreKind::Tuple(fields) => {
+                for (index, field) in fields.into_iter().enumerate() {
+                    let key = format!("{name}.{index}");
+                    if let CoreKind::Borrow { unique, value } = self.body.expression(field).kind
+                        && let Some(place) = self.projection(value)
+                    {
+                        self.reference_origins.insert(
+                            key,
+                            ProjectionLoan {
+                                place,
+                                unique,
+                                owner: None,
+                            },
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn use_deref_reference(&mut self, id: CoreId, span: Span, mutation: bool) {

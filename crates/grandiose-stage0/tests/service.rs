@@ -775,17 +775,10 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
             *child
         }
     "#;
-    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
-        StageZeroCompiler::new().compile(request(aggregate_held))
-    else {
-        panic!("aggregate-held reborrow unexpectedly bypassed loan ownership")
-    };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G5013"),
-        "missing aggregate-held reborrow diagnostic: {diagnostics:#?}"
-    );
+    let outcome = StageZeroCompiler::new()
+        .compile(request(aggregate_held))
+        .expect("aggregate-held reborrow must retain its backing loan origin");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
