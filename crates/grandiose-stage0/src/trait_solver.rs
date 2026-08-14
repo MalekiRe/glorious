@@ -419,9 +419,11 @@ impl TraitSolver {
             ))),
             Type::Reference {
                 mutability,
+                lifetime,
                 referent,
             } => Ok(Type::Reference {
                 mutability,
+                lifetime,
                 referent: Box::new(self.normalize_type_projections(*referent, active)?),
             }),
             Type::Callable {
