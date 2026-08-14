@@ -634,6 +634,27 @@ fn parent_unique_reference_is_suspended_while_a_unique_reborrow_is_live() {
 }
 
 #[test]
+fn sibling_shared_reborrows_keep_the_parent_region_live() {
+    let source = "pub fn main() -> i64 { let value = 21; let parent = &mut value; let left = & *parent; let right = & *parent; *left + *right }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn shared_reborrow_still_suspends_unique_parent_mutation() {
+    let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = & *parent; *parent = 2; *child }";
+    let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("shared reborrow failed to suspend parent mutation: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004")
+    );
+}
+
+#[test]
 fn assignment_reinitializes_a_local_after_a_whole_value_move() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
