@@ -76,7 +76,8 @@ retained below but scheduled after the core language and tooling tranche.
 
 - general, Copy, cyclic, and loop-aware phi simplification;
 - scope/cleanup-aware forwarding and special control parameters;
-- integer ranges and aggregate constants;
+- integer ranges and aggregate constants beyond the implemented scalar
+  arithmetic, comparison, boolean, and typed-edge constant facts;
 - broader projection/construction folding and Copy propagation;
 - load/store forwarding with place/alias kills;
 - storage-liveness rules and richer cross-block forwarding.
