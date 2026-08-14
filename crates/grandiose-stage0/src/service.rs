@@ -1097,6 +1097,17 @@ impl StageZeroCompiler {
                     })?;
             }
         }
+        for instance in instance_graph.ordered() {
+            let mut instance_dependencies = vec![DependencyNode::Core(instance.callable)];
+            if let Some(callees) = instance_graph.callees(&instance) {
+                instance_dependencies.extend(callees.iter().cloned().map(DependencyNode::Instance));
+            }
+            dependencies.record(
+                DependencyNode::Instance(instance.clone()),
+                instance.fingerprint(),
+                instance_dependencies,
+            );
+        }
         for (definition, is_constant, valid, core, flow) in body_products {
             session.checkpoint(0)?;
             if !valid {

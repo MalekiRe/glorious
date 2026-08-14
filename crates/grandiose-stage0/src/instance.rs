@@ -122,6 +122,13 @@ impl PartialEq for InstanceKey {
 
 impl Eq for InstanceKey {}
 
+impl std::hash::Hash for InstanceKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.callable, state);
+        std::hash::Hash::hash(&self.canonical_substitution, state);
+    }
+}
+
 impl Ord for InstanceKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.callable.cmp(&other.callable).then_with(|| {

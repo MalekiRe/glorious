@@ -9,7 +9,7 @@ use std::{
     sync::Mutex,
 };
 
-use crate::{DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId};
+use crate::{DefKey, Digest, FileKey, InstanceKey, ModuleKey, PackageKey, RevisionId};
 
 /// A stable semantic product identity.  The variants model actual compiler
 /// boundaries rather than strings invented by individual passes.
@@ -20,6 +20,7 @@ pub enum DependencyNode {
     Fixity(ModuleKey),
     Body(DefKey),
     Core(DefKey),
+    Instance(InstanceKey),
     Mir(DefKey),
     Artifact(PackageKey),
 }
