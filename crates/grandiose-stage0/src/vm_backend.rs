@@ -413,6 +413,11 @@ pub enum VmInstruction {
         dst: u32,
         value: u32,
     },
+    /// Exact manifest-bound i64-to-u32 conversion retaining low two's-complement bits.
+    I64ToU32Wrapping {
+        dst: u32,
+        value: u32,
+    },
     MakeTuple {
         dst: u32,
         fields: Vec<u32>,
@@ -1102,7 +1107,10 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 56 adds opcode 114 for manifest-bound i64 left shift with a u32
+/// Schema 58 adds opcode 117 for manifest-bound wrapping i64-to-u32
+/// conversion, retaining the low two's-complement bits. Schema 57 adds opcode
+/// 116 for manifest-bound checked i64-to-u32 conversion. Schema 56 adds opcode
+/// 114 for manifest-bound i64 left shift with a u32
 /// count and wrapping count semantics. Schema 55 adds opcode 115 for manifest-bound i64 right shift with a u32
 /// count and wrapping count semantics. Schema 54 adds opcode 113 for
 /// manifest-bound unary i64 bitwise-not. Schema
@@ -1135,7 +1143,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 57;
+pub const STAGE0_VM_SCHEMA: u32 = 58;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3491,6 +3499,10 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
+            117 => Ok(VmInstruction::I64ToU32Wrapping {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             25 => self.bool_equality(|dst, left, right| VmInstruction::EqText { dst, left, right }),
             26 => self.bool_equality(|dst, left, right| VmInstruction::NeText { dst, left, right }),
             27 => self.i64_arithmetic(|dst, left, right| VmInstruction::ConcatText {
@@ -4371,6 +4383,10 @@ fn lower_instruction(
             value: value.0,
         },
         MirInstruction::I64ToU32Checked { dst, value } => VmInstruction::I64ToU32Checked {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::I64ToU32Wrapping { dst, value } => VmInstruction::I64ToU32Wrapping {
             dst: dst.0,
             value: value.0,
         },
@@ -5394,6 +5410,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?
             }
             VmInstruction::I64ToU32Checked { dst, value } => {
+                read(&states, *value)?;
+                expect_type(function, *dst, VmType::U32)?;
+                expect_type(function, *value, VmType::I64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::I64ToU32Wrapping { dst, value } => {
                 read(&states, *value)?;
                 expect_type(function, *dst, VmType::U32)?;
                 expect_type(function, *value, VmType::I64)?;
@@ -8199,6 +8221,13 @@ fn execute(
                     u32::try_from(value).map_err(|_| VmArtifactError::ArithmeticOverflow)?;
                 registers[dst as usize] = Some(VmValue::U32(value));
             }
+            VmInstruction::I64ToU32Wrapping { dst, value } => {
+                registers[dst as usize] = Some(VmValue::U32(expect_i64(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )? as u32));
+            }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
@@ -9955,6 +9984,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::I64ToU32Wrapping { dst, value } => {
+            output.push(117);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::MakeCallable {
             dst,
             callee,
@@ -10419,6 +10453,13 @@ fn execute_with_arguments(
                 let value =
                     u32::try_from(value).map_err(|_| VmArtifactError::ArithmeticOverflow)?;
                 registers[*dst as usize] = Some(VmValue::U32(value));
+            }
+            VmInstruction::I64ToU32Wrapping { dst, value } => {
+                registers[*dst as usize] = Some(VmValue::U32(expect_i64(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )? as u32));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
