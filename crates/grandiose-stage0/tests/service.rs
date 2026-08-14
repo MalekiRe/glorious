@@ -477,6 +477,27 @@ fn manifest_bound_checked_i64_to_i8_converts_and_rejects_out_of_range_values() {
 }
 
 #[test]
+fn manifest_bound_wrapping_i64_to_i8_truncates_twos_complement_bits() {
+    let mut input = request(
+        "fn __g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () } pub fn main() -> i8 { __g1_int_convert_wrapping_to_i8<i64>(255) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertWrappingToI8,
+        "__g1_int_convert_wrapping_to_i8",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i8()
+            .unwrap(),
+        -1
+    );
+}
+
+#[test]
 fn manifest_bound_generic_int_wrapping_to_i32_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_i32<T>(value: T) -> i32 { () } pub fn main() -> i32 { __g1_int_convert_wrapping_to_i32<i64>(4294967295) }",

@@ -135,6 +135,7 @@ pub enum PrimitiveRole {
     /// two's-complement bits.
     IntConvertWrappingToI32,
     IntConvertCheckedToI8,
+    IntConvertWrappingToI8,
 }
 
 impl PrimitiveRole {
@@ -200,6 +201,7 @@ impl PrimitiveRole {
             Self::IntConvertCheckedToI32 => "int-convert-checked-to-i32",
             Self::IntConvertWrappingToI32 => "int-convert-wrapping-to-i32",
             Self::IntConvertCheckedToI8 => "int-convert-checked-to-i8",
+            Self::IntConvertWrappingToI8 => "int-convert-wrapping-to-i8",
         }
     }
 
@@ -265,6 +267,7 @@ impl PrimitiveRole {
             "int-convert-checked-to-i32" => Self::IntConvertCheckedToI32,
             "int-convert-wrapping-to-i32" => Self::IntConvertWrappingToI32,
             "int-convert-checked-to-i8" => Self::IntConvertCheckedToI8,
+            "int-convert-wrapping-to-i8" => Self::IntConvertWrappingToI8,
             _ => return None,
         })
     }
@@ -763,6 +766,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntConvertWrappingToI8 => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Scalar(crate::ScalarType::I8),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntConvertWrappingToUsize => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
@@ -924,6 +938,7 @@ fn manifest_digest(
             PrimitiveRole::IntConvertCheckedToI32 => 57,
             PrimitiveRole::IntConvertWrappingToI32 => 58,
             PrimitiveRole::IntConvertCheckedToI8 => 59,
+            PrimitiveRole::IntConvertWrappingToI8 => 60,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
