@@ -133,6 +133,31 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
 }
 
 #[test]
+fn mir_rejects_a_forged_payload_distinct_nan_constant() {
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-nan-payload")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(Type::Scalar(ScalarType::F64))],
+        result: Type::Scalar(ScalarType::F64),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![MirInstruction::ConstF64 {
+                dst: MirLocal(0),
+                bits: 0x7ff8_0000_0000_0001,
+            }],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("non-canonical NaN payload"))
+    );
+}
+
+#[test]
 fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
     let leave = |cleanup| MirFunction {
         definition: DefKey(Digest::of_bytes(b"forged-mir-cleanup")),

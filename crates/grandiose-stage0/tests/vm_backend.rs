@@ -3156,6 +3156,41 @@ fn verifier_rejects_type_confused_constants_before_execution() {
 }
 
 #[test]
+fn vm_rejects_payload_distinct_nan_constants_at_candidate_and_decode_boundaries() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"forged-vm-nan-payload")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::F64],
+            instructions: vec![
+                VmInstruction::ConstF64 {
+                    dst: 0,
+                    bits: 0x7ff8_0000_0000_0001,
+                },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-vm-nan-payload-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate.clone()),
+        Err(VmArtifactError::NonCanonicalFloat {
+            bits: 0x7ff8_0000_0000_0001
+        })
+    ));
+    assert!(matches!(
+        decode_artifact(&encode_artifact(&candidate)),
+        Err(VmArtifactError::NonCanonicalFloat {
+            bits: 0x7ff8_0000_0000_0001
+        })
+    ));
+}
+
+#[test]
 fn verifier_rejects_candidates_with_stale_schema_or_fingerprint() {
     let candidate = CandidateVmArtifact {
         schema: 1,

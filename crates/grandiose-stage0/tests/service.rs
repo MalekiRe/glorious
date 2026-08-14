@@ -5439,6 +5439,18 @@ fn service_lowers_f64_arithmetic_and_typed_calls_to_the_verified_vm() {
 }
 
 #[test]
+fn source_float_arithmetic_canonicalizes_runtime_nan_results() {
+    let artifact = StageZeroCompiler::new()
+        .compile(request("pub fn main() -> f64 { 0.0 / 0.0 }"))
+        .unwrap()
+        .artifact
+        .unwrap();
+    let value = artifact.run_f64().unwrap();
+    assert!(value.is_nan());
+    assert_eq!(value.to_bits(), 0x7ff8_0000_0000_0000);
+}
+
+#[test]
 fn verified_vm_executes_division_and_remainder_without_host_panics() {
     let integer = StageZeroCompiler::new()
         .compile(request("pub fn main() -> i64 { 84 / 2 % 43 }"))

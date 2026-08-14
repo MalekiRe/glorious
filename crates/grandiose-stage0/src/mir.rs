@@ -60,6 +60,29 @@ pub struct MirPatternField {
     pub ty: Type,
     pub pattern: MirPattern,
 }
+
+/// The sole NaN payload admitted by frozen MIR and VM artifacts.  IEEE-754
+/// deliberately leaves NaN payload propagation largely implementation-defined;
+/// retaining arbitrary payloads would therefore let semantically equivalent
+/// source programs acquire host-dependent artifact bytes and fingerprints.
+pub const CANONICAL_F64_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+
+/// Canonicalize the one non-value-equivalent part of an IEEE-754 `f64`
+/// representation before it crosses a frozen compiler boundary.
+pub fn canonical_f64_bits(bits: u64) -> u64 {
+    if f64::from_bits(bits).is_nan() {
+        CANONICAL_F64_NAN_BITS
+    } else {
+        bits
+    }
+}
+
+/// A frozen float immediate is canonical exactly when it does not encode a
+/// payload-distinct NaN spelling.
+pub fn is_canonical_f64_bits(bits: u64) -> bool {
+    canonical_f64_bits(bits) == bits
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MirInstruction {
     ConstUnit {
@@ -2131,6 +2154,15 @@ impl MirFunction {
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
     fn validate_instruction(&self, instruction: &MirInstruction) -> Result<(), String> {
+        if let MirInstruction::ConstF64 { dst, bits } = instruction {
+            if self.local_type(*dst)? != &Type::Scalar(crate::types::ScalarType::F64) {
+                return Err("MIR f64 constant destination is not f64".into());
+            }
+            if !is_canonical_f64_bits(*bits) {
+                return Err("MIR f64 constant has a non-canonical NaN payload".into());
+            }
+            return Ok(());
+        }
         if let MirInstruction::MakeCallable {
             callee,
             captures,
@@ -11073,7 +11105,7 @@ impl Lowerer<'_> {
                 Type::Scalar(crate::types::ScalarType::F64) => match parse_f64_literal(&text) {
                     Ok(value) => self.instructions.push(MirInstruction::ConstF64 {
                         dst,
-                        bits: value.to_bits(),
+                        bits: canonical_f64_bits(value.to_bits()),
                     }),
                     Err(_) => {
                         self.error("G6003", "invalid f64 literal at MIR lowering");
@@ -11352,7 +11384,7 @@ impl Lowerer<'_> {
                         let zero = self.alloc(Type::Scalar(crate::types::ScalarType::F64), id);
                         self.instructions.push(MirInstruction::ConstF64 {
                             dst: zero,
-                            bits: 0.0f64.to_bits(),
+                            bits: canonical_f64_bits(0.0f64.to_bits()),
                         });
                         self.instructions.push(MirInstruction::SubF64 {
                             dst,

@@ -17,7 +17,8 @@ use crate::{
     identity::{DefKey, Digest},
     mir::{
         MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern, MirPatternField,
-        MirProgram, MirTerminator, lifted_callable_definition,
+        MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f64_bits,
+        lifted_callable_definition,
     },
     types::{
         ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, StructuralU32Expr, Type,
@@ -773,6 +774,12 @@ pub enum VmArtifactError {
         found: u32,
     },
     FingerprintMismatch,
+    /// A frozen float immediate carried a payload-distinct NaN spelling.
+    /// Runtime arithmetic may produce NaN, but it is canonicalized before it
+    /// becomes an observable VM value.
+    NonCanonicalFloat {
+        bits: u64,
+    },
     DivisionByZero,
     ArithmeticOverflow,
     UnhandledEffect {
@@ -838,8 +845,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// exact finite replay budgets in `InstallHandler`; older payloads cannot be
 /// decoded safely with these independent boundary proofs. Schema 35 seals
 /// structural u32 expressions and all const kinds inside nominal layouts and
-/// effect protocol identities.
-pub const STAGE0_VM_SCHEMA: u32 = 35;
+/// effect protocol identities. Schema 36 canonically represents IEEE-754 NaN
+/// immediates, preventing host/payload-dependent artifact identities.
+pub const STAGE0_VM_SCHEMA: u32 = 36;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2683,10 +2691,14 @@ impl<'a> Decoder<'a> {
                     arguments,
                 })
             }
-            7 => Ok(VmInstruction::ConstF64 {
-                dst: self.u32()?,
-                bits: self.u64()?,
-            }),
+            7 => {
+                let dst = self.u32()?;
+                let bits = self.u64()?;
+                if !is_canonical_f64_bits(bits) {
+                    return Err(VmArtifactError::NonCanonicalFloat { bits });
+                }
+                Ok(VmInstruction::ConstF64 { dst, bits })
+            }
             8 => self.i64_arithmetic(|dst, left, right| VmInstruction::DivI64 { dst, left, right }),
             9 => self.i64_arithmetic(|dst, left, right| VmInstruction::RemI64 { dst, left, right }),
             10 => {
@@ -4132,7 +4144,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *dst, VmType::I64)?;
                 write(&mut states, *dst)?
             }
-            VmInstruction::ConstF64 { dst, .. } => {
+            VmInstruction::ConstF64 { dst, bits } => {
+                if !is_canonical_f64_bits(*bits) {
+                    return Err(VmArtifactError::NonCanonicalFloat { bits: *bits });
+                }
                 expect_type(function, *dst, VmType::F64)?;
                 write(&mut states, *dst)?
             }
@@ -6027,6 +6042,15 @@ fn expect_f64(value: impl Borrow<VmValue>) -> Result<f64, VmArtifactError> {
         }),
     }
 }
+
+/// Keep the VM's observable IEEE-754 representation independent of the host
+/// NaN payload selected by an arithmetic instruction.  The numerical
+/// comparison rules remain ordinary IEEE rules; only the non-semantic payload
+/// encoding is collapsed.
+fn canonical_vm_f64(value: f64) -> f64 {
+    f64::from_bits(canonical_f64_bits(value.to_bits()))
+}
+
 fn expect_bool(value: impl Borrow<VmValue>) -> Result<bool, VmArtifactError> {
     match value.borrow() {
         VmValue::Bool(value) => Ok(*value),
@@ -6323,7 +6347,7 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::I64(value))
             }
             VmInstruction::ConstF64 { dst, bits } => {
-                registers[dst as usize] = Some(VmValue::F64(f64::from_bits(bits)))
+                registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(f64::from_bits(bits))))
             }
             VmInstruction::ConstBool { dst, value } => {
                 registers[dst as usize] = Some(VmValue::Bool(value))
@@ -7041,7 +7065,7 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::I64(value));
             }
             VmInstruction::AddF64 { dst, left, right } => {
-                registers[dst as usize] = Some(VmValue::F64(
+                registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[left as usize]
                             .as_ref()
@@ -7051,7 +7075,7 @@ fn execute(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::ConcatText { dst, left, right } => {
                 let left = expect_text(
@@ -7067,7 +7091,7 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
             }
             VmInstruction::SubF64 { dst, left, right } => {
-                registers[dst as usize] = Some(VmValue::F64(
+                registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[left as usize]
                             .as_ref()
@@ -7077,10 +7101,10 @@ fn execute(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::MulF64 { dst, left, right } => {
-                registers[dst as usize] = Some(VmValue::F64(
+                registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[left as usize]
                             .as_ref()
@@ -7090,10 +7114,10 @@ fn execute(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::DivF64 { dst, left, right } => {
-                registers[dst as usize] = Some(VmValue::F64(
+                registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[left as usize]
                             .as_ref()
@@ -7103,10 +7127,10 @@ fn execute(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::RemF64 { dst, left, right } => {
-                registers[dst as usize] = Some(VmValue::F64(
+                registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[left as usize]
                             .as_ref()
@@ -7116,7 +7140,7 @@ fn execute(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::CompareI64 {
                 dst,
@@ -7962,7 +7986,8 @@ fn execute_with_arguments(
                 registers[*dst as usize] = Some(VmValue::I64(*value))
             }
             VmInstruction::ConstF64 { dst, bits } => {
-                registers[*dst as usize] = Some(VmValue::F64(f64::from_bits(*bits)))
+                registers[*dst as usize] =
+                    Some(VmValue::F64(canonical_vm_f64(f64::from_bits(*bits))))
             }
             VmInstruction::ConstBool { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::Bool(*value))
@@ -8735,7 +8760,7 @@ fn execute_with_arguments(
                 registers[*dst as usize] = Some(VmValue::I64(value));
             }
             VmInstruction::AddF64 { dst, left, right } => {
-                registers[*dst as usize] = Some(VmValue::F64(
+                registers[*dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[*left as usize]
                             .as_ref()
@@ -8745,7 +8770,7 @@ fn execute_with_arguments(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::ConcatText { dst, left, right } => {
                 let left = expect_text(
@@ -8761,7 +8786,7 @@ fn execute_with_arguments(
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
             }
             VmInstruction::SubF64 { dst, left, right } => {
-                registers[*dst as usize] = Some(VmValue::F64(
+                registers[*dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[*left as usize]
                             .as_ref()
@@ -8771,10 +8796,10 @@ fn execute_with_arguments(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::MulF64 { dst, left, right } => {
-                registers[*dst as usize] = Some(VmValue::F64(
+                registers[*dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[*left as usize]
                             .as_ref()
@@ -8784,10 +8809,10 @@ fn execute_with_arguments(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::DivF64 { dst, left, right } => {
-                registers[*dst as usize] = Some(VmValue::F64(
+                registers[*dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[*left as usize]
                             .as_ref()
@@ -8797,10 +8822,10 @@ fn execute_with_arguments(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::RemF64 { dst, left, right } => {
-                registers[*dst as usize] = Some(VmValue::F64(
+                registers[*dst as usize] = Some(VmValue::F64(canonical_vm_f64(
                     expect_f64(
                         registers[*left as usize]
                             .as_ref()
@@ -8810,7 +8835,7 @@ fn execute_with_arguments(
                             .as_ref()
                             .expect("verified register"),
                     )?,
-                ))
+                )))
             }
             VmInstruction::CompareI64 {
                 dst,
