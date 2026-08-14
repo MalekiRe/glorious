@@ -514,6 +514,27 @@ fn manifest_bound_checked_i64_to_u64_converts_and_rejects_negative_values() {
 }
 
 #[test]
+fn manifest_bound_wrapping_i64_to_u64_retains_twos_complement_bits() {
+    let mut input = request(
+        "fn __g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () } pub fn main() -> u64 { __g1_int_convert_wrapping_to_u64<i64>(-1) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertWrappingToU64,
+        "__g1_int_convert_wrapping_to_u64",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_u64()
+            .unwrap(),
+        u64::MAX
+    );
+}
+
+#[test]
 fn manifest_bound_wrapping_i64_to_i8_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () } pub fn main() -> i8 { __g1_int_convert_wrapping_to_i8<i64>(255) }",
