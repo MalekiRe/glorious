@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BodySyntax, CaptureMode, CoreHandlerResumption, CoreKind, DeclarationScan, DefinitionIndex,
-    ElaboratedInterface, FileKey, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction,
-    MirLowering, PackageKey, PlaceFlow, Type, TypedBody, implementation_method_key,
+    ElaboratedInterface, FileKey, FlowEventKind, InterfaceSet, LexedFile, Lifetime, LogicalPath,
+    MirInstruction, MirLowering, PackageKey, PlaceFlow, Type, TypedBody, implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -492,6 +492,46 @@ fn placeflow_releases_a_named_loan_after_a_nested_block_last_use() {
         "pub fn main() -> i64 { let value = 1; let loan = &mut value; { loan; 0 }; value }";
     let flow = flow_for("core-nll-nested-last-use@0.1.0", source);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+}
+
+#[test]
+fn placeflow_reborrows_a_named_loan_captured_by_a_closure() {
+    let source = "pub fn main() -> i64 { let value = 1; let loan = &value; let saved = () -> &i64 { loan }; value = 2; 0 }";
+    let flow = flow_for("core-nll-captured-reference@0.1.0", source);
+    assert!(
+        flow.events
+            .iter()
+            .any(|event| matches!(&event.kind, FlowEventKind::Reborrow(root) if root == "value")),
+        "capturing a named reference must retain a reborrow of its backing place: {:#?}",
+        flow.events
+    );
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5007"),
+        "an escaping closure capture must keep the source place borrowed: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_keeps_a_captured_reborrow_live_across_a_handler_join() {
+    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let value = 1; let loan = &value; handle Tick::tick() { Tick::tick() => { let saved = () -> &i64 { loan }; 0 } }; value = 2; 0 }";
+    let flow = flow_for("core-nll-captured-reference-handler@0.1.0", source);
+    assert!(
+        flow.events
+            .iter()
+            .any(|event| matches!(&event.kind, FlowEventKind::Reborrow(root) if root == "value")),
+        "handler-arm closure capture did not create a backing reborrow: {:#?}",
+        flow.events
+    );
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5007"),
+        "handler joins must retain a closure-captured loan from every reachable arm: {:#?}",
+        flow.diagnostics
+    );
 }
 
 #[test]

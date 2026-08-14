@@ -58,6 +58,12 @@ pub enum FlowEventKind {
     Move(String),
     BorrowShared(String),
     BorrowUnique(String),
+    /// A closure captured a reference local whose backing place is already
+    /// loaned.  The capture must retain that backing loan for the callable
+    /// environment; otherwise NLL would end the loan at the reference
+    /// local's last syntactic use and permit the referent to be mutated or
+    /// moved while the closure can still observe it.
+    Reborrow(String),
     EndBorrow(String),
     Assign(String),
 }
@@ -136,6 +142,7 @@ impl Analyzer<'_> {
             | CoreKind::Error => {}
             CoreKind::Closure { captures, .. } => {
                 for capture in captures {
+                    self.capture_reference_loan(&capture.name, e.span);
                     match capture.mode {
                         CaptureMode::SharedBorrow => self.borrow(&capture.name, false, e.span),
                         CaptureMode::UniqueBorrow => self.borrow(&capture.name, true, e.span),
@@ -348,8 +355,16 @@ impl Analyzer<'_> {
                 self.collect_local_uses(*left, uses);
                 self.collect_local_uses(*right, uses);
             }
-            CoreKind::Closure { .. }
-            | CoreKind::Literal(_)
+            CoreKind::Closure { captures, .. } => {
+                // Captures are reads at callable construction time.  More
+                // importantly, a captured reference keeps its owning local
+                // live until this closure boundary can reborrow its backing
+                // place in `visit_with_live_after`.
+                for capture in captures {
+                    uses.insert(capture.name.clone());
+                }
+            }
+            CoreKind::Literal(_)
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
@@ -367,6 +382,39 @@ impl Analyzer<'_> {
             .collect::<BTreeSet<_>>();
         for owner in dead {
             self.release_owner_loans(&owner, span);
+        }
+    }
+
+    /// Transfer the backing region of a named reference into a closure
+    /// environment.  `let r = &place; let f = || r` is not merely a borrow of
+    /// the stack slot for `r`: `f` can later read the reference value and
+    /// therefore keeps `place` borrowed.  The closure environment has no
+    /// source-local spelling in Typed Core, so `owner: None` is the explicit
+    /// conservative representation of an escaping/unknown owner.  It is
+    /// retained through handler joins and to the end of the enclosing body.
+    ///
+    /// This is also the first reborrow operation in the flow domain.  We copy
+    /// the exact projected source loan, preserving mutability, rather than
+    /// widening `&pair.left` to an imprecise whole-record loan.
+    fn capture_reference_loan(&mut self, name: &str, span: Span) {
+        let reborrows = self
+            .projection_loans
+            .iter()
+            .filter(|loan| loan.owner.as_deref() == Some(name))
+            .cloned()
+            .map(|mut loan| {
+                loan.owner = None;
+                loan
+            })
+            .collect::<Vec<_>>();
+        if reborrows.is_empty() {
+            return;
+        }
+        for loan in reborrows {
+            if !self.projection_loans.contains(&loan) {
+                self.event(FlowEventKind::Reborrow(loan.place.root.clone()), span);
+                self.projection_loans.push(loan);
+            }
         }
     }
 
