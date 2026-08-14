@@ -5590,6 +5590,23 @@ fn service_preserves_generic_effect_identity_across_nested_arm_resumption() {
 }
 
 #[test]
+fn service_forwards_nested_generic_operation_instances_through_materialized_calls() {
+    let source = "effect Exchange<T> { [1,1] exchange<U>(value: T, reply: U) -> U; } pub fn leaf<T, U>(value: T, reply: U) -> U / Exchange<T> { Exchange<T>::exchange<U>(value, reply) } pub fn partial<U>(value: i64, reply: U) -> U / Exchange<i64> { handle leaf(value, reply) { Exchange<i64>::exchange<U>(0, reply, k) => k(reply) } } pub fn main() -> Text { handle partial(7, \"payload\") { Exchange<i64>::exchange<Text>(_, reply, k) => k(reply) } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a refutable generic inner handler must forward to the outer concrete instance");
+    let artifact = outcome.artifact.expect("build must publish a VM artifact");
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Forward))
+    }));
+    assert_eq!(artifact.run_text().unwrap(), "payload");
+}
+
+#[test]
 fn service_resumes_an_outer_handler_after_an_inner_effectful_function_value_call() {
     let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn invoke() -> i64 / Ping { Ping::ping() } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => { let operation = invoke; handle operation() { Ping::ping() with inner => { let value = inner(41); outer(value) } } } } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -7059,6 +7076,36 @@ fn service_replays_distinct_generic_operations_across_a_direct_call() {
 }
 
 #[test]
+fn service_replays_generic_operation_payloads_through_generic_call_frames() {
+    let source = "effect Exchange<T> { [2,2] exchange<U>(value: T, reply: U) -> U; } pub fn leaf<T, U>(value: T, reply: U) -> U / Exchange<T> { Exchange<T>::exchange<U>(value, reply) } pub fn relay<T, U>(value: T, reply: U) -> U / Exchange<T> { leaf(value, reply) } pub fn main() -> Text { handle relay(7, \"payload\") { Exchange<i64>::exchange<Text>(_, reply, k) => k(reply) + k(reply) } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("generic operation instances must retain payload types across replayed calls");
+    let artifact = outcome.artifact.expect("build must publish a VM artifact");
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            effect_arguments,
+            resume_type: VmType::Text,
+            continuation: VmContinuationPolicy::Replay { uses: 2 },
+            ..
+        } if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+    )));
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .count(),
+        2,
+        "each replayed generic continuation must return to the handler clause"
+    );
+    assert_eq!(artifact.run_text().unwrap(), "payloadpayload");
+}
+
+#[test]
 fn service_replays_distinct_generic_operations_through_a_function_value() {
     let source = "effect Console<T> { [2,2] read() -> T; [2,2] write(value: T) -> i64; } pub fn helper() -> i64 / Console<Text> { let text = Console<Text>::read(); Console<Text>::write(text) } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); value + 1 } { Console<Text>::read(k) => k(\"one\") + k(\"two\"); Console<Text>::write(value, k) => k(10) + k(20) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -7489,6 +7536,34 @@ fn service_cancels_a_generic_multi_operation_call_through_distinct_vm_frames() {
         "each distinct operation frame needs its own cancellation target"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_cancels_a_generic_operation_instance_through_generic_call_frames() {
+    let source = "effect Exchange<T> { [0,1] exchange<U>(value: T, reply: U) -> U; } pub fn leaf<T, U>(value: T, reply: U) -> U / Exchange<T> { Exchange<T>::exchange<U>(value, reply) } pub fn relay<T, U>(value: T, reply: U) -> U / Exchange<T> { leaf(value, reply) } pub fn main() -> Text { handle relay(7, \"payload\") { Exchange<i64>::exchange<Text>(_, _) with _ => \"cancelled\" } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("generic cancellation must preserve its concrete operation result type");
+    let artifact = outcome.artifact.expect("build must publish a VM artifact");
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            effect_arguments,
+            resume_type: VmType::Text,
+            continuation: VmContinuationPolicy::Consume,
+            ..
+        } if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+    )));
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Cancel)),
+        "the cancellation clause must consume the suspended generic call frame"
+    );
+    assert_eq!(artifact.run_text().unwrap(), "cancelled");
 }
 
 #[test]
