@@ -468,7 +468,7 @@ fn public_generic_integer_wrappers_cover_all_width_runtime_semantics() {
                 .instructions
                 .iter()
                 .find_map(|instruction| match instruction {
-                    VmInstruction::IntIntrinsic { dst, .. } => Some((key.clone(), *dst)),
+                    VmInstruction::IntIntrinsic { dst, .. } => Some((*key, *dst)),
                     _ => None,
                 })
         })
@@ -8630,7 +8630,7 @@ fn service_lowers_every_remaining_typed_integer_literal_across_generic_calls() {
                 .instructions
                 .iter()
                 .find_map(|instruction| match instruction {
-                    VmInstruction::ConstI128 { dst, .. } => Some((key.clone(), *dst)),
+                    VmInstruction::ConstI128 { dst, .. } => Some((*key, *dst)),
                     _ => None,
                 })
         })
