@@ -73,6 +73,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_less<T>` in distributed std.
     /// Its i64 specialization returns the canonical 0-or-1 u32 predicate.
     IntLess,
+    /// Exact generic declaration `__g1_int_greater<T>` in distributed std.
+    /// Its i64 specialization returns the canonical 0-or-1 u32 predicate.
+    IntGreater,
 }
 
 impl PrimitiveRole {
@@ -114,6 +117,7 @@ impl PrimitiveRole {
             Self::IntWrappingAdd => "int-wrapping-add",
             Self::IntEqual => "int-equal",
             Self::IntLess => "int-less",
+            Self::IntGreater => "int-greater",
         }
     }
 
@@ -526,17 +530,19 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
-        PrimitiveRole::IntEqual | PrimitiveRole::IntLess => crate::CallableSignature {
-            generics: 1,
-            generic_kinds: vec![crate::GenericKind::Type],
-            parameters: vec![Type::Generic(0), Type::Generic(0)],
-            result: Type::Scalar(crate::ScalarType::U32),
-            effects: EffectRow::empty(),
-            invocation: Quantity::ONCE,
-            where_bounds: vec![],
-            where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
-        },
+        PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
+            crate::CallableSignature {
+                generics: 1,
+                generic_kinds: vec![crate::GenericKind::Type],
+                parameters: vec![Type::Generic(0), Type::Generic(0)],
+                result: Type::Scalar(crate::ScalarType::U32),
+                effects: EffectRow::empty(),
+                invocation: Quantity::ONCE,
+                where_bounds: vec![],
+                where_associated_type_bindings: vec![],
+                where_associated_effect_bindings: vec![],
+            }
+        }
     }
 }
 fn manifest_digest(
@@ -584,6 +590,7 @@ fn manifest_digest(
             PrimitiveRole::IntWrappingAdd => 33,
             PrimitiveRole::IntEqual => 34,
             PrimitiveRole::IntLess => 38,
+            PrimitiveRole::IntGreater => 39,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

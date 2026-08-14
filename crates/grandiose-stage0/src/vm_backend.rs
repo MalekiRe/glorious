@@ -579,6 +579,12 @@ pub enum VmInstruction {
         left: u32,
         right: u32,
     },
+    /// Exact generic `__g1_int_greater<i64>` leaf with its frozen u32 ABI.
+    IntGreaterI64 {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
     SubI64 {
         dst: u32,
         left: u32,
@@ -1038,7 +1044,9 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 47 adds opcode 109 for the manifest-bound generic i64 less-than
+/// Schema 48 adds opcode 110 for the manifest-bound generic i64 greater-than
+/// leaf, whose public ABI returns a canonical u32 predicate. Schema 47 adds
+/// opcode 109 for the manifest-bound generic i64 less-than
 /// leaf, whose public ABI returns a canonical u32 predicate. Schema 46 adds
 /// opcode 105 for the manifest-bound generic i64 equality
 /// leaf, whose public ABI returns a canonical u32 predicate. Schema 45 adds
@@ -1060,7 +1068,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 47;
+pub const STAGE0_VM_SCHEMA: u32 = 48;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3145,6 +3153,11 @@ impl<'a> Decoder<'a> {
                 left,
                 right,
             }),
+            110 => self.i64_arithmetic(|dst, left, right| VmInstruction::IntGreaterI64 {
+                dst,
+                left,
+                right,
+            }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
             6 => {
@@ -4480,6 +4493,11 @@ fn lower_instruction(
             right: right.0,
         },
         MirInstruction::IntLessI64 { dst, left, right } => VmInstruction::IntLessI64 {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::IntGreaterI64 { dst, left, right } => VmInstruction::IntGreaterI64 {
             dst: dst.0,
             left: left.0,
             right: right.0,
@@ -6098,7 +6116,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?
             }
             VmInstruction::IntEqualI64 { dst, left, right }
-            | VmInstruction::IntLessI64 { dst, left, right } => {
+            | VmInstruction::IntLessI64 { dst, left, right }
+            | VmInstruction::IntGreaterI64 { dst, left, right } => {
                 read(&states, *left)?;
                 read(&states, *right)?;
                 expect_type(function, *dst, VmType::U32)?;
@@ -8670,6 +8689,19 @@ fn execute(
                     )?) as u32,
                 ))
             }
+            VmInstruction::IntGreaterI64 { dst, left, right } => {
+                registers[dst as usize] = Some(VmValue::U32(
+                    (expect_i64(
+                        registers[left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? > expect_i64(
+                        registers[right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?) as u32,
+                ))
+            }
             VmInstruction::SubI64 { dst, left, right } => {
                 registers[dst as usize] = Some(VmValue::I64(
                     expect_i64(
@@ -9362,6 +9394,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         | VmInstruction::WrappingAddI64 { dst, left, right }
         | VmInstruction::IntEqualI64 { dst, left, right }
         | VmInstruction::IntLessI64 { dst, left, right }
+        | VmInstruction::IntGreaterI64 { dst, left, right }
         | VmInstruction::SubI64 { dst, left, right }
         | VmInstruction::MulI64 { dst, left, right }
         | VmInstruction::DivI64 { dst, left, right }
@@ -9376,6 +9409,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 VmInstruction::WrappingAddI64 { .. } => 104,
                 VmInstruction::IntEqualI64 { .. } => 105,
                 VmInstruction::IntLessI64 { .. } => 109,
+                VmInstruction::IntGreaterI64 { .. } => 110,
                 VmInstruction::SubI64 { .. } => 4,
                 VmInstruction::MulI64 { .. } => 5,
                 VmInstruction::DivI64 { .. } => 8,
@@ -10784,6 +10818,19 @@ fn execute_with_arguments(
                             .as_ref()
                             .expect("verified register"),
                     )? < expect_i64(
+                        registers[*right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?) as u32,
+                ))
+            }
+            VmInstruction::IntGreaterI64 { dst, left, right } => {
+                registers[*dst as usize] = Some(VmValue::U32(
+                    (expect_i64(
+                        registers[*left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? > expect_i64(
                         registers[*right as usize]
                             .as_ref()
                             .expect("verified register"),

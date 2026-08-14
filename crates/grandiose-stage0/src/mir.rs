@@ -457,6 +457,13 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// Exact generic `__g1_int_greater<i64>` runtime leaf with its public u32
+    /// predicate ABI.
+    IntGreaterI64 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
     SubI64 {
         dst: MirLocal,
         left: MirLocal,
@@ -1038,6 +1045,7 @@ fn fold_block(
             MirInstruction::WrappingAddI64 { .. } => None,
             MirInstruction::IntEqualI64 { .. } => None,
             MirInstruction::IntLessI64 { .. } => None,
+            MirInstruction::IntGreaterI64 { .. } => None,
             MirInstruction::SubI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_sub)
             }
@@ -1270,6 +1278,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::WrappingAddI64 { dst, .. }
         | MirInstruction::IntEqualI64 { dst, .. }
         | MirInstruction::IntLessI64 { dst, .. }
+        | MirInstruction::IntGreaterI64 { dst, .. }
         | MirInstruction::SubI64 { dst, .. }
         | MirInstruction::MulI64 { dst, .. }
         | MirInstruction::DivI64 { dst, .. }
@@ -3267,6 +3276,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::WrappingAddI64 { .. }
         | MirInstruction::IntEqualI64 { .. }
         | MirInstruction::IntLessI64 { .. }
+        | MirInstruction::IntGreaterI64 { .. }
         | MirInstruction::SubI64 { .. }
         | MirInstruction::MulI64 { .. }
         | MirInstruction::DivI64 { .. }
@@ -4004,6 +4014,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::WrappingAddI64 { dst, left, right }
         | MirInstruction::IntEqualI64 { dst, left, right }
         | MirInstruction::IntLessI64 { dst, left, right }
+        | MirInstruction::IntGreaterI64 { dst, left, right }
         | MirInstruction::SubI64 { dst, left, right }
         | MirInstruction::MulI64 { dst, left, right }
         | MirInstruction::DivI64 { dst, left, right }
@@ -13616,7 +13627,8 @@ impl Lowerer<'_> {
                                 role @ (PrimitiveRole::IntCheckedAdd
                                 | PrimitiveRole::IntWrappingAdd
                                 | PrimitiveRole::IntEqual
-                                | PrimitiveRole::IntLess),
+                                | PrimitiveRole::IntLess
+                                | PrimitiveRole::IntGreater),
                             ) => {
                                 let [left, right] = arguments.as_slice() else {
                                     self.error(
@@ -13635,12 +13647,16 @@ impl Lowerer<'_> {
                                         != Type::Scalar(crate::types::ScalarType::I64)
                                     || (matches!(
                                         role,
-                                        PrimitiveRole::IntEqual | PrimitiveRole::IntLess
+                                        PrimitiveRole::IntEqual
+                                            | PrimitiveRole::IntLess
+                                            | PrimitiveRole::IntGreater
                                     ) && self.body.expression(id).ty
                                         != Type::Scalar(crate::types::ScalarType::U32))
                                     || (!matches!(
                                         role,
-                                        PrimitiveRole::IntEqual | PrimitiveRole::IntLess
+                                        PrimitiveRole::IntEqual
+                                            | PrimitiveRole::IntLess
+                                            | PrimitiveRole::IntGreater
                                     ) && self.body.expression(id).ty
                                         != Type::Scalar(crate::types::ScalarType::I64))
                                 {
@@ -13666,6 +13682,11 @@ impl Lowerer<'_> {
                                         right: *right,
                                     },
                                     PrimitiveRole::IntLess => MirInstruction::IntLessI64 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::IntGreater => MirInstruction::IntGreaterI64 {
                                         dst,
                                         left: *left,
                                         right: *right,
