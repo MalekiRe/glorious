@@ -730,6 +730,16 @@ impl TraitSolver {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
             return TraitAnswerIndex::Overflow;
         }
+        // A trait relation may itself be headed by a concrete associated
+        // projection: `Value: Consume<<Value as Source>::Item>`.  Projection
+        // requests already normalize their own heads, but ordinary goals and
+        // implementation where-obligations enter through this path.  Keeping
+        // normalization at the shared goal boundary prevents those two
+        // semantically equivalent routes from selecting different evidence.
+        let goal = match self.normalize_goal(goal) {
+            Ok(goal) => goal,
+            Err(answer) => return answer,
+        };
         self.steps += 1;
         let key = goal_key(&goal);
         match self.tables.get(&key).copied() {
@@ -796,6 +806,53 @@ impl TraitSolver {
         };
         self.tables.insert(key, TableState::Complete(answer));
         answer
+    }
+
+    /// Reduce concrete associated projections in a trait goal before it is
+    /// keyed or matched against implementation heads.  Generic projections
+    /// are deliberately retained by `normalize_type_projections`, preserving
+    /// the caller's eventual lexical evidence rather than guessing a global
+    /// implementation.
+    fn normalize_goal(&mut self, goal: TraitGoal) -> Result<TraitGoal, TraitAnswerIndex> {
+        let mut active = vec![];
+        let subject = self
+            .normalize_type_projections(goal.subject, &mut active)
+            .map_err(|answer| projection_failure_answer(*answer))?;
+        let arguments = goal
+            .relation
+            .arguments
+            .into_iter()
+            .map(|argument| self.normalize_type_projections(argument, &mut active))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|answer| projection_failure_answer(*answer))?;
+        Ok(TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: goal.relation.definition,
+                arguments,
+            },
+            subject,
+        })
+    }
+}
+
+/// A projection failure cannot become implicit successful trait evidence.
+/// A refuted *projection relation* is not a refutation of the outer trait
+/// goal, so it is deliberately reported as no candidate rather than leaking
+/// unrelated negative evidence into the result.  Recursive normalization is
+/// a bounded solver failure; ambiguity remains ambiguity.
+fn projection_failure_answer(answer: TraitProjectionAnswer) -> TraitAnswerIndex {
+    match answer {
+        TraitProjectionAnswer::Ambiguous => TraitAnswerIndex::Ambiguous,
+        TraitProjectionAnswer::Overflow | TraitProjectionAnswer::RecursiveProjection => {
+            TraitAnswerIndex::Overflow
+        }
+        TraitProjectionAnswer::Refuted { .. }
+        | TraitProjectionAnswer::NoSolution
+        | TraitProjectionAnswer::MissingAssociatedType { .. }
+        | TraitProjectionAnswer::AssociatedTypeArity { .. } => TraitAnswerIndex::NoSolution,
+        TraitProjectionAnswer::Normalized { .. } => {
+            unreachable!("projection normalizer only returns normalized types through Ok")
+        }
     }
 }
 

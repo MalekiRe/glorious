@@ -51,6 +51,56 @@ fn tabled_solver_proves_generic_impls_after_where_obligations() {
 }
 
 #[test]
+fn tabled_solver_normalizes_associated_projections_in_where_obligations() {
+    let (interface, signatures) = signatures(
+        "trait Source { type Item; } trait Consume<T> {} trait Ready {} struct Value {} impl Source for Value { type Item = i64; } impl Consume<i64> for Value {} impl Ready for Value where Value: Consume< <Value as Source>::Item > {}",
+    );
+    let ready = key(&interface, "Ready");
+    let value = key(&interface, "Value");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: value,
+            arguments: vec![],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+}
+
+#[test]
+fn failed_projection_does_not_refute_the_outer_trait_goal() {
+    let (interface, signatures) = signatures(
+        "trait Source { type Item; } trait Consume<T> {} struct Value {} impl !Source for Value {}",
+    );
+    let source = key(&interface, "Source");
+    let consume = key(&interface, "Consume");
+    let value = key(&interface, "Value");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: consume,
+            arguments: vec![Type::Projection {
+                subject: Box::new(Type::Nominal {
+                    definition: value,
+                    arguments: vec![],
+                }),
+                trait_definition: source,
+                trait_arguments: vec![],
+                name: "Item".into(),
+                item_arguments: vec![],
+            }],
+        },
+        subject: Type::Nominal {
+            definition: value,
+            arguments: vec![],
+        },
+    });
+    assert_eq!(answer, TraitAnswer::NoSolution);
+}
+
+#[test]
 fn tabled_solver_binds_lifetime_parameters_in_implementation_heads() {
     let (interface, signatures) = signatures("trait Marker {} impl<'a> Marker for &'a i64 {}");
     let marker = key(&interface, "Marker");
