@@ -1,6 +1,6 @@
 use grandiose_stage0::{
     CoreId, DefKey, Digest, MirBlock, MirBlockId, MirEditor, MirFunction, MirInstruction, MirLocal,
-    MirLocalDecl, MirTerminator, ScalarType, Type, optimize_mir,
+    MirLocalDecl, MirPattern, MirTerminator, ScalarType, Type, optimize_mir,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -185,6 +185,151 @@ fn optimizer_folds_reflexive_integer_and_boolean_comparisons_without_constants()
             MirInstruction::ConstBool { value: true, .. },
             MirInstruction::ConstBool { value: false, .. },
         ]
+    ));
+}
+
+#[test]
+fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let f64_ty = Type::Scalar(ScalarType::F64);
+    let char_ty = Type::Scalar(ScalarType::Char);
+    let text_ty = Type::Scalar(ScalarType::Text);
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-pattern-constants")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64_ty),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+            local(f64_ty),
+            local(bool_ty.clone()),
+            local(char_ty),
+            local(bool_ty.clone()),
+            local(text_ty),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+            local(bool_ty),
+        ],
+        result: Type::Scalar(ScalarType::Bool),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(0),
+                        value: 41,
+                    },
+                    MirInstruction::PatternTest {
+                        dst: MirLocal(1),
+                        subject: MirLocal(0),
+                        pattern: MirPattern::Literal("0x29".into()),
+                    },
+                    MirInstruction::PatternTest {
+                        dst: MirLocal(2),
+                        subject: MirLocal(0),
+                        pattern: MirPattern::Literal("42".into()),
+                    },
+                    MirInstruction::PatternTest {
+                        dst: MirLocal(3),
+                        subject: MirLocal(0),
+                        pattern: MirPattern::Any,
+                    },
+                    MirInstruction::ConstF64 {
+                        dst: MirLocal(4),
+                        bits: (-0.0f64).to_bits(),
+                    },
+                    MirInstruction::PatternTest {
+                        dst: MirLocal(5),
+                        subject: MirLocal(4),
+                        pattern: MirPattern::Literal("0.0".into()),
+                    },
+                    MirInstruction::ConstChar {
+                        dst: MirLocal(6),
+                        value: '\n' as u32,
+                    },
+                    MirInstruction::PatternTest {
+                        dst: MirLocal(7),
+                        subject: MirLocal(6),
+                        pattern: MirPattern::Literal("'\\n'".into()),
+                    },
+                    MirInstruction::ConstText {
+                        dst: MirLocal(8),
+                        value: "line\nbreak".into(),
+                    },
+                    MirInstruction::PatternTest {
+                        dst: MirLocal(9),
+                        subject: MirLocal(8),
+                        pattern: MirPattern::Literal("\"line\\nbreak\"".into()),
+                    },
+                ],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(2),
+                    then_target: MirBlockId(1),
+                    then_arguments: vec![],
+                    else_target: MirBlockId(2),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstBool {
+                    dst: MirLocal(10),
+                    value: true,
+                }],
+                terminator: MirTerminator::Return {
+                    value: MirLocal(10),
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstBool {
+                    dst: MirLocal(11),
+                    value: false,
+                }],
+                terminator: MirTerminator::Return {
+                    value: MirLocal(11),
+                },
+            },
+        ],
+    };
+
+    let (optimized, report) = optimize_mir(function).unwrap();
+    assert_eq!(report.constant_folds, 6);
+    assert_eq!(report.eliminated_branches, 1);
+    assert!(matches!(
+        optimized.blocks[0].instructions[1],
+        MirInstruction::ConstBool { value: true, .. }
+    ));
+    assert!(matches!(
+        optimized.blocks[0].instructions[2],
+        MirInstruction::ConstBool { value: false, .. }
+    ));
+    assert!(matches!(
+        optimized.blocks[0].instructions[3],
+        MirInstruction::ConstBool { value: true, .. }
+    ));
+    assert!(matches!(
+        optimized.blocks[0].instructions[5],
+        MirInstruction::ConstBool { value: true, .. }
+    ));
+    assert!(matches!(
+        optimized.blocks[0].instructions[7],
+        MirInstruction::ConstBool { value: true, .. }
+    ));
+    assert!(matches!(
+        optimized.blocks[0].instructions[9],
+        MirInstruction::ConstBool { value: true, .. }
+    ));
+    assert!(matches!(
+        optimized.blocks[0].terminator,
+        MirTerminator::Goto {
+            target: MirBlockId(2),
+            ..
+        }
     ));
 }
 

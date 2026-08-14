@@ -539,7 +539,7 @@ fn block_entry_constants(function: &MirFunction) -> Vec<Option<BTreeMap<MirLocal
                 .filter_map(|(&parameter, &argument)| {
                     exit_facts
                         .get(&argument)
-                        .copied()
+                        .cloned()
                         .map(|value| (parameter, value))
                 })
                 .collect::<BTreeMap<_, _>>();
@@ -582,10 +582,13 @@ fn merge_constant_entry(
     *existing != before
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Constant {
     I64(i64),
+    F64(u64),
     Bool(bool),
+    Char(u32),
+    Text(String),
 }
 fn fold_block(
     instructions: Vec<MirInstruction>,
@@ -596,6 +599,11 @@ fn fold_block(
     for original in instructions {
         let folded = match original.clone() {
             MirInstruction::Copy { dst, src } => constant_instruction(dst, constants.get(&src)),
+            MirInstruction::PatternTest {
+                dst,
+                subject,
+                pattern,
+            } => fold_pattern_test(dst, constants.get(&subject), &pattern),
             MirInstruction::NotBool { dst, value } => match constants.get(&value) {
                 Some(Constant::Bool(value)) => {
                     Some(MirInstruction::ConstBool { dst, value: !value })
@@ -668,8 +676,17 @@ fn fold_block(
             MirInstruction::ConstI64 { dst, value } => {
                 constants.insert(dst, Constant::I64(value));
             }
+            MirInstruction::ConstF64 { dst, bits } => {
+                constants.insert(dst, Constant::F64(bits));
+            }
             MirInstruction::ConstBool { dst, value } => {
                 constants.insert(dst, Constant::Bool(value));
+            }
+            MirInstruction::ConstChar { dst, value } => {
+                constants.insert(dst, Constant::Char(value));
+            }
+            MirInstruction::ConstText { dst, ref value } => {
+                constants.insert(dst, Constant::Text(value.clone()));
             }
             _ => {
                 if let Some(dst) = destination(&instruction) {
@@ -684,9 +701,62 @@ fn fold_block(
 fn constant_instruction(dst: MirLocal, value: Option<&Constant>) -> Option<MirInstruction> {
     match value {
         Some(Constant::I64(value)) => Some(MirInstruction::ConstI64 { dst, value: *value }),
+        Some(Constant::F64(bits)) => Some(MirInstruction::ConstF64 { dst, bits: *bits }),
         Some(Constant::Bool(value)) => Some(MirInstruction::ConstBool { dst, value: *value }),
+        Some(Constant::Char(value)) => Some(MirInstruction::ConstChar { dst, value: *value }),
+        Some(Constant::Text(value)) => Some(MirInstruction::ConstText {
+            dst,
+            value: value.clone(),
+        }),
         None => None,
     }
+}
+/// Fold structural decisions only when their result is independent of runtime
+/// aggregate identity. Literal matching shares MIR's literal decoders with
+/// lowering, so escaped text and character spellings retain exact VM
+/// comparison semantics. Enum patterns remain refutable even when all of
+/// their fields are wildcards because the variant tag is observable. Record
+/// field bounds are intentionally opaque in MIR, so only an empty record
+/// pattern is independently proven irrefutable.
+fn fold_pattern_test(
+    dst: MirLocal,
+    subject: Option<&Constant>,
+    pattern: &MirPattern,
+) -> Option<MirInstruction> {
+    let value = if pattern_is_mir_irrefutable(pattern) {
+        true
+    } else {
+        literal_pattern_matches_constant(subject?, pattern)?
+    };
+    Some(MirInstruction::ConstBool { dst, value })
+}
+
+fn pattern_is_mir_irrefutable(pattern: &MirPattern) -> bool {
+    match pattern {
+        MirPattern::Any => true,
+        MirPattern::Literal(_) | MirPattern::Enum { .. } => false,
+        MirPattern::Tuple(fields) => fields.iter().all(pattern_is_mir_irrefutable),
+        MirPattern::Record { fields, .. } => fields.is_empty(),
+    }
+}
+
+fn literal_pattern_matches_constant(value: &Constant, pattern: &MirPattern) -> Option<bool> {
+    let MirPattern::Literal(pattern) = pattern else {
+        return None;
+    };
+    Some(match value {
+        Constant::I64(value) => parse_i64_literal(pattern).is_ok_and(|pattern| pattern == *value),
+        // Match the VM's IEEE equality rather than comparing bit patterns:
+        // `-0.0` and `0.0` compare equal, while NaN never matches itself.
+        Constant::F64(bits) => {
+            parse_f64_literal(pattern).is_ok_and(|pattern| pattern == f64::from_bits(*bits))
+        }
+        Constant::Bool(value) => {
+            matches!((pattern.as_str(), value), ("true", true) | ("false", false))
+        }
+        Constant::Char(value) => parse_char_literal(pattern).is_ok_and(|pattern| pattern == *value),
+        Constant::Text(value) => parse_text_literal(pattern).is_ok_and(|pattern| pattern == *value),
+    })
 }
 /// Integer and boolean comparisons are reflexive at every initialized MIR
 /// value.  Floats deliberately do not use this rule because `NaN != NaN`.
