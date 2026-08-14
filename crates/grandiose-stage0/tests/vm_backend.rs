@@ -4953,6 +4953,58 @@ fn verifier_rejects_copying_a_nominal_carrier_of_a_unique_reference() {
 }
 
 #[test]
+fn verifier_rejects_a_forged_tuple_borrow_referent_before_dereference() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"forged-tuple-borrow-referent")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Tuple(vec![VmType::I64]),
+                VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::Bool),
+                },
+                VmType::Bool,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeTuple {
+                    dst: 1,
+                    fields: vec![0],
+                },
+                VmInstruction::Borrow {
+                    dst: 2,
+                    src: 1,
+                    fields: vec![0],
+                    unique: false,
+                    reborrow: false,
+                },
+                VmInstruction::DerefCopy {
+                    dst: 3,
+                    reference: 2,
+                },
+                VmInstruction::Return { value: 3 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-tuple-borrow-referent-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::TypeMismatch {
+            register: 2,
+            expected: VmType::I64,
+            found: VmType::Bool,
+        })
+    ));
+}
+
+#[test]
 fn verifier_rejects_forged_reborrow_capability_and_whole_place_referent() {
     let mut shared_to_unique = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

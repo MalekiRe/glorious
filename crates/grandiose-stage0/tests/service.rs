@@ -7764,6 +7764,14 @@ fn service_rejects_body_local_references_in_enum_and_array_effect_payloads() {
 }
 
 #[test]
+fn service_executes_a_borrowed_nominal_projection_through_the_verified_vm() {
+    let source = "pub struct Pair { value: i64, other: i64 } pub fn main() -> i64 { let pair = Pair { value: 41, other: 0 }; let value = &pair.value; *value + 1 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_tracks_outlives_through_assigned_tuple_reference_projections() {
     let incoming = StageZeroCompiler::new()
         .compile(request(

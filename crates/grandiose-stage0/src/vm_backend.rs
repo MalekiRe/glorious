@@ -5661,15 +5661,20 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     }
                     (source, false) => source,
                 };
-                // A whole-place carrier loan and a whole-reference reborrow
+                // A whole-place carrier loan and every tuple/array projection
                 // have a fully knowable referent at this boundary. Reject a
                 // forged destination type rather than allowing a later
                 // DerefCopy to observe a value that disagrees with its
-                // register contract.
-                if fields.is_empty() && destination_referent.as_ref() != source_referent {
+                // register contract. Nominal field layouts are sealed by the
+                // compiler's frozen layout proof and remain opaque to this
+                // standalone VM function representation.
+                let projected_referent = vm_projected_referent_type(source_referent, fields)?;
+                if let Some(projected_referent) = projected_referent
+                    && destination_referent.as_ref() != &projected_referent
+                {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
-                        expected: source_referent.clone(),
+                        expected: projected_referent,
                         found: *destination_referent,
                     });
                 }
@@ -6302,6 +6307,28 @@ fn validate_vm_nominal_copy_descriptors(
     }
     Ok(())
 }
+/// Recover a projected referent when the VM type itself carries the complete
+/// structural layout. Nominal layouts intentionally return `None`: their
+/// proof lives in frozen Core/MIR metadata rather than a standalone artifact.
+/// A scalar projection is always malformed and cannot be deferred safely.
+fn vm_projected_referent_type(
+    source: &VmType,
+    fields: &[u32],
+) -> Result<Option<VmType>, VmArtifactError> {
+    let mut current = source;
+    for field in fields {
+        current = match current {
+            VmType::Tuple(elements) => elements
+                .get(*field as usize)
+                .ok_or(VmArtifactError::InvalidRegister { register: *field })?,
+            VmType::Array(element) => element,
+            VmType::Nominal { .. } => return Ok(None),
+            _ => return Err(VmArtifactError::InvalidRegister { register: *field }),
+        };
+    }
+    Ok(Some(current.clone()))
+}
+
 fn vm_type_is_duplicable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -> bool {
     fn visit(
         ty: &VmType,
