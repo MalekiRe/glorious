@@ -6562,6 +6562,53 @@ fn service_resolves_explicit_import_aliases() {
 }
 
 #[test]
+fn service_resolves_private_module_import_aliases_from_nested_descendants() {
+    let root = "mod api; mod compiler; pub fn main() -> i64 { compiler::frontend::run() }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[
+                ("src/api/api.glorious", "pub fn answer() -> i64 { 42 }"),
+                (
+                    "src/compiler/compiler.glorious",
+                    "use crate::api as local; pub mod frontend;",
+                ),
+                (
+                    "src/compiler/frontend/frontend.glorious",
+                    "pub fn run() -> i64 { local::answer() }",
+                ),
+            ],
+        ))
+        .expect("a nested module must inherit its enclosing private import alias");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_nested_public_reexports_through_private_import_aliases() {
+    let root = "pub mod api; pub mod outer; pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+        root,
+        &[
+            ("src/api/api.glorious", "pub fn answer() -> i64 { 42 }"),
+            (
+                "src/outer/outer.glorious",
+                "use crate::api as local; pub mod facade;",
+            ),
+            ("src/outer/facade/facade.glorious", "pub use local::answer;"),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("private nested import alias unexpectedly entered a public reexport");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "missing public reexport privacy diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_resolves_grouped_import_bindings() {
     let root =
         "mod math; use math::{add_two as add, zero}; pub fn main() -> i64 { add(40) + zero() }";

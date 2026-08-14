@@ -1187,17 +1187,46 @@ impl DefinitionIndex {
         let Some(name) = path.last() else {
             return ResolutionState::Unresolved;
         };
-        let module = if path.len() == 1 {
-            lexical_owner.clone()
-        } else {
-            match self.lexical_module(lexical_owner, requester, &path[..path.len() - 1]) {
-                ModuleLookup::Found(module) => module,
-                ModuleLookup::Ambiguous(modules) => return self.ambiguous_modules(modules),
-                ModuleLookup::Inaccessible => return ResolutionState::Inaccessible(vec![]),
-                ModuleLookup::Absent => return ResolutionState::Unresolved,
+        if path.len() == 1 {
+            // Imports are source occurrences with the same lexical lookup
+            // authority as bodies. A nested module may therefore import a
+            // private item or alias introduced by an enclosing module; an
+            // unrelated sibling still cannot obtain that capability because
+            // the original requester is retained in every member lookup.
+            let mut lexical = lexical_owner.clone();
+            loop {
+                let resolved = self.resolve_member(
+                    namespace,
+                    &lexical,
+                    name,
+                    requester,
+                    !requester_has_lexical_authority(requester, &lexical),
+                    visited,
+                );
+                if !matches!(resolved, ResolutionState::Unresolved) {
+                    return resolved;
+                }
+                let Some(parent) = parent_module_path(&lexical.path) else {
+                    break;
+                };
+                lexical.path = parent;
             }
+            return ResolutionState::Unresolved;
+        }
+        let module = match self.lexical_module(lexical_owner, requester, &path[..path.len() - 1]) {
+            ModuleLookup::Found(module) => module,
+            ModuleLookup::Ambiguous(modules) => return self.ambiguous_modules(modules),
+            ModuleLookup::Inaccessible => return ResolutionState::Inaccessible(vec![]),
+            ModuleLookup::Absent => return ResolutionState::Unresolved,
         };
-        self.resolve_member(namespace, &module, name, requester, true, visited)
+        self.resolve_member(
+            namespace,
+            &module,
+            name,
+            requester,
+            !requester_has_lexical_authority(requester, &module),
+            visited,
+        )
     }
 
     fn classify(
@@ -1217,9 +1246,7 @@ impl DefinitionIndex {
             // same descendant rule to private module edges.
             .filter(|entry| {
                 owner.is_none_or(|owner| {
-                    entry.public
-                        || (entry.module.package == owner.package
-                            && module_is_descendant_of(owner, &entry.module.path))
+                    entry.public || requester_has_lexical_authority(owner, &entry.module)
                 })
             })
             .map(|entry| entry.key)
@@ -1421,7 +1448,7 @@ impl DefinitionIndex {
             // A private import is lexical to its declaring module.  It must
             // not become a module edge for an outside requester merely
             // because the final imported definition happens to be public.
-            if !import.public && import.module != *requester {
+            if !import.public && !requester_has_lexical_authority(requester, &import.module) {
                 if import.glob || import.alias == alias {
                     inaccessible = true;
                 }
@@ -1616,6 +1643,16 @@ fn module_is_descendant_of(module: &ModuleKey, ancestor: &str) -> bool {
             .path
             .strip_prefix(ancestor)
             .is_some_and(|suffix| suffix.starts_with("::"))
+}
+
+/// Private item and import authority is lexical rather than a property of a
+/// spelling: a module may use declarations introduced by itself or any
+/// enclosing module in the same package. Keeping this shared predicate for
+/// direct definitions and imported module aliases prevents one namespace from
+/// becoming more permissive than another.
+fn requester_has_lexical_authority(requester: &ModuleKey, defining_module: &ModuleKey) -> bool {
+    requester.package == defining_module.package
+        && module_is_descendant_of(requester, &defining_module.path)
 }
 
 fn canonicalize_keys(keys: &mut Vec<DefKey>) {

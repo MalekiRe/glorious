@@ -117,6 +117,168 @@ fn nested_modules_inherit_private_items_from_enclosing_modules() {
 }
 
 #[test]
+fn nested_modules_inherit_private_items_in_every_semantic_namespace() {
+    let package = PackageKey("resolution-lexical-private-namespaces@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect(
+        "crate",
+        "fn value() { () } struct Token {} trait Gate {} effect Trace { note(); } mod compiler;",
+    );
+    let compiler = collect("crate::compiler", "mod frontend;");
+    let frontend = collect("crate::compiler::frontend", "fn check() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &compiler, &frontend]);
+    let owner = ModuleKey {
+        package,
+        path: "crate::compiler::frontend".into(),
+    };
+
+    for (namespace, name) in [
+        (DefinitionNamespace::Value, "value"),
+        (DefinitionNamespace::Type, "Token"),
+        (DefinitionNamespace::Trait, "Gate"),
+        (DefinitionNamespace::Effect, "Trace"),
+    ] {
+        assert!(
+            matches!(
+                index.resolve_path(namespace, &owner, &[name.into()]),
+                ResolutionState::Resolved(_)
+            ),
+            "nested lexical module did not inherit private {namespace:?} `{name}`"
+        );
+    }
+}
+
+#[test]
+fn nested_modules_can_import_enclosing_private_bindings_in_every_namespace() {
+    let package = PackageKey("resolution-lexical-private-imports@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect(
+        "crate",
+        "mod api; mod compiler; use crate::api::{value, Token, Gate, Trace};",
+    );
+    let api = collect(
+        "crate::api",
+        "pub fn value() { () } pub struct Token {} pub trait Gate {} pub effect Trace { note(); }",
+    );
+    let compiler = collect("crate::compiler", "mod frontend;");
+    let frontend = collect(
+        "crate::compiler::frontend",
+        "use value; use Token; use Gate; use Trace; fn check() { () }",
+    );
+    let index = DefinitionIndex::from_interfaces([&root, &api, &compiler, &frontend]);
+    let owner = ModuleKey {
+        package,
+        path: "crate::compiler::frontend".into(),
+    };
+    assert!(
+        index.validate_imports().is_empty(),
+        "nested imports must retain enclosing private authority: {:#?}",
+        index.validate_imports()
+    );
+    for (namespace, name) in [
+        (DefinitionNamespace::Value, "value"),
+        (DefinitionNamespace::Type, "Token"),
+        (DefinitionNamespace::Trait, "Gate"),
+        (DefinitionNamespace::Effect, "Trace"),
+    ] {
+        assert!(
+            matches!(
+                index.resolve_path(namespace, &owner, &[name.into()]),
+                ResolutionState::Resolved(_)
+            ),
+            "nested imported {namespace:?} `{name}` did not resolve"
+        );
+    }
+}
+
+#[test]
+fn private_module_import_aliases_are_lexical_to_descendants_not_siblings() {
+    let package = PackageKey("resolution-lexical-private-module-import@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "mod api; mod outer; mod sibling;");
+    let api = collect("crate::api", "pub fn answer() { () }");
+    let outer = collect("crate::outer", "use crate::api as local; mod frontend;");
+    let frontend = collect("crate::outer::frontend", "fn run() { () }");
+    let sibling = collect("crate::sibling", "fn run() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &api, &outer, &frontend, &sibling]);
+    let descendant = ModuleKey {
+        package: package.clone(),
+        path: "crate::outer::frontend".into(),
+    };
+    let sibling = ModuleKey {
+        package,
+        path: "crate::sibling".into(),
+    };
+    let path = ["local".into(), "answer".into()];
+    assert!(matches!(
+        index.resolve_path(DefinitionNamespace::Value, &descendant, &path),
+        ResolutionState::Resolved(_)
+    ));
+    assert!(matches!(
+        index.resolve_path(DefinitionNamespace::Value, &sibling, &path),
+        ResolutionState::Unresolved | ResolutionState::Inaccessible(_)
+    ));
+}
+
+#[test]
+fn public_reexports_preserve_namespace_specific_visibility() {
+    let package = PackageKey("resolution-reexport-namespaces@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod api; pub mod facade;");
+    let api = collect(
+        "crate::api",
+        "pub fn value() { () } pub struct Token {} pub trait Gate {} pub effect Trace { note(); }",
+    );
+    let facade = collect(
+        "crate::facade",
+        "pub use crate::api::{value, Token, Gate, Trace};",
+    );
+    let index = DefinitionIndex::from_interfaces([&root, &api, &facade]);
+    let requester = ModuleKey {
+        package,
+        path: "<dependency>".into(),
+    };
+    for (namespace, name) in [
+        (DefinitionNamespace::Value, "value"),
+        (DefinitionNamespace::Type, "Token"),
+        (DefinitionNamespace::Trait, "Gate"),
+        (DefinitionNamespace::Effect, "Trace"),
+    ] {
+        assert!(
+            matches!(
+                index.resolve_path(
+                    namespace,
+                    &requester,
+                    &["crate".into(), "facade".into(), name.into()],
+                ),
+                ResolutionState::Resolved(_)
+            ),
+            "public {namespace:?} reexport `{name}` was not visible to a dependency"
+        );
+    }
+}
+
+#[test]
 fn private_nested_module_paths_do_not_leak_public_members_to_siblings_or_ancestors() {
     let package = PackageKey("resolution-private-module@0.1.0".into());
     let collect = |module: &str, source: &str| {
