@@ -2925,6 +2925,18 @@ fn service_resumes_an_aliased_inner_snapshot_into_an_outer_effect_handler() {
 }
 
 #[test]
+fn service_restores_three_nested_handler_frames_for_aliased_residual_resumptions() {
+    // Each resumption restores the frames outside the operation it handles:
+    // Ask resumes into Log while Ask remains above Log, then Log resumes into
+    // Audit while both inner frames remain above Audit. The result exercises
+    // deep frame restoration plus the ordinary reverse uninstall path.
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Log { [1,1] log(value: i64) -> i64; } effect Audit { [1,1] audit(value: i64) -> i64; } pub fn main() -> i64 { handle { handle { handle { let asked = Ask::ask(); let logged = Log::log(asked); Audit::audit(logged) } { Ask::ask() with k => { let saved = k; saved(40) } } } { Log::log(value) with k => { let saved = k; saved(value + 1) } } } { Audit::audit(value) with k => { let saved = k; saved(value + 1) } } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_keeps_a_statement_handler_alias_closed_before_later_shadowing() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => { let saved = k; saved(41) } }; let saved = (value: i64) -> i64 { value + 1 }; saved(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

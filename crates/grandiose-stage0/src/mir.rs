@@ -1828,6 +1828,39 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // Preserve the previously admitted two-frame leaf shape when it has
+        // setup that the structural direct-residual chain intentionally does
+        // not claim. The chain lowering above owns the ordinary case,
+        // including every depth greater than two.
+        if let Some(function) = lowerer
+            .lower_root_runtime_two_frame_residual_outer_one_shot_handler(
+                body.root,
+                parameters.clone(),
+            )
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_runtime_nested_one_shot_handler(body.root, parameters.clone())
         {
@@ -6807,6 +6840,238 @@ impl Lowerer<'_> {
             blocks,
         })
     }
+    /// Lower a lexical chain of one-shot handlers around a direct residual
+    /// operation chain.  The source nests handlers from outermost to
+    /// innermost, while execution reaches their operations in the opposite
+    /// direction: each resumed operation exposes the next outward effect.
+    ///
+    /// The plan deliberately mirrors that nesting rather than encoding a
+    /// collection of pairwise cases:
+    ///
+    /// * peel every lexical handler layer and align it with the corresponding
+    ///   direct operation, from the final outward operation back to the first;
+    /// * install all frames outer-to-inner before evaluating the first
+    ///   operation; and
+    /// * give every clause its own block, so `Resume` and `ResumeSnapshot`
+    ///   continue to target the VM's branded live frame instead of a lowering
+    ///   approximation.
+    ///
+    /// This makes a captured inner continuation restore all of its enclosing
+    /// handlers.  A later residual `Perform` then suspends the matching outer
+    /// frame while retaining the intervening inner frames in its continuation
+    /// suffix, which is the required deep-handler cleanup behavior.
+    fn lower_root_runtime_residual_outer_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let mut current = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle { .. } => root,
+            CoreKind::Block(values) if values.len() == 1 => values[0],
+            _ => return None,
+        };
+        let mut layers = Vec::<Vec<CoreHandlerClause>>::new();
+        let leaf = loop {
+            let CoreKind::Handle {
+                computation,
+                clauses,
+            } = self.body.expression(current).kind.clone()
+            else {
+                return None;
+            };
+            layers.push(clauses);
+            match self.body.expression(computation).kind.clone() {
+                CoreKind::Handle { .. } => current = computation,
+                CoreKind::Block(values)
+                    if values.len() == 1
+                        && matches!(
+                            self.body.expression(values[0]).kind,
+                            CoreKind::Handle { .. }
+                        ) =>
+                {
+                    current = values[0];
+                }
+                _ => break computation,
+            }
+        };
+        if layers.len() < 2 {
+            return None;
+        }
+        let CoreKind::Block(values) = self.body.expression(leaf).kind.clone() else {
+            return None;
+        };
+        if values.len() != layers.len() {
+            return None;
+        }
+
+        // Operations are stored in runtime order (innermost first). An
+        // intermediate result must be named so following operation arguments
+        // can refer to the exact value restored by the preceding frame.
+        let mut operations = Vec::new();
+        for (index, expression) in values.iter().copied().enumerate() {
+            let (binding, operation) = match self.body.expression(expression).kind.clone() {
+                CoreKind::Let { name, value } => (Some(name), value),
+                _ if index + 1 == values.len() => (None, expression),
+                _ => return None,
+            };
+            let CoreKind::Perform {
+                effect,
+                operation: operation_index,
+                arguments,
+                terminal: false,
+                ..
+            } = self.body.expression(operation).kind.clone()
+            else {
+                return None;
+            };
+            operations.push((binding, operation, effect, operation_index, arguments));
+        }
+
+        let is_once = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                } | CoreHandlerResumption::Tail {
+                    quantity: crate::quantity::Quantity::ONCE
+                }
+            )
+        };
+        // `layers` is outer-to-inner, whereas the residual operations are
+        // inner-to-outer. Freeze only the one operation clause each frame can
+        // actually observe; all broader dispatch shapes remain owned by the
+        // pattern-matrix lowerings below.
+        let mut frames = Vec::with_capacity(layers.len());
+        for (clauses, (_, operation, effect, operation_index, arguments)) in
+            layers.into_iter().zip(operations.iter().rev())
+        {
+            let operation_clauses = clauses
+                .into_iter()
+                .filter(|clause| !clause.terminal)
+                .collect::<Vec<_>>();
+            let [clause] = operation_clauses.as_slice() else {
+                return None;
+            };
+            if clause.effect != *effect
+                || clause.operation != *operation_index
+                || !is_once(clause)
+                || !clause.patterns.iter().all(pattern_is_irrefutable)
+                || clause.patterns.len() != arguments.len()
+            {
+                return None;
+            }
+            frames.push((clause.clone(), *operation));
+        }
+
+        let payloads = frames
+            .iter()
+            .map(|(clause, operation)| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), *operation))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let results = operations
+            .iter()
+            .map(|(_, operation, ..)| {
+                self.alloc(self.body.expression(*operation).ty.clone(), *operation)
+            })
+            .collect::<Vec<_>>();
+
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (index, ((clause, operation), payloads)) in frames.iter().zip(&payloads).enumerate() {
+            let (_, _, effect, operation_index, _) = operations
+                .iter()
+                .rev()
+                .nth(index)
+                .expect("frame and operation chain lengths match");
+            entry.push(MirInstruction::InstallHandler {
+                effect: effect.definition,
+                effect_arguments: effect.arguments.clone(),
+                operation: *operation_index,
+                payload_destinations: payloads.clone(),
+                resume_type: self.body.expression(*operation).ty.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId(index as u32 + 1),
+            });
+            debug_assert_eq!(clause.effect, *effect);
+        }
+        let mut previous_bindings = Vec::new();
+        for ((binding, operation, effect, operation_index, argument_ids), result) in
+            operations.iter().zip(&results)
+        {
+            let arguments = argument_ids
+                .iter()
+                .map(|argument| self.value(*argument))
+                .collect::<Option<Vec<_>>>()?;
+            entry.extend(std::mem::take(&mut self.instructions));
+            entry.push(MirInstruction::Perform {
+                dst: *result,
+                effect: effect.definition,
+                effect_arguments: effect.arguments.clone(),
+                operation: *operation_index,
+                arguments,
+            });
+            if let Some(binding) = binding {
+                previous_bindings
+                    .push((binding.clone(), self.named.insert(binding.clone(), *result)));
+            }
+            debug_assert_eq!(
+                self.body.expression(*operation).ty,
+                self.locals[result.0 as usize].ty
+            );
+        }
+        for (binding, previous) in previous_bindings.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.named.insert(binding, previous);
+            } else {
+                self.named.remove(&binding);
+            }
+        }
+        for _ in &frames {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let base_named = self.named.clone();
+        let base_values = self.values.clone();
+        let mut handler_blocks = Vec::with_capacity(frames.len());
+        for ((clause, _), payloads) in frames.iter().zip(&payloads) {
+            self.instructions = Vec::new();
+            self.named = base_named.clone();
+            self.values = base_values.clone();
+            self.bind_handler_patterns(&clause.patterns, payloads)?;
+            let value = self.direct_handler_clause_value(clause)?;
+            self.instructions.push(MirInstruction::Resume { value });
+            handler_blocks.push(std::mem::take(&mut self.instructions));
+        }
+        self.named = base_named;
+        self.values = base_values;
+
+        let result = *results.last().expect("non-empty operation chain");
+        let mut blocks = vec![MirBlock {
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return { value: result },
+        }];
+        blocks.extend(handler_blocks.into_iter().map(|instructions| MirBlock {
+            parameters: vec![],
+            instructions,
+            terminator: MirTerminator::Unreachable,
+        }));
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
     /// Lower the smallest general deep-handler stack which cannot be reduced
     /// to a single operation dispatch: an inner one-shot operation resumes
     /// into a residual operation owned by an outer handler.  In particular,
@@ -6814,7 +7079,7 @@ impl Lowerer<'_> {
     /// operation in its effect row.  The VM must therefore retain both frames
     /// across `ResumeSnapshot`, then capture the inner frame above the outer
     /// one while dispatching the residual operation.
-    fn lower_root_runtime_residual_outer_one_shot_handler(
+    fn lower_root_runtime_two_frame_residual_outer_one_shot_handler(
         &mut self,
         root: CoreId,
         parameters: Vec<MirLocal>,
