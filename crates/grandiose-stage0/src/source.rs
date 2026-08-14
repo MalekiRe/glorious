@@ -169,6 +169,20 @@ impl LexedFile {
     }
 }
 
+/// Classify one complete scalar literal using the exact lossless lexer
+/// contract.  Frozen MIR and VM patterns use this instead of maintaining a
+/// second, broader spelling heuristic: hostile semantic products must not be
+/// able to smuggle a malformed source literal past the frontend boundary.
+pub(crate) fn exact_scalar_literal_kind(source: &str) -> Option<TokenKind> {
+    let file = FileKey(Digest::of_bytes(b"grandiose-stage0-scalar-literal"));
+    let lexed = LexedFile::lex(file, source);
+    if !lexed.diagnostics.is_empty() || lexed.tokens.len() != 2 {
+        return None;
+    }
+    let token = lexed.tokens.first()?;
+    (lexed.tokens[1].kind == TokenKind::End).then_some(token.kind.clone())
+}
+
 impl DelimiterMap {
     fn build(tokens: &[Token]) -> Self {
         let mut pairs = vec![None; tokens.len()];
@@ -340,8 +354,11 @@ impl Lexer<'_> {
         if prefixed {
             self.index += 2;
             // The bootstrap grammar permits separators immediately after a
-            // radix prefix, e.g. `0x_dead_beef`.
-            while self.peek(0) == Some(b'_') {
+            // radix prefix, e.g. `0x_dead_beef`, but still requires exactly
+            // one separator before the first digit.  Consuming an arbitrary
+            // run here used to admit `0x__dead` even though separators are
+            // otherwise only legal between digit components.
+            if self.peek(0) == Some(b'_') {
                 self.index += 1;
             }
         }

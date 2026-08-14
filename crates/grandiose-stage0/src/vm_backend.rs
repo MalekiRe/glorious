@@ -18,8 +18,9 @@ use crate::{
     mir::{
         MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern, MirPatternField,
         MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f64_bits,
-        lifted_callable_definition,
+        lifted_callable_definition, parse_char_literal, parse_f64_literal, parse_text_literal,
     },
+    source::{TokenKind, exact_scalar_literal_kind},
     types::{
         ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, StructuralU32Expr, Type,
     },
@@ -3859,15 +3860,20 @@ fn compare_char(dst: u32, left: u32, right: u32, op: VmCompare) -> VmInstruction
 fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifactError> {
     match pattern {
         VmPattern::Any => Ok(()),
-        VmPattern::Literal(value) if literal_vm_type(value) == *subject => Ok(()),
-        VmPattern::Literal(_) => Err(VmArtifactError::TypeMismatch {
-            register: 0,
-            expected: literal_vm_type(match pattern {
-                VmPattern::Literal(value) => value,
-                _ => unreachable!(),
-            }),
-            found: subject.clone(),
-        }),
+        VmPattern::Literal(value) => {
+            let expected = literal_vm_type(value).ok_or(VmArtifactError::MalformedEncoding {
+                message: "invalid scalar literal pattern",
+            })?;
+            if expected == *subject {
+                Ok(())
+            } else {
+                Err(VmArtifactError::TypeMismatch {
+                    register: 0,
+                    expected,
+                    found: subject.clone(),
+                })
+            }
+        }
         VmPattern::Tuple(patterns) => match subject {
             VmType::Tuple(types) if patterns.len() == types.len() => patterns
                 .iter()
@@ -3948,17 +3954,16 @@ fn verify_pattern_fields(
     }
     Ok(())
 }
-fn literal_vm_type(value: &str) -> VmType {
+fn literal_vm_type(value: &str) -> Option<VmType> {
     if matches!(value, "true" | "false") {
-        VmType::Bool
-    } else if value.starts_with('"') {
-        VmType::Text
-    } else if value.starts_with('\'') {
-        VmType::Char
-    } else if value.contains('.') || value.contains('e') || value.contains('E') {
-        VmType::F64
-    } else {
-        VmType::I64
+        return Some(VmType::Bool);
+    }
+    match exact_scalar_literal_kind(value)? {
+        TokenKind::Integer if parse_pattern_i64(value).is_some() => Some(VmType::I64),
+        TokenKind::Float if parse_pattern_f64(value).is_some() => Some(VmType::F64),
+        TokenKind::Character if parse_pattern_char(value).is_some() => Some(VmType::Char),
+        TokenKind::String if parse_pattern_text(value).is_some() => Some(VmType::Text),
+        _ => None,
     }
 }
 
@@ -6283,43 +6288,13 @@ fn parse_pattern_i64(text: &str) -> Option<i64> {
     i64::from_str_radix(digits, radix).ok()
 }
 fn parse_pattern_f64(text: &str) -> Option<f64> {
-    text.replace('_', "").parse().ok()
+    parse_f64_literal(text).ok()
 }
 fn parse_pattern_char(text: &str) -> Option<char> {
-    let body = text.strip_prefix('\'')?.strip_suffix('\'')?;
-    match body {
-        "\\n" => Some('\n'),
-        "\\r" => Some('\r'),
-        "\\t" => Some('\t'),
-        "\\\\" => Some('\\'),
-        "\\'" => Some('\''),
-        _ if !body.starts_with('\\') => {
-            let mut values = body.chars();
-            let value = values.next()?;
-            values.next().is_none().then_some(value)
-        }
-        _ => None,
-    }
+    char::from_u32(parse_char_literal(text).ok()?)
 }
 fn parse_pattern_text(text: &str) -> Option<String> {
-    let body = text.strip_prefix('"')?.strip_suffix('"')?;
-    let mut output = String::new();
-    let mut values = body.chars();
-    while let Some(value) = values.next() {
-        if value != '\\' {
-            output.push(value);
-            continue;
-        }
-        output.push(match values.next()? {
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            '\\' => '\\',
-            '"' => '"',
-            other => other,
-        });
-    }
-    Some(output)
+    parse_text_literal(text).ok()
 }
 /// Execute a standalone artifact under the same step and call-entry budget as
 /// a program. Standalone artifacts cannot contain calls, but a zero call-depth

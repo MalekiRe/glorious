@@ -158,6 +158,41 @@ fn mir_rejects_a_forged_payload_distinct_nan_constant() {
 }
 
 #[test]
+fn mir_rejects_a_literal_pattern_that_violates_the_lossless_lexer_contract() {
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-malformed-text-pattern")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(Type::Scalar(ScalarType::Text)),
+            local(Type::Scalar(ScalarType::Bool)),
+        ],
+        result: Type::Scalar(ScalarType::Bool),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstText {
+                    dst: MirLocal(0),
+                    value: "A".into(),
+                },
+                MirInstruction::PatternTest {
+                    dst: MirLocal(1),
+                    subject: MirLocal(0),
+                    pattern: MirPattern::Literal(r#""\u{41"#.into()),
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(1) },
+        }],
+    };
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("literal pattern"))
+    );
+}
+
+#[test]
 fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
     let leave = |cleanup| MirFunction {
         definition: DefKey(Digest::of_bytes(b"forged-mir-cleanup")),

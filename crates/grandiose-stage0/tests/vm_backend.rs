@@ -1880,6 +1880,66 @@ fn structural_pattern_tests_round_trip_through_the_independent_vm_decoder() {
 }
 
 #[test]
+fn vm_scalar_pattern_literals_share_the_lexer_escape_contract() {
+    let mut valid = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"vm-escaped-text-pattern")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::Text, VmType::Bool],
+            instructions: vec![
+                VmInstruction::ConstText {
+                    dst: 0,
+                    value: "A🦀\0".into(),
+                },
+                VmInstruction::PatternTest {
+                    dst: 1,
+                    subject: 0,
+                    pattern: VmPattern::Literal(r#""\x41\u{1f980}\0""#.into()),
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"vm-escaped-text-pattern-stale"),
+    };
+    valid.fingerprint = valid.computed_fingerprint();
+    assert!(verify_vm(valid).unwrap().run_bool().unwrap());
+
+    let mut malformed = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"vm-malformed-text-pattern")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::Text, VmType::Bool],
+            instructions: vec![
+                VmInstruction::ConstText {
+                    dst: 0,
+                    value: "A".into(),
+                },
+                VmInstruction::PatternTest {
+                    dst: 1,
+                    subject: 0,
+                    pattern: VmPattern::Literal(r#""\u{41"#.into()),
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"vm-malformed-text-pattern-stale"),
+    };
+    malformed.fingerprint = malformed.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(malformed),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "invalid scalar literal pattern"
+        })
+    ));
+}
+
+#[test]
 fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
     let definition = DefKey(Digest::of_bytes(b"vm-pattern-arity"));
     let mut candidate = CandidateVmArtifact {

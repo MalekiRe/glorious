@@ -211,7 +211,9 @@ fn numeric_lexing_validates_radices_separators_and_float_exponents() {
         ]
     );
 
-    for malformed in ["0b102", "0x", "1__2", "1_", "1e+", "12z"] {
+    for malformed in [
+        "0b102", "0x", "0x__dead", "0b__1", "1__2", "1_", "1e+", "12z",
+    ] {
         let lexed = grandiose_stage0::LexedFile::lex(file, malformed);
         assert_eq!(lexed.tokens[0].kind, TokenKind::Invalid, "{malformed}");
         assert!(
@@ -219,6 +221,29 @@ fn numeric_lexing_validates_radices_separators_and_float_exponents() {
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "G1008"),
+            "{malformed}: {:#?}",
+            lexed.diagnostics
+        );
+    }
+}
+
+#[test]
+fn literal_recovery_rejects_unclosed_or_overwide_unicode_escapes_as_one_token() {
+    let snapshot = snapshot();
+    let file = snapshot.world().sources[0].key;
+    for malformed in ["\"\\u{41", "'\\u{1f600'", "\"\\u{0000001}\"", "'\\u{}'"] {
+        let lexed = grandiose_stage0::LexedFile::lex(file, malformed);
+        assert_eq!(lexed.tokens[0].kind, TokenKind::Invalid, "{malformed}");
+        assert_eq!(
+            lexed.tokens.len(),
+            2,
+            "malformed literal must recover as one token: {malformed}"
+        );
+        assert!(
+            lexed
+                .diagnostics
+                .iter()
+                .any(|diagnostic| matches!(diagnostic.code, "G1002" | "G1003" | "G1009" | "G1010")),
             "{malformed}: {:#?}",
             lexed.diagnostics
         );

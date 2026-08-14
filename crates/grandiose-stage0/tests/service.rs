@@ -5451,6 +5451,21 @@ fn source_float_arithmetic_canonicalizes_runtime_nan_results() {
 }
 
 #[test]
+fn source_rejects_decimal_f64_literals_that_overflow_to_an_unspelled_infinity() {
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request("pub fn main() -> f64 { 1e9999 }"))
+    else {
+        panic!("an overflowing decimal literal unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6003"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn verified_vm_executes_division_and_remainder_without_host_panics() {
     let integer = StageZeroCompiler::new()
         .compile(request("pub fn main() -> i64 { 84 / 2 % 43 }"))

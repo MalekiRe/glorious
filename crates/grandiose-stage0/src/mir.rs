@@ -12737,7 +12737,7 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
 fn validate_pattern(pattern: &MirPattern, subject: &Type) -> Result<(), String> {
     match pattern {
         MirPattern::Any => Ok(()),
-        MirPattern::Literal(value) if literal_type(value) == *subject => Ok(()),
+        MirPattern::Literal(value) if literal_type(value).as_ref() == Some(subject) => Ok(()),
         MirPattern::Literal(_) => {
             Err("MIR literal pattern has an incompatible subject type".into())
         }
@@ -12805,17 +12805,26 @@ fn validate_pattern_fields(
     Ok(())
 }
 
-fn literal_type(text: &str) -> Type {
+fn literal_type(text: &str) -> Option<Type> {
+    use crate::source::{TokenKind, exact_scalar_literal_kind};
+
     if matches!(text, "true" | "false") {
-        Type::Scalar(crate::types::ScalarType::Bool)
-    } else if text.starts_with('"') {
-        Type::Scalar(crate::types::ScalarType::Text)
-    } else if text.starts_with('\'') {
-        Type::Scalar(crate::types::ScalarType::Char)
-    } else if text.contains('.') || text.contains('e') || text.contains('E') {
-        Type::Scalar(crate::types::ScalarType::F64)
-    } else {
-        Type::Scalar(crate::types::ScalarType::I64)
+        return Some(Type::Scalar(crate::types::ScalarType::Bool));
+    }
+    match exact_scalar_literal_kind(text)? {
+        TokenKind::Integer if parse_i64_literal(text).is_ok() => {
+            Some(Type::Scalar(crate::types::ScalarType::I64))
+        }
+        TokenKind::Float if parse_f64_literal(text).is_ok() => {
+            Some(Type::Scalar(crate::types::ScalarType::F64))
+        }
+        TokenKind::Character if parse_char_literal(text).is_ok() => {
+            Some(Type::Scalar(crate::types::ScalarType::Char))
+        }
+        TokenKind::String if parse_text_literal(text).is_ok() => {
+            Some(Type::Scalar(crate::types::ScalarType::Text))
+        }
+        _ => None,
     }
 }
 
@@ -12836,13 +12845,18 @@ fn parse_i64_literal(text: &str) -> Result<i64, ()> {
     i64::from_str_radix(digits, radix).map_err(|_| ())
 }
 
-fn parse_f64_literal(text: &str) -> Result<f64, ()> {
-    text.replace('_', "").parse::<f64>().map_err(|_| ())
+pub(crate) fn parse_f64_literal(text: &str) -> Result<f64, ()> {
+    let value = text.replace('_', "").parse::<f64>().map_err(|_| ())?;
+    // Source has no spelling for `inf` or `NaN`.  A finite decimal that
+    // overflows while becoming an f64 is therefore a rejected literal rather
+    // than an accidental alternate spelling for infinity.  IEEE infinities
+    // and NaNs remain valid *runtime results* of float arithmetic.
+    value.is_finite().then_some(value).ok_or(())
 }
 
 /// Source lexing validates literal escape structure. MIR decodes it again so
 /// the emitted artifact contains a scalar value rather than source spelling.
-fn parse_char_literal(text: &str) -> Result<u32, ()> {
+pub(crate) fn parse_char_literal(text: &str) -> Result<u32, ()> {
     let Some(body) = text
         .strip_prefix('\'')
         .and_then(|value| value.strip_suffix('\''))
@@ -12851,33 +12865,10 @@ fn parse_char_literal(text: &str) -> Result<u32, ()> {
     };
     let mut values = body.chars();
     let value = match values.next() {
-        Some('\\') => match values.next() {
-            Some('n') => '\n',
-            Some('r') => '\r',
-            Some('t') => '\t',
-            Some('0') => '\0',
-            Some('\\') => '\\',
-            Some('\'') => '\'',
-            Some('"') => '"',
-            Some('x') => {
-                let digits = values.by_ref().take(2).collect::<String>();
-                let scalar = u32::from_str_radix(&digits, 16).map_err(|_| ())?;
-                char::from_u32(scalar).ok_or(())?
-            }
-            Some('u') => {
-                if values.next() != Some('{') {
-                    return Err(());
-                }
-                let digits = values
-                    .by_ref()
-                    .take_while(|value| *value != '}')
-                    .collect::<String>();
-                char::from_u32(u32::from_str_radix(&digits, 16).map_err(|_| ())?).ok_or(())?
-            }
-            _ => return Err(()),
-        },
-        Some(value) => value,
+        Some('\\') => parse_scalar_escape(&mut values)?,
+        Some(value) if value != '\n' => value,
         None => return Err(()),
+        Some(_) => return Err(()),
     };
     if values.next().is_some() {
         return Err(());
@@ -12885,45 +12876,76 @@ fn parse_char_literal(text: &str) -> Result<u32, ()> {
     Ok(value as u32)
 }
 
-fn parse_text_literal(text: &str) -> Result<String, ()> {
+pub(crate) fn parse_text_literal(text: &str) -> Result<String, ()> {
     let Some(body) = text
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
     else {
         return Err(());
     };
-    let mut values = body.chars().peekable();
+    let mut values = body.chars();
     let mut result = String::new();
     while let Some(value) = values.next() {
         let value = if value == '\\' {
-            match values.next() {
-                Some('n') => '\n',
-                Some('r') => '\r',
-                Some('t') => '\t',
-                Some('0') => '\0',
-                Some('\\') => '\\',
-                Some('\'') => '\'',
-                Some('"') => '"',
-                Some('x') => {
-                    let digits = values.by_ref().take(2).collect::<String>();
-                    char::from_u32(u32::from_str_radix(&digits, 16).map_err(|_| ())?).ok_or(())?
-                }
-                Some('u') => {
-                    if values.next() != Some('{') {
-                        return Err(());
-                    }
-                    let digits = values
-                        .by_ref()
-                        .take_while(|value| *value != '}')
-                        .collect::<String>();
-                    char::from_u32(u32::from_str_radix(&digits, 16).map_err(|_| ())?).ok_or(())?
-                }
-                _ => return Err(()),
-            }
+            parse_scalar_escape(&mut values)?
+        } else if value == '\n' {
+            return Err(());
         } else {
             value
         };
         result.push(value);
     }
     Ok(result)
+}
+
+/// Decode precisely the scalar escapes admitted by the lossless lexer.  This
+/// is intentionally shared by literal lowering and VM pattern matching so a
+/// recovered or hostile typed product cannot give the same spelling a second,
+/// broader meaning after the source boundary has accepted it.
+fn parse_scalar_escape(values: &mut std::str::Chars<'_>) -> Result<char, ()> {
+    match values.next() {
+        Some('n') => Ok('\n'),
+        Some('r') => Ok('\r'),
+        Some('t') => Ok('\t'),
+        Some('0') => Ok('\0'),
+        Some('\\') => Ok('\\'),
+        Some('\'') => Ok('\''),
+        Some('"') => Ok('"'),
+        Some('x') => {
+            let first = ascii_hex(values.next()).ok_or(())?;
+            let second = ascii_hex(values.next()).ok_or(())?;
+            let scalar = first * 16 + second;
+            (scalar < 0x80).then_some(scalar as char).ok_or(())
+        }
+        Some('u') => {
+            if values.next() != Some('{') {
+                return Err(());
+            }
+            let mut scalar = 0_u32;
+            let mut digits = 0_u8;
+            loop {
+                match values.next() {
+                    Some('}') if digits > 0 => return char::from_u32(scalar).ok_or(()),
+                    Some('}') | None => return Err(()),
+                    Some(value) if digits < 6 => {
+                        let value = ascii_hex(Some(value)).ok_or(())?;
+                        scalar = scalar * 16 + u32::from(value);
+                        digits += 1;
+                    }
+                    Some(_) => return Err(()),
+                }
+            }
+        }
+        _ => Err(()),
+    }
+}
+
+fn ascii_hex(value: Option<char>) -> Option<u8> {
+    let value = value?;
+    match value {
+        '0'..='9' => Some(value as u8 - b'0'),
+        'a'..='f' => Some(value as u8 - b'a' + 10),
+        'A'..='F' => Some(value as u8 - b'A' + 10),
+        _ => None,
+    }
 }
