@@ -3927,18 +3927,15 @@ impl Elaborator<'_> {
                 else {
                     unreachable!("frozen direct callable must elaborate to a callable type");
                 };
-                if self
-                    .inference
-                    .unify(*result, expected.clone().expect("guarded above"))
-                    .is_err()
-                {
-                    self.error(
-                        expression.span,
-                        "G4107",
-                        "call result does not match the contextual expected type",
-                    );
-                    self.recovered = true;
-                }
+                // Feed result evidence into generic type inference before
+                // elaborating contextual arguments, but defer a mismatch
+                // diagnostic until `call` has opened the declaration-owned
+                // lifetime relation against its actual arguments.  A result
+                // such as `&'a T` cannot unify with contextual `&T` while
+                // `'a` is still rigid; the call boundary is the only place
+                // that can soundly turn it into the caller-local region.
+                let expected = expected.expect("guarded above");
+                let _ = self.inference.unify(*result, expected.clone());
                 let arguments = arguments
                     .into_iter()
                     .enumerate()
@@ -3954,7 +3951,20 @@ impl Elaborator<'_> {
                         )
                     })
                     .collect();
-                self.call(callee, arguments, expression.span)
+                let call = self.call(callee, arguments, expression.span);
+                let actual = self.expressions[call.0 as usize].ty.clone();
+                if self
+                    .unify_rigid_lifetimes(expected, actual, expression.span)
+                    .is_err()
+                {
+                    self.error(
+                        expression.span,
+                        "G4107",
+                        "call result does not match the contextual expected type",
+                    );
+                    self.recovered = true;
+                }
+                call
             }
             ExprKind::Closure { parameters, body } => self.closure(
                 parameters
