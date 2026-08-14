@@ -1303,6 +1303,32 @@ impl MirLowering {
             };
         }
         if let Some(function) =
+            lowerer.lower_root_statement_ordered_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
             lowerer.lower_root_runtime_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -4824,6 +4850,213 @@ impl Lowerer<'_> {
                     terminator: MirTerminator::Unreachable,
                 },
             ],
+        })
+    }
+    /// Runtime ordered dispatch for a direct one-shot handler used before a
+    /// later enclosing-block suffix. Unlike the compact single-arm path this
+    /// keeps every refutable clause as a real CFG edge and emits `Forward`
+    /// only after the final miss.
+    fn lower_root_statement_ordered_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let CoreKind::Block(values) = self.body.expression(root).kind.clone() else {
+            return None;
+        };
+        let handler_index = values
+            .iter()
+            .position(|id| matches!(self.body.expression(*id).kind, CoreKind::Handle { .. }))?;
+        if handler_index + 1 >= values.len() {
+            return None;
+        }
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(values[handler_index]).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments,
+            terminal: false,
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let mut matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        if matching.len() < 2 {
+            return None;
+        }
+        let fallback = matching
+            .iter()
+            .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable));
+        if let Some(index) = fallback {
+            matching.truncate(index + 1);
+        }
+        if matching.iter().any(|clause| {
+            clause.patterns.len() != arguments.len()
+                || !matches!(clause.resumption,
+                    CoreHandlerResumption::Explicit { quantity, .. } | CoreHandlerResumption::Tail { quantity }
+                    if quantity == crate::quantity::Quantity::ONCE)
+        }) { return None; }
+        for expression in &values[..handler_index] {
+            self.statement(*expression)?;
+        }
+        let payloads = matching[0]
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let resumed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let body_blocks = (0..matching.len())
+            .map(|index| MirBlockId(1 + index as u32))
+            .collect::<Vec<_>>();
+        let mut next = 1 + matching.len() as u32;
+        let test_blocks = matching
+            .iter()
+            .map(|clause| {
+                (0..if clause.patterns.iter().all(pattern_is_irrefutable) {
+                    0
+                } else {
+                    clause.patterns.len()
+                })
+                    .map(|_| {
+                        let id = MirBlockId(next);
+                        next += 1;
+                        id
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let forward_block = fallback.is_none().then_some(MirBlockId(next));
+        let target = test_blocks[0].first().copied().unwrap_or(body_blocks[0]);
+        let arguments = arguments
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            target,
+        });
+        entry.push(MirInstruction::Perform {
+            dst: resumed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        let (last, suffix) = values[handler_index + 1..].split_last()?;
+        for statement in suffix {
+            self.statement(*statement)?;
+        }
+        let result = self.value(*last)?;
+        entry.extend(std::mem::take(&mut self.instructions));
+        let mut bodies = Vec::new();
+        for clause in &matching {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            let value = self.direct_handler_clause_value(clause)?;
+            self.instructions.push(MirInstruction::Resume { value });
+            bodies.push(std::mem::take(&mut self.instructions));
+        }
+        let mut tests = Vec::new();
+        for (clause, ids) in matching.iter().zip(&test_blocks) {
+            let values = clause
+                .patterns
+                .iter()
+                .cloned()
+                .zip(payloads.iter().copied())
+                .zip(ids.iter().copied())
+                .map(|((pattern, subject), id)| {
+                    Some((
+                        id,
+                        self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root),
+                        subject,
+                        lower_pattern(pattern)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            tests.push(values);
+        }
+        let mut blocks = vec![MirBlock {
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return { value: result },
+        }];
+        blocks.extend(bodies.into_iter().map(|instructions| MirBlock {
+            parameters: vec![],
+            instructions,
+            terminator: MirTerminator::Unreachable,
+        }));
+        for (index, values) in tests.into_iter().enumerate() {
+            for (test_index, (id, condition, subject, pattern)) in values.into_iter().enumerate() {
+                let failure = test_blocks[index]
+                    .get(test_index + 1)
+                    .copied()
+                    .or_else(|| {
+                        test_blocks
+                            .get(index + 1)
+                            .and_then(|ids| ids.first())
+                            .copied()
+                    })
+                    .or_else(|| body_blocks.get(index + 1).copied())
+                    .or(forward_block)
+                    .expect("partial dispatch has a following clause or forwarding edge");
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject,
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: test_blocks[index]
+                            .get(test_index + 1)
+                            .copied()
+                            .unwrap_or(body_blocks[index]),
+                        then_arguments: vec![],
+                        else_target: failure,
+                        else_arguments: vec![],
+                    },
+                });
+                debug_assert_eq!(id.0, blocks.len() as u32 - 1);
+            }
+        }
+        if forward_block.is_some() {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
         })
     }
     /// Lower one nonempty, exact-one-shot continuation through the VM handler

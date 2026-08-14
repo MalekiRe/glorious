@@ -1338,6 +1338,14 @@ fn service_restores_statement_handler_residual_through_an_aliased_snapshot() {
 }
 
 #[test]
+fn service_dispatches_refutable_statement_handler_clauses_before_outer_suffix() {
+    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(2) { Ask::ask(1) with k => k(40), Ask::ask(seed) with k => k(seed + 40) }; 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_composes_a_direct_operation_arm_with_a_normal_completion_arm() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask() => 41 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
