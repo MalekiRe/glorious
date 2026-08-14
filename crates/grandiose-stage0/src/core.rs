@@ -2637,20 +2637,12 @@ impl Elaborator<'_> {
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
-                    arguments: trait_arguments
-                        .clone()
-                        .into_iter()
-                        .map(crate::GenericArgument::Type)
-                        .collect(),
+                    arguments: projection_generic_arguments(trait_arguments),
                 },
                 subject: *subject.clone(),
             },
             name,
-            &item_arguments
-                .iter()
-                .cloned()
-                .map(crate::GenericArgument::Type)
-                .collect::<Vec<_>>(),
+            &projection_generic_arguments(item_arguments),
         );
         match answer {
             TraitProjectionAnswer::Normalized { ty, .. } => ty,
@@ -3062,19 +3054,12 @@ impl Elaborator<'_> {
                             TraitGoal {
                                 relation: crate::ElaboratedTraitReference {
                                     definition: trait_definition,
-                                    arguments: trait_arguments
-                                        .into_iter()
-                                        .map(crate::GenericArgument::Type)
-                                        .collect(),
+                                    arguments: projection_generic_arguments(&trait_arguments),
                                 },
                                 subject,
                             },
                             name,
-                            &item_arguments
-                                .iter()
-                                .cloned()
-                                .map(crate::GenericArgument::Type)
-                                .collect::<Vec<_>>(),
+                            &projection_generic_arguments(&item_arguments),
                         ) {
                         TraitEffectRowProjectionAnswer::Normalized { row, .. }
                             if row.tail.is_none() && row.projections.is_empty() =>
@@ -6069,21 +6054,12 @@ impl Elaborator<'_> {
                 TraitGoal {
                     relation: crate::ElaboratedTraitReference {
                         definition: projection.trait_definition,
-                        arguments: projection
-                            .trait_arguments
-                            .into_iter()
-                            .map(crate::GenericArgument::Type)
-                            .collect(),
+                        arguments: projection_generic_arguments(&projection.trait_arguments),
                     },
                     subject: *projection.subject,
                 },
                 &projection.name,
-                &projection
-                    .item_arguments
-                    .iter()
-                    .cloned()
-                    .map(crate::GenericArgument::Type)
-                    .collect::<Vec<_>>(),
+                &projection_generic_arguments(&projection.item_arguments),
             ) {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
                     effects.effects.extend(row.effects);
@@ -6887,6 +6863,22 @@ fn projection_is_concrete(value: &Type) -> bool {
         | Type::ConstGeneric { .. }
         | Type::Error => true,
     }
+}
+
+/// Projection carriers predate kind-preserving generic arguments and therefore
+/// encode structural consts as `Type` values.  Recover those distinct kinds at
+/// the solver boundary; all remaining entries are genuine value-type slots.
+fn projection_generic_arguments(arguments: &[Type]) -> Vec<GenericArgument> {
+    arguments
+        .iter()
+        .cloned()
+        .map(|argument| match argument {
+            Type::ConstU32(value) => GenericArgument::ConstU32(value),
+            Type::ConstQuantity(value) => GenericArgument::ConstQuantity(value),
+            Type::ConstGeneric { index, kind } => GenericArgument::ConstGeneric { index, kind },
+            argument => GenericArgument::Type(argument),
+        })
+        .collect()
 }
 
 fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
