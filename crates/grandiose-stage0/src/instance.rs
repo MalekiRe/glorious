@@ -180,7 +180,7 @@ fn effect_instance_depth(value: &crate::EffectInstance) -> usize {
 fn effect_projection_depth(value: &crate::EffectRowProjection) -> usize {
     nested_depth(
         std::iter::once(type_depth(&value.subject))
-            .chain(value.trait_arguments.iter().map(type_depth))
+            .chain(value.trait_arguments.iter().map(instance_argument_depth))
             .chain(value.item_arguments.iter().map(instance_argument_depth)),
     )
 }
@@ -207,7 +207,7 @@ fn type_depth(value: &Type) -> usize {
             ..
         } => nested_depth(
             std::iter::once(type_depth(subject))
-                .chain(trait_arguments.iter().map(type_depth))
+                .chain(trait_arguments.iter().map(instance_argument_depth))
                 .chain(item_arguments.iter().map(instance_argument_depth)),
         ),
         Type::Tuple(values) => nested_depth(values.iter().map(type_depth)),

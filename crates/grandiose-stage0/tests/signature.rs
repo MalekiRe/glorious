@@ -1434,6 +1434,53 @@ fn generic_associated_type_projections_are_preserved_in_frozen_signatures() {
 }
 
 #[test]
+fn mixed_kind_trait_heads_are_preserved_in_associated_type_projections() {
+    let package = PackageKey("signature-mixed-trait-projection@0.1.0".into());
+    let source = "trait Select<'a, e: EffectRow, n: u32> { type Output; } pub fn project<'b, row: EffectRow, m: u32, T>(value: T) -> <T as Select<'b, row, m>>::Output { ignored }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let select = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Select"))
+        .unwrap()
+        .key;
+    let project = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("project"))
+        .unwrap()
+        .key;
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&project).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        &signature.result,
+        Type::Projection { subject, trait_definition, trait_arguments, name, .. }
+            if **subject == Type::Generic(3)
+                && *trait_definition == select
+                && name == "Output"
+                && trait_arguments == &[
+                    GenericArgument::Lifetime(Lifetime::Generic(0)),
+                    GenericArgument::EffectRow(grandiose_stage0::EffectRow {
+                        effects: Default::default(), projections: vec![],
+                        tail: Some(grandiose_stage0::EffectTail::Generic(1)),
+                    }),
+                    GenericArgument::ConstGeneric { index: 2, kind: ConstKind::U32 },
+                ]
+    ));
+}
+
+#[test]
 fn generic_associated_item_arguments_are_preserved_in_frozen_signatures() {
     let package = PackageKey("signature-gat-projection@0.1.0".into());
     let source = "trait Apply { type Output<T>; } pub fn project<S, T>(value: S) -> <S as Apply>::Output<T> { ignored }";

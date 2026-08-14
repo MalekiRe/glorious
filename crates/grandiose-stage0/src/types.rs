@@ -301,7 +301,10 @@ pub struct EffectInstance {
 pub struct EffectRowProjection {
     pub subject: Box<Type>,
     pub trait_definition: DefKey,
-    pub trait_arguments: Vec<Type>,
+    /// The enclosing trait application is an identity-bearing mixed-kind
+    /// substitution.  In particular, a delayed row projection must not turn
+    /// an effect-row or lifetime argument into a type-shaped placeholder.
+    pub trait_arguments: Vec<GenericArgument>,
     pub name: String,
     /// The associated effect-row item's own binders, distinct from the
     /// enclosing trait arguments and preserved with their identity kinds.
@@ -388,7 +391,11 @@ pub enum Type {
     Projection {
         subject: Box<Type>,
         trait_definition: DefKey,
-        trait_arguments: Vec<Type>,
+        /// The enclosing trait application carries every declared argument
+        /// kind.  Keeping this distinct from the associated item's own GAT
+        /// application makes `<T as Trait<'a, R>>::Item<N>` canonical rather
+        /// than silently lossy at the frozen Core boundary.
+        trait_arguments: Vec<GenericArgument>,
         name: String,
         /// Declaration-owned kinds for the associated item's binders. The
         /// Every item argument retains its declared identity kind. This is
@@ -557,7 +564,8 @@ impl InferContext {
                 Ok(Type::Projection {
                     subject: Box::new(self.unify(*left_subject, *right_subject)?),
                     trait_definition: left_trait,
-                    trait_arguments: self.unify_many(left_arguments, right_arguments)?,
+                    trait_arguments: self
+                        .unify_generic_arguments(left_arguments, right_arguments)?,
                     name: left_name,
                     item_generic_kinds: left_item_kinds,
                     item_arguments: self
@@ -645,7 +653,7 @@ impl InferContext {
                 trait_definition,
                 trait_arguments: trait_arguments
                     .into_iter()
-                    .map(|argument| self.zonk(argument))
+                    .map(|argument| self.zonk_generic_argument(argument))
                     .collect::<Result<_, _>>()?,
                 name,
                 item_generic_kinds,
@@ -752,7 +760,7 @@ impl InferContext {
                         trait_arguments: projection
                             .trait_arguments
                             .into_iter()
-                            .map(|argument| self.zonk(argument))
+                            .map(|argument| self.zonk_generic_argument(argument))
                             .collect::<Result<_, _>>()?,
                         name: projection.name,
                         item_generic_kinds: projection.item_generic_kinds,
@@ -1007,7 +1015,7 @@ impl InferContext {
             unified.push(EffectRowProjection {
                 subject: Box::new(self.unify(*left_projection.subject, *right_projection.subject)?),
                 trait_definition: left_projection.trait_definition,
-                trait_arguments: self.unify_many(
+                trait_arguments: self.unify_generic_arguments(
                     left_projection.trait_arguments,
                     right_projection.trait_arguments,
                 )?,
@@ -1045,7 +1053,7 @@ impl InferContext {
                     self.unify(*required_projection.subject, *allowed_projection.subject)?,
                 ),
                 trait_definition: required_projection.trait_definition,
-                trait_arguments: self.unify_many(
+                trait_arguments: self.unify_generic_arguments(
                     required_projection.trait_arguments,
                     allowed_projection.trait_arguments,
                 )?,
@@ -1167,7 +1175,7 @@ impl InferContext {
                     && left_arguments
                         .iter()
                         .zip(&right_arguments)
-                        .all(|(left, right)| self.types_may_unify(left, right))
+                        .all(|(left, right)| self.generic_arguments_may_unify(left, right))
                     && left_item_arguments
                         .iter()
                         .zip(&right_item_arguments)
@@ -1261,7 +1269,7 @@ impl InferContext {
                     || projection
                         .trait_arguments
                         .iter()
-                        .any(|argument| self.effect_occurs_in_type(variable, argument))
+                        .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
                     || projection
                         .item_arguments
                         .iter()
@@ -1302,7 +1310,7 @@ impl InferContext {
                 self.effect_occurs_in_type(variable, &subject)
                     || trait_arguments
                         .iter()
-                        .any(|argument| self.effect_occurs_in_type(variable, argument))
+                        .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
                     || item_arguments
                         .iter()
                         .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
@@ -1353,7 +1361,7 @@ impl InferContext {
                 self.occurs(variable, &subject)
                     || trait_arguments
                         .iter()
-                        .any(|argument| self.occurs(variable, argument))
+                        .any(|argument| self.generic_argument_occurs(variable, argument))
                     || item_arguments
                         .iter()
                         .any(|argument| self.generic_argument_occurs(variable, argument))
@@ -1441,7 +1449,7 @@ impl InferContext {
                             .trait_arguments
                             .iter()
                             .zip(&candidate.trait_arguments)
-                            .all(|(left, right)| self.types_may_unify(left, right))
+                            .all(|(left, right)| self.generic_arguments_may_unify(left, right))
                         && projection
                             .item_arguments
                             .iter()
@@ -1506,7 +1514,7 @@ impl InferContext {
                 || projection
                     .trait_arguments
                     .iter()
-                    .any(|argument| self.occurs(variable, argument))
+                    .any(|argument| self.generic_argument_occurs(variable, argument))
                 || projection
                     .item_arguments
                     .iter()
@@ -1570,7 +1578,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.push(11);
             encode_type(subject, output);
             output.extend_from_slice(&trait_definition.0.as_bytes());
-            encode_types(trait_arguments, output);
+            encode_generic_arguments(trait_arguments, output);
             output.extend_from_slice(&(name.len() as u64).to_le_bytes());
             output.extend_from_slice(name.as_bytes());
             encode_generic_kinds(item_generic_kinds, output);
@@ -1629,7 +1637,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             for projection in &effects.projections {
                 encode_type(&projection.subject, output);
                 output.extend_from_slice(&projection.trait_definition.0.as_bytes());
-                encode_types(&projection.trait_arguments, output);
+                encode_generic_arguments(&projection.trait_arguments, output);
                 output.extend_from_slice(&(projection.name.len() as u64).to_le_bytes());
                 output.extend_from_slice(projection.name.as_bytes());
                 encode_generic_kinds(&projection.item_generic_kinds, output);
@@ -1749,7 +1757,7 @@ pub(crate) fn canonicalize_type_identity(value: Type) -> Type {
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(canonicalize_type_identity)
+                .map(canonicalize_generic_argument_identity)
                 .collect(),
             name,
             item_generic_kinds,
@@ -1821,7 +1829,9 @@ fn type_identity_is_well_formed(value: &Type) -> bool {
             ..
         } => {
             type_identity_is_well_formed(subject)
-                && trait_arguments.iter().all(type_identity_is_well_formed)
+                && trait_arguments
+                    .iter()
+                    .all(generic_argument_identity_is_well_formed)
                 && item_arguments
                     .iter()
                     .all(generic_argument_identity_is_well_formed)
@@ -1879,7 +1889,7 @@ fn effect_row_identity_is_well_formed(value: &EffectRow) -> bool {
             && projection
                 .trait_arguments
                 .iter()
-                .all(type_identity_is_well_formed)
+                .all(generic_argument_identity_is_well_formed)
             && projection
                 .item_arguments
                 .iter()
@@ -1977,7 +1987,7 @@ fn canonicalize_effect_row_identity(value: EffectRow) -> EffectRow {
                 trait_arguments: projection
                     .trait_arguments
                     .into_iter()
-                    .map(canonicalize_type_identity)
+                    .map(canonicalize_generic_argument_identity)
                     .collect(),
                 name: projection.name,
                 item_generic_kinds: projection.item_generic_kinds,
@@ -2001,7 +2011,7 @@ fn effect_row_projection_key(value: &EffectRowProjection) -> Vec<u8> {
     let mut bytes = vec![];
     encode_type(&value.subject, &mut bytes);
     bytes.extend_from_slice(&value.trait_definition.0.as_bytes());
-    encode_types(&value.trait_arguments, &mut bytes);
+    encode_generic_arguments(&value.trait_arguments, &mut bytes);
     bytes.extend_from_slice(&(value.name.len() as u64).to_le_bytes());
     bytes.extend_from_slice(value.name.as_bytes());
     encode_generic_kinds(&value.item_generic_kinds, &mut bytes);

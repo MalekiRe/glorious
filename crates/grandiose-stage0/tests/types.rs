@@ -440,7 +440,7 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
         projections: vec![EffectRowProjection {
             subject: Box::new(inference.fresh()),
             trait_definition: capability,
-            trait_arguments: vec![inference.fresh()],
+            trait_arguments: vec![GenericArgument::Type(inference.fresh())],
             name: "Effects".into(),
             item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
             item_arguments: vec![GenericArgument::Type(inference.fresh())],
@@ -452,7 +452,7 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
         projections: vec![EffectRowProjection {
             subject: Box::new(Type::Scalar(ScalarType::I64)),
             trait_definition: capability,
-            trait_arguments: vec![Type::Scalar(ScalarType::Text)],
+            trait_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))],
             name: "Effects".into(),
             item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
             item_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::U8))],

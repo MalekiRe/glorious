@@ -1440,7 +1440,9 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
             ..
         } => {
             type_contains_inference(subject)
-                || trait_arguments.iter().any(type_contains_inference)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_inference)
                 || item_arguments
                     .iter()
                     .any(generic_argument_contains_inference)
@@ -1469,7 +1471,7 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
                         || projection
                             .trait_arguments
                             .iter()
-                            .any(type_contains_inference)
+                            .any(generic_argument_contains_inference)
                         || projection
                             .item_arguments
                             .iter()
@@ -1512,9 +1514,9 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
             ..
         } => {
             type_contains_out_of_scope_bound_lifetime_in(subject, binders)
-                || trait_arguments
-                    .iter()
-                    .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
+                || trait_arguments.iter().any(|argument| {
+                    generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
+                })
                 || item_arguments.iter().any(|argument| {
                     generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
                 })
@@ -1588,10 +1590,9 @@ fn effect_row_contains_out_of_scope_bound_lifetime(row: &EffectRow, binders: &[u
         })
     }) || row.projections.iter().any(|projection| {
         type_contains_out_of_scope_bound_lifetime_in(&projection.subject, binders)
-            || projection
-                .trait_arguments
-                .iter()
-                .any(|argument| type_contains_out_of_scope_bound_lifetime_in(argument, binders))
+            || projection.trait_arguments.iter().any(|argument| {
+                generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
+            })
             || projection.item_arguments.iter().any(|argument| {
                 generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
             })
@@ -1939,7 +1940,7 @@ fn effect_row_contains_inference(row: &EffectRow) -> bool {
                 || projection
                     .trait_arguments
                     .iter()
-                    .any(type_contains_inference)
+                    .any(generic_argument_contains_inference)
                 || projection
                     .item_arguments
                     .iter()
@@ -3585,7 +3586,6 @@ impl Elaborator<'_> {
         else {
             return Type::Error;
         };
-        let trait_arguments = self.projection_type_arguments(trait_identity_arguments.clone());
         let Some(ElaboratedHeader::Trait(trait_header)) =
             self.signatures.definitions.get(&trait_definition)
         else {
@@ -3621,7 +3621,7 @@ impl Elaborator<'_> {
         let projection = Type::Projection {
             subject: Box::new(subject),
             trait_definition,
-            trait_arguments,
+            trait_arguments: trait_identity_arguments.clone(),
             name: name.to_owned(),
             item_generic_kinds: item.generic_kinds.clone(),
             item_arguments,
@@ -3738,30 +3738,6 @@ impl Elaborator<'_> {
                 })
                 .collect(),
         )
-    }
-
-    /// The enclosing trait portion of the historical `Type::Projection`
-    /// shell remains type-shaped. GAT item arguments do not pass through this
-    /// adapter; they retain full `GenericArgument` identity on the projection.
-    fn projection_type_arguments(&mut self, arguments: Vec<GenericArgument>) -> Vec<Type> {
-        arguments
-            .into_iter()
-            .map(|argument| match argument {
-                GenericArgument::Type(value) => value,
-                GenericArgument::ConstU32(value) => Type::ConstU32(value),
-                GenericArgument::ConstQuantity(value) => Type::ConstQuantity(value),
-                GenericArgument::ConstGeneric { index, kind } => Type::ConstGeneric { index, kind },
-                GenericArgument::ConstU32Expr(_)
-                | GenericArgument::EffectRow(_)
-                | GenericArgument::Lifetime(_) => {
-                    self.projection_error(
-                        "G4158",
-                        "type projection through a non-runtime trait argument is not yet supported",
-                    );
-                    Type::Error
-                }
-            })
-            .collect()
     }
 
     /// Elaborate body-local explicit generic arguments only after resolving
@@ -7719,7 +7695,7 @@ impl Elaborator<'_> {
                 || !projection
                     .trait_arguments
                     .iter()
-                    .all(projection_is_concrete)
+                    .all(generic_argument_is_concrete)
                 || !projection
                     .item_arguments
                     .iter()
@@ -7737,7 +7713,7 @@ impl Elaborator<'_> {
                 TraitGoal {
                     relation: crate::ElaboratedTraitReference {
                         definition: projection.trait_definition,
-                        arguments: projection_generic_arguments(&projection.trait_arguments),
+                        arguments: projection.trait_arguments.clone(),
                     },
                     subject: *projection.subject,
                 },
@@ -8216,7 +8192,7 @@ fn align_lifetime_types(
                     .iter()
                     .zip(actual_trait_arguments)
                     .map(|(expected, actual)| {
-                        align_lifetime_types(expected, actual, substitution, mode, depth)
+                        align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
                     })
                     .collect::<Result<_, _>>()?,
                 name: expected_name.clone(),
@@ -8383,7 +8359,7 @@ fn align_lifetime_effect_row(
                 .iter()
                 .zip(&actual_projection.trait_arguments)
                 .map(|(expected, actual)| {
-                    align_lifetime_types(expected, actual, substitution, mode, depth)
+                    align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
                 })
                 .collect::<Result<_, _>>()?,
             name: expected_projection.name.clone(),
@@ -8480,7 +8456,7 @@ fn substitute_call_lifetimes(
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                .map(|value| substitute_call_generic_argument(value, substitution, depth))
                 .collect::<Result<_, _>>()?,
             name,
             item_generic_kinds,
@@ -8595,7 +8571,7 @@ fn substitute_call_effects(
                 trait_arguments: projection
                     .trait_arguments
                     .into_iter()
-                    .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                    .map(|value| substitute_call_generic_argument(value, substitution, depth))
                     .collect::<Result<_, _>>()?,
                 name: projection.name,
                 item_generic_kinds: projection.item_generic_kinds,
@@ -8645,7 +8621,7 @@ fn projection_is_concrete(value: &Type) -> bool {
             ..
         } => {
             projection_is_concrete(subject)
-                && trait_arguments.iter().all(projection_is_concrete)
+                && trait_arguments.iter().all(generic_argument_is_concrete)
                 && item_arguments.iter().all(generic_argument_is_concrete)
         }
         Type::Array(element)
@@ -8663,22 +8639,6 @@ fn projection_is_concrete(value: &Type) -> bool {
         | Type::ConstGeneric { .. }
         | Type::Error => true,
     }
-}
-
-/// Trait arguments in the older projection shell are still type-shaped. The
-/// associated item's own argument list is not: it is already a
-/// `Vec<GenericArgument>` and crosses the solver unchanged.
-fn projection_generic_arguments(arguments: &[Type]) -> Vec<GenericArgument> {
-    arguments
-        .iter()
-        .cloned()
-        .map(|argument| match argument {
-            Type::ConstU32(value) => GenericArgument::ConstU32(value),
-            Type::ConstQuantity(value) => GenericArgument::ConstQuantity(value),
-            Type::ConstGeneric { index, kind } => GenericArgument::ConstGeneric { index, kind },
-            argument => GenericArgument::Type(argument),
-        })
-        .collect()
 }
 
 fn generic_argument_is_concrete(value: &GenericArgument) -> bool {

@@ -1468,7 +1468,7 @@ fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(|value| replace_trait_self_type(value, self_ty))
+                .map(|value| replace_trait_self_generic_argument(value, self_ty))
                 .collect(),
             name,
             item_generic_kinds,
@@ -1562,7 +1562,7 @@ fn replace_trait_self_effect_row(value: EffectRow, self_ty: &Type) -> EffectRow 
                 trait_arguments: projection
                     .trait_arguments
                     .into_iter()
-                    .map(|value| replace_trait_self_type(value, self_ty))
+                    .map(|value| replace_trait_self_generic_argument(value, self_ty))
                     .collect(),
                 name: projection.name,
                 item_generic_kinds: projection.item_generic_kinds,
@@ -1621,7 +1621,7 @@ fn rebase_method_lifetimes(
             trait_arguments: trait_arguments
                 .into_iter()
                 .map(|value| {
-                    rebase_method_lifetimes(
+                    rebase_method_lifetime_generic_argument(
                         value,
                         trait_generic_count,
                         implementation_generic_count,
@@ -1796,7 +1796,7 @@ fn rebase_method_lifetime_effect_row(
                     .trait_arguments
                     .into_iter()
                     .map(|argument| {
-                        rebase_method_lifetimes(
+                        rebase_method_lifetime_generic_argument(
                             argument,
                             trait_generic_count,
                             implementation_generic_count,
@@ -1967,7 +1967,7 @@ fn normalize_effect_row(
                     .trait_arguments
                     .into_iter()
                     .map(|argument| {
-                        normalize_alias_type(argument, definitions, &mut vec![], diagnostics)
+                        normalize_trait_generic_argument(argument, definitions, diagnostics)
                     })
                     .collect(),
                 name: projection.name,
@@ -2671,7 +2671,7 @@ impl Elaborator<'_> {
                     projections.push(EffectRowProjection {
                         subject: Box::new(subject),
                         trait_definition: relation.definition,
-                        trait_arguments: self.type_only_trait_arguments(name, relation.arguments),
+                        trait_arguments: self.projection_trait_arguments(name, relation.arguments),
                         name: name.clone(),
                         item_generic_kinds: item_kinds.to_vec(),
                         item_arguments: self.elaborate_type_generic_arguments(
@@ -2917,7 +2917,7 @@ impl Elaborator<'_> {
                 Type::Projection {
                     subject: Box::new(subject),
                     trait_definition: relation.definition,
-                    trait_arguments: self.type_only_trait_arguments(name, relation.arguments),
+                    trait_arguments: self.projection_trait_arguments(name, relation.arguments),
                     name: name.clone(),
                     item_generic_kinds: item_kinds.to_vec(),
                     item_arguments: self.elaborate_type_generic_arguments(
@@ -3165,30 +3165,15 @@ impl Elaborator<'_> {
             .collect()
     }
 
-    /// Projections are still a type-only runtime representation. Rejecting a
-    /// non-type trait argument here is intentional: trait identity retains it
-    /// in `ElaboratedTraitReference`, while the older projection carrier must
-    /// not silently reinterpret it as a value type.
-    fn type_only_trait_arguments(
+    /// A projection preserves the enclosing trait's complete source-slot
+    /// identity. Runtime lowering still rejects unresolved symbolic types;
+    /// it must not erase regions, rows, or structural constants beforehand.
+    fn projection_trait_arguments(
         &mut self,
-        name: &str,
+        _name: &str,
         arguments: Vec<GenericArgument>,
-    ) -> Vec<Type> {
+    ) -> Vec<GenericArgument> {
         arguments
-            .into_iter()
-            .map(|argument| match argument {
-                GenericArgument::Type(value) => value,
-                _ => {
-                    self.error(
-                        "G3318",
-                        format!(
-                            "type projection through `{name}` requires type-kind trait arguments"
-                        ),
-                    );
-                    Type::Error
-                }
-            })
-            .collect()
     }
     fn arity(&mut self, name: &str, expected: usize, found: usize) {
         self.error(
@@ -3338,7 +3323,9 @@ fn normalize_alias_type(
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(|argument| normalize_alias_type(argument, definitions, stack, diagnostics))
+                .map(|argument| {
+                    normalize_alias_generic_argument(argument, definitions, stack, diagnostics)
+                })
                 .collect(),
             name,
             item_generic_kinds,
@@ -3479,7 +3466,7 @@ fn substitute_alias_generic_identity(value: Type, arguments: &[GenericArgument])
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(|value| substitute_alias_generic_identity(value, arguments))
+                .map(|value| substitute_alias_generic_identity_argument(value, arguments))
                 .collect(),
             name,
             item_generic_kinds,
@@ -3595,7 +3582,7 @@ fn substitute_alias_generic_identity_effect_row(
                 trait_arguments: projection
                     .trait_arguments
                     .into_iter()
-                    .map(|value| substitute_alias_generic_identity(value, arguments))
+                    .map(|value| substitute_alias_generic_identity_argument(value, arguments))
                     .collect(),
                 name: projection.name,
                 item_generic_kinds: projection.item_generic_kinds,
@@ -3647,7 +3634,7 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(|value| substitute_alias_generics(value, arguments))
+                .map(|value| substitute_alias_effect_generic_argument(value, arguments))
                 .collect(),
             name,
             item_generic_kinds,
@@ -3715,7 +3702,7 @@ fn substitute_effect_row(value: EffectRow, arguments: &[Type]) -> EffectRow {
                 trait_arguments: projection
                     .trait_arguments
                     .into_iter()
-                    .map(|value| substitute_alias_generics(value, arguments))
+                    .map(|value| substitute_alias_effect_generic_argument(value, arguments))
                     .collect(),
                 name: projection.name,
                 item_generic_kinds: projection.item_generic_kinds,
@@ -3801,7 +3788,7 @@ fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) ->
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(|value| substitute_trait_type_generics(value, arguments))
+                .map(|value| substitute_trait_generic_argument(value, arguments))
                 .collect(),
             name,
             item_generic_kinds,
@@ -3901,7 +3888,7 @@ fn substitute_trait_effect_row(value: EffectRow, arguments: &[GenericArgument]) 
                 trait_arguments: projection
                     .trait_arguments
                     .into_iter()
-                    .map(|value| substitute_trait_type_generics(value, arguments))
+                    .map(|value| substitute_trait_generic_argument(value, arguments))
                     .collect(),
                 name: projection.name,
                 item_generic_kinds: projection.item_generic_kinds,

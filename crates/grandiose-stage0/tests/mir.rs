@@ -261,6 +261,30 @@ fn mir_validation_rejects_noncanonical_nested_effect_row_identity() {
 }
 
 #[test]
+fn mir_validation_rejects_inference_in_enclosing_mixed_trait_heads() {
+    let mut function = graph();
+    function.locals[1].ty = Type::Projection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: DefKey(Digest::of_bytes(b"mir-mixed-trait-head")),
+        trait_arguments: vec![GenericArgument::EffectRow(EffectRow::closed_instances([
+            EffectInstance {
+                definition: DefKey(Digest::of_bytes(b"mir-mixed-trait-head-effect")),
+                arguments: vec![GenericArgument::Type(Type::Infer(InferVar(91)))],
+            },
+        ]))],
+        name: "Output".into(),
+        item_generic_kinds: vec![],
+        item_arguments: vec![],
+    };
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("unresolved inference")),
+        "MIR must walk enclosing trait arguments instead of treating them as a type-only shell"
+    );
+}
+
+#[test]
 fn mir_validation_rejects_inference_nested_in_callable_effect_arguments() {
     let mut function = graph();
     function.locals.push(local(Type::Callable {

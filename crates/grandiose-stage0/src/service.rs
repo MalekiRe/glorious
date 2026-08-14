@@ -1625,7 +1625,7 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
             trait_definition: *trait_definition,
             trait_arguments: trait_arguments
                 .iter()
-                .map(|argument| specialize_type(argument, arguments))
+                .map(|argument| specialize_generic_argument(argument, arguments))
                 .collect(),
             name: name.clone(),
             item_generic_kinds: item_generic_kinds.clone(),
@@ -1729,7 +1729,7 @@ fn specialize_effect_row(
                 trait_arguments: projection
                     .trait_arguments
                     .iter()
-                    .map(|argument| specialize_type(argument, arguments))
+                    .map(|argument| specialize_generic_argument(argument, arguments))
                     .collect(),
                 name: projection.name.clone(),
                 item_generic_kinds: projection.item_generic_kinds.clone(),
@@ -1991,7 +1991,7 @@ mod tests {
                 projections: vec![EffectRowProjection {
                     subject: Box::new(Type::Generic(0)),
                     trait_definition: trait_key,
-                    trait_arguments: vec![Type::Generic(0)],
+                    trait_arguments: vec![GenericArgument::Type(Type::Generic(0))],
                     name: "Effects".into(),
                     item_generic_kinds: vec![crate::GenericKind::Const(crate::ConstKind::U32)],
                     item_arguments: vec![GenericArgument::ConstGeneric {
@@ -2053,7 +2053,7 @@ mod tests {
                 item_arguments,
                 ..
             }] if **subject == Type::Scalar(ScalarType::Text)
-                && trait_arguments == &vec![Type::Scalar(ScalarType::Text)]
+                && trait_arguments == &vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))]
                 && item_arguments == &vec![GenericArgument::ConstU32(17)]
         ));
     }

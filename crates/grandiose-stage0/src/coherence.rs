@@ -687,7 +687,7 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
             let trait_arguments = left_trait_arguments
                 .iter()
                 .zip(right_trait_arguments)
-                .map(|(left, right)| unify_overlap_type(left, right, bindings))
+                .map(|(left, right)| unify_overlap_argument(left, right, bindings))
                 .collect::<Option<Vec<_>>>()?;
             let item_arguments = left_item_arguments
                 .iter()
@@ -739,7 +739,7 @@ fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings
             contains_overlap_generic(&subject, index, bindings)
                 || trait_arguments
                     .iter()
-                    .any(|argument| contains_overlap_generic(argument, index, bindings))
+                    .any(|argument| contains_overlap_argument_generic(argument, index, bindings))
                 || item_arguments
                     .iter()
                     .any(|argument| contains_overlap_argument_generic(argument, index, bindings))
@@ -869,7 +869,7 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
             trait_definition: *trait_definition,
             trait_arguments: trait_arguments
                 .iter()
-                .map(|argument| resolve_overlap_type(argument, bindings))
+                .map(|argument| resolve_overlap_argument(argument, bindings))
                 .collect(),
             name: name.clone(),
             item_generic_kinds: item_generic_kinds.clone(),
@@ -929,7 +929,7 @@ fn resolve_overlap_effect_row(
                 trait_arguments: projection
                     .trait_arguments
                     .iter()
-                    .map(|argument| resolve_overlap_type(argument, bindings))
+                    .map(|argument| resolve_overlap_argument(argument, bindings))
                     .collect(),
                 name: projection.name.clone(),
                 item_generic_kinds: projection.item_generic_kinds.clone(),
@@ -1025,7 +1025,7 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
             trait_definition: *trait_definition,
             trait_arguments: trait_arguments
                 .iter()
-                .map(|argument| rebase_overlap_type(argument, offset))
+                .map(|argument| rebase_overlap_argument(argument, offset))
                 .collect(),
             name: name.clone(),
             item_generic_kinds: item_generic_kinds.clone(),
@@ -1094,7 +1094,7 @@ fn rebase_overlap_effect_row(value: &crate::EffectRow, offset: u32) -> crate::Ef
                 trait_arguments: projection
                     .trait_arguments
                     .iter()
-                    .map(|argument| rebase_overlap_type(argument, offset))
+                    .map(|argument| rebase_overlap_argument(argument, offset))
                     .collect(),
                 name: projection.name.clone(),
                 item_generic_kinds: projection.item_generic_kinds.clone(),

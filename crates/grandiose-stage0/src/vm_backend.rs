@@ -85,7 +85,10 @@ pub struct VmEffectInstance {
 pub struct VmEffectRowProjection {
     pub subject: VmType,
     pub trait_definition: DefKey,
-    pub trait_arguments: Vec<VmType>,
+    /// The enclosing trait head retains its source-slot kinds in frozen VM
+    /// metadata. This row is not a value layout, so lifetimes and nested rows
+    /// must never be coerced into `VmType` merely to serialize it.
+    pub trait_arguments: Vec<VmGenericArgument>,
     pub name: String,
     /// Associated item arguments retain their source kind in bytecode
     /// metadata, even though this row never becomes a VM value.
@@ -693,7 +696,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 // Schema 29 carries the frozen nominal-pattern arity used by the standalone
 // verifier.  Older bytecode lacks that proof and must fail closed rather than
 // being decoded with shifted field data.
-pub const STAGE0_VM_SCHEMA: u32 = 29;
+pub const STAGE0_VM_SCHEMA: u32 = 30;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1400,14 +1403,7 @@ fn vm_effect_argument(
                             trait_arguments: projection
                                 .trait_arguments
                                 .iter()
-                                .map(|argument| {
-                                    vm_type(argument).map_err(|ty| {
-                                        VmArtifactError::UnsupportedEffectArgumentType {
-                                            effect,
-                                            ty,
-                                        }
-                                    })
-                                })
+                                .map(|argument| vm_effect_argument(effect, argument))
                                 .collect::<Result<_, _>>()?,
                             name: projection.name.clone(),
                             item_arguments: projection
@@ -1505,7 +1501,7 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
             for projection in &value.projections {
                 encode_type(&projection.subject, output);
                 output.extend_from_slice(&projection.trait_definition.0.as_bytes());
-                encode_vm_types(&projection.trait_arguments, output);
+                encode_vm_generic_arguments(&projection.trait_arguments, output);
                 output.extend_from_slice(&(projection.name.len() as u64).to_le_bytes());
                 output.extend_from_slice(projection.name.as_bytes());
                 encode_vm_generic_arguments(&projection.item_arguments, output);
@@ -1571,13 +1567,6 @@ fn encode_vm_generic_arguments(values: &[VmGenericArgument], output: &mut Vec<u8
     }
 }
 
-fn encode_vm_types(values: &[VmType], output: &mut Vec<u8>) {
-    output.extend_from_slice(&(values.len() as u64).to_le_bytes());
-    for value in values {
-        encode_type(value, output);
-    }
-}
-
 fn vm_effect_instance_key(value: &VmEffectInstance) -> Vec<u8> {
     let mut output = value.definition.0.as_bytes().to_vec();
     encode_vm_generic_arguments(&value.arguments, &mut output);
@@ -1588,7 +1577,7 @@ fn vm_effect_row_projection_key(value: &VmEffectRowProjection) -> Vec<u8> {
     let mut output = Vec::new();
     encode_type(&value.subject, &mut output);
     output.extend_from_slice(&value.trait_definition.0.as_bytes());
-    encode_vm_types(&value.trait_arguments, &mut output);
+    encode_vm_generic_arguments(&value.trait_arguments, &mut output);
     output.extend_from_slice(&(value.name.len() as u64).to_le_bytes());
     output.extend_from_slice(value.name.as_bytes());
     encode_vm_generic_arguments(&value.item_arguments, &mut output);
@@ -1605,7 +1594,7 @@ fn encode_optional_digest(value: Option<Digest>, output: &mut Vec<u8>) {
     }
 }
 fn artifact_fingerprint(runtime_manifest: Option<Digest>, function: &VmFunction) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-v21".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-v22".to_vec();
     encode_optional_digest(runtime_manifest, &mut bytes);
     encode_function(function, &mut bytes);
     Digest::of_bytes(&bytes)
@@ -1615,7 +1604,7 @@ fn program_fingerprint(
     runtime_manifest: Option<Digest>,
     functions: &BTreeMap<DefKey, VmFunction>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-program-v21".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-program-v22".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
     encode_optional_digest(runtime_manifest, &mut bytes);
     for function in functions.values() {
@@ -1808,12 +1797,7 @@ impl<'a> Decoder<'a> {
                 for _ in 0..projection_count {
                     let subject = self.vm_type_at_depth(depth + 1)?;
                     let trait_definition = self.def_key()?;
-                    let trait_argument_count =
-                        self.count("effect projection trait arguments", MAX_DECODE_REGISTERS)?;
-                    let mut trait_arguments = Vec::with_capacity(trait_argument_count);
-                    for _ in 0..trait_argument_count {
-                        trait_arguments.push(self.vm_type_at_depth(depth + 1)?);
-                    }
+                    let trait_arguments = self.vm_generic_arguments_at_depth(depth + 1)?;
                     let name = self.text()?;
                     let item_arguments = self.vm_generic_arguments_at_depth(depth + 1)?;
                     projections.push(VmEffectRowProjection {

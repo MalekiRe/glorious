@@ -959,7 +959,7 @@ impl TraitSolver {
                 let subject = self.normalize_type_projections(*subject, active)?;
                 let trait_arguments = trait_arguments
                     .into_iter()
-                    .map(|argument| self.normalize_type_projections(argument, active))
+                    .map(|argument| self.normalize_trait_argument(argument, active))
                     .collect::<Result<Vec<_>, _>>()?;
                 let item_arguments = item_arguments
                     .into_iter()
@@ -990,10 +990,7 @@ impl TraitSolver {
                 let goal = TraitGoal {
                     relation: ElaboratedTraitReference {
                         definition: trait_definition,
-                        arguments: trait_arguments
-                            .into_iter()
-                            .map(GenericArgument::Type)
-                            .collect(),
+                        arguments: trait_arguments,
                     },
                     subject: *subject,
                 };
@@ -1346,7 +1343,7 @@ impl TraitSolver {
             let trait_arguments = projection
                 .trait_arguments
                 .into_iter()
-                .map(|argument| self.normalize_type_projections(argument, &mut vec![]))
+                .map(|argument| self.normalize_trait_argument(argument, &mut vec![]))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|answer| {
                     Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
@@ -1371,7 +1368,7 @@ impl TraitSolver {
                 || !projection
                     .trait_arguments
                     .iter()
-                    .all(projection_is_concrete)
+                    .all(generic_argument_is_concrete)
                 || !projection
                     .item_arguments
                     .iter()
@@ -1383,11 +1380,7 @@ impl TraitSolver {
             let goal = TraitGoal {
                 relation: ElaboratedTraitReference {
                     definition: projection.trait_definition,
-                    arguments: projection
-                        .trait_arguments
-                        .into_iter()
-                        .map(GenericArgument::Type)
-                        .collect(),
+                    arguments: projection.trait_arguments,
                 },
                 subject: *projection.subject,
             };
@@ -2036,7 +2029,7 @@ fn match_effect_row_at(
                     .iter()
                     .zip(&found.trait_arguments)
                     .try_for_each(|(expected, found)| {
-                        match_type_at(expected, found, &mut candidate, binder_depth)
+                        match_generic_argument_at(expected, found, &mut candidate, binder_depth)
                     })
             })
             .and_then(|()| {
@@ -2221,7 +2214,7 @@ fn match_type_at(
                     .iter()
                     .zip(actual_trait_arguments)
                     .try_for_each(|(template, actual)| {
-                        match_type_at(template, actual, substitution, binder_depth)
+                        match_generic_argument_at(template, actual, substitution, binder_depth)
                     })?;
                 item_arguments
                     .iter()
@@ -2349,9 +2342,9 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
             ..
         } => {
             has_free_hrtb_placeholder(subject, callable_nesting)
-                || trait_arguments
-                    .iter()
-                    .any(|value| has_free_hrtb_placeholder(value, callable_nesting))
+                || trait_arguments.iter().any(|value| {
+                    generic_argument_contains_free_hrtb_placeholder(value, callable_nesting)
+                })
                 || item_arguments.iter().any(|value| {
                     generic_argument_contains_free_hrtb_placeholder(value, callable_nesting)
                 })
@@ -2402,10 +2395,9 @@ fn effect_row_contains_free_hrtb_placeholder(value: &EffectRow, callable_nesting
         })
     }) || value.projections.iter().any(|projection| {
         has_free_hrtb_placeholder(&projection.subject, callable_nesting)
-            || projection
-                .trait_arguments
-                .iter()
-                .any(|argument| has_free_hrtb_placeholder(argument, callable_nesting))
+            || projection.trait_arguments.iter().any(|argument| {
+                generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
+            })
             || projection.item_arguments.iter().any(|argument| {
                 generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
             })
@@ -2602,7 +2594,7 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             trait_definition: *trait_definition,
             trait_arguments: trait_arguments
                 .iter()
-                .map(|value| substitute_type(value, substitution))
+                .map(|value| substitute_generic_argument(value, substitution))
                 .collect(),
             name: name.clone(),
             item_generic_kinds: item_generic_kinds.clone(),
@@ -2680,7 +2672,7 @@ fn substitute_effect_row(
                 trait_arguments: projection
                     .trait_arguments
                     .iter()
-                    .map(|value| substitute_type(value, substitution))
+                    .map(|value| substitute_generic_argument(value, substitution))
                     .collect(),
                 name: projection.name.clone(),
                 item_generic_kinds: projection.item_generic_kinds.clone(),
@@ -2800,7 +2792,7 @@ fn projection_is_concrete(value: &Type) -> bool {
             ..
         } => {
             projection_is_concrete(subject)
-                && trait_arguments.iter().all(projection_is_concrete)
+                && trait_arguments.iter().all(generic_argument_is_concrete)
                 && item_arguments.iter().all(generic_argument_is_concrete)
         }
         Type::Array(element) => projection_is_concrete(element),

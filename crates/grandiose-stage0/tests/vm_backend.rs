@@ -436,7 +436,7 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
             projections: vec![VmEffectRowProjection {
                 subject: VmType::Generic(1),
                 trait_definition,
-                trait_arguments: vec![VmType::Text],
+                trait_arguments: vec![VmGenericArgument::Type(VmType::Text)],
                 name: "Associated".into(),
                 item_arguments: vec![
                     VmGenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 0 }),

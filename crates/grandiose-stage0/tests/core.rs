@@ -715,6 +715,26 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         "Core must reject an associated-item argument whose kind does not match the frozen declaration contract"
     );
 
+    let forged_trait_head = body(Type::Projection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: DefKey(Digest::of_bytes(b"core-forged-mixed-trait-head")),
+        trait_arguments: vec![GenericArgument::EffectRow(EffectRow {
+            effects: BTreeSet::new(),
+            projections: vec![projection("Z"), projection("A")],
+            tail: None,
+        })],
+        name: "Output".into(),
+        item_generic_kinds: vec![],
+        item_arguments: vec![],
+    });
+    assert!(
+        forged_trait_head
+            .validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4186"),
+        "Core must validate canonical identity nested in enclosing mixed-kind trait arguments"
+    );
+
     let hrtb_gat_with_row = body(Type::Callable {
         lifetime_binders: 1,
         parameters: vec![],
@@ -2102,6 +2122,41 @@ fn concrete_gat_projections_normalize_in_typed_closure_contracts() {
         expression.kind,
         CoreKind::Closure { ref parameters, .. }
             if parameters[0].1 == grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::Text)
+    )));
+}
+
+#[test]
+fn mixed_kind_trait_heads_normalize_in_typed_closure_contracts() {
+    let package = PackageKey("core-mixed-trait-projection@0.1.0".into());
+    let source = "effect Trace { note(); } trait Select<'a, e: EffectRow, n: u32> { type Output; } struct Value {} impl Select<'static, {Trace}, 7> for Value { type Output = Text; } pub fn main() -> i64 { let identity = (value: <Value as Select<'static, {Trace}, 7>>::Output) -> Text { value }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    assert!(body.diagnostics.is_empty(), "{body:#?}");
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        expression.kind,
+        CoreKind::Closure { ref parameters, .. }
+            if parameters[0].1 == Type::Scalar(ScalarType::Text)
     )));
 }
 

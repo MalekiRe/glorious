@@ -2151,9 +2151,9 @@ fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), S
             ..
         } => {
             validate_mir_type(subject, lifetime_binders)?;
-            trait_arguments
-                .iter()
-                .try_for_each(|argument| validate_mir_type(argument, lifetime_binders))?;
+            trait_arguments.iter().try_for_each(|argument| {
+                validate_mir_generic_argument(argument, lifetime_binders)
+            })?;
             item_arguments
                 .iter()
                 .try_for_each(|argument| validate_mir_generic_argument(argument, lifetime_binders))
@@ -2230,7 +2230,7 @@ fn validate_mir_effect_row(
     for projection in &effects.projections {
         validate_mir_type(&projection.subject, lifetime_binders)?;
         for argument in &projection.trait_arguments {
-            validate_mir_type(argument, lifetime_binders)?;
+            validate_mir_generic_argument(argument, lifetime_binders)?;
         }
         for argument in &projection.item_arguments {
             validate_mir_generic_argument(argument, lifetime_binders)?;
@@ -11569,7 +11569,7 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
             trait_definition,
             trait_arguments: trait_arguments
                 .into_iter()
-                .map(|argument| substitute_generic_type(argument, substitutions))
+                .map(|argument| substitute_generic_argument(argument, substitutions))
                 .collect::<Option<_>>()?,
             name,
             item_generic_kinds,
@@ -11689,7 +11689,7 @@ fn substitute_generic_effect_row(
                     trait_arguments: projection
                         .trait_arguments
                         .into_iter()
-                        .map(|argument| substitute_generic_type(argument, substitutions))
+                        .map(|argument| substitute_generic_argument(argument, substitutions))
                         .collect::<Option<_>>()?,
                     name: projection.name,
                     item_generic_kinds: projection.item_generic_kinds,
