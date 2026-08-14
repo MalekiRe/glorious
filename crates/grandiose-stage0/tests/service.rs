@@ -6271,6 +6271,23 @@ fn service_nested_effect_handler_label_transfer_leaves_after_strict_prefix() {
 }
 
 #[test]
+fn service_assignment_value_label_transfer_exits_before_the_store() {
+    let source = r#"
+        pub fn main() -> i64 {
+            let value = 0;
+            let slot = &mut value;
+            label done {
+                *slot = transfer done 42;
+                0
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }

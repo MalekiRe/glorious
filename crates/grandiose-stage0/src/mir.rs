@@ -6490,6 +6490,10 @@ impl Lowerer<'_> {
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
             | CoreKind::Unary { value: base, .. } => self.lower_label_transfer_path(base, target),
+            // Assignment lowering evaluates the source before it resolves
+            // and writes the destination. A transfer in that source therefore
+            // exits before any store or destination-place action is emitted.
+            CoreKind::Assign { value, .. } => self.lower_label_transfer_path(value, target),
             CoreKind::Transfer { brand, value } if brand == target => self.value(value),
             CoreKind::Transfer { .. } => {
                 self.error(
@@ -6725,6 +6729,7 @@ impl Lowerer<'_> {
             CoreKind::Perform { arguments, .. } => arguments
                 .iter()
                 .any(|argument| self.contains_label_transfer(*argument, target)),
+            CoreKind::Assign { value, .. } => self.contains_label_transfer(*value, target),
             _ => false,
         }
     }
