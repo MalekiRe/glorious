@@ -383,8 +383,6 @@ pub struct TypedInterfaces {
         IndexVec<ShellTag, Option<InterfaceNominalId>>,
     shell_to_type: IndexVec<ShellTag, Option<TypeId>>,
     shell_to_effect: IndexVec<ShellTag, Option<InterfaceEffectId>>,
-    shell_to_trait: IndexVec<ShellTag, Option<InterfaceTraitId>>,
-    shell_to_impl: IndexVec<ShellTag, Option<InterfaceImplId>>,
     // Collection-only memo state retained for deterministic diagnostics.
     alias_states: Vec<AliasResolutionState>
 }
@@ -4244,30 +4242,6 @@ push_missing_type_ids(
 
 push_missing_effect_ids(
     value: &mut IndexVec<ShellTag, Option<InterfaceEffectId>>,
-    remaining: usize
-) {
-    for_range(Range::new(0, remaining), { _ =>
-        handle IndexVec::push(&mut *value, None) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(_) => ()
-        }
-    })
-}
-
-push_missing_trait_ids(
-    value: &mut IndexVec<ShellTag, Option<InterfaceTraitId>>,
-    remaining: usize
-) {
-    for_range(Range::new(0, remaining), { _ =>
-        handle IndexVec::push(&mut *value, None) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(_) => ()
-        }
-    })
-}
-
-push_missing_impl_ids(
-    value: &mut IndexVec<ShellTag, Option<InterfaceImplId>>,
     remaining: usize
 ) {
     for_range(Range::new(0, remaining), { _ =>
@@ -8645,8 +8619,6 @@ pub collect_interfaces(
         shell_to_nominal: IndexVec::new(),
         shell_to_type: IndexVec::new(),
         shell_to_effect: IndexVec::new(),
-        shell_to_trait: IndexVec::new(),
-        shell_to_impl: IndexVec::new(),
         alias_states: Vec::new()
     };
     seed_types(&mut output);
@@ -8655,8 +8627,6 @@ pub collect_interfaces(
     push_missing_nominal_ids(&mut output.shell_to_nominal, shell_count);
     push_missing_type_ids(&mut output.shell_to_type, shell_count);
     push_missing_effect_ids(&mut output.shell_to_effect, shell_count);
-    push_missing_trait_ids(&mut output.shell_to_trait, shell_count);
-    push_missing_impl_ids(&mut output.shell_to_impl, shell_count);
     push_unresolved_aliases(
         &mut output.alias_states,
         super::headers::alias_count(super::headers::nominal_index(headers))
