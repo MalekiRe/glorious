@@ -370,6 +370,7 @@ impl TypedBody {
                 .unwrap_or_default(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
+            active_resumptions: vec![],
         };
         let expected_result = signatures
             .definitions
@@ -534,6 +535,7 @@ impl TypedBody {
                 .collect(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
+            active_resumptions: vec![],
         };
         let mut parameters = vec![];
         for (parameter, ty) in context
@@ -604,6 +606,7 @@ impl TypedBody {
             ambient_where_bounds: vec![],
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
+            active_resumptions: vec![],
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -737,6 +740,13 @@ struct Elaborator<'a> {
     /// direct `perform` but never a callable boundary that may invoke any
     /// operation of the protocol.
     handled_operations: std::collections::BTreeSet<(EffectInstance, u32)>,
+    /// Lexically live generated continuations. A resumption is an identity
+    /// tied to one suspended handler frame, not an ordinary closure value.
+    /// Until a first-class continuation environment is represented in MIR and
+    /// the VM, nested closure capture would let that identity escape its
+    /// frame. Keep the restriction at Typed Core, where capture facts are
+    /// explicit and source recovery cannot manufacture an executable escape.
+    active_resumptions: Vec<String>,
 }
 impl Elaborator<'_> {
     fn expression(&mut self, id: ExprId) -> CoreId {
@@ -1105,6 +1115,7 @@ impl Elaborator<'_> {
         }
         let parameters = vec![];
         let captures = self.closure_captures(body, &parameters);
+        self.check_resumption_captures(&captures, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
         self.alloc(
@@ -1172,6 +1183,7 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
         let captures = self.closure_captures(body, &parameters);
+        self.check_resumption_captures(&captures, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
         self.alloc(
@@ -1737,6 +1749,28 @@ impl Elaborator<'_> {
             .into_iter()
             .map(|(name, (mode, ty))| ClosureCapture { name, mode, ty })
             .collect()
+    }
+    /// Continuations are frame-bound identities. Capturing one by a nested
+    /// closure would let it survive the handler frame that owns it, which the
+    /// current continuation lowering deliberately has no representation for.
+    /// Direct invocation remains valid; this is only the closure-capture
+    /// product boundary.
+    fn check_resumption_captures(&mut self, captures: &[ClosureCapture], span: Span) {
+        if let Some(capture) = captures.iter().find(|capture| {
+            self.active_resumptions
+                .iter()
+                .any(|resumption| resumption == &capture.name)
+        }) {
+            self.error(
+                span,
+                "G4174",
+                &format!(
+                    "nested closure cannot capture handler resumption `{}` before continuations have an escaping representation",
+                    capture.name
+                ),
+            );
+            self.recovered = true;
+        }
     }
     fn collect_captures(
         &self,
@@ -2980,7 +3014,21 @@ impl Elaborator<'_> {
                     quantity: clause.operation.resumption,
                 }
             };
+            let active_resumption = match &resumption {
+                CoreHandlerResumption::Explicit { name, .. } => Some(name.clone()),
+                CoreHandlerResumption::Tail { .. }
+                | CoreHandlerResumption::Discard { .. }
+                | CoreHandlerResumption::Terminal => None,
+            };
+            if let Some(name) = &active_resumption {
+                self.active_resumptions.push(name.clone());
+            }
             let body = self.expression(clause.source.body);
+            if active_resumption.is_some() {
+                self.active_resumptions
+                    .pop()
+                    .expect("active handler resumption must outlive its clause body");
+            }
             self.locals.leave();
             let body_ty = self.expressions[body.0 as usize].ty.clone();
             let expected = match resumption {
