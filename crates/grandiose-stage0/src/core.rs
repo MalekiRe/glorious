@@ -1363,6 +1363,24 @@ impl Elaborator<'_> {
                     Type::Error
                 };
             }
+            if self.effect_row_parameters.contains_key(name) {
+                self.error(
+                    self.body.expression(self.body.root).span,
+                    "G4171",
+                    &format!("effect-row generic `{name}` cannot be used as a closure type"),
+                );
+                self.recovered = true;
+                return Type::Error;
+            }
+            if self.lifetime_parameters.contains_key(name) {
+                self.error(
+                    self.body.expression(self.body.root).span,
+                    "G4172",
+                    &format!("lifetime generic `{name}` cannot be used as a closure type"),
+                );
+                self.recovered = true;
+                return Type::Error;
+            }
             if let Some(scalar) = closure_scalar(name) {
                 return if arguments.is_empty() {
                     Type::Scalar(scalar)
