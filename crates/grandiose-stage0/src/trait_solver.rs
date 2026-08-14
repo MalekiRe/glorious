@@ -319,7 +319,7 @@ impl TraitSolver {
                         let base = rule.implementation.generics;
                         let mut substitution = substitution;
                         for (offset, argument) in arguments.iter().cloned().enumerate() {
-                            substitution.insert(base + offset as u32, argument);
+                            substitution.types.insert(base + offset as u32, argument);
                         }
                         TraitProjectionAnswer::Normalized {
                             evidence,
@@ -541,7 +541,7 @@ impl TraitSolver {
                     Some(item) => {
                         let base = rule.implementation.generics;
                         for (offset, argument) in arguments.iter().cloned().enumerate() {
-                            substitution.insert(base + offset as u32, argument);
+                            substitution.types.insert(base + offset as u32, argument);
                         }
                         TraitEffectRowProjectionAnswer::Normalized {
                             evidence,
@@ -710,7 +710,9 @@ impl TraitSolver {
                     return TraitMethodAnswer::NoSolution;
                 };
                 for (offset, argument) in arguments.iter().cloned().enumerate() {
-                    substitution.insert(rule.implementation.generics + offset as u32, argument);
+                    substitution
+                        .types
+                        .insert(rule.implementation.generics + offset as u32, argument);
                 }
                 TraitMethodAnswer::Selected {
                     method: implementation_method_key(evidence, name),
@@ -797,14 +799,23 @@ impl TraitSolver {
     }
 }
 
+/// One implementation match has separate substitution domains for types and
+/// regions.  A source binder slot is shared for stable identity, but a
+/// lifetime may never leak into the type map as a fabricated `Type::Generic`.
+#[derive(Default)]
+struct ImplementationSubstitution {
+    types: BTreeMap<u32, Type>,
+    lifetimes: BTreeMap<u32, crate::Lifetime>,
+}
+
 fn match_rule(
     implementation: &ElaboratedImplementation,
     goal: &TraitGoal,
-) -> Option<BTreeMap<u32, Type>> {
+) -> Option<ImplementationSubstitution> {
     if implementation.relation.arguments.len() != goal.relation.arguments.len() {
         return None;
     }
-    let mut substitution = BTreeMap::new();
+    let mut substitution = ImplementationSubstitution::default();
     match_type(&implementation.self_ty, &goal.subject, &mut substitution)?;
     for (template, actual) in implementation
         .relation
@@ -820,14 +831,14 @@ fn match_rule(
 fn match_type(
     template: &Type,
     actual: &Type,
-    substitution: &mut BTreeMap<u32, Type>,
+    substitution: &mut ImplementationSubstitution,
 ) -> Option<()> {
     match template {
-        Type::Generic(index) => match substitution.get(index) {
+        Type::Generic(index) => match substitution.types.get(index) {
             Some(previous) if previous != actual => None,
             Some(_) => Some(()),
             None => {
-                substitution.insert(*index, actual.clone());
+                substitution.types.insert(*index, actual.clone());
                 Some(())
             }
         },
@@ -842,11 +853,11 @@ fn match_type(
             if !is_const_argument_of_kind(actual, *kind) {
                 return None;
             }
-            match substitution.get(index) {
+            match substitution.types.get(index) {
                 Some(previous) if previous != actual => None,
                 Some(_) => Some(()),
                 None => {
-                    substitution.insert(*index, actual.clone());
+                    substitution.types.insert(*index, actual.clone());
                     Some(())
                 }
             }
@@ -919,7 +930,8 @@ fn match_type(
                 mutability: actual_mutability,
                 lifetime: actual_lifetime,
                 referent: actual_referent,
-            } if mutability == actual_mutability && lifetime == actual_lifetime => {
+            } if mutability == actual_mutability => {
+                match_lifetime(*lifetime, *actual_lifetime, substitution)?;
                 match_type(referent, actual_referent, substitution)
             }
             _ => None,
@@ -955,6 +967,24 @@ fn match_type(
     }
 }
 
+fn match_lifetime(
+    template: crate::Lifetime,
+    actual: crate::Lifetime,
+    substitution: &mut ImplementationSubstitution,
+) -> Option<()> {
+    match template {
+        crate::Lifetime::Generic(index) => match substitution.lifetimes.get(&index) {
+            Some(previous) if *previous != actual => None,
+            Some(_) => Some(()),
+            None => {
+                substitution.lifetimes.insert(index, actual);
+                Some(())
+            }
+        },
+        crate::Lifetime::Static | crate::Lifetime::Elided => (template == actual).then_some(()),
+    }
+}
+
 /// Check that a solver-side substitution remains in the structural domain of
 /// its declared const binder.  Generic consts are valid actual terms because
 /// a canonical goal may itself be parameterized; their kind must still agree.
@@ -982,7 +1012,7 @@ fn is_const_argument_of_kind(value: &Type, expected: crate::ConstKind) -> bool {
 
 fn substitute_relation(
     relation: &ElaboratedTraitReference,
-    substitution: &BTreeMap<u32, Type>,
+    substitution: &ImplementationSubstitution,
 ) -> ElaboratedTraitReference {
     ElaboratedTraitReference {
         definition: relation.definition,
@@ -994,13 +1024,15 @@ fn substitute_relation(
     }
 }
 
-fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
+fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> Type {
     match value {
         Type::Generic(index) => substitution
+            .types
             .get(index)
             .cloned()
             .unwrap_or_else(|| value.clone()),
         Type::ConstGeneric { index, .. } => substitution
+            .types
             .get(index)
             .cloned()
             .unwrap_or_else(|| value.clone()),
@@ -1046,7 +1078,14 @@ fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
             referent,
         } => Type::Reference {
             mutability: *mutability,
-            lifetime: *lifetime,
+            lifetime: match lifetime {
+                crate::Lifetime::Generic(index) => substitution
+                    .lifetimes
+                    .get(index)
+                    .copied()
+                    .unwrap_or(*lifetime),
+                lifetime => *lifetime,
+            },
             referent: Box::new(substitute_type(referent, substitution)),
         },
         Type::Callable {
@@ -1067,7 +1106,10 @@ fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
     }
 }
 
-fn substitute_effect_row(value: &EffectRow, substitution: &BTreeMap<u32, Type>) -> EffectRow {
+fn substitute_effect_row(
+    value: &EffectRow,
+    substitution: &ImplementationSubstitution,
+) -> EffectRow {
     EffectRow {
         effects: value
             .effects
@@ -1107,7 +1149,7 @@ fn substitute_effect_row(value: &EffectRow, substitution: &BTreeMap<u32, Type>) 
 
 fn substitute_callable_signature(
     value: &CallableSignature,
-    substitution: &BTreeMap<u32, Type>,
+    substitution: &ImplementationSubstitution,
 ) -> CallableSignature {
     CallableSignature {
         generics: 0,

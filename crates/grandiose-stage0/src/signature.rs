@@ -40,6 +40,10 @@ pub struct ElaboratedTraitReference {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedTrait {
     pub generics: u32,
+    /// Kinds of declaration binders in source-slot order.  Traits may bind
+    /// regions just like callables, but those regions must never be confused
+    /// with a type argument when a method contract is instantiated.
+    pub generic_kinds: Vec<GenericKind>,
     pub supertraits: Vec<ElaboratedTraitReference>,
     /// Declared associated type names and their item-generic arities. The
     /// frozen interface retains this metadata so projection syntax can keep
@@ -61,6 +65,11 @@ pub struct ElaboratedAssociatedType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedImplementation {
     pub generics: u32,
+    /// Kinds of implementation binders in source-slot order.  This is part
+    /// of the frozen impl identity: in particular `impl<'a> Marker for
+    /// &'a T` has a region binder even though that binder never occupies the
+    /// type-substitution namespace.
+    pub generic_kinds: Vec<GenericKind>,
     pub negative: bool,
     pub relation: ElaboratedTraitReference,
     pub self_ty: Type,
@@ -1306,6 +1315,7 @@ impl Elaborator<'_> {
             .collect();
         ElaboratedTrait {
             generics: header.generics.len() as u32,
+            generic_kinds: header.generics.kinds(),
             supertraits: header
                 .supertraits
                 .iter()
@@ -1451,6 +1461,7 @@ impl Elaborator<'_> {
             .collect();
         ElaboratedImplementation {
             generics: header.generics.len() as u32,
+            generic_kinds: header.generics.kinds(),
             negative: header.negative,
             relation,
             self_ty,

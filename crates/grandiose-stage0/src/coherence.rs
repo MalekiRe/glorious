@@ -239,7 +239,20 @@ fn collect_generic_names(
             }
             collect_generic_names(result, declared, used);
         }
-        HeaderType::Reference { referent, .. } => collect_generic_names(referent, declared, used),
+        HeaderType::Reference {
+            lifetime, referent, ..
+        } => {
+            // Lifetime binders live outside the type namespace, so walking
+            // only the referent makes `impl<'a> !Marker for &'a T` look as
+            // though `'a` were unconstrained.  Coherence must account for
+            // every binder that contributes to an implementation head.
+            if let Some(lifetime) = lifetime
+                && declared.contains(lifetime)
+            {
+                used.insert(lifetime.clone());
+            }
+            collect_generic_names(referent, declared, used);
+        }
         HeaderType::Path(_) | HeaderType::Never | HeaderType::Recovered => {}
     }
 }

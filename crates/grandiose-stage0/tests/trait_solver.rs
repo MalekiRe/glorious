@@ -1,7 +1,8 @@
 use grandiose_stage0::{
     DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey, InterfaceSet,
-    LexedFile, PackageKey, ScalarType, TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
-    TraitMethodAnswer, TraitProjectionAnswer, TraitSolver, Type, implementation_method_key,
+    LexedFile, Lifetime, Mutability, PackageKey, ScalarType, TraitAnswer,
+    TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer,
+    TraitSolver, Type, implementation_method_key,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -44,6 +45,24 @@ fn tabled_solver_proves_generic_impls_after_where_obligations() {
         subject: Type::Nominal {
             definition: boxed,
             arguments: vec![Type::Scalar(ScalarType::I64)],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+}
+
+#[test]
+fn tabled_solver_binds_lifetime_parameters_in_implementation_heads() {
+    let (interface, signatures) = signatures("trait Marker {} impl<'a> Marker for &'a i64 {}");
+    let marker = key(&interface, "Marker");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: marker,
+            arguments: vec![],
+        },
+        subject: Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Static,
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
         },
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");

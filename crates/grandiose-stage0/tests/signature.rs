@@ -239,6 +239,74 @@ fn interfaces_preserve_declared_reference_lifetimes_without_type_slots() {
 }
 
 #[test]
+fn trait_and_implementation_lifetime_binders_are_frozen_with_their_kinds() {
+    let package = PackageKey("signature-trait-implementation-lifetimes@0.1.0".into());
+    let source = r#"
+        trait View<'a> {
+            fn view(value: &'a i64) -> &'a i64;
+        }
+        trait Marker {}
+        impl<'a> Marker for &'a i64 {}
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+
+    let view = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("View"))
+        .expect("View definition");
+    let ElaboratedHeader::Trait(view) = signatures.definitions.get(&view.key).unwrap() else {
+        panic!("expected trait signature")
+    };
+    assert_eq!(view.generics, 1);
+    assert_eq!(view.generic_kinds, [GenericKind::Lifetime]);
+    let method = view.methods.get("view").expect("view method");
+    assert!(matches!(
+        method.parameters.as_slice(),
+        [Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }]
+    ));
+    assert!(matches!(
+        method.result,
+        Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }
+    ));
+
+    let implementation = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.is_none())
+        .expect("implementation declaration");
+    let ElaboratedHeader::Implementation(implementation) =
+        signatures.definitions.get(&implementation.key).unwrap()
+    else {
+        panic!("expected implementation signature")
+    };
+    assert_eq!(implementation.generics, 1);
+    assert_eq!(implementation.generic_kinds, [GenericKind::Lifetime]);
+    assert!(matches!(
+        implementation.self_ty,
+        Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn interfaces_reject_unbound_or_type_position_lifetimes() {
     let package = PackageKey("signature-invalid-lifetimes@0.1.0".into());
     let source =

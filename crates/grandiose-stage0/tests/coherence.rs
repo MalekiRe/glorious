@@ -54,3 +54,24 @@ fn coherence_accepts_disjoint_heads_and_rejects_unconstrained_negative_generics(
         "{unconstrained:#?}"
     );
 }
+
+#[test]
+fn coherence_counts_lifetime_binders_used_by_negative_impl_heads() {
+    let constrained = collect("trait Marker {} impl<'a> !Marker for &'a i64 {}");
+    assert!(
+        constrained
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G3407"),
+        "{constrained:#?}"
+    );
+
+    let unconstrained = collect("trait Marker {} impl<'a> !Marker for i64 {}");
+    assert!(
+        unconstrained
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3407"),
+        "{unconstrained:#?}"
+    );
+}
