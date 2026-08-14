@@ -1069,7 +1069,10 @@ fn pattern_is_recovered(pattern: &CorePattern) -> bool {
     }
 }
 
-fn type_contains_inference(ty: &Type) -> bool {
+/// Whether a semantic type tree still contains body-local uncertainty.  Core
+/// uses this before freezing a body, and MIR repeats the same check because a
+/// persisted or forged Core product must not get a weaker route to execution.
+pub(crate) fn type_contains_inference(ty: &Type) -> bool {
     match ty {
         Type::Infer(_) => true,
         Type::Nominal { arguments, .. } => {
@@ -1153,6 +1156,14 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         CoreKind::Function { arguments, .. } => {
             arguments.iter().any(generic_argument_contains_inference)
         }
+        CoreKind::TraitMethod {
+            trait_arguments,
+            method_arguments,
+            ..
+        } => trait_arguments
+            .iter()
+            .chain(method_arguments)
+            .any(generic_argument_contains_inference),
         CoreKind::Perform { effect, .. } => effect
             .arguments
             .iter()
@@ -1194,7 +1205,6 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
-        | CoreKind::TraitMethod { .. }
         | CoreKind::Constant(_)
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
@@ -3256,6 +3266,40 @@ impl Elaborator<'_> {
     /// Existing callable and effect-operation signature substitution is
     /// deliberately type-valued. Keep that boundary explicit instead of
     /// coercing a well-kinded source row, lifetime, or const into `Type::Error`.
+    fn inferred_method_generic_arguments(
+        &mut self,
+        kinds: &[crate::GenericKind],
+    ) -> (Vec<GenericArgument>, Vec<Type>) {
+        // Trait selection's current signature-instantiation API has one
+        // placeholder per declared method binder.  Preserve the real kind in
+        // Core metadata and use an internal non-type placeholder only for
+        // that legacy type-indexed selector; otherwise a lifetime binder
+        // would escape as a spurious `Type::Infer` at the Core boundary.
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| match kind {
+                crate::GenericKind::Type => {
+                    let ty = self.inference.fresh();
+                    (GenericArgument::Type(ty.clone()), ty)
+                }
+                crate::GenericKind::EffectRow => {
+                    (GenericArgument::EffectRow(EffectRow::empty()), Type::Error)
+                }
+                crate::GenericKind::Lifetime => {
+                    (GenericArgument::Lifetime(Lifetime::Elided), Type::Error)
+                }
+                crate::GenericKind::Const(kind) => (
+                    GenericArgument::ConstGeneric {
+                        index: index as u32,
+                        kind: *kind,
+                    },
+                    Type::Error,
+                ),
+            })
+            .unzip()
+    }
+
     fn generic_arguments_as_types(
         &mut self,
         arguments: Vec<GenericArgument>,
@@ -3932,12 +3976,12 @@ impl Elaborator<'_> {
                 *trait_arguments = trait_arguments
                     .iter()
                     .cloned()
-                    .map(|argument| self.zonk_generic_argument_if_resolved(argument))
+                    .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
                 *method_arguments = method_arguments
                     .iter()
                     .cloned()
-                    .map(|argument| self.zonk_generic_argument_if_resolved(argument))
+                    .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
             }
             CoreKind::Perform { effect, .. } => {
@@ -4087,26 +4131,6 @@ impl Elaborator<'_> {
             GenericArgument::EffectRow(value) => {
                 GenericArgument::EffectRow(self.zonk_effect_row(value, span))
             }
-            argument => argument,
-        }
-    }
-
-    /// Trait-method metadata may carry intentionally open lifetime binders
-    /// until a call opens them.  Canonicalize every closed substitution while
-    /// preserving those binders; reporting an inference error here would turn
-    /// a valid lifetime-polymorphic method value into recovered Core.
-    fn zonk_generic_argument_if_resolved(&mut self, argument: GenericArgument) -> GenericArgument {
-        match argument {
-            GenericArgument::Type(value) => self
-                .inference
-                .zonk(value.clone())
-                .map(GenericArgument::Type)
-                .unwrap_or(GenericArgument::Type(value)),
-            GenericArgument::EffectRow(value) => self
-                .inference
-                .zonk_effects_allowing_generic_tail(value.clone())
-                .map(GenericArgument::EffectRow)
-                .unwrap_or(GenericArgument::EffectRow(value)),
             argument => argument,
         }
     }
@@ -5205,10 +5229,8 @@ impl Elaborator<'_> {
         ) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
-        let method_arguments = if operation_arguments.is_empty() {
-            (0..method_generic_kinds.len())
-                .map(|_| GenericArgument::Type(self.inference.fresh()))
-                .collect::<Vec<_>>()
+        let (method_arguments, method_types) = if operation_arguments.is_empty() {
+            self.inferred_method_generic_arguments(&method_generic_kinds)
         } else {
             if operation_arguments.len() != method_generic_kinds.len() {
                 return Some(self.fail(
@@ -5217,20 +5239,21 @@ impl Elaborator<'_> {
                     "trait method operation arguments do not match its declaration",
                 ));
             }
-            self.body_generic_arguments(
+            let method_arguments = self.body_generic_arguments(
                 &operation_arguments,
                 &method_generic_kinds,
                 span,
                 "G4168",
                 "trait method operation arguments do not match its declaration",
-            )?
+            )?;
+            let method_types = self.generic_arguments_as_types(
+                method_arguments.clone(),
+                span,
+                "G4168",
+                "qualified trait methods require type-valued operation arguments",
+            )?;
+            (method_arguments, method_types)
         };
-        let method_types = self.generic_arguments_as_types(
-            method_arguments.clone(),
-            span,
-            "G4168",
-            "qualified trait methods require type-valued operation arguments",
-        )?;
         let answer = TraitSolver::new(self.signatures).select_method(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
@@ -5382,10 +5405,8 @@ impl Elaborator<'_> {
             ));
         };
         let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
-        let method_arguments = if operation_arguments.is_empty() {
-            (0..method_generic_kinds.len())
-                .map(|_| GenericArgument::Type(self.inference.fresh()))
-                .collect::<Vec<_>>()
+        let (method_arguments, method_types) = if operation_arguments.is_empty() {
+            self.inferred_method_generic_arguments(&method_generic_kinds)
         } else {
             if operation_arguments.len() != method_generic_kinds.len() {
                 return Some(self.fail(
@@ -5394,20 +5415,21 @@ impl Elaborator<'_> {
                     "trait method operation arguments do not match its declaration",
                 ));
             }
-            self.body_generic_arguments(
+            let method_arguments = self.body_generic_arguments(
                 &operation_arguments,
                 &method_generic_kinds,
                 span,
                 "G4168",
                 "trait method operation arguments do not match its declaration",
-            )?
+            )?;
+            let method_types = self.generic_arguments_as_types(
+                method_arguments.clone(),
+                span,
+                "G4168",
+                "qualified trait methods require type-valued operation arguments",
+            )?;
+            (method_arguments, method_types)
         };
-        let method_types = self.generic_arguments_as_types(
-            method_arguments.clone(),
-            span,
-            "G4168",
-            "qualified trait methods require type-valued operation arguments",
-        )?;
         let answer = TraitSolver::new(self.signatures).select_method(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {

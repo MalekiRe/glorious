@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use grandiose_stage0::{
-    CoreId, DefKey, Digest, MirBlock, MirBlockId, MirEditor, MirFunction, MirInstruction, MirLocal,
-    MirLocalDecl, MirPattern, MirTerminator, ScalarType, Type, optimize_mir,
+    CoreId, DefKey, Digest, GenericArgument, InferVar, Lifetime, MirBlock, MirBlockId, MirEditor,
+    MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirPattern, MirProgram, MirTerminator,
+    ScalarType, Type, optimize_mir,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -59,6 +62,57 @@ fn cfg_validation_checks_typed_block_edges_and_returns() {
     };
     *then_arguments = vec![MirLocal(0)];
     assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes() {
+    let mut nested_local = graph();
+    nested_local.locals[1].ty = Type::Array(Box::new(Type::Tuple(vec![Type::Infer(InferVar(9))])));
+    assert!(
+        nested_local
+            .validate()
+            .is_err_and(|error| error.contains("unresolved inference")),
+        "nested local inference must not become executable MIR"
+    );
+
+    let mut unscoped_lifetime = graph();
+    unscoped_lifetime.locals[1].ty = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Shared,
+        lifetime: Lifetime::Bound { depth: 0, index: 0 },
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    };
+    assert!(
+        unscoped_lifetime
+            .validate()
+            .is_err_and(|error| error.contains("absent higher-ranked binder")),
+        "a bound lifetime outside a callable binder must be rejected"
+    );
+
+    let mut generic_metadata = graph();
+    generic_metadata.blocks[0]
+        .instructions
+        .push(MirInstruction::Call {
+            dst: MirLocal(1),
+            callee: DefKey(Digest::of_bytes(b"generic-target")),
+            generic_arguments: vec![GenericArgument::Type(Type::Nominal {
+                definition: DefKey(Digest::of_bytes(b"nested-generic")),
+                arguments: vec![GenericArgument::Type(Type::Infer(InferVar(4)))],
+            })],
+            trait_instance: None,
+            arguments: vec![],
+        });
+    let entry = generic_metadata.definition;
+    let program = MirProgram {
+        entry,
+        functions: BTreeMap::from([(entry, generic_metadata)]),
+        instances: BTreeMap::new(),
+    };
+    assert!(
+        program
+            .validate()
+            .is_err_and(|error| error.contains("unresolved inference")),
+        "nested generic call metadata must not bypass MIR program validation"
+    );
 }
 
 #[test]

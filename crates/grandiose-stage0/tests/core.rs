@@ -1,7 +1,8 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
     ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePlace, DeclarationScan,
-    DefKey, DefinitionIndex, Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey,
+    DefKey, DefinitionIndex, Digest, EffectRow, ElaboratedInterface, EnvironmentBrand, EscapeFlow,
+    FileKey,
     FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath,
     MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span,
     Type, TypedBody, implementation_method_key,
@@ -400,6 +401,59 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4181"),
         "inference hidden in Core metadata must not reach lowering"
+    );
+}
+
+#[test]
+fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
+    let package = PackageKey("core-trait-method-inference@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::TraitMethod {
+                evidence: DefKey(Digest::of_bytes(b"evidence")),
+                method: DefKey(Digest::of_bytes(b"method")),
+                trait_arguments: vec![GenericArgument::Type(Type::Infer(InferVar(3)))],
+                method_arguments: vec![],
+            },
+            ty: Type::Callable {
+                lifetime_binders: 0,
+                parameters: vec![],
+                result: Box::new(Type::Unit),
+                effects: EffectRow::empty(),
+                invocation: Quantity::ONCE,
+            },
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4181"),
+        "inference hidden in trait-method metadata must not reach lowering"
+    );
+    let flow = PlaceFlow::analyze(&body);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-trait-method")),
+        &body,
+        &flow,
+    );
+    assert!(lowered.function.is_none());
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR lowering must independently reject invalid frozen Core"
     );
 }
 
@@ -3230,7 +3284,7 @@ fn capture_environments_seal_and_validate_mode_derived_post_states() {
             && lowered
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "G6011"),
+                .any(|diagnostic| diagnostic.code == "G6000"),
         "MIR accepted a forged capture post-state: {lowered:#?}"
     );
 }

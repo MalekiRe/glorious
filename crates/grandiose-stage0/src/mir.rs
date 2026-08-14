@@ -1053,6 +1053,20 @@ impl MirLowering {
                 }],
             };
         }
+        let core_validation = body.validate();
+        if let Some(diagnostic) = core_validation.first() {
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: vec![MirDiagnostic {
+                    code: "G6000",
+                    message: format!(
+                        "cannot lower invalid Typed Core ({}): {}",
+                        diagnostic.code, diagnostic.message
+                    ),
+                }],
+            };
+        }
         if !flow.diagnostics.is_empty() {
             return Self {
                 function: None,
@@ -1668,6 +1682,10 @@ impl MirFunction {
         if self.entry.0 as usize >= self.blocks.len() {
             return Err(format!("MIR entry block {} is absent", self.entry.0));
         }
+        validate_mir_type(&self.result, &mut vec![])?;
+        for local in &self.locals {
+            validate_mir_type(&local.ty, &mut vec![])?;
+        }
         for (index, block) in self.blocks.iter().enumerate() {
             for &parameter in &block.parameters {
                 self.local_type(parameter)?;
@@ -1677,6 +1695,7 @@ impl MirFunction {
                     self.local_type(local)?;
                 }
                 self.validate_instruction(instruction)?;
+                validate_instruction_semantic_types(instruction)?;
             }
             self.validate_terminator(index, &block.terminator)?;
         }
@@ -1879,6 +1898,256 @@ impl MirFunction {
                 Ok(())
             }
             MirTerminator::Unreachable => Ok(()),
+        }
+    }
+}
+
+/// MIR is still permitted to carry declaration-owned generic parameters until
+/// instance materialization, but it must never carry body-local inference,
+/// recovery poison, or a higher-ranked lifetime whose binder is absent.  The
+/// walk intentionally reaches type and effect arguments embedded in callable,
+/// nominal, aggregate, pattern, and handler metadata as well as local types.
+fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), String> {
+    match ty {
+        Type::Infer(_) => Err("MIR semantic type retains an unresolved inference variable".into()),
+        Type::Error => Err("MIR semantic type retains recovered error poison".into()),
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .try_for_each(|argument| validate_mir_generic_argument(argument, lifetime_binders)),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            validate_mir_type(subject, lifetime_binders)?;
+            trait_arguments
+                .iter()
+                .try_for_each(|argument| validate_mir_type(argument, lifetime_binders))?;
+            item_arguments
+                .iter()
+                .try_for_each(|argument| validate_mir_type(argument, lifetime_binders))
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .try_for_each(|element| validate_mir_type(element, lifetime_binders)),
+        Type::Array(element) => validate_mir_type(element, lifetime_binders),
+        Type::Reference {
+            lifetime, referent, ..
+        } => {
+            validate_mir_lifetime(*lifetime, lifetime_binders)?;
+            validate_mir_type(referent, lifetime_binders)
+        }
+        Type::Callable {
+            lifetime_binders: count,
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            lifetime_binders.push(*count);
+            let validation = parameters
+                .iter()
+                .try_for_each(|parameter| validate_mir_type(parameter, lifetime_binders))
+                .and_then(|()| validate_mir_type(result, lifetime_binders))
+                .and_then(|()| validate_mir_effect_row(effects, lifetime_binders));
+            lifetime_binders.pop();
+            validation
+        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_) => Ok(()),
+    }
+}
+
+fn validate_mir_generic_argument(
+    argument: &GenericArgument,
+    lifetime_binders: &mut Vec<u32>,
+) -> Result<(), String> {
+    match argument {
+        GenericArgument::Type(ty) => validate_mir_type(ty, lifetime_binders),
+        GenericArgument::EffectRow(effects) => validate_mir_effect_row(effects, lifetime_binders),
+        GenericArgument::Lifetime(lifetime) => validate_mir_lifetime(*lifetime, lifetime_binders),
+        GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => Ok(()),
+    }
+}
+
+fn validate_mir_effect_row(
+    effects: &crate::EffectRow,
+    lifetime_binders: &mut Vec<u32>,
+) -> Result<(), String> {
+    if matches!(effects.tail, Some(crate::EffectTail::Infer(_))) {
+        return Err("MIR effect row retains an unresolved inference tail".into());
+    }
+    for effect in &effects.effects {
+        for argument in &effect.arguments {
+            validate_mir_generic_argument(argument, lifetime_binders)?;
+        }
+    }
+    for projection in &effects.projections {
+        validate_mir_type(&projection.subject, lifetime_binders)?;
+        for argument in &projection.trait_arguments {
+            validate_mir_type(argument, lifetime_binders)?;
+        }
+        for argument in &projection.item_arguments {
+            validate_mir_type(argument, lifetime_binders)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_mir_lifetime(
+    lifetime: crate::Lifetime,
+    lifetime_binders: &[u32],
+) -> Result<(), String> {
+    let crate::Lifetime::Bound { depth, index } = lifetime else {
+        return Ok(());
+    };
+    let Some(count) = lifetime_binders.iter().rev().nth(depth as usize) else {
+        return Err("MIR lifetime refers to an absent higher-ranked binder".into());
+    };
+    if index >= *count {
+        return Err("MIR lifetime refers to an out-of-range higher-ranked binder".into());
+    }
+    Ok(())
+}
+
+fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(), String> {
+    let mut lifetime_binders = vec![];
+    match instruction {
+        MirInstruction::MakeArray { element_type, .. } => {
+            validate_mir_type(element_type, &mut lifetime_binders)
+        }
+        MirInstruction::MakeRecord { field_types, .. }
+        | MirInstruction::MakeEnum { field_types, .. } => field_types
+            .iter()
+            .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders)),
+        MirInstruction::ProjectRecord { field_type, .. }
+        | MirInstruction::ProjectTuple { field_type, .. }
+        | MirInstruction::UpdateRecord { field_type, .. } => {
+            validate_mir_type(field_type, &mut lifetime_binders)
+        }
+        MirInstruction::PatternTest { pattern, .. } => {
+            validate_mir_pattern_semantic_types(pattern, &mut lifetime_binders)
+        }
+        MirInstruction::Perform {
+            effect_arguments, ..
+        } => effect_arguments.iter().try_for_each(|argument| {
+            validate_mir_generic_argument(argument, &mut lifetime_binders)
+        }),
+        MirInstruction::InstallHandler {
+            effect_arguments,
+            resume_type,
+            ..
+        } => {
+            effect_arguments.iter().try_for_each(|argument| {
+                validate_mir_generic_argument(argument, &mut lifetime_binders)
+            })?;
+            validate_mir_type(resume_type, &mut lifetime_binders)
+        }
+        MirInstruction::Call {
+            generic_arguments,
+            trait_instance,
+            ..
+        }
+        | MirInstruction::MakeCallable {
+            generic_arguments,
+            trait_instance,
+            ..
+        } => {
+            generic_arguments.iter().try_for_each(|argument| {
+                validate_mir_generic_argument(argument, &mut lifetime_binders)
+            })?;
+            if let Some(instance) = trait_instance {
+                instance.trait_arguments.iter().try_for_each(|argument| {
+                    validate_mir_generic_argument(argument, &mut lifetime_binders)
+                })?;
+                instance.method_arguments.iter().try_for_each(|argument| {
+                    validate_mir_generic_argument(argument, &mut lifetime_binders)
+                })?;
+            }
+            Ok(())
+        }
+        MirInstruction::ConstUnit { .. }
+        | MirInstruction::ConstI64 { .. }
+        | MirInstruction::ConstF64 { .. }
+        | MirInstruction::ConstBool { .. }
+        | MirInstruction::ConstChar { .. }
+        | MirInstruction::ConstText { .. }
+        | MirInstruction::MakeTuple { .. }
+        | MirInstruction::UninstallHandler
+        | MirInstruction::CaptureResumption { .. }
+        | MirInstruction::Resume { .. }
+        | MirInstruction::ResumeReturn { .. }
+        | MirInstruction::ResumeSnapshot { .. }
+        | MirInstruction::Forward
+        | MirInstruction::Cancel
+        | MirInstruction::Copy { .. }
+        | MirInstruction::Store { .. }
+        | MirInstruction::Move { .. }
+        | MirInstruction::Borrow { .. }
+        | MirInstruction::DerefCopy { .. }
+        | MirInstruction::DerefStore { .. }
+        | MirInstruction::NotBool { .. }
+        | MirInstruction::AddI64 { .. }
+        | MirInstruction::SubI64 { .. }
+        | MirInstruction::MulI64 { .. }
+        | MirInstruction::DivI64 { .. }
+        | MirInstruction::RemI64 { .. }
+        | MirInstruction::AddF64 { .. }
+        | MirInstruction::SubF64 { .. }
+        | MirInstruction::MulF64 { .. }
+        | MirInstruction::DivF64 { .. }
+        | MirInstruction::RemF64 { .. }
+        | MirInstruction::EqI64 { .. }
+        | MirInstruction::NeI64 { .. }
+        | MirInstruction::LtI64 { .. }
+        | MirInstruction::LeI64 { .. }
+        | MirInstruction::GtI64 { .. }
+        | MirInstruction::GeI64 { .. }
+        | MirInstruction::EqF64 { .. }
+        | MirInstruction::NeF64 { .. }
+        | MirInstruction::LtF64 { .. }
+        | MirInstruction::LeF64 { .. }
+        | MirInstruction::GtF64 { .. }
+        | MirInstruction::GeF64 { .. }
+        | MirInstruction::EqBool { .. }
+        | MirInstruction::NeBool { .. }
+        | MirInstruction::ConcatText { .. }
+        | MirInstruction::EqText { .. }
+        | MirInstruction::NeText { .. }
+        | MirInstruction::EqChar { .. }
+        | MirInstruction::NeChar { .. }
+        | MirInstruction::LtChar { .. }
+        | MirInstruction::LeChar { .. }
+        | MirInstruction::GtChar { .. }
+        | MirInstruction::GeChar { .. }
+        | MirInstruction::CallIndirect { .. } => Ok(()),
+    }
+}
+
+fn validate_mir_pattern_semantic_types(
+    pattern: &MirPattern,
+    lifetime_binders: &mut Vec<u32>,
+) -> Result<(), String> {
+    match pattern {
+        MirPattern::Any | MirPattern::Literal(_) => Ok(()),
+        MirPattern::Tuple(patterns) => patterns
+            .iter()
+            .try_for_each(|pattern| validate_mir_pattern_semantic_types(pattern, lifetime_binders)),
+        MirPattern::Record { fields, .. } | MirPattern::Enum { fields, .. } => {
+            for field in fields {
+                validate_mir_type(&field.ty, lifetime_binders)?;
+                validate_mir_pattern_semantic_types(&field.pattern, lifetime_binders)?;
+            }
+            Ok(())
         }
     }
 }

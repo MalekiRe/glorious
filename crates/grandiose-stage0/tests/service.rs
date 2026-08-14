@@ -1319,6 +1319,22 @@ fn service_materializes_contextually_typed_trait_method_values() {
 }
 
 #[test]
+fn service_rejects_unconstrained_trait_method_value_generics_at_the_core_boundary() {
+    let source = "trait Pick { fn pick<T>(value: i64) -> i64; } impl Pick for i64 { fn pick<T>(value: i64) -> i64 { value } } pub fn accept(callable: (i64) -> i64) -> i64 { callable(42) } pub fn main() -> i64 { accept(Pick::pick) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("unconstrained trait-method generic unexpectedly entered an artifact");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4116"),
+        "missing frozen-Core inference diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_direct_qualified_trait_calls_without_a_selected_implementation() {
     let source = "trait Increment { fn increment(value: i64) -> i64; } pub fn main() -> i64 { Increment::increment(41) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
