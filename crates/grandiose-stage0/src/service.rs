@@ -1164,6 +1164,7 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::IntEqual,
                         crate::PrimitiveRole::IntLess,
                         crate::PrimitiveRole::IntGreater,
+                        crate::PrimitiveRole::IntBitAnd,
                     ]
                     .iter()
                     .any(|role| manifest.primitives.get(role) == Some(&declaration.key))

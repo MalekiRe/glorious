@@ -585,6 +585,13 @@ pub enum VmInstruction {
         left: u32,
         right: u32,
     },
+    /// Exact manifest-bound i64 bitwise-and. This remains distinct from all
+    /// source arithmetic in the frozen bytecode contract.
+    BitAndI64 {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
     SubI64 {
         dst: u32,
         left: u32,
@@ -1044,13 +1051,14 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 48 adds opcode 110 for the manifest-bound generic i64 greater-than
-/// leaf, whose public ABI returns a canonical u32 predicate. Schema 47 adds
-/// opcode 109 for the manifest-bound generic i64 less-than
-/// leaf, whose public ABI returns a canonical u32 predicate. Schema 46 adds
-/// opcode 105 for the manifest-bound generic i64 equality
-/// leaf, whose public ABI returns a canonical u32 predicate. Schema 45 adds
-/// opcode 104 for manifest-bound wrapping i64 addition. Schema
+/// Schema 49 adds opcode 108 for manifest-bound i64 bitwise-and. Schema 48
+/// adds opcode 110 for the manifest-bound generic i64 greater-than leaf,
+/// whose public ABI returns a canonical u32 predicate. Schema 47 adds opcode
+/// 109 for the manifest-bound generic i64 less-than leaf, whose public ABI
+/// returns a canonical u32 predicate. Schema 46 adds opcode 105 for the
+/// manifest-bound generic i64 equality leaf, whose public ABI returns a
+/// canonical u32 predicate. Schema 45 adds opcode 104 for manifest-bound
+/// wrapping i64 addition. Schema
 /// 43 adds the canonical Bytes opcode family 80 through 86. Schema 42 reserves G1 opcodes 48 and 49 for the checked Char/u32
 /// conversion family and relocates internal control encodings. Schema 40 adds `u32`/`Bytes` values and opcodes 65 through 68 for the
 /// manifest-bound Text family. Schema 39 adds a target-independent `usize`
@@ -1068,7 +1076,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 48;
+pub const STAGE0_VM_SCHEMA: u32 = 49;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3158,6 +3166,11 @@ impl<'a> Decoder<'a> {
                 left,
                 right,
             }),
+            108 => self.i64_arithmetic(|dst, left, right| VmInstruction::BitAndI64 {
+                dst,
+                left,
+                right,
+            }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
             6 => {
@@ -4498,6 +4511,11 @@ fn lower_instruction(
             right: right.0,
         },
         MirInstruction::IntGreaterI64 { dst, left, right } => VmInstruction::IntGreaterI64 {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::BitAndI64 { dst, left, right } => VmInstruction::BitAndI64 {
             dst: dst.0,
             left: left.0,
             right: right.0,
@@ -6092,6 +6110,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::AddI64 { dst, left, right }
             | VmInstruction::WrappingAddI64 { dst, left, right }
+            | VmInstruction::BitAndI64 { dst, left, right }
             | VmInstruction::SubI64 { dst, left, right }
             | VmInstruction::MulI64 { dst, left, right }
             | VmInstruction::DivI64 { dst, left, right }
@@ -8702,6 +8721,19 @@ fn execute(
                     )?) as u32,
                 ))
             }
+            VmInstruction::BitAndI64 { dst, left, right } => {
+                registers[dst as usize] = Some(VmValue::I64(
+                    expect_i64(
+                        registers[left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? & expect_i64(
+                        registers[right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                ))
+            }
             VmInstruction::SubI64 { dst, left, right } => {
                 registers[dst as usize] = Some(VmValue::I64(
                     expect_i64(
@@ -9395,6 +9427,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         | VmInstruction::IntEqualI64 { dst, left, right }
         | VmInstruction::IntLessI64 { dst, left, right }
         | VmInstruction::IntGreaterI64 { dst, left, right }
+        | VmInstruction::BitAndI64 { dst, left, right }
         | VmInstruction::SubI64 { dst, left, right }
         | VmInstruction::MulI64 { dst, left, right }
         | VmInstruction::DivI64 { dst, left, right }
@@ -9410,6 +9443,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 VmInstruction::IntEqualI64 { .. } => 105,
                 VmInstruction::IntLessI64 { .. } => 109,
                 VmInstruction::IntGreaterI64 { .. } => 110,
+                VmInstruction::BitAndI64 { .. } => 108,
                 VmInstruction::SubI64 { .. } => 4,
                 VmInstruction::MulI64 { .. } => 5,
                 VmInstruction::DivI64 { .. } => 8,
@@ -10835,6 +10869,19 @@ fn execute_with_arguments(
                             .as_ref()
                             .expect("verified register"),
                     )?) as u32,
+                ))
+            }
+            VmInstruction::BitAndI64 { dst, left, right } => {
+                registers[*dst as usize] = Some(VmValue::I64(
+                    expect_i64(
+                        registers[*left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? & expect_i64(
+                        registers[*right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
                 ))
             }
             VmInstruction::SubI64 { dst, left, right } => {

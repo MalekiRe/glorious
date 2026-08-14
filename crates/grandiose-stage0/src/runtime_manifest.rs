@@ -76,6 +76,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_greater<T>` in distributed std.
     /// Its i64 specialization returns the canonical 0-or-1 u32 predicate.
     IntGreater,
+    /// Exact generic declaration `__g1_int_bit_and<T>` in distributed std.
+    /// Its frozen i64 specialization is a distinct bitwise VM operation.
+    IntBitAnd,
 }
 
 impl PrimitiveRole {
@@ -118,6 +121,7 @@ impl PrimitiveRole {
             Self::IntEqual => "int-equal",
             Self::IntLess => "int-less",
             Self::IntGreater => "int-greater",
+            Self::IntBitAnd => "int-bit-and",
         }
     }
 
@@ -160,6 +164,7 @@ impl PrimitiveRole {
             "int-equal" => Self::IntEqual,
             "int-less" => Self::IntLess,
             "int-greater" => Self::IntGreater,
+            "int-bit-and" => Self::IntBitAnd,
             _ => return None,
         })
     }
@@ -520,17 +525,19 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
-        PrimitiveRole::IntCheckedAdd | PrimitiveRole::IntWrappingAdd => crate::CallableSignature {
-            generics: 1,
-            generic_kinds: vec![crate::GenericKind::Type],
-            parameters: vec![Type::Generic(0), Type::Generic(0)],
-            result: Type::Generic(0),
-            effects: EffectRow::empty(),
-            invocation: Quantity::ONCE,
-            where_bounds: vec![],
-            where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
-        },
+        PrimitiveRole::IntCheckedAdd | PrimitiveRole::IntWrappingAdd | PrimitiveRole::IntBitAnd => {
+            crate::CallableSignature {
+                generics: 1,
+                generic_kinds: vec![crate::GenericKind::Type],
+                parameters: vec![Type::Generic(0), Type::Generic(0)],
+                result: Type::Generic(0),
+                effects: EffectRow::empty(),
+                invocation: Quantity::ONCE,
+                where_bounds: vec![],
+                where_associated_type_bindings: vec![],
+                where_associated_effect_bindings: vec![],
+            }
+        }
         PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
             crate::CallableSignature {
                 generics: 1,
@@ -592,6 +599,7 @@ fn manifest_digest(
             PrimitiveRole::IntEqual => 34,
             PrimitiveRole::IntLess => 38,
             PrimitiveRole::IntGreater => 39,
+            PrimitiveRole::IntBitAnd => 37,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
