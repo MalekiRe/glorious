@@ -1329,6 +1329,32 @@ impl MirLowering {
             };
         }
         if let Some(function) =
+            lowerer.lower_root_statement_cancellation_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
             lowerer.lower_root_runtime_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -5057,6 +5083,135 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+    /// A discarded affine continuation is a real control transfer, not an
+    /// erased `Perform`. The handler target consumes its suspended frame with
+    /// `Cancel` and then joins the enclosing suffix explicitly.
+    fn lower_root_statement_cancellation_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let CoreKind::Block(values) = self.body.expression(root).kind.clone() else {
+            return None;
+        };
+        let handler_index = values
+            .iter()
+            .position(|id| matches!(self.body.expression(*id).kind, CoreKind::Handle { .. }))?;
+        if handler_index + 1 >= values.len() {
+            return None;
+        }
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(values[handler_index]).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments,
+            terminal: false,
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Discard { quantity } = clause.resumption else {
+            return None;
+        };
+        if quantity.requires_positive_use()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+            || clause.patterns.len() != arguments.len()
+        {
+            return None;
+        }
+        for expression in &values[..handler_index] {
+            self.statement(*expression)?;
+        }
+        let payloads = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let arguments = arguments
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            target: MirBlockId(2),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        let (last, suffix) = values[handler_index + 1..].split_last()?;
+        for statement in suffix {
+            self.statement(*statement)?;
+        }
+        let result = self.value(*last)?;
+        let suffix_instructions = std::mem::take(&mut self.instructions);
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&clause.patterns, &payloads)?;
+        let _ = self.value(clause.body)?;
+        self.instructions.push(MirInstruction::Cancel);
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: suffix_instructions,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![],
+                    },
+                },
+            ],
         })
     }
     /// Lower one nonempty, exact-one-shot continuation through the VM handler
