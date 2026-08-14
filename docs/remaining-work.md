@@ -13,9 +13,10 @@ retained below but scheduled after the core language and tooling tranche.
 ### 3.3 Handler optimizer specialization
 
 - static-handler specialization beyond the implemented direct and one-hop
-  forwarded terminal fusion and canonical single-performance one-shot
-  resume/cancel composition: deeper forwarding graphs, branching or repeated
-  performances, captured continuations, and multishot/deep-reinstating cases.
+  forwarded terminal fusion, canonical single-performance one-shot
+  resume/cancel composition, and replay-safe pure-residual finite multi-shot
+  cloning: deeper forwarding graphs, branching or repeated performances,
+  captured continuations, and dynamic multishot/deep-reinstating cases.
 
 ## 5. MIR and bytecode backend
 
