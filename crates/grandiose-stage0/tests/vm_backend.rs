@@ -1778,3 +1778,66 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
         Err(VmArtifactError::HandlerTargetReachedByControlFlow { target: 3 })
     ));
 }
+
+#[test]
+fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
+    let effect = DefKey(Digest::of_bytes(b"leave-clause-effect"));
+    let owner = DefKey(Digest::of_bytes(b"leave-clause-owner"));
+    let function = VmFunction {
+        definition: DefKey(Digest::of_bytes(b"leave-clause")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::I64, VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![],
+                resume_type: VmType::I64,
+                target: 5,
+            },
+            VmInstruction::Perform {
+                dst: 1,
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                arguments: vec![],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 1 },
+            VmInstruction::Leave {
+                brand_owner: owner,
+                brand_label: 2,
+                target: 7,
+                arguments: vec![0],
+                destinations: vec![3],
+                cleanup: VmCleanupProof {
+                    moved_places: vec![],
+                    active_loans: vec![],
+                },
+            },
+            VmInstruction::Trap,
+            VmInstruction::Return { value: 3 },
+        ],
+    };
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"leave-clause-artifact"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    assert_eq!(verify_vm(artifact).unwrap().run_i64().unwrap(), 42);
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: function.definition,
+        functions: BTreeMap::from([(function.definition, function)]),
+        fingerprint: Digest::of_bytes(b"leave-clause-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
+}
