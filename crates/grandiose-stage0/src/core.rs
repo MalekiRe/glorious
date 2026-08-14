@@ -6878,7 +6878,6 @@ fn align_lifetime_types(
             },
         ) if expected_binders == actual_binders
             && expected_parameters.len() == actual_parameters.len()
-            && expected_effects == actual_effects
             && expected_invocation == actual_invocation =>
         {
             Ok(Type::Callable {
@@ -6897,7 +6896,13 @@ fn align_lifetime_types(
                     mode,
                     depth + 1,
                 )?),
-                effects: expected_effects.clone(),
+                effects: align_lifetime_effect_row(
+                    expected_effects,
+                    actual_effects,
+                    substitution,
+                    mode,
+                    depth + 1,
+                )?,
                 invocation: *expected_invocation,
             })
         }
@@ -6924,9 +6929,98 @@ fn align_lifetime_generic_argument(
             bind_lifetime(*expected, *actual, substitution, mode, depth)?;
             Ok(GenericArgument::Lifetime(*actual))
         }
+        (GenericArgument::EffectRow(expected), GenericArgument::EffectRow(actual)) => {
+            align_lifetime_effect_row(expected, actual, substitution, mode, depth)
+                .map(GenericArgument::EffectRow)
+        }
         (expected, actual) if expected == actual => Ok(expected.clone()),
         _ => Err(LifetimeError::UnsatisfiedOutlives),
     }
+}
+
+fn align_lifetime_effect_row(
+    expected: &EffectRow,
+    actual: &EffectRow,
+    substitution: &mut CallLifetimeSubstitution,
+    mode: LifetimeMode,
+    depth: u32,
+) -> Result<EffectRow, LifetimeError> {
+    if expected.tail != actual.tail || expected.effects.len() != actual.effects.len() {
+        return Err(LifetimeError::UnsatisfiedOutlives);
+    }
+    let mut unmatched = actual.effects.iter().cloned().collect::<Vec<_>>();
+    let mut effects = std::collections::BTreeSet::new();
+    for expected_effect in &expected.effects {
+        let Some(index) = unmatched.iter().position(|actual_effect| {
+            actual_effect.definition == expected_effect.definition
+                && actual_effect.arguments.len() == expected_effect.arguments.len()
+        }) else {
+            return Err(LifetimeError::UnsatisfiedOutlives);
+        };
+        let actual_effect = unmatched.remove(index);
+        effects.insert(EffectInstance {
+            definition: expected_effect.definition,
+            arguments: expected_effect
+                .arguments
+                .iter()
+                .zip(&actual_effect.arguments)
+                .map(|(expected, actual)| {
+                    align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
+                })
+                .collect::<Result<_, _>>()?,
+        });
+    }
+    if expected.projections.len() != actual.projections.len() {
+        return Err(LifetimeError::UnsatisfiedOutlives);
+    }
+    let mut unmatched = actual.projections.clone();
+    let mut projections = Vec::with_capacity(expected.projections.len());
+    for expected_projection in &expected.projections {
+        let Some(index) = unmatched.iter().position(|actual_projection| {
+            actual_projection.trait_definition == expected_projection.trait_definition
+                && actual_projection.name == expected_projection.name
+                && actual_projection.trait_arguments.len()
+                    == expected_projection.trait_arguments.len()
+                && actual_projection.item_arguments.len()
+                    == expected_projection.item_arguments.len()
+        }) else {
+            return Err(LifetimeError::UnsatisfiedOutlives);
+        };
+        let actual_projection = unmatched.remove(index);
+        projections.push(crate::EffectRowProjection {
+            subject: Box::new(align_lifetime_types(
+                &expected_projection.subject,
+                &actual_projection.subject,
+                substitution,
+                mode,
+                depth,
+            )?),
+            trait_definition: expected_projection.trait_definition,
+            trait_arguments: expected_projection
+                .trait_arguments
+                .iter()
+                .zip(&actual_projection.trait_arguments)
+                .map(|(expected, actual)| {
+                    align_lifetime_types(expected, actual, substitution, mode, depth)
+                })
+                .collect::<Result<_, _>>()?,
+            name: expected_projection.name.clone(),
+            item_arguments: expected_projection
+                .item_arguments
+                .iter()
+                .zip(&actual_projection.item_arguments)
+                .map(|(expected, actual)| {
+                    align_lifetime_types(expected, actual, substitution, mode, depth)
+                })
+                .collect::<Result<_, _>>()?,
+        });
+    }
+    Ok(EffectRow {
+        effects,
+        projections,
+        tail: expected.tail,
+    }
+    .canonicalized())
 }
 
 fn bind_lifetime(
