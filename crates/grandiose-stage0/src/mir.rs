@@ -284,6 +284,11 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    /// Exact manifest-bound checked i64-to-u8 conversion.
+    I64ToU8Checked {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1436,6 +1441,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::I64ToU32Wrapping { dst, .. }
         | MirInstruction::I64ToUsizeChecked { dst, .. }
         | MirInstruction::I64ToUsizeWrapping { dst, .. }
+        | MirInstruction::I64ToU8Checked { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3347,6 +3353,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::I64ToU32Wrapping { .. }
         | MirInstruction::I64ToUsizeChecked { .. }
         | MirInstruction::I64ToUsizeWrapping { .. } => Ok(()),
+        MirInstruction::I64ToU8Checked { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -4079,7 +4086,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::I64ToU32Checked { dst, value }
         | MirInstruction::I64ToU32Wrapping { dst, value }
         | MirInstruction::I64ToUsizeChecked { dst, value }
-        | MirInstruction::I64ToUsizeWrapping { dst, value } => vec![*dst, *value],
+        | MirInstruction::I64ToUsizeWrapping { dst, value }
+        | MirInstruction::I64ToU8Checked { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -14074,6 +14082,32 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::I64ToUsizeChecked { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::IntConvertCheckedToU8) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic checked u8 conversion requires one operand",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::U8)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic checked u8 conversion is only authorized for frozen i64",
+                                    );
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::I64ToU8Checked { dst, value: *value });
                             }
                             None => match host_import {
                                 Some(import) => self.instructions.push(MirInstruction::HostCall {

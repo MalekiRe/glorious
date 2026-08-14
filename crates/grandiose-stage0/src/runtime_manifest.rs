@@ -110,6 +110,10 @@ pub enum PrimitiveRole {
     IntShl,
     IntConvertCheckedToU32,
     IntConvertCheckedToUsize,
+    /// Exact generic declaration `__g1_int_convert_checked_to_u8<T>` in
+    /// distributed std. Its frozen i64 specialization rejects values outside
+    /// the u8 range.
+    IntConvertCheckedToU8,
 }
 
 impl PrimitiveRole {
@@ -166,6 +170,7 @@ impl PrimitiveRole {
             Self::IntShl => "int-shl",
             Self::IntConvertCheckedToU32 => "int-convert-checked-to-u32",
             Self::IntConvertCheckedToUsize => "int-convert-checked-to-usize",
+            Self::IntConvertCheckedToU8 => "int-convert-checked-to-u8",
         }
     }
 
@@ -222,6 +227,7 @@ impl PrimitiveRole {
             "int-shl" => Self::IntShl,
             "int-convert-checked-to-u32" => Self::IntConvertCheckedToU32,
             "int-convert-checked-to-usize" => Self::IntConvertCheckedToUsize,
+            "int-convert-checked-to-u8" => Self::IntConvertCheckedToU8,
             _ => return None,
         })
     }
@@ -654,6 +660,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntConvertCheckedToU8 => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Scalar(crate::ScalarType::U8),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntConvertWrappingToUsize => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
@@ -773,6 +790,7 @@ fn manifest_digest(
             PrimitiveRole::IntShl => 43,
             PrimitiveRole::IntConvertCheckedToU32 => 47,
             PrimitiveRole::IntConvertCheckedToUsize => 49,
+            PrimitiveRole::IntConvertCheckedToU8 => 51,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
