@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 
 use grandiose_stage0::{
-    ConstKind, DeclarationScan, DefKey, DefinitionIndex, Digest, EffectRow, EffectTail,
-    ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout, FileKey, GenericArgument,
-    GenericKind, InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, NominalField,
-    PackageKey, Quantity, ScalarType, StructuralU32Expr, TraitSolver, Type,
+    CallableSignature, ConstKind, DeclarationScan, DefKey, DefinitionIndex, Digest, EffectRow,
+    EffectTail, ElaboratedAssociatedTypeBinding, ElaboratedHeader, ElaboratedInterface,
+    ElaboratedNominalLayout, ElaboratedTraitReference, FileKey, GenericArgument, GenericKind,
+    InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, NominalField, PackageKey,
+    Quantity, ScalarType, StructuralU32Expr, TraitSolver, Type,
+    intrinsic_callable_trait_definition,
 };
 
 #[test]
@@ -148,6 +150,85 @@ fn frozen_callable_signatures_retain_named_associated_item_equalities() {
             .value
             .effects
             .is_empty()
+    );
+}
+
+#[test]
+fn frozen_interfaces_reject_forged_intrinsic_fn_output_contracts() {
+    let intrinsic = intrinsic_callable_trait_definition();
+    let callable = Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Scalar(ScalarType::I64)),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+    };
+    let relation = ElaboratedTraitReference {
+        definition: intrinsic,
+        arguments: vec![GenericArgument::Type(Type::Unit)],
+    };
+    let mut interface = ElaboratedInterface::default();
+    interface.definitions.insert(
+        DefKey(Digest::of_bytes(b"forged-intrinsic-fn-signature")),
+        ElaboratedHeader::Callable(CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![],
+            result: Type::Unit,
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![(callable.clone(), relation.clone())],
+            where_associated_type_bindings: vec![ElaboratedAssociatedTypeBinding {
+                subject: callable,
+                relation,
+                name: "Output".into(),
+                item_generic_kinds: vec![],
+                item_arguments: vec![],
+                value: Type::Scalar(ScalarType::Bool),
+            }],
+            where_associated_effect_bindings: vec![],
+        }),
+    );
+    interface.validate_projection_obligations();
+    assert!(
+        interface
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4167"),
+        "{:#?}",
+        interface.diagnostics
+    );
+}
+
+#[test]
+fn unresolved_source_fn_spelling_freezes_the_intrinsic_callable_identity() {
+    let package = PackageKey("signature-intrinsic-fn@0.1.0".into());
+    let source =
+        "pub fn apply<F>(body: F) -> i64 where F: Fn<(), Output = i64, Effects = {}> { body() }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface.definitions.first().expect("apply definition");
+    let ElaboratedHeader::Callable(signature) =
+        signatures.definitions.get(&definition.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert_eq!(
+        signature.where_bounds[0].1.definition,
+        intrinsic_callable_trait_definition()
+    );
+    assert_eq!(signature.where_associated_type_bindings[0].name, "Output");
+    assert_eq!(
+        signature.where_associated_effect_bindings[0].name,
+        "Effects"
     );
 }
 

@@ -2777,6 +2777,18 @@ impl TypedBody {
                 .and_then(callable)
                 .map(|signature| signature.where_bounds.clone())
                 .unwrap_or_default(),
+            ambient_callable_type_bindings: signatures
+                .definitions
+                .get(&definition.key)
+                .and_then(callable)
+                .map(|signature| signature.where_associated_type_bindings.clone())
+                .unwrap_or_default(),
+            ambient_callable_effect_bindings: signatures
+                .definitions
+                .get(&definition.key)
+                .and_then(callable)
+                .map(|signature| signature.where_associated_effect_bindings.clone())
+                .unwrap_or_default(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
@@ -2962,6 +2974,14 @@ impl TypedBody {
                 .flatten()
                 .chain(context.signature.where_bounds.clone())
                 .collect(),
+            ambient_callable_type_bindings: context
+                .signature
+                .where_associated_type_bindings
+                .clone(),
+            ambient_callable_effect_bindings: context
+                .signature
+                .where_associated_effect_bindings
+                .clone(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
@@ -3046,6 +3066,8 @@ impl TypedBody {
             const_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             ambient_where_bounds: vec![],
+            ambient_callable_type_bindings: vec![],
+            ambient_callable_effect_bindings: vec![],
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
@@ -3194,6 +3216,11 @@ struct Elaborator<'a> {
     /// rejecting a call which is valid precisely because its own `where`
     /// clause established the required evidence.
     ambient_where_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+    /// Associated equalities belonging to the lexical callable evidence.
+    /// These give a generic `F: Fn<..., Output = R, Effects = E>` its actual
+    /// indirect-call contract without manufacturing a nominal function type.
+    ambient_callable_type_bindings: Vec<crate::ElaboratedAssociatedTypeBinding>,
+    ambient_callable_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
     /// Protocol instances exhaustively intercepted by lexically active deep
     /// handlers.  A partial handler never enters this set, so forwarding still
     /// requires the enclosing callable's outward effect declaration.
@@ -6709,6 +6736,13 @@ impl Elaborator<'_> {
     }
     fn call(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span) -> CoreId {
         let callable = self.expressions[callee.0 as usize].ty.clone();
+        let callable = match callable {
+            callable @ Type::Callable { .. } => callable,
+            value => match self.callable_contract_from_ambient_fn_bound(&value) {
+                Some(callable) => callable,
+                None => return self.fail(span, "G4105", "called expression is not callable"),
+            },
+        };
         let Type::Callable {
             parameters,
             result,
@@ -6768,6 +6802,59 @@ impl Elaborator<'_> {
             result,
             span,
         )
+    }
+
+    /// Open the compiler-owned `Fn` evidence attached to the declaration
+    /// currently being elaborated.  This is lexical contract use, not an
+    /// inference fallback: a same-spelled user trait has a different frozen
+    /// identity and therefore cannot make an arbitrary value callable.
+    fn callable_contract_from_ambient_fn_bound(&self, value: &Type) -> Option<Type> {
+        for (subject, relation) in &self.ambient_where_bounds {
+            if subject != value || !crate::is_intrinsic_callable_trait(relation) {
+                continue;
+            }
+            let parameters = match relation.arguments.as_slice() {
+                [crate::GenericArgument::Type(Type::Tuple(parameters))] => parameters.clone(),
+                [crate::GenericArgument::Type(Type::Unit)] => vec![],
+                _ => continue,
+            };
+            let outputs = self
+                .ambient_callable_type_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.subject == *subject
+                        && binding.relation == *relation
+                        && binding.name == "Output"
+                        && binding.item_arguments.is_empty()
+                })
+                .collect::<Vec<_>>();
+            let effects = self
+                .ambient_callable_effect_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.subject == *subject
+                        && binding.relation == *relation
+                        && binding.name == "Effects"
+                        && binding.item_arguments.is_empty()
+                })
+                .collect::<Vec<_>>();
+            let [output] = outputs.as_slice() else {
+                continue;
+            };
+            let effects = match effects.as_slice() {
+                [] => EffectRow::empty(),
+                [effects] => effects.value.clone(),
+                _ => continue,
+            };
+            return Some(Type::Callable {
+                lifetime_binders: 0,
+                parameters,
+                result: Box::new(output.value.clone()),
+                effects,
+                invocation: crate::Quantity::ONCE,
+            });
+        }
+        None
     }
     /// Resolve a qualified trait method used as a first-class callable.  A
     /// trait selection needs a concrete subject, so unlike an immediately
@@ -8673,7 +8760,13 @@ impl Elaborator<'_> {
             self.recovered = true;
             return;
         };
-        self.check_where_bounds(signature.where_bounds, span);
+        self.check_where_bounds(signature.where_bounds.clone(), span);
+        self.check_intrinsic_callable_bindings(
+            signature.where_bounds,
+            signature.where_associated_type_bindings,
+            signature.where_associated_effect_bindings,
+            span,
+        );
     }
     fn check_where_bounds(
         &mut self,
@@ -8761,6 +8854,99 @@ impl Elaborator<'_> {
         }
         if failed {
             self.recovered = true;
+        }
+    }
+
+    fn check_intrinsic_callable_bindings(
+        &mut self,
+        bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+        type_bindings: Vec<crate::ElaboratedAssociatedTypeBinding>,
+        effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
+        span: Span,
+    ) {
+        for (subject, relation) in bounds {
+            if !crate::is_intrinsic_callable_trait(&relation) {
+                continue;
+            }
+            let Ok(Type::Callable {
+                parameters,
+                result,
+                effects,
+                ..
+            }) = self.inference.zonk(subject.clone())
+            else {
+                continue;
+            };
+            let inputs = match relation.arguments.as_slice() {
+                [crate::GenericArgument::Type(Type::Tuple(inputs))] => inputs.clone(),
+                [crate::GenericArgument::Type(Type::Unit)] => vec![],
+                _ => {
+                    self.error(
+                        span,
+                        "G4164",
+                        "intrinsic `Fn` requires a tuple input argument",
+                    );
+                    self.recovered = true;
+                    continue;
+                }
+            };
+            let inputs = inputs
+                .iter()
+                .cloned()
+                .map(|input| self.inference.zonk(input))
+                .collect::<Result<Vec<_>, _>>();
+            if inputs.as_ref().is_ok_and(|inputs| *inputs != parameters) {
+                self.error(
+                    span,
+                    "G4166",
+                    "intrinsic `Fn` input tuple does not match callable parameters",
+                );
+                self.recovered = true;
+            }
+            let outputs = type_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.subject == subject
+                        && binding.relation == relation
+                        && binding.name == "Output"
+                        && binding.item_arguments.is_empty()
+                })
+                .collect::<Vec<_>>();
+            if let [binding] = outputs.as_slice()
+                && self
+                    .inference
+                    .zonk(binding.value.clone())
+                    .is_ok_and(|output| output != *result)
+            {
+                self.error(
+                    span,
+                    "G4167",
+                    "intrinsic `Fn` Output equality does not match callable result",
+                );
+                self.recovered = true;
+            }
+            let rows = effect_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.subject == subject
+                        && binding.relation == relation
+                        && binding.name == "Effects"
+                        && binding.item_arguments.is_empty()
+                })
+                .collect::<Vec<_>>();
+            if let [binding] = rows.as_slice()
+                && self
+                    .inference
+                    .zonk_effects_allowing_generic_tail(binding.value.clone())
+                    .is_ok_and(|row| row != effects)
+            {
+                self.error(
+                    span,
+                    "G4168",
+                    "intrinsic `Fn` Effects equality does not match callable effects",
+                );
+                self.recovered = true;
+            }
         }
     }
     /// Discharge an obligation directly from the declaration contract in

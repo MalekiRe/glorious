@@ -24,6 +24,20 @@ use crate::{
 /// concrete self type before a method contract becomes callable.
 pub(crate) const TRAIT_SELF_GENERIC: u32 = u32::MAX;
 
+/// Stable identity for the language-provided callable contract.  This is not
+/// a prelude spelling: source resolution may bind a user trait named `Fn`,
+/// but only an unresolved unqualified `Fn` is elaborated to this identity.
+/// Solver-side callable evidence keys exclusively on this value.
+pub fn intrinsic_callable_trait_definition() -> DefKey {
+    DefKey(crate::Digest::of_bytes(
+        b"grandiose-stage0-intrinsic-callable-trait-v1",
+    ))
+}
+
+pub fn is_intrinsic_callable_trait(reference: &ElaboratedTraitReference) -> bool {
+    reference.definition == intrinsic_callable_trait_definition()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
     pub generics: u32,
@@ -991,6 +1005,13 @@ impl ElaboratedInterface {
         let mut diagnostics = Vec::new();
 
         for (definition, header) in &definitions {
+            if *definition == intrinsic_callable_trait_definition() {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4169",
+                    message: "frozen interfaces cannot define the intrinsic `Fn` trait identity"
+                        .into(),
+                });
+            }
             match header {
                 ElaboratedHeader::Callable(signature)
                 | ElaboratedHeader::ValueAlias { signature, .. } => {
@@ -1092,6 +1113,13 @@ impl ElaboratedInterface {
                     }
                 }
                 ElaboratedHeader::Implementation(implementation) => {
+                    if is_intrinsic_callable_trait(&implementation.relation) {
+                        diagnostics.push(SignatureDiagnostic {
+                            code: "G4169",
+                            message: "frozen interfaces cannot implement the intrinsic `Fn` trait"
+                                .into(),
+                        });
+                    }
                     let mut ambient = implementation.where_bounds.clone();
                     ambient.push((
                         implementation.self_ty.clone(),
@@ -1241,6 +1269,9 @@ impl ElaboratedInterface {
         for (subject, relation) in &signature.where_bounds {
             self.validate_type_projection_obligations(subject, &ambient, diagnostics);
             self.validate_trait_reference_projection_obligations(relation, &ambient, diagnostics);
+            if is_intrinsic_callable_trait(relation) {
+                self.validate_intrinsic_callable_bound(signature, subject, relation, diagnostics);
+            }
         }
         for binding in &signature.where_associated_type_bindings {
             self.validate_type_projection_obligations(&binding.subject, &ambient, diagnostics);
@@ -1273,6 +1304,96 @@ impl ElaboratedInterface {
                 );
             }
             self.validate_effect_row_projection_obligations(&binding.value, &ambient, diagnostics);
+        }
+    }
+
+    /// Validate the frozen shape of compiler-owned callable evidence.  Source
+    /// generics may carry an `Fn` contract without being callable yet, but a
+    /// concrete callable cannot lie about its inputs, result, or outward row.
+    /// This also rejects manually forged interfaces before a solver could use
+    /// their relation as evidence.
+    fn validate_intrinsic_callable_bound(
+        &self,
+        signature: &CallableSignature,
+        subject: &Type,
+        relation: &ElaboratedTraitReference,
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        let inputs = match relation.arguments.as_slice() {
+            [GenericArgument::Type(Type::Tuple(inputs))] => Some(inputs.as_slice()),
+            [GenericArgument::Type(Type::Unit)] => Some(&[] as &[Type]),
+            _ => {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4164",
+                    message: "intrinsic `Fn` requires exactly one tuple input argument".into(),
+                });
+                None
+            }
+        };
+        let type_bindings = signature
+            .where_associated_type_bindings
+            .iter()
+            .filter(|binding| binding.subject == *subject && binding.relation == *relation)
+            .collect::<Vec<_>>();
+        let effect_bindings = signature
+            .where_associated_effect_bindings
+            .iter()
+            .filter(|binding| binding.subject == *subject && binding.relation == *relation)
+            .collect::<Vec<_>>();
+        for binding in &type_bindings {
+            if binding.name != "Output" || !binding.item_arguments.is_empty() {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4165",
+                    message: "intrinsic `Fn` only accepts `Output = Type`".into(),
+                });
+            }
+        }
+        for binding in &effect_bindings {
+            if binding.name != "Effects" || !binding.item_arguments.is_empty() {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4165",
+                    message: "intrinsic `Fn` only accepts `Effects = Row`".into(),
+                });
+            }
+        }
+        let Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } = subject
+        else {
+            return;
+        };
+        if inputs.is_some_and(|inputs| inputs != parameters) {
+            diagnostics.push(SignatureDiagnostic {
+                code: "G4166",
+                message: "intrinsic `Fn` input tuple does not match callable parameters".into(),
+            });
+        }
+        if type_bindings.len() > 1 || effect_bindings.len() > 1 {
+            diagnostics.push(SignatureDiagnostic {
+                code: "G4165",
+                message: "intrinsic `Fn` has duplicate associated equality bindings".into(),
+            });
+        }
+        if let Some(binding) = type_bindings.first()
+            && binding.name == "Output"
+            && binding.value != **result
+        {
+            diagnostics.push(SignatureDiagnostic {
+                code: "G4167",
+                message: "intrinsic `Fn` Output equality does not match callable result".into(),
+            });
+        }
+        if let Some(binding) = effect_bindings.first()
+            && binding.name == "Effects"
+            && binding.value != *effects
+        {
+            diagnostics.push(SignatureDiagnostic {
+                code: "G4168",
+                message: "intrinsic `Fn` Effects equality does not match callable effects".into(),
+            });
         }
     }
 
@@ -3529,27 +3650,37 @@ impl Elaborator<'_> {
                 else {
                     continue;
                 };
-                let item_generic_kinds = self
-                    .index
-                    .associated_type_generic_kinds(relation.definition, name)
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| {
-                        // An unresolved relation already carries the primary
-                        // diagnostic. Preserve the equality in the error
-                        // interface rather than inventing an item declaration.
-                        if relation.definition
-                            != DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait"))
-                        {
-                            self.error(
-                                "G4163",
-                                format!(
-                                    "trait `{}` has no associated type `{name}`",
-                                    bound.relation.path.join("::")
-                                ),
-                            );
-                        }
-                        vec![]
-                    });
+                let item_generic_kinds = if is_intrinsic_callable_trait(&relation) {
+                    if name != "Output" || !item_arguments.is_empty() {
+                        self.error(
+                            "G4165",
+                            "intrinsic `Fn` only accepts the zero-arity `Output = Type` equality"
+                                .into(),
+                        );
+                    }
+                    vec![]
+                } else {
+                    self.index
+                        .associated_type_generic_kinds(relation.definition, name)
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| {
+                            // An unresolved relation already carries the primary
+                            // diagnostic. Preserve the equality in the error
+                            // interface rather than inventing an item declaration.
+                            if relation.definition
+                                != DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait"))
+                            {
+                                self.error(
+                                    "G4163",
+                                    format!(
+                                        "trait `{}` has no associated type `{name}`",
+                                        bound.relation.path.join("::")
+                                    ),
+                                );
+                            }
+                            vec![]
+                        })
+                };
                 let elaborated_item_arguments = if item_generic_kinds.is_empty()
                     && relation.definition
                         == DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait"))
@@ -3576,11 +3707,21 @@ impl Elaborator<'_> {
                 else {
                     continue;
                 };
-                let item_generic_kinds = self
-                    .index
-                    .associated_type_generic_kinds(relation.definition, name)
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_default();
+                let item_generic_kinds = if is_intrinsic_callable_trait(&relation) {
+                    if name != "Effects" || !item_arguments.is_empty() {
+                        self.error(
+                            "G4165",
+                            "intrinsic `Fn` only accepts the zero-arity `Effects = Row` equality"
+                                .into(),
+                        );
+                    }
+                    vec![]
+                } else {
+                    self.index
+                        .associated_type_generic_kinds(relation.definition, name)
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_default()
+                };
                 let elaborated_item_arguments = if item_generic_kinds.is_empty()
                     && relation.definition
                         == DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait"))
@@ -3767,6 +3908,22 @@ impl Elaborator<'_> {
                 }
             }
             _ => {
+                if path == ["Fn"] {
+                    let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
+                    if !matches!(
+                        arguments.as_slice(),
+                        [GenericArgument::Type(Type::Tuple(_) | Type::Unit)]
+                    ) {
+                        self.error(
+                            "G4164",
+                            "intrinsic `Fn` requires exactly one tuple input argument".into(),
+                        );
+                    }
+                    return ElaboratedTraitReference {
+                        definition: intrinsic_callable_trait_definition(),
+                        arguments,
+                    };
+                }
                 let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
                 self.error("G3310", format!("unresolved trait `{}`", path.join("::")));
                 ElaboratedTraitReference {

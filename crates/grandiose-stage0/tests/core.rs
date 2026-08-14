@@ -91,6 +91,21 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
 }
 
 #[test]
+fn typed_core_opens_intrinsic_fn_where_contract_for_generic_local_calls() {
+    let core = core_for(
+        "core-intrinsic-fn-contract",
+        "pub fn main<F>(body: F) -> i64 where F: Fn<(), Output = i64, Effects = {}> { body() }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(
+        core.expressions
+            .iter()
+            .any(|expression| matches!(expression.kind, CoreKind::Call { .. }))
+    );
+    assert_eq!(core.expression(core.root).ty, Type::Scalar(ScalarType::I64));
+}
+
+#[test]
 fn declared_result_expectations_flow_through_blocks_and_structured_values() {
     let core = core_for(
         "core-structured-expected-types@0.1.0",

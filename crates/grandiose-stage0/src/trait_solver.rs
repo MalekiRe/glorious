@@ -11,7 +11,7 @@ use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedEnumVariantPayload,
     ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout,
     ElaboratedTrait, ElaboratedTraitReference, GenericArgument, Type, implementation_method_key,
-    signature::TRAIT_SELF_GENERIC,
+    signature::{TRAIT_SELF_GENERIC, is_intrinsic_callable_trait},
     types::{canonical_generic_arguments_encoding, canonical_type_encoding},
 };
 
@@ -1564,6 +1564,9 @@ impl TraitSolver {
         if self.assumption_proves(&goal, assumptions) {
             return TraitAnswerIndex::Proven(assumption_evidence(&goal));
         }
+        if is_intrinsic_callable_trait(&goal.relation) {
+            return self.solve_intrinsic_callable_goal(&goal);
+        }
         self.steps += 1;
         let key = goal_key(&goal);
         match self.tables.get(&key).copied() {
@@ -1637,6 +1640,28 @@ impl TraitSolver {
         self.traits
             .get(&goal.relation.definition)
             .is_some_and(|trait_header| trait_header.auto_trait)
+    }
+
+    /// `Fn` is compiler-owned evidence, not a declaration that source code
+    /// can shadow or implement.  Its sole proof rule is the frozen callable
+    /// shape: the single positional relation argument is the input tuple.
+    fn solve_intrinsic_callable_goal(&self, goal: &TraitGoal) -> TraitAnswerIndex {
+        let Type::Callable { parameters, .. } = &goal.subject else {
+            return TraitAnswerIndex::NoSolution;
+        };
+        let inputs = match goal.relation.arguments.as_slice() {
+            [GenericArgument::Type(Type::Tuple(inputs))] => inputs.as_slice(),
+            [GenericArgument::Type(Type::Unit)] => &[],
+            _ => return TraitAnswerIndex::NoSolution,
+        };
+        if inputs != parameters {
+            return TraitAnswerIndex::NoSolution;
+        }
+        let key = goal_key(goal);
+        TraitAnswerIndex::Proven(DefKey(Digest::of_parts([
+            b"grandiose-stage0-intrinsic-callable-evidence-v1".as_slice(),
+            key.as_bytes().as_slice(),
+        ])))
     }
 
     /// Produce structural auto-trait evidence only when the source has

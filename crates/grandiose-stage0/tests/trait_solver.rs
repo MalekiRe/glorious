@@ -7,7 +7,7 @@ use grandiose_stage0::{
     TraitCandidateRejection, TraitConstProjectionAnswer, TraitCyclePolicy,
     TraitEffectRowProjectionAnswer, TraitExplanationTerminal, TraitGoal, TraitMethodAnswer,
     TraitProjectionAnswer, TraitSelectionExplanation, TraitSolver, TraitSolverLimits, Type,
-    implementation_method_key,
+    implementation_method_key, intrinsic_callable_trait_definition,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -57,6 +57,42 @@ fn terminal(explanation: &TraitSelectionExplanation) -> Option<&TraitExplanation
                 .find_map(|bound| terminal(&bound.explanation))
         })
     })
+}
+
+#[test]
+fn intrinsic_fn_evidence_is_tied_to_callable_shape_not_the_source_spelling() {
+    let (interface, signatures) = signatures("trait Fn {}");
+    let declared_fn = key(&interface, "Fn");
+    let callable = Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![Type::Scalar(ScalarType::I64)],
+        result: Box::new(Type::Scalar(ScalarType::Bool)),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    assert!(matches!(
+        solver.solve(TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: intrinsic_callable_trait_definition(),
+                arguments: vec![GenericArgument::Type(Type::Tuple(vec![Type::Scalar(
+                    ScalarType::I64,
+                )]))],
+            },
+            subject: callable.clone(),
+        }),
+        TraitAnswer::Proven { .. }
+    ));
+    assert!(matches!(
+        solver.solve(TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: declared_fn,
+                arguments: vec![],
+            },
+            subject: callable,
+        }),
+        TraitAnswer::NoSolution
+    ));
 }
 
 #[test]
