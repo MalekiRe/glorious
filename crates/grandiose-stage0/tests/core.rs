@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BodySyntax, CaptureMode, CoreHandlerResumption, CoreKind, DeclarationScan, DefinitionIndex,
-    ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath, MirInstruction,
-    MirLowering, PackageKey, PlaceFlow, TypedBody, implementation_method_key,
+    ElaboratedInterface, FileKey, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction,
+    MirLowering, PackageKey, PlaceFlow, Type, TypedBody, implementation_method_key,
 };
 
 #[test]
@@ -306,6 +306,82 @@ fn typed_closures_become_callable_core_values_with_explicit_capture_modes() {
     assert_eq!(captures.len(), 1);
     assert_eq!(captures[0].name, "value");
     assert_eq!(captures[0].mode, CaptureMode::SharedBorrow);
+}
+
+#[test]
+fn typed_closures_preserve_enclosing_lifetime_binders() {
+    let package = PackageKey("core-closure-lifetime@0.1.0".into());
+    let source = "pub fn main<'a>(value: &'a i64) -> i64 { let identity = (item: &'a i64) -> &'a i64 { item }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = &interface.definitions[0];
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let closure = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Closure { .. }))
+        .expect("typed closure");
+    let Type::Callable {
+        parameters, result, ..
+    } = &closure.ty
+    else {
+        panic!("typed closure did not receive a callable type")
+    };
+    assert!(matches!(
+        parameters.as_slice(),
+        [Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }]
+    ));
+    assert!(matches!(
+        result.as_ref(),
+        Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn typed_closures_reject_unbound_lifetime_annotations() {
+    let package = PackageKey("core-closure-unbound-lifetime@0.1.0".into());
+    let source = "pub fn main() -> i64 { let identity = (item: &'a i64) -> i64 { 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = &interface.definitions[0];
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4170"),
+        "{:#?}",
+        core.diagnostics
+    );
 }
 
 #[test]

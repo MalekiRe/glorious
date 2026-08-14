@@ -293,7 +293,9 @@ impl TypedBody {
                     .generics
                     .iter()
                     .enumerate()
-                    .filter(|(_, name)| !header.generics.is_effect_row(name))
+                    .filter(|(_, name)| {
+                        !header.generics.is_effect_row(name) && !header.generics.is_lifetime(name)
+                    })
                     .map(|(index, name)| (name.clone(), index as u32))
                     .collect()
             })
@@ -320,6 +322,18 @@ impl TypedBody {
                         .iter()
                         .enumerate()
                         .filter(|(_, name)| header.generics.is_effect_row(name))
+                        .map(|(index, name)| (name.clone(), index as u32))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            lifetime_parameters: definition
+                .callable_header()
+                .map(|header| {
+                    header
+                        .generics
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, name)| header.generics.is_lifetime(name))
                         .map(|(index, name)| (name.clone(), index as u32))
                         .collect()
                 })
@@ -400,13 +414,17 @@ impl TypedBody {
     ) -> Self {
         let mut generic_parameters = std::collections::BTreeMap::new();
         for (index, name) in context.implementation_header.generics.iter().enumerate() {
-            if !context.implementation_header.generics.is_effect_row(name) {
+            if !context.implementation_header.generics.is_effect_row(name)
+                && !context.implementation_header.generics.is_lifetime(name)
+            {
                 generic_parameters.insert(name.clone(), index as u32);
             }
         }
         let method_base = context.implementation_header.generics.len() as u32;
         for (offset, name) in context.method.signature.generics.iter().enumerate() {
-            if !context.method.signature.generics.is_effect_row(name) {
+            if !context.method.signature.generics.is_effect_row(name)
+                && !context.method.signature.generics.is_lifetime(name)
+            {
                 generic_parameters.insert(name.clone(), method_base + offset as u32);
             }
         }
@@ -434,6 +452,21 @@ impl TypedBody {
                 let method_base = context.implementation_header.generics.len() as u32;
                 for (offset, name) in context.method.signature.generics.iter().enumerate() {
                     if context.method.signature.generics.is_effect_row(name) {
+                        parameters.insert(name.clone(), method_base + offset as u32);
+                    }
+                }
+                parameters
+            },
+            lifetime_parameters: {
+                let mut parameters = std::collections::BTreeMap::new();
+                for (index, name) in context.implementation_header.generics.iter().enumerate() {
+                    if context.implementation_header.generics.is_lifetime(name) {
+                        parameters.insert(name.clone(), index as u32);
+                    }
+                }
+                let method_base = context.implementation_header.generics.len() as u32;
+                for (offset, name) in context.method.signature.generics.iter().enumerate() {
+                    if context.method.signature.generics.is_lifetime(name) {
                         parameters.insert(name.clone(), method_base + offset as u32);
                     }
                 }
@@ -505,6 +538,7 @@ impl TypedBody {
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
+            lifetime_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             handled_effects: std::collections::BTreeSet::new(),
         };
@@ -616,6 +650,9 @@ struct Elaborator<'a> {
     /// separate from `generic_parameters`: an effect row can be a callable
     /// tail but can never be elaborated as a value type.
     effect_row_parameters: std::collections::BTreeMap<String, u32>,
+    /// Lifetime binders have their own namespace and slot identity. They are
+    /// valid only as the qualifier of a reference, never as a value type.
+    lifetime_parameters: std::collections::BTreeMap<String, u32>,
     declared_effects: EffectRow,
     /// Protocol instances exhaustively intercepted by lexically active deep
     /// handlers.  A partial handler never enters this set, so forwarding still
@@ -1090,7 +1127,7 @@ impl Elaborator<'_> {
             },
             HeaderType::Reference {
                 unique,
-                lifetime: _,
+                lifetime,
                 referent,
             } => Type::Reference {
                 mutability: if *unique {
@@ -1098,7 +1135,7 @@ impl Elaborator<'_> {
                 } else {
                     Mutability::Shared
                 },
-                lifetime: Lifetime::Elided,
+                lifetime: self.header_lifetime(lifetime.as_deref()),
                 referent: Box::new(self.header_type(referent)),
             },
             HeaderType::Projection {
@@ -1119,6 +1156,24 @@ impl Elaborator<'_> {
                     _ => Type::Error,
                 }
             }
+        }
+    }
+    fn header_lifetime(&mut self, spelling: Option<&str>) -> Lifetime {
+        match spelling {
+            None | Some("'_") => Lifetime::Elided,
+            Some("'static") => Lifetime::Static,
+            Some(name) => match self.lifetime_parameters.get(name) {
+                Some(index) => Lifetime::Generic(*index),
+                None => {
+                    self.error(
+                        self.body.expression(self.body.root).span,
+                        "G4170",
+                        &format!("unbound lifetime `{name}` in closure annotation"),
+                    );
+                    self.recovered = true;
+                    Lifetime::Elided
+                }
+            },
         }
     }
     /// Callable signatures retain symbolic projections so generic interfaces
