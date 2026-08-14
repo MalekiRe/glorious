@@ -247,6 +247,9 @@ pub struct InstanceRoot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstanceGraphError {
+    UnknownCaller {
+        caller: Box<InstanceKey>,
+    },
     TotalLimit {
         limit: usize,
         root: Box<InstanceKey>,
@@ -283,11 +286,20 @@ impl InstanceGraph {
         callee: InstanceKey,
         limits: InstanceLimits,
     ) -> Result<bool, InstanceGraphError> {
+        if !self.edges.contains_key(caller) {
+            return Err(InstanceGraphError::UnknownCaller {
+                caller: Box::new(caller.clone()),
+            });
+        }
+        // Insert before publishing the edge. A rejected specialization must
+        // leave the graph unchanged, otherwise a later retry could observe an
+        // unvalidated callee that was never admitted by the resource policy.
+        let inserted = self.insert(callee.clone(), None, limits)?;
         self.edges
             .entry(caller.clone())
             .or_default()
             .insert(callee.clone());
-        self.insert(callee, None, limits)
+        Ok(inserted)
     }
 
     fn insert(
@@ -484,5 +496,51 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(graph.breadth_first_from_roots(), vec![first, second]);
+    }
+
+    #[test]
+    fn discovery_is_transactional_and_requires_an_admitted_caller() {
+        let kinds = [GenericKind::Type];
+        let first = InstanceKey::new(
+            definition(b"first"),
+            &kinds,
+            vec![InstanceArgument::Type(Type::Scalar(ScalarType::I64))],
+        )
+        .unwrap();
+        let second = InstanceKey::new(
+            definition(b"second"),
+            &kinds,
+            vec![InstanceArgument::Type(Type::Scalar(ScalarType::I64))],
+        )
+        .unwrap();
+        let mut graph = InstanceGraph::default();
+        assert!(matches!(
+            graph.discover_callee(&first, second.clone(), InstanceLimits::default()),
+            Err(InstanceGraphError::UnknownCaller { .. })
+        ));
+        graph
+            .discover_root(
+                InstanceRoot {
+                    key: first.clone(),
+                    reason: "entry".into(),
+                },
+                InstanceLimits {
+                    total: 1,
+                    per_definition: 1,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            graph.discover_callee(
+                &first,
+                second,
+                InstanceLimits {
+                    total: 1,
+                    per_definition: 1,
+                },
+            ),
+            Err(InstanceGraphError::TotalLimit { .. })
+        ));
+        assert!(graph.callees(&first).unwrap().is_empty());
     }
 }
