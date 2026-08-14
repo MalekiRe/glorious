@@ -1863,6 +1863,8 @@ impl MirLowering {
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),
             direct_resumption: None,
+            suspend_completion: false,
+            deferred_completion: None,
         };
         let parameters = body
             .parameters
@@ -2632,6 +2634,36 @@ impl MirLowering {
             };
         }
         if let Some(function) = lowerer.lower_root_completion_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        // A normal completion is an expression, not merely a tail return.
+        // Root completion lowering above owns the direct tail form; this
+        // continuation CFG path owns occurrences in operands, initializers,
+        // and other strict expression positions.
+        if let Some(function) =
+            lowerer.lower_root_non_tail_completion(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
                 if let Err(message) = validate_lowered_handler_contracts(body, &function) {
@@ -4552,6 +4584,15 @@ struct Lowerer<'a> {
     /// representation can be eliminated: either the root identity or a
     /// replay-safe residual computation cloned once per finite resumption.
     direct_resumption: Option<DirectResumptionState>,
+    /// While lowering a root expression with a non-tail normal completion,
+    /// stop at the first completion in source evaluation order.  The CFG
+    /// continuation lowerer records that boundary, selects an arm, and then
+    /// resumes ordinary value lowering with the selected result cached under
+    /// this Core identity.  Keeping the boundary in the lowerer (rather than
+    /// treating completion as a pseudo-value instruction) preserves pattern
+    /// binding scope and does not speculate later operands.
+    suspend_completion: bool,
+    deferred_completion: Option<CoreId>,
 }
 
 #[derive(Clone, Debug)]
@@ -12391,6 +12432,227 @@ impl Lowerer<'_> {
         Some(entry)
     }
 
+    /// Lower normal-completion expressions which occur below the root return
+    /// boundary.  MIR has no expression-level branch instruction: the
+    /// selected arm therefore continues by re-lowering the enclosing root
+    /// with this completion Core id mapped to the arm's typed result local.
+    /// The cache contains every value evaluated before the completion, so the
+    /// continuation neither duplicates a strict prefix nor observes a binder
+    /// outside the arm where that binder was introduced.
+    fn lower_root_non_tail_completion(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        if !self.contains_evaluated_completion(root) {
+            return None;
+        }
+        let mut blocks = Vec::new();
+        let entry = self.lower_completion_continuation_segment(root, &mut blocks)?;
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry,
+            blocks,
+        })
+    }
+
+    /// Emit one straight-line prefix of `root`.  If it reaches another
+    /// completion, construct its ordered decision matrix and recursively emit
+    /// each arm's residual continuation.  A segment is intentionally a CFG
+    /// block, not an instruction splice: branch-local result locals are only
+    /// initialized along their selected edge.
+    fn lower_completion_continuation_segment(
+        &mut self,
+        root: CoreId,
+        blocks: &mut Vec<MirBlock>,
+    ) -> Option<MirBlockId> {
+        debug_assert!(!self.suspend_completion);
+        self.suspend_completion = true;
+        self.deferred_completion = None;
+        let finished = self.value(root);
+        self.suspend_completion = false;
+
+        if let Some(value) = finished {
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: std::mem::take(&mut self.instructions),
+                terminator: MirTerminator::Return { value },
+            });
+            return Some(id);
+        }
+        let completion = self.deferred_completion.take()?;
+        let CoreKind::Completion {
+            computation,
+            clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+
+        // `value` stopped before allocating or evaluating the completion
+        // itself.  Its computation belongs to the common prefix and runs
+        // exactly once before the ordered matrix.
+        let subject = self.value(computation)?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let boundary_values = self.values.clone();
+        let boundary_named = self.named.clone();
+        // Reserve the common-prefix block before recursively emitting the
+        // arms.  The VM artifact format requires the function entry to be
+        // block zero, while each arm may itself discover another completion
+        // and append a whole residual decision subgraph.
+        let entry = MirBlockId(blocks.len() as u32);
+        blocks.push(MirBlock {
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Unreachable,
+        });
+        let fallback_index = clauses
+            .iter()
+            .position(|clause| pattern_is_irrefutable(&clause.pattern));
+        let selected = fallback_index
+            .map(|index| clauses[..=index].to_vec())
+            .unwrap_or(clauses);
+        let has_fallback = fallback_index.is_some();
+
+        let mut arms = Vec::with_capacity(selected.len());
+        for clause in &selected {
+            self.instructions = Vec::new();
+            self.values = boundary_values.clone();
+            self.named = boundary_named.clone();
+            self.bind_completion_clause(clause, subject)?;
+            if matches!(self.body.expression(clause.body).ty, Type::Never) {
+                // A bottom arm still evaluates its selected body, but it has
+                // no value with which to enter the enclosing continuation.
+                self.statement(clause.body)?;
+                let id = MirBlockId(blocks.len() as u32);
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: std::mem::take(&mut self.instructions),
+                    terminator: MirTerminator::Unreachable,
+                });
+                arms.push(id);
+                continue;
+            }
+            let value = self.value(clause.body)?;
+            let arm_instructions = std::mem::take(&mut self.instructions);
+
+            // Completion binders are arm-local.  Restore the lexical
+            // environment at the completion boundary, publish only the
+            // selected result, and lower the original suffix under that
+            // mapping.  This is the typed merge point for all arm results.
+            self.instructions = arm_instructions;
+            self.values = boundary_values.clone();
+            self.values.insert(completion, value);
+            self.named = boundary_named.clone();
+            arms.push(self.lower_completion_continuation_segment(root, blocks)?);
+        }
+
+        self.values = boundary_values;
+        self.named = boundary_named;
+        self.instructions = entry_instructions;
+        blocks[entry.0 as usize].instructions = std::mem::take(&mut self.instructions);
+
+        let mut next = if has_fallback {
+            *arms.last().expect("completion fallback arm exists")
+        } else {
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            });
+            id
+        };
+        let tested = if has_fallback {
+            selected.len().saturating_sub(1)
+        } else {
+            selected.len()
+        };
+        for index in (0..tested).rev() {
+            let pattern = lower_pattern(selected[index].pattern.clone())?;
+            let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: arms[index],
+                    then_arguments: vec![],
+                    else_target: next,
+                    else_arguments: vec![],
+                },
+            });
+            next = id;
+        }
+        blocks[entry.0 as usize].terminator = MirTerminator::Goto {
+            target: next,
+            arguments: vec![],
+        };
+        Some(entry)
+    }
+
+    /// Search only expressions evaluated in the current lexical execution
+    /// path.  Handler clauses and closure bodies get their own lowering
+    /// boundaries, so looking through them here would manufacture a branch in
+    /// code that has not been invoked.
+    fn contains_evaluated_completion(&self, id: CoreId) -> bool {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Completion { .. } => true,
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
+                .into_iter()
+                .any(|value| self.contains_evaluated_completion(value)),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .any(|field| self.contains_evaluated_completion(field)),
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Unary { value: base, .. }
+            | CoreKind::Label { body: base, .. }
+            | CoreKind::Transfer { value: base, .. } => self.contains_evaluated_completion(base),
+            CoreKind::Let { value, .. } | CoreKind::Assign { value, .. } => {
+                self.contains_evaluated_completion(value)
+            }
+            CoreKind::Binary { left, right, .. } => {
+                self.contains_evaluated_completion(left)
+                    || self.contains_evaluated_completion(right)
+            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
+                self.contains_evaluated_completion(callee)
+                    || arguments
+                        .into_iter()
+                        .any(|argument| self.contains_evaluated_completion(argument))
+            }
+            CoreKind::Perform { arguments, .. } => arguments
+                .into_iter()
+                .any(|argument| self.contains_evaluated_completion(argument)),
+            CoreKind::Handle { computation, .. } => self.contains_evaluated_completion(computation),
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Closure { .. }
+            | CoreKind::Error => false,
+        }
+    }
+
     /// A block preserves its tail value, so a completion in that position has
     /// the same branch-to-return shape as a bare completion while retaining
     /// all prefix side effects in the selected arm's entry block.
@@ -13112,6 +13374,13 @@ impl Lowerer<'_> {
         if let Some(v) = self.values.get(&id) {
             return Some(*v);
         };
+        if self.suspend_completion
+            && matches!(self.body.expression(id).kind, CoreKind::Completion { .. })
+        {
+            debug_assert!(self.deferred_completion.is_none());
+            self.deferred_completion = Some(id);
+            return None;
+        }
         let e = self.body.expression(id).clone();
         // A local binding has stable storage identity. MIR may still use
         // registers, but a `let` cannot merely alias its initializer: later
@@ -16320,6 +16589,8 @@ impl Lowerer<'_> {
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),
             direct_resumption: None,
+            suspend_completion: false,
+            deferred_completion: None,
         };
         let mut lifted_parameters = Vec::with_capacity(captures.len() + parameters.len());
         for capture in &captures {

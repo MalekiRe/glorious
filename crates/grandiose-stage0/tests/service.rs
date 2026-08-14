@@ -5858,6 +5858,44 @@ fn service_reborrows_a_refined_enum_payload_by_position() {
 }
 
 #[test]
+fn service_lowers_non_tail_completion_operands_into_vm_cfg() {
+    let source = r#"
+        pub fn main() -> i64 {
+            handle 40 {
+                40 => 40,
+                _ => 0,
+            } + handle 2 {
+                2 => 2,
+                _ => 0,
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_lowers_non_tail_completion_let_initializers_into_vm_cfg() {
+    let source = r#"
+        pub fn main() -> i64 {
+            let left = handle 20 {
+                20 => 20,
+                _ => 0,
+            };
+            let right = handle 22 {
+                22 => 22,
+                _ => 0,
+            };
+            left + right
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }
