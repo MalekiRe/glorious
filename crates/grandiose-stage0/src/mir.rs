@@ -6927,16 +6927,21 @@ impl Lowerer<'_> {
             operations.push((binding, operation, effect, operation_index, arguments));
         }
 
-        let is_once = |clause: &CoreHandlerClause| {
-            matches!(
-                clause.resumption,
-                CoreHandlerResumption::Explicit {
-                    quantity: crate::quantity::Quantity::ONCE,
-                    ..
-                } | CoreHandlerResumption::Tail {
-                    quantity: crate::quantity::Quantity::ONCE
-                }
-            )
+        let policy_for = |clause: &CoreHandlerClause| match &clause.resumption {
+            CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Tail { quantity }
+                if *quantity == crate::quantity::Quantity::ONCE =>
+            {
+                Some(MirContinuationPolicy::Consume)
+            }
+            CoreHandlerResumption::Explicit { .. }
+                if exact_replay_uses(&clause.resumption).is_some() =>
+            {
+                Some(MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&clause.resumption)?,
+                })
+            }
+            _ => None,
         };
         // `layers` is outer-to-inner, whereas the residual operations are
         // inner-to-outer. Retain the ordered operation-clause matrix for each
@@ -6964,18 +6969,21 @@ impl Lowerer<'_> {
             {
                 operation_clauses.truncate(fallback + 1);
             }
-            if operation_clauses
-                .iter()
-                .any(|clause| !is_once(clause) || clause.patterns.len() != arguments.len())
-            {
+            let Some(policy) = policy_for(&operation_clauses[0]) else {
+                return None;
+            };
+            if operation_clauses.iter().any(|clause| {
+                policy_for(clause).as_ref() != Some(&policy)
+                    || clause.patterns.len() != arguments.len()
+            }) {
                 return None;
             }
-            frames.push((operation_clauses, *operation));
+            frames.push((operation_clauses, *operation, policy));
         }
 
         let payloads = frames
             .iter()
-            .map(|(clauses, operation)| {
+            .map(|(clauses, operation, _)| {
                 clauses[0]
                     .payload_types
                     .iter()
@@ -7002,7 +7010,9 @@ impl Lowerer<'_> {
             terminator: MirTerminator::Unreachable,
         }];
         let mut dispatch_targets = Vec::with_capacity(frames.len());
-        for ((clauses, _), payloads) in frames.iter().zip(&payloads) {
+        for (frame_index, ((clauses, _, policy), payloads)) in
+            frames.iter().zip(&payloads).enumerate()
+        {
             let mut rows = Vec::with_capacity(clauses.len());
             for clause in clauses {
                 self.instructions = Vec::new();
@@ -7010,12 +7020,32 @@ impl Lowerer<'_> {
                 self.values = base_values.clone();
                 self.bind_handler_patterns(&clause.patterns, payloads)?;
                 let value = self.direct_handler_clause_value(clause)?;
-                self.instructions.push(MirInstruction::Resume { value });
+                if policy.is_replay() {
+                    // Every `ResumeReturn` in the clause has already cloned
+                    // and restored this frame's suffix. Once the exact use
+                    // budget is met, cancel the dormant replay frame before
+                    // returning the clause result to its enclosing resumption.
+                    self.instructions.push(MirInstruction::Cancel);
+                    // A replay clause returns the aggregate result of all
+                    // `ResumeReturn` calls, rather than re-entering its
+                    // suspended protected path. Only outer lexical frames
+                    // remain active at this point; close them in reverse
+                    // order before the handler result leaves the stack.
+                    for _ in 0..frame_index {
+                        self.instructions.push(MirInstruction::UninstallHandler);
+                    }
+                } else {
+                    self.instructions.push(MirInstruction::Resume { value });
+                }
                 let body = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
                     parameters: vec![],
                     instructions: std::mem::take(&mut self.instructions),
-                    terminator: MirTerminator::Unreachable,
+                    terminator: if policy.is_replay() {
+                        MirTerminator::Return { value }
+                    } else {
+                        MirTerminator::Unreachable
+                    },
                 });
                 let tests = clause
                     .patterns
@@ -7078,7 +7108,9 @@ impl Lowerer<'_> {
         self.values = base_values.clone();
 
         let mut entry = std::mem::take(&mut self.instructions);
-        for (index, ((clauses, operation), payloads)) in frames.iter().zip(&payloads).enumerate() {
+        for (index, ((clauses, operation, policy), payloads)) in
+            frames.iter().zip(&payloads).enumerate()
+        {
             let (_, _, effect, operation_index, _) = operations
                 .iter()
                 .rev()
@@ -7090,7 +7122,7 @@ impl Lowerer<'_> {
                 operation: *operation_index,
                 payload_destinations: payloads.clone(),
                 resume_type: self.body.expression(*operation).ty.clone(),
-                continuation: MirContinuationPolicy::Consume,
+                continuation: policy.clone(),
                 target: dispatch_targets[index],
             });
             debug_assert_eq!(clauses[0].effect, *effect);

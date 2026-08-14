@@ -2948,6 +2948,18 @@ fn service_dispatches_a_pattern_matrix_inside_a_three_deep_residual_handler_stac
 }
 
 #[test]
+fn service_replays_a_three_deep_residual_handler_stack_with_cloned_frame_suffixes() {
+    // Each `Ask` replay restores fresh Log/Audit frame suffixes. The two
+    // residual paths produce 22 and 23 respectively, and the replay clause
+    // observes both `ResumeReturn` results before cancelling its exact-[2,2]
+    // frame.
+    let source = "effect Ask { [2,2] ask() -> i64; } effect Log { [1,1] log(value: i64) -> i64; } effect Audit { [1,1] audit(value: i64) -> i64; } pub fn main() -> i64 { handle { handle { handle { let asked = Ask::ask(); let logged = Log::log(asked); Audit::audit(logged) } { Ask::ask() with k => k(20) + k(21) } } { Log::log(value) with k => k(value + 1) } } { Audit::audit(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 45);
+}
+
+#[test]
 fn service_keeps_a_statement_handler_alias_closed_before_later_shadowing() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => { let saved = k; saved(41) } }; let saved = (value: i64) -> i64 { value + 1 }; saved(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

@@ -2919,6 +2919,64 @@ fn verifier_rejects_a_forged_partial_handler_forward_without_an_outer_frame() {
 }
 
 #[test]
+fn verifier_rejects_a_replay_snapshot_after_its_frame_is_cancelled() {
+    let effect = DefKey(Digest::of_bytes(b"cancelled-replay-snapshot"));
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // Replay may clone a live continuation suffix, but `Cancel` revokes every
+    // snapshot alias of that frame. A forged post-cancel resume cannot spend
+    // an otherwise well-typed replay capability.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"cancelled-replay-snapshot-candidate")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![snapshot, VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 1, value: 41 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Replay { uses: 2 },
+                    target: 6,
+                },
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 2 },
+                VmInstruction::Trap,
+                VmInstruction::CaptureResumption { dst: 0 },
+                VmInstruction::Cancel,
+                VmInstruction::ResumeSnapshot {
+                    snapshot: 0,
+                    value: 1,
+                },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"cancelled-replay-snapshot-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
 fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame() {
     let effect = DefKey(Digest::of_bytes(b"Console-decline"));
     let mut candidate = CandidateVmArtifact {
