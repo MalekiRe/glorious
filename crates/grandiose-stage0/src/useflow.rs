@@ -103,6 +103,7 @@ impl UseFlow {
             next_key: 0,
             contracts: BTreeMap::new(),
             facts: BTreeMap::new(),
+            projected_contracts: BTreeMap::new(),
             escapes: BTreeMap::new(),
             escaped_closures: BTreeSet::new(),
             value_obligations: vec![],
@@ -222,6 +223,11 @@ struct Analyzer<'a> {
     next_key: u32,
     contracts: BTreeMap<ContractKey, Contract>,
     facts: BTreeMap<ContractKey, Quantity>,
+    /// Callable leaves reached through a parameter/opaque aggregate are
+    /// discovered from PlaceFlow's canonical projection rather than inferred
+    /// from the aggregate's source spelling.  One place owns one contract
+    /// across direct calls, moves, branches, and closure bodies.
+    projected_contracts: BTreeMap<MoveFact, ContractKey>,
     escapes: BTreeMap<ContractKey, Vec<(Option<Quantity>, Span, CallableEscapeBoundary)>>,
     escaped_closures: BTreeSet<CallableId>,
     value_obligations: Vec<ValueUseFact>,
@@ -386,7 +392,8 @@ impl Analyzer<'_> {
                 // obligation.
                 let replacement = self.binding_for_value(value, environment);
                 if let Some(place_fact) = self.assignment_place_fact(expression.span) {
-                    let previous = self.binding_at_place(&place, environment);
+                    let previous =
+                        self.binding_at_place(&place, &place_fact, expression.span, environment);
                     self.record_overwrite(&previous, place_fact, expression.span);
                 }
                 self.assign_binding(&place, replacement, environment);
@@ -593,6 +600,15 @@ impl Analyzer<'_> {
     }
 
     fn binding_for_value(&mut self, id: CoreId, environment: &Environment) -> Binding {
+        self.binding_for_value_at_place(id, environment, None)
+    }
+
+    fn binding_for_value_at_place(
+        &mut self,
+        id: CoreId,
+        environment: &Environment,
+        supplied_place: Option<MoveFact>,
+    ) -> Binding {
         let expression = self.body.expression(id);
         match &expression.kind {
             CoreKind::Local(name) => environment
@@ -606,11 +622,21 @@ impl Analyzer<'_> {
                 .cloned()
                 .unwrap_or(Binding::Other),
             CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => Binding::GlobalCallable,
-            CoreKind::Field { base, index, .. } => match self.binding_for_value(*base, environment)
-            {
-                Binding::Aggregate(fields) => fields.get(index).cloned().unwrap_or(Binding::Other),
-                _ => Binding::Other,
-            },
+            CoreKind::Field { base, index, .. } => {
+                match self.binding_for_value(*base, environment) {
+                    Binding::Aggregate(fields) => {
+                        fields.get(index).cloned().unwrap_or(Binding::Other)
+                    }
+                    Binding::Other => self
+                        .projected_binding(
+                            supplied_place.or_else(|| self.read_place_fact(expression.span)),
+                            &expression.ty,
+                            expression.span,
+                        )
+                        .unwrap_or(Binding::Other),
+                    _ => Binding::Other,
+                }
+            }
             CoreKind::Tuple(values)
             | CoreKind::Array(values)
             | CoreKind::Record { fields: values, .. }
@@ -623,7 +649,11 @@ impl Analyzer<'_> {
                     })
                     .collect(),
             ),
-            CoreKind::Move(value) => self.binding_for_value(*value, environment),
+            CoreKind::Move(value) => self.binding_for_value_at_place(
+                *value,
+                environment,
+                self.move_place_fact(expression.span),
+            ),
             CoreKind::Closure {
                 callable,
                 parameters,
@@ -704,6 +734,35 @@ impl Analyzer<'_> {
         })
     }
 
+    fn read_place_fact(&self, span: Span) -> Option<MoveFact> {
+        self.ownership.events.iter().find_map(|event| {
+            matches!(event.kind, FlowEventKind::Read(_))
+                .then_some(())
+                .filter(|_| event.span == span)
+                .and(event.place.clone())
+        })
+    }
+
+    fn projected_binding(
+        &mut self,
+        place: Option<MoveFact>,
+        ty: &Type,
+        span: Span,
+    ) -> Option<Binding> {
+        let place = place?;
+        let invocation = callable_invocation(ty)?;
+        let key = match self.projected_contracts.get(&place).copied() {
+            Some(key) => key,
+            None => {
+                let name = display_place(&place);
+                let key = self.contract(&name, invocation, span, false);
+                self.projected_contracts.insert(place, key);
+                key
+            }
+        };
+        Some(Binding::Contract(key))
+    }
+
     fn borrow_place_fact(&self, span: Span, unique: bool) -> Option<MoveFact> {
         self.ownership.events.iter().find_map(|event| {
             let matches_kind = matches!(
@@ -733,7 +792,23 @@ impl Analyzer<'_> {
         })
     }
 
-    fn binding_at_place(&self, place: &CorePlace, environment: &Environment) -> Binding {
+    fn binding_at_place(
+        &mut self,
+        place: &CorePlace,
+        place_fact: &MoveFact,
+        span: Span,
+        environment: &Environment,
+    ) -> Binding {
+        let binding = self.existing_binding_at_place(place, environment);
+        if matches!(binding, Binding::Other) {
+            self.projected_binding(Some(place_fact.clone()), &place.ty(), span)
+                .unwrap_or(Binding::Other)
+        } else {
+            binding
+        }
+    }
+
+    fn existing_binding_at_place(&self, place: &CorePlace, environment: &Environment) -> Binding {
         match place {
             CorePlace::Local { name, .. } => environment
                 .bindings
@@ -741,7 +816,7 @@ impl Analyzer<'_> {
                 .cloned()
                 .unwrap_or(Binding::Other),
             CorePlace::Field { base, index, .. } => {
-                match self.binding_at_place(base, environment) {
+                match self.existing_binding_at_place(base, environment) {
                     Binding::Aggregate(fields) => {
                         fields.get(index).cloned().unwrap_or(Binding::Other)
                     }
@@ -764,7 +839,7 @@ impl Analyzer<'_> {
                 environment.bindings.insert(name.clone(), replacement);
             }
             CorePlace::Field { base, index, .. } => {
-                let mut aggregate = self.binding_at_place(base, environment);
+                let mut aggregate = self.existing_binding_at_place(base, environment);
                 if let Binding::Aggregate(fields) = &mut aggregate {
                     fields.insert(*index, replacement);
                     self.assign_binding(base, aggregate, environment);

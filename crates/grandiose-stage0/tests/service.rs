@@ -2483,6 +2483,70 @@ fn service_checks_aggregate_callable_obligations_at_handler_branch_exits() {
 }
 
 #[test]
+fn service_tracks_callable_obligations_projected_from_aggregate_parameters() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(pair: Pair) -> i64 { pair.function(41) } pub fn main() -> i64 { apply(Pair { function: add_one, value: 0 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_discarding_a_projected_aggregate_parameter_callable() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn discard(pair: Pair) -> i64 { let ignored = move pair.function; 0 } pub fn main() -> i64 { discard(Pair { function: add_one, value: 0 }) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("discarded aggregate parameter callback unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing projected partial-move lower-bound diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_overwriting_a_projected_aggregate_parameter_callable() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replace(pair: Pair) -> i64 { pair.function = (value: i64) -> i64 { value }; 0 } pub fn main() -> i64 { replace(Pair { function: add_one, value: 0 }) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("overwritten aggregate parameter callback unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5014"),
+        "missing projected callable overwrite diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_transfers_projected_parameter_callable_through_partial_move_and_closure() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn through(pair: Pair) -> i64 { let taken = move pair.function; let call = (value: i64) -> i64 { taken(value) }; call(41) } pub fn main() -> i64 { through(Pair { function: add_one, value: 0 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_checks_projected_parameter_callable_at_handler_branch_join() {
+    let source = "effect Pick { [0,1] pick(value: Bool) -> i64; } pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn choose(value: Bool, pair: Pair) -> i64 { handle Pick::pick(value) { Pick::pick(true) => pair.function(41), Pick::pick(false) => 0 } } pub fn main() -> i64 { choose(true, Pair { function: add_one, value: 0 }) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("handler branch unexpectedly satisfied projected callback obligation");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing projected callable branch-hull diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_materializes_a_concretely_instantiated_generic_function_value() {
     let source = "pub fn identity<T>(value: T) -> T { value } pub fn apply(function: (i64) -> i64) -> i64 { function(42) } pub fn main() -> i64 { apply(identity) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

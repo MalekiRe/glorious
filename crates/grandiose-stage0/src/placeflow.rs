@@ -659,18 +659,6 @@ impl Analyzer<'_> {
         }
         self.event(FlowEventKind::EndBorrow(owner.into()), span);
     }
-    fn read(&mut self, n: &str, s: Span) {
-        match self.states.get(n) {
-            Some(LocalState::Moved) => self.error(s, "G5001", format!("use of moved local `{n}`")),
-            Some(LocalState::UniquelyBorrowed) => self.error(
-                s,
-                "G5008",
-                format!("cannot read uniquely borrowed local `{n}`"),
-            ),
-            Some(_) => self.event(FlowEventKind::Read(n.into()), s),
-            None => self.error(s, "G5002", format!("unknown local `{n}` in PlaceFlow")),
-        }
-    }
     fn move_(&mut self, n: &str, s: Span) {
         let place = Projection {
             root: n.into(),
@@ -827,7 +815,29 @@ impl Analyzer<'_> {
             );
             return;
         }
-        self.read(&place.root, span);
+        // Preserve the complete static projection in the event stream. Later
+        // consumers (notably quantitative-use) must not reconstruct a field
+        // path from source spelling or collapse `pair.left` into `pair`.
+        match self.states.get(&place.root) {
+            Some(LocalState::Moved) => self.error(
+                span,
+                "G5001",
+                format!("use of moved local `{}`", place.root),
+            ),
+            Some(LocalState::UniquelyBorrowed) => self.error(
+                span,
+                "G5008",
+                format!("cannot read uniquely borrowed local `{}`", place.root),
+            ),
+            Some(_) => {
+                self.place_event(FlowEventKind::Read(place.root.clone()), place.clone(), span)
+            }
+            None => self.error(
+                span,
+                "G5002",
+                format!("unknown local `{}` in PlaceFlow", place.root),
+            ),
+        }
         if self
             .projection_loans
             .iter()
