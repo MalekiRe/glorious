@@ -965,6 +965,102 @@ fn placeflow_releases_a_named_loan_after_a_nested_block_last_use() {
 }
 
 #[test]
+fn placeflow_ignores_a_forged_conflicting_suffix_after_a_direct_transfer() {
+    let package = PackageKey("core-forged-transfer-unreachable@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let i64 = Type::Scalar(ScalarType::I64);
+    let body = TypedBody {
+        parameters: vec![("value".into(), i64.clone())],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Local("value".into()),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Borrow {
+                    unique: true,
+                    value: CoreId(0),
+                },
+                ty: Type::Reference {
+                    mutability: grandiose_stage0::Mutability::Unique,
+                    lifetime: Lifetime::Elided,
+                    referent: Box::new(i64.clone()),
+                },
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Let {
+                    name: "loan".into(),
+                    value: CoreId(1),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("0".into()),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Transfer {
+                    brand: grandiose_stage0::LabelBrand {
+                        owner: DefKey(Digest::of_bytes(b"forged-transfer-owner")),
+                        label: 0,
+                    },
+                    value: CoreId(3),
+                },
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("2".into()),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Assign {
+                    place: CorePlace::Local {
+                        name: "value".into(),
+                        ty: i64.clone(),
+                    },
+                    value: CoreId(5),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Local("loan".into()),
+                ty: Type::Reference {
+                    mutability: grandiose_stage0::Mutability::Unique,
+                    lifetime: Lifetime::Elided,
+                    referent: Box::new(i64.clone()),
+                },
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Block(vec![CoreId(2), CoreId(4), CoreId(6), CoreId(7)]),
+                ty: i64,
+                span,
+            },
+        ],
+        root: CoreId(8),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(body.validate().is_empty(), "{:#?}", body.validate());
+    let flow = PlaceFlow::analyze(&body);
+    assert!(
+        flow.diagnostics.is_empty(),
+        "a post-transfer forged suffix must not participate in PlaceFlow: {flow:#?}"
+    );
+}
+
+#[test]
 fn placeflow_releases_a_dead_let_bound_closure_capture() {
     let source = "pub fn main() -> i64 { let value = 1; let loan = &value; let saved = () -> &i64 { loan }; value = 2; 0 }";
     let flow = flow_for("core-nll-captured-reference@0.1.0", source);

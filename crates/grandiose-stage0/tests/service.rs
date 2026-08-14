@@ -970,6 +970,67 @@ fn nll_keeps_a_closure_capture_live_across_a_handler_when_used_afterward() {
 }
 
 #[test]
+fn nll_does_not_treat_the_dead_suffix_of_a_label_transfer_as_a_loan_use() {
+    let source = r#"
+        pub fn main() -> i64 {
+            let value = 1;
+            label done {
+                let loan = &mut value;
+                transfer done 0;
+                *loan
+            };
+            value = 42;
+            value
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a transfer must not keep a dead suffix loan live");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nll_distinguishes_a_shadowed_local_from_an_outer_live_loan() {
+    let source = r#"
+        pub fn main() -> i64 {
+            let value = 1;
+            let outer = &mut value;
+            { let value = 2; value = 3; value };
+            *outer = 42;
+            *outer
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("an inner shadow must not alias the outer loan");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nll_releases_a_reborrow_created_before_a_label_transfer() {
+    let source = r#"
+        pub fn main() -> i64 {
+            let value = 1;
+            let parent = &mut value;
+            label done {
+                let child = &mut *parent;
+                transfer done 0;
+                *child
+            };
+            *parent = 42;
+            *parent
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a transfer must clean its child reborrow before rejoining the label");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn shared_reborrow_still_suspends_unique_parent_mutation() {
     let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = & *parent; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {

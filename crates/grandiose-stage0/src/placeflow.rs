@@ -141,12 +141,15 @@ impl PlaceFlow {
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
             moved_places: BTreeSet::new(),
+            scopes: vec![BTreeMap::new()],
+            next_shadow: 0,
             events: vec![],
             refinements: vec![],
             diagnostics: vec![],
         };
         for (name, _) in &body.parameters {
             a.states.insert(name.clone(), LocalState::Initialized);
+            a.scopes[0].insert(name.clone(), name.clone());
         }
         a.visit_with_live_after(body.root, &BTreeSet::new());
         a.diagnostics.sort_by_key(|d| d.span.start);
@@ -195,6 +198,11 @@ struct Analyzer<'a> {
     /// reinitialized. Whole-local moves are mirrored in `states`; field moves
     /// deliberately are not, because their siblings remain usable.
     moved_places: BTreeSet<Projection>,
+    /// Source spellings remain useful in frozen Core diagnostics, while
+    /// ownership facts need lexical identities so an inner `let value` does
+    /// not alias an outer loan of the same spelling.
+    scopes: Vec<BTreeMap<String, String>>,
+    next_shadow: u32,
     events: Vec<FlowEvent>,
     refinements: Vec<RefinementFact>,
     diagnostics: Vec<FlowDiagnostic>,
@@ -210,6 +218,67 @@ type HandlerExit = (
 );
 
 impl Analyzer<'_> {
+    fn resolve_name(&self, name: &str) -> String {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .cloned()
+            .unwrap_or_else(|| name.to_owned())
+    }
+
+    fn reserve_binding(&mut self, name: &str) -> String {
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
+        {
+            let identity = format!("{name}#{}", self.next_shadow);
+            self.next_shadow = self.next_shadow.saturating_add(1);
+            identity
+        } else {
+            name.to_owned()
+        }
+    }
+
+    fn activate_binding(&mut self, spelling: &str, identity: String) {
+        self.scopes
+            .last_mut()
+            .expect("PlaceFlow always has a root lexical scope")
+            .insert(spelling.to_owned(), identity);
+    }
+
+    fn visit_scoped_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
+        self.scopes.push(BTreeMap::new());
+        self.visit_sequence(values, live_after);
+        let scope = self.scopes.pop().expect("nested PlaceFlow scope");
+        let locals = scope.into_values().collect::<BTreeSet<_>>();
+        for local in &locals {
+            self.release_owner_loans(local, self.body.expression(self.body.root).span);
+        }
+        self.states.retain(|name, _| !locals.contains(name));
+        self.projection_loans.retain(|loan| {
+            !locals.contains(&loan.place.root)
+                && !loan
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| locals.contains(owner))
+        });
+        self.moved_places
+            .retain(|place| !locals.contains(&place.root));
+        self.reborrow_parents
+            .retain(|child, parent| !locals.contains(child) && !locals.contains(parent));
+        self.reference_origins.retain(|name, loan| {
+            !locals.contains(name)
+                && !locals.contains(&loan.place.root)
+                && !loan
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| locals.contains(owner))
+        });
+    }
+
     /// Visit an expression while retaining only loans whose owner may be used
     /// by the continuation.  This is the first NLL region domain: a `let r =
     /// &place` loan lasts to the last value use of `r`, rather than to body
@@ -232,6 +301,7 @@ impl Analyzer<'_> {
                 self.visit_with_live_after(body, live_after)
             }
             CoreKind::Let { name, value } => {
+                let binding = self.reserve_binding(&name);
                 if let CoreKind::Borrow { unique, value } = self.body.expression(value).kind.clone()
                 {
                     // `name` owns the region instead of creating a forever
@@ -248,8 +318,8 @@ impl Analyzer<'_> {
                     } else {
                         self.visit_with_live_after(value, &borrow_live);
                     }
-                    if !self.reborrow_place(value, unique, e.span, name.clone()) {
-                        self.borrow_place(value, unique, e.span, Some(name.clone()));
+                    if !self.reborrow_place(value, unique, e.span, binding.clone()) {
+                        self.borrow_place(value, unique, e.span, Some(binding.clone()));
                     }
                 } else if let CoreKind::Closure { environment, .. } =
                     self.body.expression(value).kind.clone()
@@ -260,13 +330,14 @@ impl Analyzer<'_> {
                     // including when the binding was created in a handler
                     // arm. Bare closure expressions still use `None` below:
                     // they may be returned, passed, or otherwise escape.
-                    self.visit_closure_environment(&environment, e.span, Some(name.as_str()));
+                    self.visit_closure_environment(&environment, e.span, Some(binding.as_str()));
                 } else {
                     self.visit_with_live_after(value, live_after);
                 }
-                self.states.insert(name.clone(), LocalState::Initialized);
-                self.record_aggregate_reference_origins(&name, value);
-                self.event(FlowEventKind::Initialize(name), e.span)
+                self.activate_binding(&name, binding.clone());
+                self.states.insert(binding.clone(), LocalState::Initialized);
+                self.record_aggregate_reference_origins(&binding, value);
+                self.event(FlowEventKind::Initialize(binding), e.span)
             }
             CoreKind::Assign { place, value } => {
                 // The destination is evaluated after the RHS, but its local
@@ -462,19 +533,41 @@ impl Analyzer<'_> {
             CoreKind::Binary { left, right, .. } => {
                 self.visit_sequence(&[left, right], live_after);
             }
-            CoreKind::Block(values) => self.visit_sequence(&values, live_after),
+            CoreKind::Block(values) if id == self.body.root => {
+                self.visit_sequence(&values, live_after)
+            }
+            CoreKind::Block(values) => self.visit_scoped_sequence(&values, live_after),
         }
         self.release_dead_loans(live_after, e.span);
     }
 
     fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
-        let mut suffixes = vec![live_after.clone(); values.len()];
+        // A direct transfer leaves the current lexical continuation. Core
+        // still retains the syntactic suffix for diagnostics and IDE tools,
+        // but ownership must not treat that dead suffix as a use of a loan or
+        // as a conflicting access. Nested labels rejoin their own expression
+        // and therefore remain ordinary values here; only the direct edge is
+        // terminal for this sequence.
+        let reachable = values
+            .iter()
+            .copied()
+            .scan(false, |terminated, value| {
+                if *terminated {
+                    return None;
+                }
+                if matches!(self.body.expression(value).kind, CoreKind::Transfer { .. }) {
+                    *terminated = true;
+                }
+                Some(value)
+            })
+            .collect::<Vec<_>>();
+        let mut suffixes = vec![live_after.clone(); reachable.len()];
         let mut future = live_after.clone();
-        for (index, value) in values.iter().enumerate().rev() {
+        for (index, value) in reachable.iter().enumerate().rev() {
             suffixes[index] = future.clone();
             self.collect_local_uses(*value, &mut future);
         }
-        for (value, future) in values.iter().zip(suffixes) {
+        for (value, future) in reachable.iter().zip(suffixes) {
             self.visit_with_live_after(*value, &future);
         }
     }
@@ -636,7 +729,7 @@ impl Analyzer<'_> {
     /// the conservative escaping representation.
     fn capture_place_loan(&mut self, name: &str, unique: bool, span: Span, owner: Option<&str>) {
         let place = Projection {
-            root: name.to_owned(),
+            root: self.resolve_name(name),
             fields: vec![],
         };
         if self
@@ -654,9 +747,9 @@ impl Analyzer<'_> {
         self.borrow(name, unique, span);
         self.place_event(
             if unique {
-                FlowEventKind::BorrowUnique(name.to_owned())
+                FlowEventKind::BorrowUnique(place.root.clone())
             } else {
-                FlowEventKind::BorrowShared(name.to_owned())
+                FlowEventKind::BorrowShared(place.root.clone())
             },
             place.clone(),
             span,
@@ -680,10 +773,11 @@ impl Analyzer<'_> {
     /// the exact projected source loan, preserving mutability, rather than
     /// widening `&pair.left` to an imprecise whole-record loan.
     fn capture_reference_loan(&mut self, name: &str, span: Span, owner: Option<&str>) {
+        let name = self.resolve_name(name);
         let reborrows = self
             .projection_loans
             .iter()
-            .filter(|loan| loan.owner.as_deref() == Some(name))
+            .filter(|loan| loan.owner.as_deref() == Some(name.as_str()))
             .cloned()
             .map(|mut loan| {
                 loan.owner = owner.map(str::to_owned);
@@ -747,8 +841,9 @@ impl Analyzer<'_> {
         self.event(FlowEventKind::EndBorrow(owner.into()), span);
     }
     fn move_(&mut self, n: &str, s: Span) {
+        let n = self.resolve_name(n);
         let place = Projection {
-            root: n.into(),
+            root: n.clone(),
             fields: vec![],
         };
         if let Some(moved) = self.moved_place_overlapping(&place) {
@@ -762,11 +857,11 @@ impl Analyzer<'_> {
             );
             return;
         }
-        match self.states.get(n) {
+        match self.states.get(&n) {
             Some(LocalState::Initialized) => {
-                self.states.insert(n.into(), LocalState::Moved);
+                self.states.insert(n.clone(), LocalState::Moved);
                 self.record_move(place);
-                self.event(FlowEventKind::Move(n.into()), s)
+                self.event(FlowEventKind::Move(n.clone()), s)
             }
             Some(LocalState::Moved) => {
                 self.error(s, "G5003", format!("local `{n}` is moved more than once"))
@@ -776,19 +871,20 @@ impl Analyzer<'_> {
         }
     }
     fn borrow(&mut self, n: &str, u: bool, s: Span) {
-        match (self.states.get(n).copied(), u) {
+        let n = self.resolve_name(n);
+        match (self.states.get(&n).copied(), u) {
             (Some(LocalState::Initialized), true) => {
-                self.states.insert(n.into(), LocalState::UniquelyBorrowed);
-                self.event(FlowEventKind::BorrowUnique(n.into()), s)
+                self.states.insert(n.clone(), LocalState::UniquelyBorrowed);
+                self.event(FlowEventKind::BorrowUnique(n.clone()), s)
             }
             (Some(LocalState::Initialized), false) => {
-                self.states.insert(n.into(), LocalState::SharedBorrowed(1));
-                self.event(FlowEventKind::BorrowShared(n.into()), s)
+                self.states.insert(n.clone(), LocalState::SharedBorrowed(1));
+                self.event(FlowEventKind::BorrowShared(n.clone()), s)
             }
             (Some(LocalState::SharedBorrowed(c)), false) => {
                 self.states
-                    .insert(n.into(), LocalState::SharedBorrowed(c + 1));
-                self.event(FlowEventKind::BorrowShared(n.into()), s)
+                    .insert(n.clone(), LocalState::SharedBorrowed(c + 1));
+                self.event(FlowEventKind::BorrowShared(n.clone()), s)
             }
             (Some(LocalState::Moved), _) => {
                 self.error(s, "G5005", format!("cannot borrow moved local `{n}`"))
@@ -859,7 +955,7 @@ impl Analyzer<'_> {
     fn projection(&self, id: CoreId) -> Option<Projection> {
         match &self.body.expression(id).kind {
             CoreKind::Local(name) => Some(Projection {
-                root: name.clone(),
+                root: self.resolve_name(name),
                 fields: vec![],
             }),
             CoreKind::Field { base, index, .. } => {
@@ -871,14 +967,14 @@ impl Analyzer<'_> {
         }
     }
 
-    fn place_projection(place: &CorePlace) -> Option<Projection> {
+    fn place_projection(&self, place: &CorePlace) -> Option<Projection> {
         match place {
             CorePlace::Local { name, .. } => Some(Projection {
-                root: name.clone(),
+                root: self.resolve_name(name),
                 fields: vec![],
             }),
             CorePlace::Field { base, index, .. } => {
-                let mut projection = Self::place_projection(base)?;
+                let mut projection = self.place_projection(base)?;
                 projection.fields.push(*index);
                 Some(projection)
             }
@@ -1153,7 +1249,7 @@ impl Analyzer<'_> {
 
     fn reference_origin_key(&self, id: CoreId) -> Option<String> {
         match &self.body.expression(id).kind {
-            CoreKind::Local(name) => Some(name.clone()),
+            CoreKind::Local(name) => Some(self.resolve_name(name)),
             CoreKind::Field { base, index, .. } => {
                 let mut key = self.reference_origin_key(*base)?;
                 key.push('.');
@@ -1211,7 +1307,7 @@ impl Analyzer<'_> {
 
     fn place_origin_key(&self, place: &CorePlace) -> Option<String> {
         match place {
-            CorePlace::Local { name, .. } => Some(name.clone()),
+            CorePlace::Local { name, .. } => Some(self.resolve_name(name)),
             CorePlace::Field { base, index, .. } => {
                 let mut key = self.place_origin_key(base)?;
                 key.push('.');
@@ -1223,9 +1319,10 @@ impl Analyzer<'_> {
     }
 
     fn use_deref_reference(&mut self, id: CoreId, span: Span, mutation: bool) {
-        let CoreKind::Local(name) = &self.body.expression(id).kind else {
+        let CoreKind::Local(source_name) = &self.body.expression(id).kind else {
             return;
         };
+        let name = self.resolve_name(source_name);
         let Some(parent) = self
             .projection_loans
             .iter()
@@ -1238,7 +1335,7 @@ impl Analyzer<'_> {
             loan.owner.as_deref() != Some(name.as_str())
                 && self
                     .reborrow_parents
-                    .get(name)
+                    .get(&name)
                     .is_none_or(|parent| loan.owner.as_deref() != Some(parent.as_str()))
                 && loan.place.overlaps(&parent.place)
                 && (mutation || parent.unique || loan.unique)
@@ -1256,7 +1353,7 @@ impl Analyzer<'_> {
     }
 
     fn assign_place(&mut self, place: &CorePlace, span: Span) {
-        let Some(projection) = Self::place_projection(place) else {
+        let Some(projection) = self.place_projection(place) else {
             return;
         };
         if self
