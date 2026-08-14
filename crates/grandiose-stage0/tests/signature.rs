@@ -380,10 +380,58 @@ fn generic_associated_type_projections_are_preserved_in_frozen_signatures() {
             trait_definition,
             trait_arguments,
             name,
+            item_arguments,
         } if **subject == Type::Generic(0)
             && *trait_definition == iterator
             && trait_arguments.is_empty()
             && name == "Item"
+            && item_arguments.is_empty()
+    ));
+}
+
+#[test]
+fn generic_associated_item_arguments_are_preserved_in_frozen_signatures() {
+    let package = PackageKey("signature-gat-projection@0.1.0".into());
+    let source = "trait Apply { type Output<T>; } pub fn project<S, T>(value: S) -> <S as Apply>::Output<T> { ignored }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let apply = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Apply"))
+        .unwrap()
+        .key;
+    let project = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("project"))
+        .unwrap()
+        .key;
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&project).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        &signature.result,
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } if **subject == Type::Generic(0)
+            && *trait_definition == apply
+            && trait_arguments.is_empty()
+            && name == "Output"
+            && item_arguments == &[Type::Generic(1)]
     ));
 }
 

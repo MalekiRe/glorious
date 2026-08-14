@@ -113,6 +113,7 @@ pub enum Type {
         trait_definition: DefKey,
         trait_arguments: Vec<Type>,
         name: String,
+        item_arguments: Vec<Type>,
     },
     Tuple(Vec<Type>),
     Array(Box<Type>),
@@ -216,18 +217,21 @@ impl InferContext {
                     trait_definition: left_trait,
                     trait_arguments: left_arguments,
                     name: left_name,
+                    item_arguments: left_item_arguments,
                 },
                 Type::Projection {
                     subject: right_subject,
                     trait_definition: right_trait,
                     trait_arguments: right_arguments,
                     name: right_name,
+                    item_arguments: right_item_arguments,
                 },
             ) if left_trait == right_trait && left_name == right_name => Ok(Type::Projection {
                 subject: Box::new(self.unify(*left_subject, *right_subject)?),
                 trait_definition: left_trait,
                 trait_arguments: self.unify_many(left_arguments, right_arguments)?,
                 name: left_name,
+                item_arguments: self.unify_many(left_item_arguments, right_item_arguments)?,
             }),
             (Type::Tuple(left), Type::Tuple(right)) => {
                 Ok(Type::Tuple(self.unify_many(left, right)?))
@@ -295,6 +299,7 @@ impl InferContext {
                 trait_definition,
                 trait_arguments,
                 name,
+                item_arguments,
             } => Ok(Type::Projection {
                 subject: Box::new(self.zonk(*subject)?),
                 trait_definition,
@@ -303,6 +308,10 @@ impl InferContext {
                     .map(|argument| self.zonk(argument))
                     .collect::<Result<_, _>>()?,
                 name,
+                item_arguments: item_arguments
+                    .into_iter()
+                    .map(|argument| self.zonk(argument))
+                    .collect::<Result<_, _>>()?,
             }),
             Type::Tuple(elements) => Ok(Type::Tuple(
                 elements
@@ -534,21 +543,25 @@ impl InferContext {
                     trait_definition: left_trait,
                     trait_arguments: left_arguments,
                     name: left_name,
+                    item_arguments: left_item_arguments,
                 },
                 Type::Projection {
                     subject: right_subject,
                     trait_definition: right_trait,
                     trait_arguments: right_arguments,
                     name: right_name,
+                    item_arguments: right_item_arguments,
                 },
             ) if left_trait == right_trait
                 && left_name == right_name
-                && left_arguments.len() == right_arguments.len() =>
+                && left_arguments.len() == right_arguments.len()
+                && left_item_arguments.len() == right_item_arguments.len() =>
             {
                 self.types_may_unify(&left_subject, &right_subject)
                     && left_arguments
                         .iter()
                         .zip(&right_arguments)
+                        .chain(left_item_arguments.iter().zip(&right_item_arguments))
                         .all(|(left, right)| self.types_may_unify(left, right))
             }
             (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => left
@@ -624,10 +637,14 @@ impl InferContext {
             Type::Projection {
                 subject,
                 trait_arguments,
+                item_arguments,
                 ..
             } => {
                 self.occurs(variable, &subject)
                     || trait_arguments
+                        .iter()
+                        .any(|argument| self.occurs(variable, argument))
+                    || item_arguments
                         .iter()
                         .any(|argument| self.occurs(variable, argument))
             }
@@ -688,6 +705,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             trait_definition,
             trait_arguments,
             name,
+            item_arguments,
         } => {
             output.push(11);
             encode_type(subject, output);
@@ -695,6 +713,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             encode_types(trait_arguments, output);
             output.extend_from_slice(&(name.len() as u64).to_le_bytes());
             output.extend_from_slice(name.as_bytes());
+            encode_types(item_arguments, output);
         }
         Type::Tuple(elements) => {
             output.push(4);

@@ -1043,7 +1043,8 @@ impl Elaborator<'_> {
                 trait_path,
                 trait_arguments,
                 name,
-            } => self.header_projection(subject, trait_path, trait_arguments, name),
+                item_arguments,
+            } => self.header_projection(subject, trait_path, trait_arguments, name, item_arguments),
             HeaderType::Path(path) => self.header_path(path, vec![]),
             HeaderType::Application(base, arguments) => {
                 let arguments = arguments
@@ -1063,9 +1064,14 @@ impl Elaborator<'_> {
         trait_path: &[String],
         trait_arguments: &[crate::header::HeaderType],
         name: &str,
+        item_arguments: &[crate::header::HeaderType],
     ) -> Type {
         let subject = self.header_type(subject);
         let trait_arguments = trait_arguments
+            .iter()
+            .map(|argument| self.header_type(argument))
+            .collect::<Vec<_>>();
+        let item_arguments = item_arguments
             .iter()
             .map(|argument| self.header_type(argument))
             .collect::<Vec<_>>();
@@ -1106,11 +1112,11 @@ impl Elaborator<'_> {
                 );
                 return Type::Error;
             }
-            Some(item) if item.generics == 0 => {}
+            Some(item) if item.generics == item_arguments.len() as u32 => {}
             Some(_) => {
                 self.projection_error(
                     "G4149",
-                    "generic associated types require the pending item-argument projection syntax",
+                    "associated type projection has the wrong number of item arguments",
                 );
                 return Type::Error;
             }
@@ -1124,6 +1130,7 @@ impl Elaborator<'_> {
             trait_definition,
             trait_arguments,
             name: name.to_owned(),
+            item_arguments,
         };
         if !projection_is_concrete(&projection) {
             return projection;
@@ -1132,12 +1139,13 @@ impl Elaborator<'_> {
             subject,
             trait_arguments,
             name,
+            item_arguments,
             ..
         } = &projection
         else {
             unreachable!("projection was just constructed")
         };
-        let answer = TraitSolver::new(self.signatures).normalize_associated_type(
+        let answer = TraitSolver::new(self.signatures).normalize_associated_type_application(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
@@ -1146,6 +1154,7 @@ impl Elaborator<'_> {
                 subject: *subject.clone(),
             },
             name,
+            item_arguments,
         );
         match answer {
             TraitProjectionAnswer::Normalized { ty, .. } => ty,
@@ -3274,8 +3283,13 @@ fn projection_is_concrete(value: &Type) -> bool {
         Type::Projection {
             subject,
             trait_arguments,
+            item_arguments,
             ..
-        } => projection_is_concrete(subject) && trait_arguments.iter().all(projection_is_concrete),
+        } => {
+            projection_is_concrete(subject)
+                && trait_arguments.iter().all(projection_is_concrete)
+                && item_arguments.iter().all(projection_is_concrete)
+        }
         Type::Array(element)
         | Type::Reference {
             referent: element, ..

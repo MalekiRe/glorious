@@ -1062,11 +1062,14 @@ impl Parser<'_> {
                 return None;
             }
             self.position += 2;
+            let name = self.expect_identifier()?;
+            let item_arguments = self.closure_type_arguments()?;
             return Some(HeaderType::Projection {
                 subject: Box::new(subject),
                 trait_path,
                 trait_arguments,
-                name: self.expect_identifier()?,
+                name,
+                item_arguments,
             });
         }
         if self.at_operator("!") {

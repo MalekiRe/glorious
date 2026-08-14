@@ -35,9 +35,8 @@ pub struct ElaboratedTrait {
     pub generics: u32,
     pub supertraits: Vec<ElaboratedTraitReference>,
     /// Declared associated type names and their item-generic arities. The
-    /// first projection surface is zero-arity, but preserving the declared
-    /// arity here keeps the frozen interface ready to reject unsupported GAT
-    /// applications rather than silently treating them as ordinary types.
+    /// frozen interface retains this metadata so projection syntax can keep
+    /// trait and associated-item arguments distinct through normalization.
     pub associated_types: BTreeMap<String, ElaboratedAssociatedType>,
     pub methods: BTreeMap<String, CallableSignature>,
 }
@@ -1161,6 +1160,7 @@ impl Elaborator<'_> {
                 trait_path,
                 trait_arguments,
                 name,
+                item_arguments,
             } => {
                 let subject = self.ty(subject);
                 let relation = self.trait_ref_parts(trait_path, trait_arguments);
@@ -1169,6 +1169,10 @@ impl Elaborator<'_> {
                     trait_definition: relation.definition,
                     trait_arguments: relation.arguments,
                     name: name.clone(),
+                    item_arguments: item_arguments
+                        .iter()
+                        .map(|argument| self.ty(argument))
+                        .collect(),
                 }
             }
             HeaderType::Path(path) => self.path(path, vec![]),
@@ -1335,6 +1339,7 @@ fn normalize_alias_type(
             trait_definition,
             trait_arguments,
             name,
+            item_arguments,
         } => Type::Projection {
             subject: Box::new(normalize_alias_type(
                 *subject,
@@ -1348,6 +1353,10 @@ fn normalize_alias_type(
                 .map(|argument| normalize_alias_type(argument, definitions, stack, diagnostics))
                 .collect(),
             name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(|argument| normalize_alias_type(argument, definitions, stack, diagnostics))
+                .collect(),
         },
         Type::Tuple(values) => Type::Tuple(
             values
@@ -1460,6 +1469,7 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
             trait_definition,
             trait_arguments,
             name,
+            item_arguments,
         } => Type::Projection {
             subject: Box::new(substitute_alias_generics(*subject, arguments)),
             trait_definition,
@@ -1468,6 +1478,10 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
                 .map(|value| substitute_alias_generics(value, arguments))
                 .collect(),
             name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(|value| substitute_alias_generics(value, arguments))
+                .collect(),
         },
         Type::Tuple(values) => Type::Tuple(
             values

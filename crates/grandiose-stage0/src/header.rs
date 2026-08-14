@@ -26,6 +26,10 @@ pub enum HeaderType {
         trait_path: Vec<String>,
         trait_arguments: Vec<HeaderType>,
         name: String,
+        /// Arguments applied to the selected associated item.  These remain
+        /// distinct from trait arguments so `<S as Trait<T>>::Item<U>`
+        /// preserves the complete projection identity through elaboration.
+        item_arguments: Vec<HeaderType>,
     },
     Tuple(Vec<HeaderType>),
     Callable {
@@ -1229,11 +1233,13 @@ impl Parser<'_> {
                 self.error("G3213", "expected associated type name");
                 return HeaderType::Recovered;
             };
+            let item_arguments = self.type_arguments();
             return HeaderType::Projection {
                 subject: Box::new(subject),
                 trait_path,
                 trait_arguments,
                 name,
+                item_arguments,
             };
         }
         if self.operator("!") {

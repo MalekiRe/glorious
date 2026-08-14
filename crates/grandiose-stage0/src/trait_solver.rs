@@ -176,11 +176,9 @@ impl TraitSolver {
     /// Select an implementation for `goal` and normalize one of its
     /// zero-arity associated types with the selected impl substitution.
     ///
-    /// Associated-type syntax has not yet reached body type expressions, but
-    /// the frozen interface already carries the data.  Keeping normalization
-    /// at this solver boundary means the later projection syntax can share
-    /// candidate selection, bounds checking, and canonical memoization rather
-    /// than introduce a parallel impl lookup.
+    /// Source projection syntax and frozen interfaces share this solver
+    /// boundary, so candidate selection, bounds checking, and canonical
+    /// memoization never need a parallel impl lookup.
     pub fn normalize_associated_type(
         &mut self,
         goal: TraitGoal,
@@ -408,20 +406,24 @@ fn match_type(
             trait_definition,
             trait_arguments,
             name,
+            item_arguments,
         } => match actual {
             Type::Projection {
                 subject: actual_subject,
                 trait_definition: actual_trait_definition,
                 trait_arguments: actual_trait_arguments,
                 name: actual_name,
+                item_arguments: actual_item_arguments,
             } if trait_definition == actual_trait_definition
                 && name == actual_name
-                && trait_arguments.len() == actual_trait_arguments.len() =>
+                && trait_arguments.len() == actual_trait_arguments.len()
+                && item_arguments.len() == actual_item_arguments.len() =>
             {
                 match_type(subject, actual_subject, substitution)?;
                 trait_arguments
                     .iter()
                     .zip(actual_trait_arguments)
+                    .chain(item_arguments.iter().zip(actual_item_arguments))
                     .try_for_each(|(template, actual)| match_type(template, actual, substitution))
             }
             _ => None,
@@ -515,6 +517,7 @@ fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
             trait_definition,
             trait_arguments,
             name,
+            item_arguments,
         } => Type::Projection {
             subject: Box::new(substitute_type(subject, substitution)),
             trait_definition: *trait_definition,
@@ -523,6 +526,10 @@ fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
                 .map(|value| substitute_type(value, substitution))
                 .collect(),
             name: name.clone(),
+            item_arguments: item_arguments
+                .iter()
+                .map(|value| substitute_type(value, substitution))
+                .collect(),
         },
         Type::Tuple(values) => Type::Tuple(
             values
