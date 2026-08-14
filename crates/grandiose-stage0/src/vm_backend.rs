@@ -525,6 +525,9 @@ pub enum VmArtifactError {
     HandlerDepthLimit {
         limit: u32,
     },
+    ContinuationLimit {
+        limit: u32,
+    },
     InstructionLimit {
         limit: u64,
     },
@@ -573,6 +576,8 @@ pub enum VmArtifactError {
 pub struct VmExecutionLimits {
     pub max_call_depth: u32,
     pub max_handler_depth: u32,
+    /// Maximum suspended handler continuations retained at once.
+    pub max_retained_continuations: u32,
     pub max_instructions: u64,
     /// Largest materialized aggregate or handler payload, in value elements.
     pub max_value_elements: u64,
@@ -584,6 +589,7 @@ impl Default for VmExecutionLimits {
         Self {
             max_call_depth: 4_096,
             max_handler_depth: 4_096,
+            max_retained_continuations: 4_096,
             max_instructions: 10_000_000,
             max_value_elements: 1 << 20,
             max_allocation_elements: 1 << 24,
@@ -4719,6 +4725,16 @@ fn execute(
                     });
                 };
                 let above = handlers.split_off(index + 1);
+                if handlers
+                    .iter()
+                    .filter(|handler| handler.suspended.is_some())
+                    .count()
+                    >= budget.limits.max_retained_continuations as usize
+                {
+                    return Err(VmArtifactError::ContinuationLimit {
+                        limit: budget.limits.max_retained_continuations,
+                    });
+                }
                 let frame = &mut handlers[index];
                 if frame.payload_destinations.len() != values.len() {
                     return Err(VmArtifactError::CallArity {
@@ -6121,6 +6137,16 @@ fn execute_with_arguments(
                     });
                 };
                 let above = handlers.split_off(index + 1);
+                if handlers
+                    .iter()
+                    .filter(|handler| handler.suspended.is_some())
+                    .count()
+                    >= budget.limits.max_retained_continuations as usize
+                {
+                    return Err(VmArtifactError::ContinuationLimit {
+                        limit: budget.limits.max_retained_continuations,
+                    });
+                }
                 let frame = &mut handlers[index];
                 if frame.payload_destinations.len() != values.len() {
                     return Err(VmArtifactError::CallArity {

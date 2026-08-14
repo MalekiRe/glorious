@@ -304,6 +304,39 @@ fn assert_continuation_budget_parity(function: VmFunction, max_instructions: u64
     ));
 }
 
+fn assert_continuation_retention_parity(function: VmFunction) {
+    let definition = function.definition;
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"continuation-retention-artifact"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let limits = VmExecutionLimits {
+        max_retained_continuations: 0,
+        ..VmExecutionLimits::default()
+    };
+    assert!(matches!(
+        verify_vm(artifact).unwrap().run_i64_with_limits(limits),
+        Err(VmArtifactError::ContinuationLimit { limit: 0 })
+    ));
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: definition,
+        functions: BTreeMap::from([(definition, function)]),
+        fingerprint: Digest::of_bytes(b"continuation-retention-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(program)
+            .unwrap()
+            .run_i64_with_limits(limits),
+        Err(VmArtifactError::ContinuationLimit { limit: 0 })
+    ));
+}
+
 #[test]
 fn schema_26_leave_bytes_reject_every_truncation_and_fingerprint_tampering() {
     let bytes = encoded_leave_fixture();
@@ -975,6 +1008,9 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
     // The seventh step is the restored continuation's return.
     assert_continuation_budget_parity(candidate.function.clone(), 6);
+    // No CaptureResumption/Snapshot path can create a retained frame once the
+    // explicit continuation cap is exhausted.
+    assert_continuation_retention_parity(candidate.function.clone());
     assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
 }
 
