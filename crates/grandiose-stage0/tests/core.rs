@@ -105,6 +105,44 @@ fn typed_core_retains_zonked_direct_call_specialization_arguments() {
 }
 
 #[test]
+fn typed_core_retains_explicit_direct_callable_generic_arguments() {
+    let core = core_for(
+        "core-explicit-direct-generic@0.1.0",
+        "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity<i64>(42) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::Function { arguments, .. }
+                if arguments.as_slice()
+                    == [GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+        )
+    }));
+}
+
+#[test]
+fn typed_core_retains_explicit_trait_method_generic_arguments() {
+    let core = core_for(
+        "core-explicit-trait-generic@0.1.0",
+        "trait Identity<T> { fn identity(value: T) -> T; } impl<T> Identity<T> for T { fn identity(value: T) -> T { value } } pub fn main() -> i64 { Identity<i64>::identity(42) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::TraitMethod {
+                trait_arguments,
+                method_arguments,
+                ..
+            } if trait_arguments.as_slice()
+                == [GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+                && method_arguments.is_empty()
+        )
+    }));
+}
+
+#[test]
 fn recovered_source_elaborates_to_core_error_and_is_rejected_before_mir() {
     let source = "pub fn main() -> i64 { let = ; }";
     let core = core_for("core-recovered-source@0.1.0", source);

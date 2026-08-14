@@ -319,6 +319,28 @@ fn body_parser_preserves_all_explicit_generic_argument_kinds_on_effect_paths() {
 }
 
 #[test]
+fn body_parser_recognizes_direct_callable_generic_applications() {
+    let body = parse("{ identity<i64>(42) }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected outer block")
+    };
+    let ExprKind::Call { callee, .. } = &body.expression(values[0]).kind else {
+        panic!("expected direct call")
+    };
+    assert!(matches!(
+        body.expression(*callee).kind,
+        ExprKind::GenericPath {
+            ref path,
+            ref effect_arguments,
+            ref operation_arguments,
+        } if path == &vec!["identity".to_owned()]
+            && matches!(effect_arguments.as_slice(), [HeaderGenericArgument::Type(_)])
+            && operation_arguments.is_empty()
+    ));
+}
+
+#[test]
 fn body_parser_preserves_compact_and_typed_closure_syntax_without_elaboration() {
     let package = PackageKey("body-closures@0.1.0".into());
     let source =

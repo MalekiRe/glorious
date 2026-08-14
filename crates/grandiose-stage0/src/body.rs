@@ -742,9 +742,10 @@ impl Parser<'_> {
     }
 
     /// `<` is also an ordinary infix comparison operator.  Treat it as a
-    /// source type application only when its balanced closing `>` is followed
-    /// by `::`, which is the unambiguous generic-path form admitted by this
-    /// body grammar (`Protocol<T>::operation`).
+    /// source generic application only when its balanced closing `>` is
+    /// followed by `::` or a call argument list. Both forms are unambiguous:
+    /// `Protocol<T>::operation` names a qualified path, while `value<T>(..)`
+    /// names one directly applied callable rather than a comparison.
     fn generic_path_ahead(&self) -> bool {
         if !self.at_operator("<") {
             return false;
@@ -761,7 +762,9 @@ impl Parser<'_> {
                         }
                         depth -= 1;
                         if depth == 0 {
-                            return matches!(
+                            return self.tokens.get(position + 1).is_some_and(|next| {
+                                self.lexed.tokens[*next].kind == TokenKind::Punctuation('(')
+                            }) || matches!(
                                 (self.tokens.get(position + 1), self.tokens.get(position + 2)),
                                 (Some(first), Some(second))
                                     if self.lexed.tokens[*first].kind == TokenKind::Punctuation(':')

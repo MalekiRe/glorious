@@ -1743,10 +1743,17 @@ impl Elaborator<'_> {
             ExprKind::Path(path) => self
                 .enum_constructor(path.clone(), vec![], expression.span)
                 .unwrap_or_else(|| self.path(path, expression.span)),
+            ExprKind::GenericPath {
+                path,
+                effect_arguments,
+                operation_arguments,
+            } if operation_arguments.is_empty() => {
+                self.generic_path(path, effect_arguments, expression.span)
+            }
             ExprKind::GenericPath { .. } => self.fail(
                 expression.span,
-                "G4151",
-                "a generic effect instance must be followed by an operation call",
+                "G4184",
+                "a qualified generic operation must be followed by a call",
             ),
             ExprKind::Let { name, value } => {
                 let value = self.expression(value);
@@ -3828,6 +3835,87 @@ impl Elaborator<'_> {
             _ => self.fail(span, "G4104", "unresolved value reference"),
         }
     }
+
+    /// Resolve an explicitly applied direct callable.  Body syntax keeps the
+    /// arguments source-kinded until this value lookup establishes the frozen
+    /// callable contract; the resulting Core function retains precisely that
+    /// caller-owned substitution for instance discovery and later lowering.
+    fn generic_path(
+        &mut self,
+        path: Vec<String>,
+        source_arguments: Vec<crate::header::HeaderGenericArgument>,
+        span: Span,
+    ) -> CoreId {
+        if path.len() == 1 && self.locals.lookup(&path[0]).is_some() {
+            return self.fail(
+                span,
+                "G4184",
+                "a local value cannot be explicitly generic-applied",
+            );
+        }
+        let ResolutionState::Resolved(definition) =
+            self.index
+                .resolve_path(DefinitionNamespace::Value, self.module, &path)
+        else {
+            return self.fail(
+                span,
+                "G4184",
+                "generic callable path is unresolved in the value namespace",
+            );
+        };
+        let Some(signature) = self
+            .signatures
+            .definitions
+            .get(&definition)
+            .and_then(callable)
+        else {
+            return self.fail(
+                span,
+                "G4184",
+                "explicit generic arguments require a callable value",
+            );
+        };
+        let Some(arguments) = self.body_generic_arguments(
+            &source_arguments,
+            &signature.generic_kinds,
+            span,
+            "G4184",
+            "callable generic arguments do not match its declaration",
+        ) else {
+            return self.fail(
+                span,
+                "G4184",
+                "callable generic arguments do not match its declaration",
+            );
+        };
+        let signature = match self
+            .signatures
+            .instantiate_callable_generic(definition, &arguments)
+        {
+            Ok(signature) => signature,
+            Err(_) => {
+                return self.fail(
+                    span,
+                    "G4184",
+                    "callable generic arguments do not satisfy its declaration contract",
+                );
+            }
+        };
+        self.alloc(
+            CoreKind::Function {
+                definition,
+                arguments,
+            },
+            Type::Callable {
+                lifetime_binders: 0,
+                parameters: signature.parameters,
+                result: Box::new(signature.result),
+                effects: signature.effects,
+                invocation: signature.invocation,
+            },
+            span,
+        )
+    }
     fn active_resumption(&self, name: &str) -> Option<ActiveResumption> {
         let generation = self.locals.binding_generation(&name.to_owned())?;
         self.resumption_bindings
@@ -4368,12 +4456,6 @@ impl Elaborator<'_> {
             "G4168",
             "trait method qualification generic arguments do not match its declaration",
         )?;
-        let trait_arguments = self.generic_arguments_as_types(
-            trait_arguments,
-            span,
-            "G4168",
-            "qualified trait methods require type-valued trait arguments",
-        )?;
         let Some(method_header) = trait_header.methods.get(name) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
@@ -4391,7 +4473,7 @@ impl Elaborator<'_> {
         let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
         let method_arguments = if operation_arguments.is_empty() {
             (0..method_header.generics)
-                .map(|_| self.inference.fresh())
+                .map(|_| GenericArgument::Type(self.inference.fresh()))
                 .collect::<Vec<_>>()
         } else {
             if operation_arguments.len() != method_header.generics as usize {
@@ -4401,28 +4483,20 @@ impl Elaborator<'_> {
                     "trait method operation arguments do not match its declaration",
                 ));
             }
-            let arguments = self.body_generic_arguments(
+            self.body_generic_arguments(
                 &operation_arguments,
-                &vec![crate::GenericKind::Type; method_header.generics as usize],
+                &method_header.generic_kinds,
                 span,
                 "G4168",
                 "trait method operation arguments do not match its declaration",
-            )?;
-            self.generic_arguments_as_types(
-                arguments,
-                span,
-                "G4168",
-                "qualified trait methods require type-valued operation arguments",
             )?
         };
-        let trait_arguments = trait_arguments
-            .into_iter()
-            .map(crate::GenericArgument::Type)
-            .collect::<Vec<_>>();
-        let method_arguments = method_arguments
-            .into_iter()
-            .map(crate::GenericArgument::Type)
-            .collect::<Vec<_>>();
+        let method_types = self.generic_arguments_as_types(
+            method_arguments.clone(),
+            span,
+            "G4168",
+            "qualified trait methods require type-valued operation arguments",
+        )?;
         let answer = TraitSolver::new(self.signatures).select_method(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
@@ -4432,13 +4506,7 @@ impl Elaborator<'_> {
                 subject,
             },
             name,
-            &method_arguments
-                .iter()
-                .filter_map(|argument| match argument {
-                    crate::GenericArgument::Type(ty) => Some(ty.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
+            &method_types,
         );
         let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {
