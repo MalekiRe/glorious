@@ -310,6 +310,10 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    I64ToI16Wrapping {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1467,6 +1471,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::I64ToU16Checked { dst, .. }
         | MirInstruction::I64ToU16Wrapping { dst, .. }
         | MirInstruction::I64ToI16Checked { dst, .. }
+        | MirInstruction::I64ToI16Wrapping { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3382,7 +3387,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::I64ToU8Wrapping { .. }
         | MirInstruction::I64ToU16Checked { .. }
         | MirInstruction::I64ToU16Wrapping { .. }
-        | MirInstruction::I64ToI16Checked { .. } => Ok(()),
+        | MirInstruction::I64ToI16Checked { .. }
+        | MirInstruction::I64ToI16Wrapping { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -4120,7 +4126,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::I64ToU8Wrapping { dst, value }
         | MirInstruction::I64ToU16Checked { dst, value }
         | MirInstruction::I64ToU16Wrapping { dst, value }
-        | MirInstruction::I64ToI16Checked { dst, value } => vec![*dst, *value],
+        | MirInstruction::I64ToI16Checked { dst, value }
+        | MirInstruction::I64ToI16Wrapping { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -13885,6 +13892,26 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::I64ToU16Wrapping { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::IntConvertWrappingToI16) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error("G6005", "generic wrapping i64-to-i16 conversion requires one operand");
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I16)
+                                {
+                                    self.error("G6005", "generic wrapping i64-to-i16 conversion is only VM-specialized for frozen i64");
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::I64ToI16Wrapping { dst, value: *value });
                             }
                             Some(PrimitiveRole::IntBitNot) => {
                                 let [value] = arguments.as_slice() else {
