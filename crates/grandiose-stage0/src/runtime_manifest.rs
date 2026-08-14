@@ -130,6 +130,10 @@ pub enum PrimitiveRole {
     /// distributed std. Its frozen i64 specialization rejects values outside
     /// the i32 range.
     IntConvertCheckedToI32,
+    /// Exact generic declaration `__g1_int_convert_wrapping_to_i32<T>` in
+    /// distributed std. Its frozen i64 specialization retains low
+    /// two's-complement bits.
+    IntConvertWrappingToI32,
 }
 
 impl PrimitiveRole {
@@ -193,6 +197,7 @@ impl PrimitiveRole {
             Self::IntConvertCheckedToU16 => "int-convert-checked-to-u16",
             Self::IntConvertCheckedToI16 => "int-convert-checked-to-i16",
             Self::IntConvertCheckedToI32 => "int-convert-checked-to-i32",
+            Self::IntConvertWrappingToI32 => "int-convert-wrapping-to-i32",
         }
     }
 
@@ -256,6 +261,7 @@ impl PrimitiveRole {
             "int-convert-checked-to-u16" => Self::IntConvertCheckedToU16,
             "int-convert-checked-to-i16" => Self::IntConvertCheckedToI16,
             "int-convert-checked-to-i32" => Self::IntConvertCheckedToI32,
+            "int-convert-wrapping-to-i32" => Self::IntConvertWrappingToI32,
             _ => return None,
         })
     }
@@ -732,6 +738,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntConvertWrappingToI32 => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Scalar(crate::ScalarType::I32),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntConvertWrappingToUsize => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
@@ -891,6 +908,7 @@ fn manifest_digest(
             PrimitiveRole::IntConvertCheckedToU16 => 53,
             PrimitiveRole::IntConvertCheckedToI16 => 55,
             PrimitiveRole::IntConvertCheckedToI32 => 57,
+            PrimitiveRole::IntConvertWrappingToI32 => 58,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

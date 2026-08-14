@@ -605,6 +605,39 @@ fn generic_int_checked_to_i32_requires_its_exact_i64_to_i32_abi() {
 }
 
 #[test]
+fn generic_int_wrapping_to_i32_requires_its_exact_i64_to_i32_abi() {
+    let standard = PackageKey("std@0.1.0".into());
+    let input = RuntimeManifestInput {
+        standard_library: standard.clone(),
+        selectors: vec![PrimitiveSelector {
+            role: PrimitiveRole::IntConvertWrappingToI32,
+            module_path: "crate".into(),
+            name: "__g1_int_convert_wrapping_to_i32".into(),
+        }],
+    };
+    let package_interface = interface(
+        standard.clone(),
+        "pub fn __g1_int_convert_wrapping_to_i32<T>(value: T) -> i32 { () }",
+    );
+    let signatures = ElaboratedInterface::elaborate(&package_interface);
+    input
+        .bind(vec![package_interface], &signatures)
+        .expect("exact i64-to-i32 ABI must bind");
+    let invalid_interface = interface(
+        standard,
+        "pub fn __g1_int_convert_wrapping_to_i32<T>(value: T) -> u32 { () }",
+    );
+    let invalid_signatures = ElaboratedInterface::elaborate(&invalid_interface);
+    assert!(matches!(
+        input.bind(vec![invalid_interface], &invalid_signatures),
+        Err(ManifestError::IncompatibleSignature {
+            role: PrimitiveRole::IntConvertWrappingToI32,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn generic_int_checked_to_usize_requires_its_exact_i64_to_usize_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
