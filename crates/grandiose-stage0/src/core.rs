@@ -325,6 +325,8 @@ pub enum CoreKind {
     TraitMethod {
         evidence: DefKey,
         method: DefKey,
+        trait_arguments: Vec<GenericArgument>,
+        method_arguments: Vec<GenericArgument>,
     },
     Constant(DefKey),
     Tuple(Vec<CoreId>),
@@ -602,10 +604,17 @@ impl CoreFingerprintEncoder<'_> {
                 self.debug(definition);
                 self.debug(arguments);
             }
-            CoreKind::TraitMethod { evidence, method } => {
+            CoreKind::TraitMethod {
+                evidence,
+                method,
+                trait_arguments,
+                method_arguments,
+            } => {
                 self.bytes(b"trait-method");
                 self.debug(evidence);
                 self.debug(method);
+                self.debug(trait_arguments);
+                self.debug(method_arguments);
             }
             CoreKind::Constant(definition) => {
                 self.bytes(b"constant");
@@ -4314,19 +4323,30 @@ impl Elaborator<'_> {
             }
             operation_arguments
         };
+        let trait_arguments = trait_arguments
+            .into_iter()
+            .map(crate::GenericArgument::Type)
+            .collect::<Vec<_>>();
+        let method_arguments = method_arguments
+            .into_iter()
+            .map(crate::GenericArgument::Type)
+            .collect::<Vec<_>>();
         let answer = TraitSolver::new(self.signatures).select_method(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
-                    arguments: trait_arguments
-                        .into_iter()
-                        .map(crate::GenericArgument::Type)
-                        .collect(),
+                    arguments: trait_arguments.clone(),
                 },
                 subject,
             },
             name,
-            &method_arguments,
+            &method_arguments
+                .iter()
+                .filter_map(|argument| match argument {
+                    crate::GenericArgument::Type(ty) => Some(ty.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
         );
         let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {
@@ -4378,7 +4398,12 @@ impl Elaborator<'_> {
             }
         };
         let callee = self.alloc(
-            CoreKind::TraitMethod { evidence, method },
+            CoreKind::TraitMethod {
+                evidence,
+                method,
+                trait_arguments,
+                method_arguments,
+            },
             Type::Callable {
                 lifetime_binders: 0,
                 parameters: signature.parameters.clone(),

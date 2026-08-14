@@ -535,7 +535,7 @@ fn typed_core_retains_selected_trait_method_evidence() {
     assert!(core.expressions.iter().any(|expression| {
         matches!(
             expression.kind,
-            CoreKind::TraitMethod { evidence, method }
+            CoreKind::TraitMethod { evidence, method, .. }
                 if evidence == implementation.key
                     && method == implementation_method_key(implementation.key, "increment")
         )
