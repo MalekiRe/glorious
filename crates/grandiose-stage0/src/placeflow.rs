@@ -193,6 +193,7 @@ impl Analyzer<'_> {
         let e = self.body.expression(id).clone();
         match e.kind {
             CoreKind::Literal(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
@@ -454,6 +455,7 @@ impl Analyzer<'_> {
                 }
             }
             CoreKind::Literal(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)

@@ -1111,6 +1111,14 @@ fn service_executes_a_direct_one_shot_resumption_at_the_handler_root() {
 }
 
 #[test]
+fn service_executes_an_aliased_one_shot_resumption_with_vm_parity() {
+    let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle { let answer = Ask::ask(); answer + 1 } { Ask::ask() with k => { let saved = k; saved(41) } } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_composes_a_direct_operation_arm_with_a_normal_completion_arm() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask() => 41 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

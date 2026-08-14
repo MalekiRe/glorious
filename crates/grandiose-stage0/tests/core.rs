@@ -1877,7 +1877,7 @@ fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
 }
 
 #[test]
-fn handler_resumption_cannot_be_aliased_as_an_ordinary_value() {
+fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
     let package = PackageKey("core-handler-resumption-alias@0.1.0".into());
     let source = "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => { let saved = k; saved(42) } } }";
     let file = FileKey::new(&package, "src/main.glorious");
@@ -1898,13 +1898,24 @@ fn handler_resumption_cannot_be_aliased_as_an_ordinary_value() {
         &DefinitionIndex::from_interface(&interface),
         &signatures,
     );
-    assert!(
-        core.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4175"),
-        "resumption alias escaped Typed Core validation: {:#?}",
-        core.diagnostics
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let snapshots = core
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            CoreKind::Resumption { id, .. } => Some(*id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2, "alias must remain explicit in Core");
+    assert_eq!(
+        snapshots[0], snapshots[1],
+        "alias changed snapshot identity"
     );
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    let mir = MirLowering::lower(definition.key, &core, &flow);
+    assert!(mir.diagnostics.is_empty(), "{:#?}", mir.diagnostics);
 }
 
 #[test]

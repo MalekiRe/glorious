@@ -95,6 +95,7 @@ impl Analyzer<'_> {
         let expression = self.body.expression(id).clone();
         match expression.kind {
             CoreKind::Literal(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)

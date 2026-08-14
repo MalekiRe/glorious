@@ -1941,7 +1941,6 @@ struct Lowerer<'a> {
 
 #[derive(Clone, Debug)]
 struct DirectResumptionState {
-    name: String,
     quantity: crate::quantity::Quantity,
     calls: u64,
     plan: DirectResumptionPlan,
@@ -4239,7 +4238,6 @@ impl Lowerer<'_> {
             // local or a payload binder.
             self.named.remove(continuation);
             let previous = self.direct_resumption.replace(DirectResumptionState {
-                name: continuation.clone(),
                 quantity: *quantity,
                 calls: 0,
                 plan: DirectResumptionPlan::PureResidual {
@@ -5437,7 +5435,7 @@ impl Lowerer<'_> {
                 }
                 self.value(clause.body)
             }
-            CoreHandlerResumption::Explicit { name, quantity } => {
+            CoreHandlerResumption::Explicit { quantity, .. } => {
                 if !quantity.contains(crate::quantity::Quantity::ONCE) {
                     self.error(
                         "G6005",
@@ -5445,29 +5443,26 @@ impl Lowerer<'_> {
                     );
                     return None;
                 }
-                let CoreKind::Call { callee, arguments } =
-                    self.body.expression(clause.body).kind.clone()
-                else {
+                let previous = self.direct_resumption.replace(DirectResumptionState {
+                    quantity: *quantity,
+                    calls: 0,
+                    plan: DirectResumptionPlan::Identity,
+                });
+                let result = self.value(clause.body);
+                let state = self
+                    .direct_resumption
+                    .take()
+                    .expect("direct resumption state must outlive its clause body");
+                self.direct_resumption = previous;
+                let result = result?;
+                if state.calls != 1 {
                     self.error(
                         "G6005",
-                        "direct resumptive handler requires an explicit call to its continuation",
-                    );
-                    return None;
-                };
-                if !matches!(self.body.expression(callee).kind, CoreKind::Local(ref local) if local == name)
-                    || arguments.len() != 1
-                {
-                    self.error(
-                        "G6005",
-                        "direct resumptive handler continuation must be invoked with one value",
+                        "direct resumptive handler must invoke its continuation exactly once",
                     );
                     return None;
                 }
-                // The root operation's continuation immediately returns its
-                // operation result. The upcoming deep handler-stack lowering
-                // replaces this direct identity continuation for nonempty
-                // residual computations.
-                self.value(arguments[0])
+                Some(result)
             }
             CoreHandlerResumption::Discard { quantity } => {
                 if quantity.requires_positive_use() {
@@ -5496,7 +5491,6 @@ impl Lowerer<'_> {
                 // `let name = ...` prevents direct-resumption recognition.
                 let shadowed = self.named.remove(name);
                 let previous = self.direct_resumption.replace(DirectResumptionState {
-                    name: name.clone(),
                     quantity: *quantity,
                     calls: 0,
                     plan: DirectResumptionPlan::Identity,
@@ -5621,6 +5615,26 @@ impl Lowerer<'_> {
         // registers, but a `let` cannot merely alias its initializer: later
         // assignment must overwrite this same destination.
         if let CoreKind::Let { name, value } = &e.kind {
+            if matches!(
+                self.body.expression(*value).kind,
+                CoreKind::Resumption { .. }
+            ) {
+                if self.direct_resumption.is_none() {
+                    self.error(
+                        "G6005",
+                        "first-class continuation snapshot requires handler-frame lowering",
+                    );
+                    return None;
+                }
+                // The direct specialization keeps the snapshot in its
+                // explicit resumption state; aliases are identity-preserving
+                // Core bindings and therefore need no ordinary register copy.
+                let unit = self.alloc(Type::Unit, id);
+                self.instructions
+                    .push(MirInstruction::ConstUnit { dst: unit });
+                self.values.insert(id, unit);
+                return Some(unit);
+            }
             let src = self.value(*value)?;
             let local = self.alloc(self.body.expression(*value).ty.clone(), id);
             self.instructions
@@ -5705,6 +5719,13 @@ impl Lowerer<'_> {
             CoreKind::Local(name) => {
                 let src = *self.named.get(&name).or_else(|| self.values.get(&id))?;
                 self.instructions.push(MirInstruction::Copy { dst, src });
+            }
+            CoreKind::Resumption { .. } => {
+                self.error(
+                    "G6005",
+                    "first-class continuation snapshot requires handler-frame lowering",
+                );
+                return None;
             }
             // Named callables are first-class values just like anonymous
             // closures. Their environment is statically empty, while the
@@ -6010,12 +6031,10 @@ impl Lowerer<'_> {
                 self.instructions.push(instruction);
             }
             CoreKind::Call { callee, arguments } => {
-                if let CoreKind::Local(name) = &self.body.expression(callee).kind
-                    && self
-                        .direct_resumption
-                        .as_ref()
-                        .is_some_and(|resumption| resumption.name == *name)
-                    && !self.named.contains_key(name)
+                if matches!(
+                    self.body.expression(callee).kind,
+                    CoreKind::Resumption { .. }
+                ) && self.direct_resumption.is_some()
                 {
                     let [argument] = arguments.as_slice() else {
                         self.error("G6005", "direct resumption must be invoked with one value");
@@ -6324,6 +6343,7 @@ impl Lowerer<'_> {
         match self.body.expression(id).kind.clone() {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. } => true,
             CoreKind::Constant(_)
@@ -6367,6 +6387,7 @@ impl Lowerer<'_> {
         match self.body.expression(id).kind.clone() {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. } => true,
             CoreKind::Constant(_)

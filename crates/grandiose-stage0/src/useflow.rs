@@ -324,6 +324,7 @@ impl Analyzer<'_> {
         match expression.kind {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
@@ -588,6 +589,11 @@ impl Analyzer<'_> {
         let expression = self.body.expression(id);
         match &expression.kind {
             CoreKind::Local(name) => environment
+                .bindings
+                .get(name)
+                .cloned()
+                .unwrap_or(Binding::Other),
+            CoreKind::Resumption { name, .. } => environment
                 .bindings
                 .get(name)
                 .cloned()

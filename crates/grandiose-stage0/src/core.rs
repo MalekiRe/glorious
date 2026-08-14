@@ -24,6 +24,12 @@ pub struct CoreId(pub u32);
 /// named declaration identities or interface fingerprints.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CallableId(pub u32);
+/// Stable body-local identity of a suspended handler continuation.  This is
+/// deliberately independent from its source binder: aliases may carry the
+/// same snapshot capability, while lexical shadowing must never manufacture a
+/// new continuation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ResumptionId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CaptureMode {
     SharedBorrow,
@@ -140,6 +146,7 @@ pub enum CoreHandlerResumption {
 /// environment and identifies the exact currently visible binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveResumption {
+    id: ResumptionId,
     name: String,
     binding_generation: usize,
 }
@@ -212,6 +219,14 @@ impl CorePlace {
 pub enum CoreKind {
     Literal(String),
     Local(String),
+    /// A first-class reference to one active handler snapshot.  It retains
+    /// the lexical spelling solely so capture/diagnostic products can name
+    /// the binding; `id` is the semantic identity consumed by UseFlow and
+    /// continuation lowering.
+    Resumption {
+        id: ResumptionId,
+        name: String,
+    },
     Function(DefKey),
     /// A direct function value selected from a trait implementation. Retain
     /// proof evidence alongside the callable key until MIR consumes this
@@ -458,6 +473,11 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(b"local");
                 self.bytes(name.as_bytes());
             }
+            CoreKind::Resumption { id, name } => {
+                self.bytes(b"resumption");
+                self.debug(id);
+                self.bytes(name.as_bytes());
+            }
             CoreKind::Function(definition) => {
                 self.bytes(b"function");
                 self.debug(definition);
@@ -645,6 +665,7 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         CoreKind::Binary { left, right, .. } => vec![*left, *right],
         CoreKind::Literal(_)
         | CoreKind::Local(_)
+        | CoreKind::Resumption { .. }
         | CoreKind::Function(_)
         | CoreKind::TraitMethod { .. }
         | CoreKind::Constant(_)
@@ -971,6 +992,7 @@ impl TypedBody {
             diagnostics: vec![],
             recovered: body.recovered,
             next_callable: 0,
+            next_resumption: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
             effect_row_parameters: definition
@@ -1029,7 +1051,7 @@ impl TypedBody {
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
-            direct_resumption_callee: None,
+            resumption_bindings: std::collections::BTreeMap::new(),
             resumption_use_tracker: None,
         };
         let expected_result = signatures
@@ -1135,6 +1157,7 @@ impl TypedBody {
             diagnostics: vec![],
             recovered: body.recovered,
             next_callable: 0,
+            next_resumption: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
             effect_row_parameters: {
@@ -1200,7 +1223,7 @@ impl TypedBody {
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
-            direct_resumption_callee: None,
+            resumption_bindings: std::collections::BTreeMap::new(),
             resumption_use_tracker: None,
         };
         let mut parameters = vec![];
@@ -1266,6 +1289,7 @@ impl TypedBody {
             diagnostics: vec![],
             recovered: body.recovered,
             next_callable: 0,
+            next_resumption: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
@@ -1277,7 +1301,7 @@ impl TypedBody {
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
-            direct_resumption_callee: None,
+            resumption_bindings: std::collections::BTreeMap::new(),
             resumption_use_tracker: None,
         };
         let expected = match signatures.definitions.get(&definition.key) {
@@ -1381,6 +1405,7 @@ struct Elaborator<'a> {
     diagnostics: Vec<CoreDiagnostic>,
     recovered: bool,
     next_callable: u32,
+    next_resumption: u32,
     function_arguments: std::collections::BTreeMap<CoreId, Vec<Type>>,
     /// Callable-declaration generic binders are lexically visible in its
     /// body, including effect applications such as `State<T>::get()`. They
@@ -1421,17 +1446,11 @@ struct Elaborator<'a> {
     handled_operations: std::collections::BTreeSet<(EffectInstance, u32)>,
     /// Lexically live generated continuations. A resumption is an identity
     /// tied to one suspended handler frame, not an ordinary closure value.
-    /// Until a first-class continuation environment is represented in MIR and
-    /// the VM, nested closure capture would let that identity escape its
-    /// frame. Keep the restriction at Typed Core, where capture facts are
-    /// explicit and source recovery cannot manufacture an executable escape.
     active_resumptions: Vec<ActiveResumption>,
-    /// A frame-bound resumption is not yet a first-class closure value in the
-    /// runtime representation.  This short-lived authorization is installed
-    /// only while elaborating the callee of `k(value)` (or migration spelling
-    /// `resume(k, value)`).  Every other value use fails at Typed Core rather
-    /// than leaking to a later MIR-only failure.
-    direct_resumption_callee: Option<ActiveResumption>,
+    /// Every lexical alias of an active snapshot points to its original
+    /// generated identity. Scope generations are never reused, so stale
+    /// entries cannot make a shadowing local resumptive.
+    resumption_bindings: std::collections::BTreeMap<usize, ActiveResumption>,
     /// Installed only while one explicit handler arm is elaborated. Nested
     /// handler arms replace and restore it, preserving lexical continuation
     /// identity rather than counting an accidentally shadowed spelling.
@@ -1458,6 +1477,11 @@ impl Elaborator<'_> {
                 let value = self.expression(value);
                 let ty = self.expressions[value.0 as usize].ty.clone();
                 self.locals.define(name.clone(), ty.clone());
+                if let Some(identity) = self.resumption_identity(value) {
+                    if let Some(generation) = self.locals.binding_generation(&name) {
+                        self.resumption_bindings.insert(generation, identity);
+                    }
+                }
                 self.alloc(CoreKind::Let { name, value }, Type::Unit, expression.span)
             }
             ExprKind::Assign { place, value } => {
@@ -1582,7 +1606,8 @@ impl Elaborator<'_> {
                 if matches!(self.body.expression(callee).kind, ExprKind::Path(ref path) if path.len() == 1 && path[0] == "resume")
                     && let [resumption, value] = arguments.as_slice()
                 {
-                    let callee = self.direct_resumption_callee(*resumption);
+                    let callee = self.expression(*resumption);
+                    self.record_resumption_call(callee);
                     let expected = match self.expressions[callee.0 as usize].ty.clone() {
                         Type::Callable { parameters, .. } => parameters.first().cloned(),
                         _ => None,
@@ -1662,7 +1687,8 @@ impl Elaborator<'_> {
                 {
                     return value;
                 }
-                let callee = self.direct_resumption_callee(callee);
+                let callee = self.expression(callee);
+                self.record_resumption_call(callee);
                 let expected = match self.expressions[callee.0 as usize].ty.clone() {
                     Type::Callable { parameters, .. } => Some(parameters),
                     _ => None,
@@ -2554,11 +2580,10 @@ impl Elaborator<'_> {
     /// Direct invocation remains valid; this is only the closure-capture
     /// product boundary.
     fn check_resumption_captures(&mut self, captures: &[ClosureCapture], span: Span) {
-        if let Some(capture) = captures.iter().find(|capture| {
-            self.active_resumptions
-                .iter()
-                .any(|resumption| self.resumption_is_visible(resumption, &capture.name))
-        }) {
+        if let Some(capture) = captures
+            .iter()
+            .find(|capture| self.active_resumption(&capture.name).is_some())
+        {
             self.error(
                 span,
                 "G4174",
@@ -2579,6 +2604,14 @@ impl Elaborator<'_> {
         let expression = &self.expressions[id.0 as usize];
         match &expression.kind {
             CoreKind::Local(name) if !locals.contains(name) => {
+                record_capture(
+                    captures,
+                    name,
+                    CaptureMode::SharedBorrow,
+                    expression.ty.clone(),
+                );
+            }
+            CoreKind::Resumption { name, .. } if !locals.contains(name) => {
                 record_capture(
                     captures,
                     name,
@@ -2703,6 +2736,7 @@ impl Elaborator<'_> {
             }
             CoreKind::Closure { .. }
             | CoreKind::Literal(_)
+            | CoreKind::Resumption { .. }
             | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
@@ -3134,14 +3168,15 @@ impl Elaborator<'_> {
         if path.len() == 1
             && let Some(ty) = self.locals.lookup(&path[0]).cloned()
         {
-            let active = self.active_resumption(&path[0]);
-            if active.is_some() && self.direct_resumption_callee.as_ref() != active.as_ref() {
-                self.error(
+            if let Some(active) = self.active_resumption(&path[0]) {
+                return self.alloc(
+                    CoreKind::Resumption {
+                        id: active.id,
+                        name: path[0].clone(),
+                    },
+                    ty,
                     span,
-                    "G4175",
-                    "handler resumption must be invoked directly and cannot be used as an ordinary value",
                 );
-                self.recovered = true;
             }
             return self.alloc(CoreKind::Local(path[0].clone()), ty, span);
         }
@@ -3196,43 +3231,29 @@ impl Elaborator<'_> {
             _ => self.fail(span, "G4104", "unresolved value reference"),
         }
     }
-    /// Elaborate a source expression in the one context where the current
-    /// runtime representation may consume a generated continuation: the
-    /// immediate callee position of a call.  Keeping the authorization scoped
-    /// to this expression rejects aliases, stores, borrows, and returns while
-    /// preserving direct calls and the migration `resume(k, value)` spelling.
     fn active_resumption(&self, name: &str) -> Option<ActiveResumption> {
         let generation = self.locals.binding_generation(&name.to_owned())?;
+        self.resumption_bindings.get(&generation).cloned()
+    }
+    fn resumption_identity(&self, id: CoreId) -> Option<ActiveResumption> {
+        let CoreKind::Resumption { id, .. } = &self.expressions[id.0 as usize].kind else {
+            return None;
+        };
         self.active_resumptions
             .iter()
             .rev()
-            .find(|resumption| {
-                resumption.name == name && resumption.binding_generation == generation
-            })
+            .find(|resumption| resumption.id == *id)
             .cloned()
     }
-    fn resumption_is_visible(&self, resumption: &ActiveResumption, name: &str) -> bool {
-        resumption.name == name
-            && self
-                .locals
-                .binding_generation(&name.to_owned())
-                .is_some_and(|generation| generation == resumption.binding_generation)
-    }
-    fn direct_resumption_callee(&mut self, id: ExprId) -> CoreId {
-        let authorization = match &self.body.expression(id).kind {
-            ExprKind::Path(path) if path.len() == 1 => self.active_resumption(&path[0]),
-            _ => None,
+    fn record_resumption_call(&mut self, id: CoreId) {
+        let Some(identity) = self.resumption_identity(id) else {
+            return;
         };
-        if let Some(authorization) = &authorization
-            && let Some(tracker) = &mut self.resumption_use_tracker
-            && tracker.identity == *authorization
+        if let Some(tracker) = &mut self.resumption_use_tracker
+            && tracker.identity.id == identity.id
         {
             tracker.direct_uses = tracker.direct_uses.saturating_add(1);
         }
-        let previous = std::mem::replace(&mut self.direct_resumption_callee, authorization);
-        let value = self.expression(id);
-        self.direct_resumption_callee = previous;
-        value
     }
     fn assignment_place(&mut self, id: ExprId, span: Span) -> CorePlace {
         let expression = self.body.expression(id);
@@ -4094,9 +4115,13 @@ impl Elaborator<'_> {
                 match self.locals.binding_generation(name) {
                     Some(binding_generation) => {
                         let identity = ActiveResumption {
+                            id: ResumptionId(self.next_resumption),
                             name: name.clone(),
                             binding_generation,
                         };
+                        self.next_resumption = self.next_resumption.saturating_add(1);
+                        self.resumption_bindings
+                            .insert(binding_generation, identity.clone());
                         self.active_resumptions.push(identity.clone());
                         active_identity = Some(identity);
                     }
