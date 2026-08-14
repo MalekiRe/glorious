@@ -121,13 +121,36 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
     // before the candidate reaches artifact verification.
     let generic_argument_tag = 53 + 32 + 8 + 8 + 1 + 8 + 1 + 4 + 32 + 8;
     assert_eq!(encoded[generic_argument_tag], 0);
-    let mut hostile = encoded;
+    let mut hostile = encoded.clone();
     hostile[generic_argument_tag] = u8::MAX;
     assert!(matches!(
         decode_artifact(&hostile),
         Err(VmArtifactError::MalformedEncoding {
             message: "unknown VM effect argument tag"
         })
+    ));
+
+    let nested_effect_tag = generic_argument_tag + 2;
+    assert_eq!(encoded[nested_effect_tag], 1);
+    let mut invalid_nested_tag = encoded.clone();
+    invalid_nested_tag[nested_effect_tag] = u8::MAX;
+    assert!(decode_and_verify_artifact(&invalid_nested_tag).is_err());
+
+    let mut excessive_instances = encoded.clone();
+    excessive_instances[nested_effect_tag + 1..nested_effect_tag + 9]
+        .copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(matches!(
+        decode_artifact(&excessive_instances),
+        Err(VmArtifactError::DecodeLimit { .. })
+    ));
+
+    let projection_count = nested_effect_tag + 1 + 8 + 32 + 8 + 1 + 4;
+    let mut excessive_projections = encoded;
+    excessive_projections[projection_count..projection_count + 8]
+        .copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(matches!(
+        decode_and_verify_artifact(&excessive_projections),
+        Err(VmArtifactError::DecodeLimit { .. })
     ));
 }
 
