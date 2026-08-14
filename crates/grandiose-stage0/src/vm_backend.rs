@@ -5020,29 +5020,26 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let found = register_type(function, *dst)?;
-                let VmType::Callable {
-                    parameters,
-                    effects,
-                    ..
-                } = &found
-                else {
+                let VmType::Callable { parameters, .. } = &found else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
                 };
                 let frame_id = frame.id;
                 let expected = VmType::Callable {
                     parameters: vec![frame.resume_type.clone()],
                     // A resumption returns to its suspended computation, so
-                    // its result is frame-specific. Keep it in the diagnostic
-                    // template while sealing the effect ABI to empty.
+                    // its result is frame-specific. Its effect row is the
+                    // residual outward row from Core; it remains part of the
+                    // callable ABI instead of being erased at this boundary.
                     result: Box::new(match &found {
                         VmType::Callable { result, .. } => (**result).clone(),
                         _ => unreachable!("callable was checked above"),
                     }),
-                    effects: Box::<VmEffectRow>::default(),
+                    effects: match &found {
+                        VmType::Callable { effects, .. } => effects.clone(),
+                        _ => unreachable!("callable was checked above"),
+                    },
                 };
-                if parameters.as_slice() != [frame.resume_type.clone()]
-                    || effects.as_ref() != &VmEffectRow::default()
-                {
+                if parameters.as_slice() != [frame.resume_type.clone()] {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected,
@@ -5073,18 +5070,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let VmType::Callable {
-                    parameters,
-                    effects,
-                    ..
-                } = register_type(function, *snapshot)?
+                let VmType::Callable { parameters, .. } = register_type(function, *snapshot)?
                 else {
                     return Err(VmArtifactError::NotCallable {
                         register: *snapshot,
                     });
                 };
                 if parameters.as_slice() != [frame.resume_type.clone()]
-                    || effects.as_ref() != &VmEffectRow::default()
                     || register_type(function, *value)? != frame.resume_type
                 {
                     return Err(VmArtifactError::HandlerStateMismatch);

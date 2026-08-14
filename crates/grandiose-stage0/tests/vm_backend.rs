@@ -2415,10 +2415,21 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
 #[test]
 fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     let effect = DefKey(Digest::of_bytes(b"snapshot-ask"));
+    let residual_effect = DefKey(Digest::of_bytes(b"snapshot-residual-log"));
     let continuation = VmType::Callable {
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
-        effects: Box::<VmEffectRow>::default(),
+        // Captured resumptions are first-class callable values. Their
+        // residual outward effects must survive artifact encoding and
+        // verification; only their frame provenance grants resume authority.
+        effects: Box::new(VmEffectRow {
+            effects: vec![grandiose_stage0::VmEffectInstance {
+                definition: residual_effect,
+                arguments: vec![],
+            }],
+            projections: vec![],
+            tail: None,
+        }),
     };
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

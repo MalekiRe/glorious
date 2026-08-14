@@ -3518,7 +3518,7 @@ fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
 #[test]
 fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
     let package = PackageKey("core-handler-resumption-alias@0.1.0".into());
-    let source = "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle { let answer = Ask::ask(); answer + 1 } { Ask::ask() with k => { let saved = k; saved(41) } } }";
+    let source = "effect Ask { [1, 1] ask() -> i64; } effect Log { [1, 1] log(value: i64) -> i64; } pub fn main() -> i64 / Log { handle { let answer = Ask::ask(); Log::log(answer) } { Ask::ask() with k => { let saved = k; saved(41) } } }";
     let file = FileKey::new(&package, "src/main.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -3566,6 +3566,21 @@ fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
             .iter()
             .any(|instruction| matches!(instruction, MirInstruction::CaptureResumption { .. })),
         "MIR erased the first-class snapshot: {instructions:#?}"
+    );
+    let snapshot = instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            MirInstruction::CaptureResumption { dst } => Some(*dst),
+            _ => None,
+        })
+        .expect("MIR captured the alias above");
+    assert!(
+        matches!(
+            &function.locals[snapshot.0 as usize].ty,
+            Type::Callable { effects, .. } if !effects.effects.is_empty()
+        ),
+        "the snapshot lost its residual outward effects: {:#?}",
+        function.locals[snapshot.0 as usize]
     );
     assert!(
         instructions
