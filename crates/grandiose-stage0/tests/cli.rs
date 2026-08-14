@@ -1,10 +1,15 @@
 use std::{
+    collections::BTreeMap,
     fs,
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use grandiose_stage0::{BootstrapManifest, decode_and_verify_program};
+use grandiose_stage0::{
+    BootstrapLimits, BootstrapManifest, BootstrapStage, CompilationMode, CompilationRequest,
+    CompilerBuildIdentity, Digest, LogicalPath, PackageKey, SourceInput, StageZeroCompiler,
+    decode_and_verify_program,
+};
 
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
@@ -92,6 +97,86 @@ fn cli_emits_stage_one_artifact_with_bound_bootstrap_manifest() {
     assert_eq!(manifest.stage.ordinal, 1);
     manifest.validate_verified_artifact(&program).unwrap();
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cli_verifies_adjacent_independently_bound_bootstrap_stages() {
+    let directory = temporary_directory();
+    let source = "pub fn main() -> i64 { 42 }";
+    let compiler = StageZeroCompiler::new();
+    let seed = Digest::of_bytes(b"cli-bootstrap-seed");
+    let first = compiler
+        .compile(bootstrap_request(source, seed, 1, None))
+        .unwrap();
+    let first_artifact = first.artifact.unwrap();
+    let first_manifest = first.bootstrap_manifest.unwrap();
+    let second = compiler
+        .compile(bootstrap_request(
+            source,
+            first_manifest.artifact,
+            2,
+            Some(first_manifest.artifact),
+        ))
+        .unwrap();
+    let second_artifact = second.artifact.unwrap();
+    let second_manifest = second.bootstrap_manifest.unwrap();
+
+    let first_program_path = directory.join("stage1.g0vp");
+    let first_manifest_path = directory.join("stage1.g0bm");
+    let second_program_path = directory.join("stage2.g0vp");
+    let second_manifest_path = directory.join("stage2.g0bm");
+    fs::write(&first_program_path, first_artifact.canonical_bytes()).unwrap();
+    fs::write(&first_manifest_path, first_manifest.encode().unwrap()).unwrap();
+    fs::write(&second_program_path, second_artifact.canonical_bytes()).unwrap();
+    fs::write(&second_manifest_path, second_manifest.encode().unwrap()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args([
+            "verify-bootstrap",
+            first_program_path.to_str().unwrap(),
+            first_manifest_path.to_str().unwrap(),
+            second_program_path.to_str().unwrap(),
+            second_manifest_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "bootstrap verification failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim().len(), 64);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+fn bootstrap_request(
+    source: &str,
+    compiler: Digest,
+    ordinal: u32,
+    expected_artifact: Option<Digest>,
+) -> CompilationRequest {
+    let package = PackageKey("app@0.1.0".into());
+    CompilationRequest {
+        build: CompilerBuildIdentity::stage0(compiler),
+        mode: CompilationMode::Bootstrap(BootstrapStage {
+            ordinal,
+            producer: compiler,
+            optimization_level: 0,
+            limits: BootstrapLimits::new(4, 16 * 1024),
+            expected_artifact,
+        }),
+        root_package: package.clone(),
+        sources: vec![SourceInput::new(
+            package,
+            LogicalPath::parse("src/main.glorious").unwrap(),
+            source.as_bytes(),
+        )],
+        target: "stage0-vm".into(),
+        semantic_options: BTreeMap::new(),
+        codegen_options: BTreeMap::new(),
+        capability_manifest: vec![],
+        runtime_manifest: None,
+    }
 }
 
 #[test]
