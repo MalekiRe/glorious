@@ -301,6 +301,80 @@ fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severi
 }
 
 #[test]
+fn compile_diagnostic_span_validation_replaces_invalid_phase_locations() {
+    let request = request("pub fn main() -> i64 { 42 }");
+    let file = request.sources[0].key;
+    let foreign_file = SourceInput::new(
+        PackageKey("app@0.1.0".into()),
+        LogicalPath::parse("src/foreign.glorious").unwrap(),
+        b"foreign".as_slice(),
+    )
+    .key;
+    let fingerprint = Digest::of_bytes(b"diagnostic-world");
+    let valid = CompileDiagnostic {
+        code: "G0001",
+        message: "valid source fact".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Error,
+        primary: Some(grandiose_stage0::SourceSpan {
+            file,
+            start: 0,
+            end: 1,
+        }),
+        input_fingerprint: Some(fingerprint),
+    };
+    let past_end = CompileDiagnostic {
+        code: "G0002",
+        message: "past the source end".into(),
+        primary: Some(grandiose_stage0::SourceSpan {
+            file,
+            start: 0,
+            end: 99,
+        }),
+        ..valid.clone()
+    };
+    let backwards = CompileDiagnostic {
+        code: "G0003",
+        message: "backwards range".into(),
+        primary: Some(grandiose_stage0::SourceSpan {
+            file,
+            start: 3,
+            end: 2,
+        }),
+        ..valid.clone()
+    };
+    let unknown_file = CompileDiagnostic {
+        code: "G0004",
+        message: "unknown file".into(),
+        primary: Some(grandiose_stage0::SourceSpan {
+            file: foreign_file,
+            start: 0,
+            end: 1,
+        }),
+        ..valid.clone()
+    };
+
+    let diagnostics = CompileDiagnostic::validate_primary_spans(
+        vec![valid.clone(), past_end, backwards, unknown_file],
+        &BTreeMap::from([(file, request.sources[0].bytes.len() as u32)]),
+    );
+
+    assert_eq!(diagnostics[0], valid);
+    assert_eq!(diagnostics.len(), 4);
+    for diagnostic in &diagnostics[1..] {
+        assert_eq!(diagnostic.code, "G7014");
+        assert_eq!(diagnostic.class, DiagnosticClass::Invariant);
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.primary, None);
+        assert_eq!(diagnostic.input_fingerprint, Some(fingerprint));
+    }
+    assert_eq!(
+        diagnostics[1].message,
+        "compiler produced diagnostic G0002 with an invalid primary source span"
+    );
+}
+
+#[test]
 fn compile_diagnostic_error_limit_keeps_the_earliest_facts_and_reports_suppression() {
     let request = request("pub fn main() -> i64 { missing_name }");
     let file = request.sources[0].key;

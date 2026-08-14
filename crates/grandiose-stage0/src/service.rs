@@ -95,6 +95,40 @@ impl CompileDiagnostic {
         diagnostics
     }
 
+    /// Defend the publication boundary from malformed phase-local locations.
+    /// A compiler bug must not make a host or editor trust a source span that
+    /// names an absent input or points outside the immutable request snapshot.
+    /// Replace the invalid fact with a stable invariant diagnostic instead.
+    pub fn validate_primary_spans(
+        diagnostics: Vec<Self>,
+        source_lengths: &BTreeMap<crate::FileKey, u32>,
+    ) -> Vec<Self> {
+        diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                let Some(primary) = diagnostic.primary else {
+                    return diagnostic;
+                };
+                let valid = source_lengths
+                    .get(&primary.file)
+                    .is_some_and(|length| primary.start <= primary.end && primary.end <= *length);
+                if valid {
+                    diagnostic
+                } else {
+                    let mut replacement = Self::invariant(
+                        "G7014",
+                        format!(
+                            "compiler produced diagnostic {} with an invalid primary source span",
+                            diagnostic.code
+                        ),
+                    );
+                    replacement.input_fingerprint = diagnostic.input_fingerprint;
+                    replacement
+                }
+            })
+            .collect()
+    }
+
     /// Publish at most `limit` error facts from a canonical batch. Warnings
     /// and notes remain useful context and do not consume the error budget.
     /// If the limit is exceeded, the last error slot is reserved for a stable
@@ -244,6 +278,18 @@ impl StageZeroCompiler {
     ) -> Result<CompilationOutcome, ServiceError> {
         let snapshot = self.database.open(revision)?;
         let input_fingerprint = snapshot.world().fingerprint;
+        let source_lengths = snapshot
+            .world()
+            .sources
+            .iter()
+            .map(|source| {
+                (
+                    source.key,
+                    u32::try_from(source.bytes.len())
+                        .expect("normalized world source length fits in a source span"),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let graph = ModuleGraph::build(snapshot.world(), &snapshot.world().root_package);
         let mut diagnostics = graph
             .diagnostics
@@ -253,7 +299,7 @@ impl StageZeroCompiler {
             })
             .collect::<Vec<_>>();
         let Some(root) = graph.modules.get(&graph.root) else {
-            return Err(failed(input_fingerprint, diagnostics));
+            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
         for node in graph.modules.values() {
             diagnostics.extend(node.interface.diagnostics.iter().map(|diagnostic| {
@@ -318,7 +364,7 @@ impl StageZeroCompiler {
                 "root module has no `main` definition",
                 None,
             ));
-            return Err(failed(input_fingerprint, diagnostics));
+            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
         let entry = entry.key;
         let mut functions = BTreeMap::new();
@@ -592,7 +638,7 @@ impl StageZeroCompiler {
             }
         }
         if !diagnostics.is_empty() {
-            return Err(failed(input_fingerprint, diagnostics));
+            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         }
         if let Some(cycle) = constant_cycle(&functions, &constants) {
             return Err(failed(
@@ -602,6 +648,7 @@ impl StageZeroCompiler {
                     format!("constant initializer cycle: {cycle:?}"),
                     None,
                 )],
+                &source_lengths,
             ));
         }
         // A mode changes the requested product, never the source semantics.
@@ -631,6 +678,7 @@ impl StageZeroCompiler {
                     "G7004",
                     format!("VM emission rejected MIR: {error:?}"),
                 )],
+                &source_lengths,
             )
         })?;
         if let Some(manifest) = &runtime_manifest {
@@ -644,6 +692,7 @@ impl StageZeroCompiler {
                     "G7005",
                     format!("VM verification rejected emitted artifact: {error:?}"),
                 )],
+                &source_lengths,
             )
         })?;
         let bootstrap_manifest = match &snapshot.world().mode {
@@ -661,6 +710,7 @@ impl StageZeroCompiler {
                                 artifact.fingerprint(),
                             ),
                         )],
+                        &source_lengths,
                     ));
                 }
                 Some(BootstrapManifest::from_verified_program(
@@ -724,7 +774,12 @@ fn reachable_functions(
 /// phase has produced its deterministic local facts.  This keeps phase-local
 /// diagnostics independent of request-session plumbing while ensuring no
 /// published failure can be mistaken for a result from another source world.
-fn failed(input_fingerprint: Digest, mut diagnostics: Vec<CompileDiagnostic>) -> ServiceError {
+fn failed(
+    input_fingerprint: Digest,
+    diagnostics: Vec<CompileDiagnostic>,
+    source_lengths: &BTreeMap<crate::FileKey, u32>,
+) -> ServiceError {
+    let mut diagnostics = CompileDiagnostic::validate_primary_spans(diagnostics, source_lengths);
     for diagnostic in &mut diagnostics {
         diagnostic.input_fingerprint = Some(input_fingerprint);
     }
