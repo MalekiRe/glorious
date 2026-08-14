@@ -1568,10 +1568,27 @@ impl StageZeroCompiler {
             let Some(body) = typed_bodies.get(&caller.callable) else {
                 continue;
             };
-            for expression in &body.expressions {
+            // A direct call owns its callable child in Core. Process that
+            // child through the call below, rather than once as a first-class
+            // function value and again as the call's callee. Retaining
+            // standalone callable values here is still essential: a value
+            // can flow through a closure or aggregate before invocation.
+            let direct_callees = body
+                .expressions
+                .iter()
+                .filter_map(|expression| match &expression.kind {
+                    crate::core::CoreKind::Call { callee, .. } => Some(*callee),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            for (index, expression) in body.expressions.iter().enumerate() {
                 let function = match &expression.kind {
                     crate::core::CoreKind::Function { .. }
-                    | crate::core::CoreKind::TraitMethod { .. } => Some(&expression.kind),
+                    | crate::core::CoreKind::TraitMethod { .. }
+                        if !direct_callees.contains(&crate::CoreId(index as u32)) =>
+                    {
+                        Some(&expression.kind)
+                    }
                     crate::core::CoreKind::Call { callee, .. } => {
                         Some(&body.expression(*callee).kind)
                     }
