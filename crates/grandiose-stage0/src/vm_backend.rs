@@ -4575,6 +4575,18 @@ fn unify_call_type(
             VmType::Array(found) => unify_call_type(expected, found, bindings),
             _ => false,
         },
+        VmType::Reference {
+            unique: expected_unique,
+            referent: expected_referent,
+        } => match found {
+            VmType::Reference {
+                unique: found_unique,
+                referent: found_referent,
+            } if expected_unique == found_unique => {
+                unify_call_type(expected_referent, found_referent, bindings)
+            }
+            _ => false,
+        },
         VmType::Nominal {
             definition: expected_definition,
             arguments: expected_arguments,
