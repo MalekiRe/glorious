@@ -16,7 +16,7 @@ use crate::{
     DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
     ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InputError, InstanceGraph,
     InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirInstruction,
-    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, PublicationGuard,
+    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, PrimitiveRole, PublicationGuard,
     RequestSession, RetentionReport, RevisionError, RevisionId, Severity, SourceSpan, Span,
     TraitConstProjectionAnswer, TraitGoal, TraitSolver, TrustedRuntimeManifest, Type, TypedBody,
     UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
@@ -2185,36 +2185,71 @@ fn materialization_body_arguments(
 fn materialize_deferred_scalar_operations(function: &mut MirFunction) -> Result<(), String> {
     for block in &mut function.blocks {
         for instruction in &mut block.instructions {
-            let MirInstruction::BitAndGeneric { dst, left, right } = instruction else {
-                continue;
-            };
-            let scalar = function
-                .locals
-                .get(dst.0 as usize)
-                .map(|local| local.ty.clone())
-                .ok_or_else(|| "deferred bitwise-and destination is not a MIR local".to_owned())?;
-            *instruction = match scalar {
-                Type::Scalar(crate::ScalarType::I64) => MirInstruction::BitAndI64 {
-                    dst: *dst,
-                    left: *left,
-                    right: *right,
-                },
-                Type::Scalar(crate::ScalarType::U32) => MirInstruction::BitAndU32 {
-                    dst: *dst,
-                    left: *left,
-                    right: *right,
-                },
-                Type::Scalar(crate::ScalarType::U64) => MirInstruction::BitAndU64 {
-                    dst: *dst,
-                    left: *left,
-                    right: *right,
-                },
-                other => {
-                    return Err(format!(
-                        "generic int bitwise-and instance has unsupported scalar result {other:?}"
-                    ));
+            match instruction {
+                MirInstruction::BitAndGeneric { dst, left, right } => {
+                    let scalar = function
+                        .locals
+                        .get(dst.0 as usize)
+                        .map(|local| local.ty.clone())
+                        .ok_or_else(|| {
+                            "deferred bitwise-and destination is not a MIR local".to_owned()
+                        })?;
+                    *instruction = match scalar {
+                        Type::Scalar(crate::ScalarType::I64) => MirInstruction::BitAndI64 {
+                            dst: *dst,
+                            left: *left,
+                            right: *right,
+                        },
+                        Type::Scalar(crate::ScalarType::U32) => MirInstruction::BitAndU32 {
+                            dst: *dst,
+                            left: *left,
+                            right: *right,
+                        },
+                        Type::Scalar(crate::ScalarType::U64) => MirInstruction::BitAndU64 {
+                            dst: *dst,
+                            left: *left,
+                            right: *right,
+                        },
+                        Type::Scalar(scalar) => MirInstruction::IntIntrinsic {
+                            dst: *dst,
+                            primitive: PrimitiveRole::IntBitAnd,
+                            scalar,
+                            arguments: vec![*left, *right],
+                        },
+                        other => {
+                            return Err(format!(
+                                "generic int bitwise-and instance has unsupported scalar result {other:?}"
+                            ));
+                        }
+                    };
                 }
-            };
+                MirInstruction::IntGenericIntrinsic {
+                    dst,
+                    primitive,
+                    arguments,
+                } => {
+                    let source = *arguments.first().ok_or_else(|| {
+                        "deferred integer primitive has no source argument".to_owned()
+                    })?;
+                    let Type::Scalar(scalar) = function
+                        .locals
+                        .get(source.0 as usize)
+                        .map(|local| local.ty.clone())
+                        .ok_or_else(|| {
+                            "deferred integer primitive source is not a MIR local".to_owned()
+                        })?
+                    else {
+                        return Err("generic integer primitive source is not a scalar".into());
+                    };
+                    *instruction = MirInstruction::IntIntrinsic {
+                        dst: *dst,
+                        primitive: *primitive,
+                        scalar,
+                        arguments: arguments.clone(),
+                    };
+                }
+                _ => {}
+            }
         }
     }
     Ok(())

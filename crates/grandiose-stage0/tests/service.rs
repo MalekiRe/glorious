@@ -372,6 +372,113 @@ fn manifest_bound_generic_int_wrapping_add_uses_distinct_wrapping_vm_semantics()
 }
 
 #[test]
+fn public_generic_integer_wrappers_cover_all_width_runtime_semantics() {
+    let compile = |source: String, role, name: &str| {
+        let mut input = request(&source);
+        input.runtime_manifest = Some(int_runtime_manifest(role, name));
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap_or_else(|diagnostics| panic!("{name}: {diagnostics:#?}"))
+            .artifact
+            .expect("build must publish a VM artifact")
+    };
+
+    let add = compile(
+        "fn __g1_int_wrapping_add<T>(left: T, right: T) -> T { () } \
+         pub fn add<T>(left: T, right: T) -> T { __g1_int_wrapping_add(move left, move right) } \
+         pub fn main() -> u16 { add(65535, 1) }"
+            .into(),
+        PrimitiveRole::IntWrappingAdd,
+        "__g1_int_wrapping_add",
+    );
+    assert_eq!(add.run_u16().unwrap(), 0);
+
+    let bitwise = compile(
+        "fn __g1_int_bit_xor<T>(left: T, right: T) -> T { () } \
+         pub fn xor<T>(left: T, right: T) -> T { __g1_int_bit_xor(move left, move right) } \
+         pub fn main() -> u128 { xor(340282366920938463463374607431768211455, 1) }"
+            .into(),
+        PrimitiveRole::IntBitXor,
+        "__g1_int_bit_xor",
+    );
+    assert_eq!(bitwise.run_u128().unwrap(), u128::MAX - 1);
+
+    let comparison = compile(
+        "fn __g1_int_less<T>(left: T, right: T) -> u32 { () } \
+         pub fn less<T>(left: T, right: T) -> u32 { __g1_int_less(move left, move right) } \
+         pub fn low() -> i8 { 7 } pub fn high() -> i8 { 9 } \
+         pub fn main() -> u32 { less(low(), high()) }"
+            .into(),
+        PrimitiveRole::IntLess,
+        "__g1_int_less",
+    );
+    assert_eq!(comparison.run_u32().unwrap(), 1);
+
+    let wrapping = compile(
+        "fn __g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () } \
+         pub fn narrow<T>(value: T) -> i8 { __g1_int_convert_wrapping_to_i8(move value) } \
+         pub fn maximum() -> u128 { 340282366920938463463374607431768211455 } \
+         pub fn main() -> i8 { narrow(maximum()) }"
+            .into(),
+        PrimitiveRole::IntConvertWrappingToI8,
+        "__g1_int_convert_wrapping_to_i8",
+    );
+    assert_eq!(wrapping.run_i8().unwrap(), -1);
+
+    let checked = compile(
+        "fn __g1_int_convert_checked_to_u8<T>(value: T) -> u8 { () } \
+         pub fn narrow<T>(value: T) -> u8 { __g1_int_convert_checked_to_u8(move value) } \
+         pub fn maximum() -> u128 { 340282366920938463463374607431768211455 } \
+         pub fn main() -> u8 { narrow(maximum()) }"
+            .into(),
+        PrimitiveRole::IntConvertCheckedToU8,
+        "__g1_int_convert_checked_to_u8",
+    );
+    assert!(matches!(
+        checked.run_u8(),
+        Err(VmArtifactError::ArithmeticOverflow)
+    ));
+
+    let program = decode_program(&bitwise.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::IntIntrinsic {
+                    primitive: PrimitiveRole::IntBitXor,
+                    scalar: grandiose_stage0::ScalarType::U128,
+                    ..
+                }
+            )
+        })
+    }));
+    let mut forged = program;
+    let (function_key, destination) = forged
+        .functions
+        .iter()
+        .find_map(|(key, function)| {
+            function
+                .instructions
+                .iter()
+                .find_map(|instruction| match instruction {
+                    VmInstruction::IntIntrinsic { dst, .. } => Some((key.clone(), *dst)),
+                    _ => None,
+                })
+        })
+        .expect("generic wrapper materialized an integer intrinsic");
+    forged
+        .functions
+        .get_mut(&function_key)
+        .expect("selected intrinsic belongs to its decoded function")
+        .registers[destination as usize] = VmType::U64;
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(
+        decode_and_verify_program(&encode_program(&forged)).is_err(),
+        "the verifier must reject a forged integer intrinsic result width"
+    );
+}
+
+#[test]
 fn manifest_bound_generic_int_wrapping_sub_uses_distinct_wrapping_vm_semantics() {
     let mut input = request(
         "fn __g1_int_wrapping_sub<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_sub<i64>(-9223372036854775807, 2) }",

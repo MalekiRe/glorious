@@ -20,7 +20,7 @@ use crate::{
         MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f64_bits,
         lifted_callable_definition, parse_char_literal, parse_f64_literal, parse_text_literal,
     },
-    runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth},
+    runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth, PrimitiveRole},
     source::{TokenKind, exact_scalar_literal_kind},
     types::{
         ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, StructuralU32Expr, Type,
@@ -309,6 +309,14 @@ pub enum VmInstruction {
     FloatIntrinsic {
         dst: u32,
         primitive: FloatPrimitive,
+        arguments: Vec<u32>,
+    },
+    /// Manifest-sealed generic integer operation specialized to one concrete
+    /// integer representation by the instance materializer.
+    IntIntrinsic {
+        dst: u32,
+        primitive: PrimitiveRole,
+        scalar: ScalarType,
         arguments: Vec<u32>,
     },
     ConstBool {
@@ -2368,6 +2376,113 @@ fn vm_scalar_type(value: ScalarType) -> VmType {
         .expect("all runtime float ABI scalars are representable in the VM")
 }
 
+fn encode_integer_scalar(value: ScalarType) -> Option<u8> {
+    Some(match value {
+        ScalarType::U8 => 0,
+        ScalarType::U16 => 1,
+        ScalarType::U32 => 2,
+        ScalarType::U64 => 3,
+        ScalarType::U128 => 4,
+        ScalarType::Usize => 5,
+        ScalarType::I8 => 6,
+        ScalarType::I16 => 7,
+        ScalarType::I32 => 8,
+        ScalarType::I64 => 9,
+        ScalarType::I128 => 10,
+        ScalarType::Isize => 11,
+        _ => return None,
+    })
+}
+
+fn decode_integer_scalar(value: u8) -> Result<ScalarType, VmArtifactError> {
+    Ok(match value {
+        0 => ScalarType::U8,
+        1 => ScalarType::U16,
+        2 => ScalarType::U32,
+        3 => ScalarType::U64,
+        4 => ScalarType::U128,
+        5 => ScalarType::Usize,
+        6 => ScalarType::I8,
+        7 => ScalarType::I16,
+        8 => ScalarType::I32,
+        9 => ScalarType::I64,
+        10 => ScalarType::I128,
+        11 => ScalarType::Isize,
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "invalid integer runtime scalar",
+            });
+        }
+    })
+}
+
+fn integer_intrinsic_signature(
+    primitive: PrimitiveRole,
+    scalar: ScalarType,
+) -> Result<(Vec<ScalarType>, ScalarType), VmArtifactError> {
+    if encode_integer_scalar(scalar).is_none() {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "integer runtime primitive has a non-integer scalar",
+        });
+    }
+    let binary = vec![scalar, scalar];
+    Ok(match primitive {
+        PrimitiveRole::IntCheckedAdd
+        | PrimitiveRole::IntWrappingAdd
+        | PrimitiveRole::IntWrappingSub
+        | PrimitiveRole::IntWrappingMul
+        | PrimitiveRole::IntBitAnd
+        | PrimitiveRole::IntBitOr
+        | PrimitiveRole::IntBitXor => (binary, scalar),
+        PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
+            (binary, ScalarType::U32)
+        }
+        PrimitiveRole::IntBitNot | PrimitiveRole::IntWrappingNeg => (vec![scalar], scalar),
+        PrimitiveRole::IntShl | PrimitiveRole::IntShr => (vec![scalar, ScalarType::U32], scalar),
+        PrimitiveRole::IntConvertCheckedToI64 | PrimitiveRole::IntConvertWrappingToI64 => {
+            (vec![scalar], ScalarType::I64)
+        }
+        PrimitiveRole::IntConvertCheckedToU32 | PrimitiveRole::IntConvertWrappingToU32 => {
+            (vec![scalar], ScalarType::U32)
+        }
+        PrimitiveRole::IntConvertCheckedToUsize | PrimitiveRole::IntConvertWrappingToUsize => {
+            (vec![scalar], ScalarType::Usize)
+        }
+        PrimitiveRole::IntConvertCheckedToU8 | PrimitiveRole::IntConvertWrappingToU8 => {
+            (vec![scalar], ScalarType::U8)
+        }
+        PrimitiveRole::IntConvertCheckedToU16 | PrimitiveRole::IntConvertWrappingToU16 => {
+            (vec![scalar], ScalarType::U16)
+        }
+        PrimitiveRole::IntConvertCheckedToI16 | PrimitiveRole::IntConvertWrappingToI16 => {
+            (vec![scalar], ScalarType::I16)
+        }
+        PrimitiveRole::IntConvertCheckedToI32 | PrimitiveRole::IntConvertWrappingToI32 => {
+            (vec![scalar], ScalarType::I32)
+        }
+        PrimitiveRole::IntConvertCheckedToI8 | PrimitiveRole::IntConvertWrappingToI8 => {
+            (vec![scalar], ScalarType::I8)
+        }
+        PrimitiveRole::IntConvertCheckedToU64 | PrimitiveRole::IntConvertWrappingToU64 => {
+            (vec![scalar], ScalarType::U64)
+        }
+        PrimitiveRole::IntConvertCheckedToIsize | PrimitiveRole::IntConvertWrappingToIsize => {
+            (vec![scalar], ScalarType::Isize)
+        }
+        PrimitiveRole::IntConvertCheckedToU128 | PrimitiveRole::IntConvertWrappingToU128 => {
+            (vec![scalar], ScalarType::U128)
+        }
+        PrimitiveRole::IntConvertCheckedToI128 | PrimitiveRole::IntConvertWrappingToI128 => {
+            (vec![scalar], ScalarType::I128)
+        }
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "non-integer primitive used by integer runtime opcode",
+            });
+        }
+    })
+}
+
 /// Lower a Core effect row into its source-free, canonical VM identity.  The
 /// same representation is used for protocol arguments and callable ABI rows;
 /// keeping one conversion prevents the two frozen contracts from drifting.
@@ -3831,6 +3946,27 @@ impl<'a> Decoder<'a> {
                     arguments,
                 })
             }
+            166 => {
+                let dst = self.u32()?;
+                let selector = self.text()?;
+                let Some(primitive) = PrimitiveRole::parse_selector_name(&selector) else {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid integer runtime opcode selector",
+                    });
+                };
+                let scalar = decode_integer_scalar(self.byte()?)?;
+                let count = self.count("integer runtime arguments", MAX_DECODE_REGISTERS)?;
+                let mut arguments = Vec::with_capacity(count);
+                for _ in 0..count {
+                    arguments.push(self.u32()?);
+                }
+                Ok(VmInstruction::IntIntrinsic {
+                    dst,
+                    primitive,
+                    scalar,
+                    arguments,
+                })
+            }
             8 => self.i64_arithmetic(|dst, left, right| VmInstruction::DivI64 { dst, left, right }),
             9 => self.i64_arithmetic(|dst, left, right| VmInstruction::RemI64 { dst, left, right }),
             10 => {
@@ -4966,6 +5102,22 @@ fn lower_instruction(
             primitive: *primitive,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
+        MirInstruction::IntIntrinsic {
+            dst,
+            primitive,
+            scalar,
+            arguments,
+        } => VmInstruction::IntIntrinsic {
+            dst: dst.0,
+            primitive: *primitive,
+            scalar: *scalar,
+            arguments: arguments.iter().map(|argument| argument.0).collect(),
+        },
+        MirInstruction::IntGenericIntrinsic { .. } => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "unmaterialized generic integer primitive reached VM lowering",
+            });
+        }
         MirInstruction::ConstBool { dst, value } => VmInstruction::ConstBool {
             dst: dst.0,
             value: *value,
@@ -6304,6 +6456,25 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if arguments.len() != parameters.len() {
                     return Err(VmArtifactError::MalformedEncoding {
                         message: "floating runtime primitive has the wrong arity",
+                    });
+                }
+                expect_type(function, *dst, vm_scalar_type(result))?;
+                for (&argument, parameter) in arguments.iter().zip(parameters) {
+                    expect_type(function, argument, vm_scalar_type(parameter))?;
+                    read(&states, argument)?;
+                }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::IntIntrinsic {
+                dst,
+                primitive,
+                scalar,
+                arguments,
+            } => {
+                let (parameters, result) = integer_intrinsic_signature(*primitive, *scalar)?;
+                if arguments.len() != parameters.len() {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "integer runtime primitive has the wrong arity",
                     });
                 }
                 expect_type(function, *dst, vm_scalar_type(result))?;
@@ -9738,6 +9909,353 @@ fn execute_float_intrinsic(
     }
 }
 
+fn integer_argument<'a>(
+    arguments: &[u32],
+    index: usize,
+    registers: &'a [Option<VmValue>],
+) -> Result<&'a VmValue, VmArtifactError> {
+    let register = *arguments
+        .get(index)
+        .ok_or(VmArtifactError::MalformedEncoding {
+            message: "integer runtime primitive has the wrong arity",
+        })?;
+    registers
+        .get(register as usize)
+        .and_then(Option::as_ref)
+        .ok_or(VmArtifactError::ReadBeforeWrite { register })
+}
+
+macro_rules! execute_integer_binary {
+    ($primitive:expr, $arguments:expr, $registers:expr, $expect:ident, $variant:ident) => {{
+        let left = $expect(integer_argument($arguments, 0, $registers)?)?;
+        let right = $expect(integer_argument($arguments, 1, $registers)?)?;
+        let value = match $primitive {
+            PrimitiveRole::IntCheckedAdd => left
+                .checked_add(right)
+                .ok_or(VmArtifactError::ArithmeticOverflow)?,
+            PrimitiveRole::IntWrappingAdd => left.wrapping_add(right),
+            PrimitiveRole::IntWrappingSub => left.wrapping_sub(right),
+            PrimitiveRole::IntWrappingMul => left.wrapping_mul(right),
+            PrimitiveRole::IntBitAnd => left & right,
+            PrimitiveRole::IntBitOr => left | right,
+            PrimitiveRole::IntBitXor => left ^ right,
+            _ => unreachable!("integer binary operation was validated"),
+        };
+        Ok(VmValue::$variant(value))
+    }};
+}
+
+macro_rules! execute_integer_compare {
+    ($primitive:expr, $arguments:expr, $registers:expr, $expect:ident) => {{
+        let left = $expect(integer_argument($arguments, 0, $registers)?)?;
+        let right = $expect(integer_argument($arguments, 1, $registers)?)?;
+        let value = match $primitive {
+            PrimitiveRole::IntEqual => left == right,
+            PrimitiveRole::IntLess => left < right,
+            PrimitiveRole::IntGreater => left > right,
+            _ => unreachable!("integer comparison was validated"),
+        };
+        Ok(VmValue::U32(u32::from(value)))
+    }};
+}
+
+macro_rules! execute_integer_unary {
+    ($primitive:expr, $arguments:expr, $registers:expr, $expect:ident, $variant:ident) => {{
+        let value = $expect(integer_argument($arguments, 0, $registers)?)?;
+        let value = match $primitive {
+            PrimitiveRole::IntBitNot => !value,
+            PrimitiveRole::IntWrappingNeg => value.wrapping_neg(),
+            _ => unreachable!("integer unary operation was validated"),
+        };
+        Ok(VmValue::$variant(value))
+    }};
+}
+
+macro_rules! execute_integer_shift {
+    ($primitive:expr, $arguments:expr, $registers:expr, $expect:ident, $variant:ident) => {{
+        let value = $expect(integer_argument($arguments, 0, $registers)?)?;
+        let count = expect_u32(integer_argument($arguments, 1, $registers)?)?;
+        let value = match $primitive {
+            PrimitiveRole::IntShl => value.wrapping_shl(count),
+            PrimitiveRole::IntShr => value.wrapping_shr(count),
+            _ => unreachable!("integer shift operation was validated"),
+        };
+        Ok(VmValue::$variant(value))
+    }};
+}
+
+macro_rules! execute_integer_for_scalar {
+    ($primitive:expr, $arguments:expr, $registers:expr, $expect:ident, $variant:ident) => {{
+        match $primitive {
+            PrimitiveRole::IntCheckedAdd
+            | PrimitiveRole::IntWrappingAdd
+            | PrimitiveRole::IntWrappingSub
+            | PrimitiveRole::IntWrappingMul
+            | PrimitiveRole::IntBitAnd
+            | PrimitiveRole::IntBitOr
+            | PrimitiveRole::IntBitXor => {
+                execute_integer_binary!($primitive, $arguments, $registers, $expect, $variant)
+            }
+            PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
+                execute_integer_compare!($primitive, $arguments, $registers, $expect)
+            }
+            PrimitiveRole::IntBitNot | PrimitiveRole::IntWrappingNeg => {
+                execute_integer_unary!($primitive, $arguments, $registers, $expect, $variant)
+            }
+            PrimitiveRole::IntShl | PrimitiveRole::IntShr => {
+                execute_integer_shift!($primitive, $arguments, $registers, $expect, $variant)
+            }
+            _ => unreachable!("integer intrinsic role was validated"),
+        }
+    }};
+}
+
+fn execute_integer_intrinsic(
+    primitive: PrimitiveRole,
+    scalar: ScalarType,
+    arguments: &[u32],
+    registers: &[Option<VmValue>],
+) -> Result<VmValue, VmArtifactError> {
+    let (parameters, _) = integer_intrinsic_signature(primitive, scalar)?;
+    if arguments.len() != parameters.len() {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "integer runtime primitive has the wrong arity",
+        });
+    }
+    if matches!(
+        primitive,
+        PrimitiveRole::IntConvertCheckedToI64
+            | PrimitiveRole::IntConvertWrappingToI64
+            | PrimitiveRole::IntConvertCheckedToU32
+            | PrimitiveRole::IntConvertWrappingToU32
+            | PrimitiveRole::IntConvertCheckedToUsize
+            | PrimitiveRole::IntConvertWrappingToUsize
+            | PrimitiveRole::IntConvertCheckedToU8
+            | PrimitiveRole::IntConvertWrappingToU8
+            | PrimitiveRole::IntConvertCheckedToU16
+            | PrimitiveRole::IntConvertWrappingToU16
+            | PrimitiveRole::IntConvertCheckedToI16
+            | PrimitiveRole::IntConvertWrappingToI16
+            | PrimitiveRole::IntConvertCheckedToI32
+            | PrimitiveRole::IntConvertWrappingToI32
+            | PrimitiveRole::IntConvertCheckedToI8
+            | PrimitiveRole::IntConvertWrappingToI8
+            | PrimitiveRole::IntConvertCheckedToU64
+            | PrimitiveRole::IntConvertWrappingToU64
+            | PrimitiveRole::IntConvertCheckedToIsize
+            | PrimitiveRole::IntConvertWrappingToIsize
+            | PrimitiveRole::IntConvertCheckedToU128
+            | PrimitiveRole::IntConvertWrappingToU128
+            | PrimitiveRole::IntConvertCheckedToI128
+            | PrimitiveRole::IntConvertWrappingToI128
+    ) {
+        let value = integer_argument(arguments, 0, registers)?;
+        return integer_convert(primitive, scalar, value);
+    }
+    match scalar {
+        ScalarType::U8 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_u8, U8)
+        }
+        ScalarType::U16 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_u16, U16)
+        }
+        ScalarType::U32 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_u32, U32)
+        }
+        ScalarType::U64 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_u64, U64)
+        }
+        ScalarType::U128 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_u128, U128)
+        }
+        ScalarType::Usize => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_usize, Usize)
+        }
+        ScalarType::I8 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_i8, I8)
+        }
+        ScalarType::I16 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_i16, I16)
+        }
+        ScalarType::I32 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_i32, I32)
+        }
+        ScalarType::I64 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_i64, I64)
+        }
+        ScalarType::I128 => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_i128, I128)
+        }
+        ScalarType::Isize => {
+            execute_integer_for_scalar!(primitive, arguments, registers, expect_isize, Isize)
+        }
+        _ => Err(VmArtifactError::MalformedEncoding {
+            message: "integer runtime primitive has a non-integer scalar",
+        }),
+    }
+}
+
+fn integer_width(scalar: ScalarType) -> Option<u32> {
+    Some(match scalar {
+        ScalarType::U8 | ScalarType::I8 => 8,
+        ScalarType::U16 | ScalarType::I16 => 16,
+        ScalarType::U32 | ScalarType::I32 => 32,
+        ScalarType::U64 | ScalarType::I64 | ScalarType::Usize | ScalarType::Isize => 64,
+        ScalarType::U128 | ScalarType::I128 => 128,
+        _ => return None,
+    })
+}
+
+fn integer_is_signed(scalar: ScalarType) -> bool {
+    matches!(
+        scalar,
+        ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::I128
+            | ScalarType::Isize
+    )
+}
+
+fn integer_mask(scalar: ScalarType) -> Option<u128> {
+    let width = integer_width(scalar)?;
+    Some(if width == 128 {
+        u128::MAX
+    } else {
+        (1u128 << width) - 1
+    })
+}
+
+fn integer_bits(scalar: ScalarType, value: &VmValue) -> Result<u128, VmArtifactError> {
+    Ok(match scalar {
+        ScalarType::U8 => u128::from(expect_u8(value)?),
+        ScalarType::U16 => u128::from(expect_u16(value)?),
+        ScalarType::U32 => u128::from(expect_u32(value)?),
+        ScalarType::U64 => u128::from(expect_u64(value)?),
+        ScalarType::U128 => expect_u128(value)?,
+        ScalarType::Usize => u128::from(expect_usize(value)?),
+        ScalarType::I8 => expect_i8(value)? as u128,
+        ScalarType::I16 => expect_i16(value)? as u128,
+        ScalarType::I32 => expect_i32(value)? as u128,
+        ScalarType::I64 => expect_i64(value)? as u128,
+        ScalarType::I128 => expect_i128(value)? as u128,
+        ScalarType::Isize => expect_isize(value)? as u128,
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "integer runtime primitive has a non-integer argument",
+            });
+        }
+    })
+}
+
+fn integer_signed(scalar: ScalarType, value: &VmValue) -> Result<i128, VmArtifactError> {
+    Ok(match scalar {
+        ScalarType::I8 => i128::from(expect_i8(value)?),
+        ScalarType::I16 => i128::from(expect_i16(value)?),
+        ScalarType::I32 => i128::from(expect_i32(value)?),
+        ScalarType::I64 => i128::from(expect_i64(value)?),
+        ScalarType::I128 => expect_i128(value)?,
+        ScalarType::Isize => i128::from(expect_isize(value)?),
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "integer runtime primitive expected a signed argument",
+            });
+        }
+    })
+}
+
+fn integer_from_bits(scalar: ScalarType, bits: u128) -> Result<VmValue, VmArtifactError> {
+    let bits = bits
+        & integer_mask(scalar).ok_or(VmArtifactError::MalformedEncoding {
+            message: "integer runtime primitive has a non-integer result",
+        })?;
+    Ok(match scalar {
+        ScalarType::U8 => VmValue::U8(bits as u8),
+        ScalarType::U16 => VmValue::U16(bits as u16),
+        ScalarType::U32 => VmValue::U32(bits as u32),
+        ScalarType::U64 => VmValue::U64(bits as u64),
+        ScalarType::U128 => VmValue::U128(bits),
+        ScalarType::Usize => VmValue::Usize(bits as u64),
+        ScalarType::I8 => VmValue::I8(bits as i8),
+        ScalarType::I16 => VmValue::I16(bits as i16),
+        ScalarType::I32 => VmValue::I32(bits as i32),
+        ScalarType::I64 => VmValue::I64(bits as i64),
+        ScalarType::I128 => VmValue::I128(bits as i128),
+        ScalarType::Isize => VmValue::Isize(bits as i64),
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "integer runtime primitive has a non-integer result",
+            });
+        }
+    })
+}
+
+fn integer_conversion_fits(
+    source: ScalarType,
+    target: ScalarType,
+    value: &VmValue,
+) -> Result<bool, VmArtifactError> {
+    let target_width = integer_width(target).ok_or(VmArtifactError::MalformedEncoding {
+        message: "integer conversion target is not an integer",
+    })?;
+    if integer_is_signed(source) {
+        let value = integer_signed(source, value)?;
+        if integer_is_signed(target) {
+            let (minimum, maximum) = if target_width == 128 {
+                (i128::MIN, i128::MAX)
+            } else {
+                (
+                    -(1i128 << (target_width - 1)),
+                    (1i128 << (target_width - 1)) - 1,
+                )
+            };
+            Ok((minimum..=maximum).contains(&value))
+        } else {
+            Ok(value >= 0 && (value as u128) <= integer_mask(target).unwrap())
+        }
+    } else {
+        let value = integer_bits(source, value)?;
+        if integer_is_signed(target) {
+            let maximum = if target_width == 128 {
+                i128::MAX as u128
+            } else {
+                (1u128 << (target_width - 1)) - 1
+            };
+            Ok(value <= maximum)
+        } else {
+            Ok(value <= integer_mask(target).unwrap())
+        }
+    }
+}
+
+fn integer_convert(
+    primitive: PrimitiveRole,
+    source: ScalarType,
+    value: &VmValue,
+) -> Result<VmValue, VmArtifactError> {
+    let (_, target) = integer_intrinsic_signature(primitive, source)?;
+    let checked = matches!(
+        primitive,
+        PrimitiveRole::IntConvertCheckedToI64
+            | PrimitiveRole::IntConvertCheckedToU32
+            | PrimitiveRole::IntConvertCheckedToUsize
+            | PrimitiveRole::IntConvertCheckedToU8
+            | PrimitiveRole::IntConvertCheckedToU16
+            | PrimitiveRole::IntConvertCheckedToI16
+            | PrimitiveRole::IntConvertCheckedToI32
+            | PrimitiveRole::IntConvertCheckedToI8
+            | PrimitiveRole::IntConvertCheckedToU64
+            | PrimitiveRole::IntConvertCheckedToIsize
+            | PrimitiveRole::IntConvertCheckedToU128
+            | PrimitiveRole::IntConvertCheckedToI128
+    );
+    if checked && !integer_conversion_fits(source, target, value)? {
+        return Err(VmArtifactError::ArithmeticOverflow);
+    }
+    integer_from_bits(target, integer_bits(source, value)?)
+}
+
 fn float_compare(operation: FloatCompareOp) -> VmCompare {
     match operation {
         FloatCompareOp::Eq => VmCompare::Equal,
@@ -10332,6 +10850,16 @@ fn execute(
             } => {
                 registers[dst as usize] =
                     Some(execute_float_intrinsic(primitive, &arguments, &registers)?)
+            }
+            VmInstruction::IntIntrinsic {
+                dst,
+                primitive,
+                scalar,
+                arguments,
+            } => {
+                registers[dst as usize] = Some(execute_integer_intrinsic(
+                    primitive, scalar, &arguments, &registers,
+                )?)
             }
             VmInstruction::ConstBool { dst, value } => {
                 registers[dst as usize] = Some(VmValue::Bool(value))
@@ -12115,6 +12643,26 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&argument.to_le_bytes());
             }
         }
+        VmInstruction::IntIntrinsic {
+            dst,
+            primitive,
+            scalar,
+            arguments,
+        } => {
+            output.push(166);
+            output.extend_from_slice(&dst.to_le_bytes());
+            let selector = primitive.selector_name();
+            output.extend_from_slice(&(selector.len() as u64).to_le_bytes());
+            output.extend_from_slice(selector.as_bytes());
+            output.push(
+                encode_integer_scalar(*scalar)
+                    .expect("integer intrinsic has a runtime integer scalar"),
+            );
+            output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+            for argument in arguments {
+                output.extend_from_slice(&argument.to_le_bytes());
+            }
+        }
         VmInstruction::ConstBool { dst, value } => {
             output.push(16);
             output.extend_from_slice(&dst.to_le_bytes());
@@ -13182,6 +13730,16 @@ fn execute_with_arguments(
             } => {
                 registers[*dst as usize] =
                     Some(execute_float_intrinsic(*primitive, arguments, &registers)?)
+            }
+            VmInstruction::IntIntrinsic {
+                dst,
+                primitive,
+                scalar,
+                arguments,
+            } => {
+                registers[*dst as usize] = Some(execute_integer_intrinsic(
+                    *primitive, *scalar, arguments, &registers,
+                )?)
             }
             VmInstruction::ConstBool { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::Bool(*value))

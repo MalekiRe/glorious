@@ -157,6 +157,22 @@ pub enum MirInstruction {
         primitive: FloatPrimitive,
         arguments: Vec<MirLocal>,
     },
+    /// A sealed generic-integer operation whose scalar width is fixed by the
+    /// enclosing materialized instance. The primitive role remains an exact
+    /// trusted-manifest identity, never a source callable name.
+    IntIntrinsic {
+        dst: MirLocal,
+        primitive: PrimitiveRole,
+        scalar: crate::types::ScalarType,
+        arguments: Vec<MirLocal>,
+    },
+    /// Source generic templates retain their integer operation until an
+    /// enclosing concrete instance chooses the scalar representation.
+    IntGenericIntrinsic {
+        dst: MirLocal,
+        primitive: PrimitiveRole,
+        arguments: Vec<MirLocal>,
+    },
     ConstBool {
         dst: MirLocal,
         value: bool,
@@ -1615,6 +1631,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::ConstI128 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::FloatIntrinsic { dst, .. }
+        | MirInstruction::IntIntrinsic { dst, .. }
+        | MirInstruction::IntGenericIntrinsic { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. }
@@ -3731,7 +3749,10 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
                 .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders))?;
             validate_mir_type(result, &mut lifetime_binders)
         }
-        MirInstruction::Abort | MirInstruction::FloatIntrinsic { .. } => Ok(()),
+        MirInstruction::Abort
+        | MirInstruction::FloatIntrinsic { .. }
+        | MirInstruction::IntIntrinsic { .. }
+        | MirInstruction::IntGenericIntrinsic { .. } => Ok(()),
         MirInstruction::TextByteLen { .. } => Ok(()),
         MirInstruction::TextConcat { .. }
         | MirInstruction::TextEq { .. }
@@ -4518,7 +4539,9 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. } => vec![*dst],
-        MirInstruction::FloatIntrinsic { dst, arguments, .. } => std::iter::once(*dst)
+        MirInstruction::FloatIntrinsic { dst, arguments, .. }
+        | MirInstruction::IntIntrinsic { dst, arguments, .. }
+        | MirInstruction::IntGenericIntrinsic { dst, arguments, .. } => std::iter::once(*dst)
             .chain(arguments.iter().copied())
             .collect(),
         MirInstruction::TextByteLen { dst, value } => vec![*dst, *value],
@@ -15474,6 +15497,110 @@ impl Lowerer<'_> {
                                 self.instructions
                                     .push(MirInstruction::BytesToArray { dst, value: *value });
                             }
+                            Some(role)
+                                if is_generic_integer_runtime_role(role)
+                                    && generic_arguments.as_slice()
+                                        != [GenericArgument::Type(Type::Scalar(
+                                            crate::types::ScalarType::I64,
+                                        ))] =>
+                            {
+                                let [GenericArgument::Type(source)] = generic_arguments.as_slice()
+                                else {
+                                    self.error(
+                                        "G6005",
+                                        "generic integer primitive requires one type argument",
+                                    );
+                                    return None;
+                                };
+                                let expected_result =
+                                    generic_integer_runtime_result(role, source.clone())
+                                        .expect("integer role was classified before lowering");
+                                if self.body.expression(id).ty != expected_result {
+                                    self.error(
+                                        "G6005",
+                                        "generic integer primitive result does not match its manifest ABI",
+                                    );
+                                    return None;
+                                }
+                                let expected_arity = if matches!(
+                                    role,
+                                    PrimitiveRole::IntBitNot
+                                        | PrimitiveRole::IntWrappingNeg
+                                        | PrimitiveRole::IntConvertCheckedToI64
+                                        | PrimitiveRole::IntConvertWrappingToI64
+                                        | PrimitiveRole::IntConvertCheckedToU32
+                                        | PrimitiveRole::IntConvertWrappingToU32
+                                        | PrimitiveRole::IntConvertCheckedToUsize
+                                        | PrimitiveRole::IntConvertWrappingToUsize
+                                        | PrimitiveRole::IntConvertCheckedToU8
+                                        | PrimitiveRole::IntConvertWrappingToU8
+                                        | PrimitiveRole::IntConvertCheckedToU16
+                                        | PrimitiveRole::IntConvertWrappingToU16
+                                        | PrimitiveRole::IntConvertCheckedToI16
+                                        | PrimitiveRole::IntConvertWrappingToI16
+                                        | PrimitiveRole::IntConvertCheckedToI32
+                                        | PrimitiveRole::IntConvertWrappingToI32
+                                        | PrimitiveRole::IntConvertCheckedToI8
+                                        | PrimitiveRole::IntConvertWrappingToI8
+                                        | PrimitiveRole::IntConvertCheckedToU64
+                                        | PrimitiveRole::IntConvertWrappingToU64
+                                        | PrimitiveRole::IntConvertCheckedToIsize
+                                        | PrimitiveRole::IntConvertWrappingToIsize
+                                        | PrimitiveRole::IntConvertCheckedToU128
+                                        | PrimitiveRole::IntConvertWrappingToU128
+                                        | PrimitiveRole::IntConvertCheckedToI128
+                                        | PrimitiveRole::IntConvertWrappingToI128
+                                ) {
+                                    1
+                                } else {
+                                    2
+                                };
+                                if arguments.len() != expected_arity
+                                    || self.locals[arguments[0].0 as usize].ty != *source
+                                    || (expected_arity == 2
+                                        && self.locals[arguments[1].0 as usize].ty
+                                            != if matches!(
+                                                role,
+                                                PrimitiveRole::IntShl | PrimitiveRole::IntShr
+                                            ) {
+                                                Type::Scalar(crate::types::ScalarType::U32)
+                                            } else {
+                                                source.clone()
+                                            })
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic integer primitive operands do not match its manifest ABI",
+                                    );
+                                    return None;
+                                }
+                                match source {
+                                    Type::Scalar(scalar) => {
+                                        self.instructions.push(MirInstruction::IntIntrinsic {
+                                            dst,
+                                            primitive: role,
+                                            scalar: *scalar,
+                                            arguments: arguments.clone(),
+                                        });
+                                    }
+                                    Type::Generic(_) => {
+                                        self.instructions.push(
+                                            MirInstruction::IntGenericIntrinsic {
+                                                dst,
+                                                primitive: role,
+                                                arguments: arguments.clone(),
+                                            },
+                                        );
+                                    }
+                                    _ => {
+                                        self.error(
+                                            "G6005",
+                                            "generic integer primitive requires a runtime integer scalar",
+                                        );
+                                        return None;
+                                    }
+                                }
+                            }
                             Some(
                                 role @ (PrimitiveRole::U32CheckedAdd
                                 | PrimitiveRole::U32CheckedSub
@@ -18231,6 +18358,97 @@ fn parse_i32_literal(text: &str) -> Result<i32, ()> {
 fn parse_i128_literal(text: &str) -> Result<i128, ()> {
     let (radix, digits) = normalized_integer_literal(text);
     i128::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn is_generic_integer_runtime_role(role: PrimitiveRole) -> bool {
+    matches!(
+        role,
+        PrimitiveRole::IntCheckedAdd
+            | PrimitiveRole::IntWrappingAdd
+            | PrimitiveRole::IntWrappingSub
+            | PrimitiveRole::IntWrappingMul
+            | PrimitiveRole::IntEqual
+            | PrimitiveRole::IntLess
+            | PrimitiveRole::IntGreater
+            | PrimitiveRole::IntBitAnd
+            | PrimitiveRole::IntBitOr
+            | PrimitiveRole::IntBitXor
+            | PrimitiveRole::IntBitNot
+            | PrimitiveRole::IntWrappingNeg
+            | PrimitiveRole::IntShl
+            | PrimitiveRole::IntShr
+            | PrimitiveRole::IntConvertCheckedToI64
+            | PrimitiveRole::IntConvertWrappingToI64
+            | PrimitiveRole::IntConvertCheckedToU32
+            | PrimitiveRole::IntConvertWrappingToU32
+            | PrimitiveRole::IntConvertCheckedToUsize
+            | PrimitiveRole::IntConvertWrappingToUsize
+            | PrimitiveRole::IntConvertCheckedToU8
+            | PrimitiveRole::IntConvertWrappingToU8
+            | PrimitiveRole::IntConvertCheckedToU16
+            | PrimitiveRole::IntConvertWrappingToU16
+            | PrimitiveRole::IntConvertCheckedToI16
+            | PrimitiveRole::IntConvertWrappingToI16
+            | PrimitiveRole::IntConvertCheckedToI32
+            | PrimitiveRole::IntConvertWrappingToI32
+            | PrimitiveRole::IntConvertCheckedToI8
+            | PrimitiveRole::IntConvertWrappingToI8
+            | PrimitiveRole::IntConvertCheckedToU64
+            | PrimitiveRole::IntConvertWrappingToU64
+            | PrimitiveRole::IntConvertCheckedToIsize
+            | PrimitiveRole::IntConvertWrappingToIsize
+            | PrimitiveRole::IntConvertCheckedToU128
+            | PrimitiveRole::IntConvertWrappingToU128
+            | PrimitiveRole::IntConvertCheckedToI128
+            | PrimitiveRole::IntConvertWrappingToI128
+    )
+}
+
+fn generic_integer_runtime_result(role: PrimitiveRole, source: Type) -> Option<Type> {
+    use crate::types::ScalarType;
+    Some(match role {
+        PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
+            Type::Scalar(ScalarType::U32)
+        }
+        PrimitiveRole::IntConvertCheckedToI64 | PrimitiveRole::IntConvertWrappingToI64 => {
+            Type::Scalar(ScalarType::I64)
+        }
+        PrimitiveRole::IntConvertCheckedToU32 | PrimitiveRole::IntConvertWrappingToU32 => {
+            Type::Scalar(ScalarType::U32)
+        }
+        PrimitiveRole::IntConvertCheckedToUsize | PrimitiveRole::IntConvertWrappingToUsize => {
+            Type::Scalar(ScalarType::Usize)
+        }
+        PrimitiveRole::IntConvertCheckedToU8 | PrimitiveRole::IntConvertWrappingToU8 => {
+            Type::Scalar(ScalarType::U8)
+        }
+        PrimitiveRole::IntConvertCheckedToU16 | PrimitiveRole::IntConvertWrappingToU16 => {
+            Type::Scalar(ScalarType::U16)
+        }
+        PrimitiveRole::IntConvertCheckedToI16 | PrimitiveRole::IntConvertWrappingToI16 => {
+            Type::Scalar(ScalarType::I16)
+        }
+        PrimitiveRole::IntConvertCheckedToI32 | PrimitiveRole::IntConvertWrappingToI32 => {
+            Type::Scalar(ScalarType::I32)
+        }
+        PrimitiveRole::IntConvertCheckedToI8 | PrimitiveRole::IntConvertWrappingToI8 => {
+            Type::Scalar(ScalarType::I8)
+        }
+        PrimitiveRole::IntConvertCheckedToU64 | PrimitiveRole::IntConvertWrappingToU64 => {
+            Type::Scalar(ScalarType::U64)
+        }
+        PrimitiveRole::IntConvertCheckedToIsize | PrimitiveRole::IntConvertWrappingToIsize => {
+            Type::Scalar(ScalarType::Isize)
+        }
+        PrimitiveRole::IntConvertCheckedToU128 | PrimitiveRole::IntConvertWrappingToU128 => {
+            Type::Scalar(ScalarType::U128)
+        }
+        PrimitiveRole::IntConvertCheckedToI128 | PrimitiveRole::IntConvertWrappingToI128 => {
+            Type::Scalar(ScalarType::I128)
+        }
+        _ if is_generic_integer_runtime_role(role) => source,
+        _ => return None,
+    })
 }
 
 fn normalized_integer_literal(text: &str) -> (u32, String) {
