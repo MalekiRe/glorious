@@ -6100,6 +6100,60 @@ fn service_lowers_non_tail_completion_let_initializers_into_vm_cfg() {
 }
 
 #[test]
+fn service_leaves_a_label_from_a_plain_completion_arm() {
+    let source = r#"
+        pub fn main() -> i64 {
+            label done {
+                handle 40 {
+                    40 => transfer done 42,
+                    _ => 0,
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_plain_completion_label_matrix_preserves_fallback_and_call_results() {
+    let source = r#"
+        pub fn choose(value: i64) -> i64 {
+            label done {
+                handle value {
+                    40 => transfer done 42,
+                    _ => 0,
+                }
+            }
+        }
+        pub fn main() -> i64 { choose(40) + choose(1) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejoins_nested_plain_completion_label_transfers() {
+    let source = r#"
+        pub fn main() -> i64 {
+            label outer {
+                label inner {
+                    handle 40 {
+                        40 => transfer inner 40,
+                        _ => 0,
+                    }
+                } + 2
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }

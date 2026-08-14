@@ -1966,6 +1966,26 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A normal completion inside a lexical label is a value-level
+        // decision, not an effect handler.  Its selected arm may still take
+        // the label, so give it an ordered CFG before the generic label probe
+        // attempts to evaluate `Transfer` as an ordinary expression.
+        if let Some(function) =
+            lowerer.lower_root_label_completion_transfer(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // Labels must claim their nonlocal edge before handler-specialization
         // probes inspect the body as an ordinary value expression.
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
@@ -5398,6 +5418,268 @@ impl Lowerer<'_> {
             _ => None,
         }
     }
+    /// Lower an ordinary normal-completion decision nested directly inside a
+    /// lexical label.  Effect-handler completion paths have their own frame
+    /// specializers above; this form has no handler installation at all, but
+    /// it still needs a real branch matrix so a selected `transfer` never
+    /// reaches generic expression lowering as a bottom-typed pseudo-value.
+    fn lower_root_label_completion_transfer(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let direct = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => Some((root, Vec::new())),
+            CoreKind::Block(values) => {
+                let (label, prefix) = values.split_last()?;
+                matches!(self.body.expression(*label).kind, CoreKind::Label { .. })
+                    .then_some((*label, prefix.to_vec()))
+            }
+            _ => None,
+        };
+        let (label, prefix, replay_root_continuation) = if let Some((label, prefix)) = direct
+            && self.plain_label_completion_parts(label).is_some()
+        {
+            (label, prefix, false)
+        } else {
+            (
+                self.find_plain_label_completion_transfer(root)?,
+                Vec::new(),
+                true,
+            )
+        };
+        let (brand, completion, label_prefix) = self.plain_label_completion_parts(label)?;
+        let CoreKind::Completion {
+            computation,
+            clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        for value in prefix {
+            self.statement(value)?;
+        }
+        if replay_root_continuation && !self.prepare_label_path(root, label) {
+            return None;
+        }
+        for value in label_prefix {
+            self.statement(value)?;
+        }
+        let subject = self.value(computation)?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let boundary_values = self.values.clone();
+        let boundary_named = self.named.clone();
+        let fallback_index = clauses
+            .iter()
+            .position(|clause| pattern_is_irrefutable(&clause.pattern));
+        let selected = fallback_index
+            .map(|index| clauses[..=index].to_vec())
+            .unwrap_or(clauses);
+        let has_fallback = fallback_index.is_some();
+        let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
+
+        // Reserve entry and typed rejoin before arm emission.  The VM's entry
+        // block is fixed at zero, and every ordinary arm reaches exactly the
+        // same label-result parameter while a transfer bypasses it through a
+        // cleanup-carrying `Leave` edge.
+        let mut blocks = vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: entry_instructions,
+                terminator: MirTerminator::Unreachable,
+            },
+            MirBlock {
+                parameters: vec![join],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            },
+        ];
+        let mut arms = Vec::with_capacity(selected.len());
+        for clause in &selected {
+            self.instructions = Vec::new();
+            self.values = boundary_values.clone();
+            self.named = boundary_named.clone();
+            self.bind_completion_clause(clause, subject)?;
+            let id = MirBlockId(blocks.len() as u32);
+            let terminator = if self.contains_label_transfer(clause.body, brand) {
+                let value = self.lower_label_transfer_path(clause.body, brand)?;
+                MirTerminator::Leave {
+                    brand,
+                    target: MirBlockId(1),
+                    arguments: vec![value],
+                    cleanup: MirCleanupPlan {
+                        moved_places: self.leave_cleanup.moved_places.clone(),
+                        active_loans: self.leave_cleanup.active_loans.clone(),
+                    },
+                }
+            } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
+                self.statement(clause.body)?;
+                MirTerminator::Unreachable
+            } else {
+                let value = self.value(clause.body)?;
+                MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![value],
+                }
+            };
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: std::mem::take(&mut self.instructions),
+                terminator,
+            });
+            arms.push(id);
+        }
+        self.values = boundary_values;
+        self.named = boundary_named;
+        self.instructions = Vec::new();
+        let result = if replay_root_continuation {
+            self.label_rejoins.insert(label, join);
+            self.value(root)?
+        } else {
+            join
+        };
+        blocks[1].instructions = std::mem::take(&mut self.instructions);
+        blocks[1].terminator = MirTerminator::Return { value: result };
+
+        let mut next = if has_fallback {
+            *arms.last().expect("completion fallback arm exists")
+        } else {
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            });
+            id
+        };
+        let tested = if has_fallback {
+            selected.len().saturating_sub(1)
+        } else {
+            selected.len()
+        };
+        for index in (0..tested).rev() {
+            let pattern = lower_pattern(selected[index].pattern.clone())?;
+            let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: arms[index],
+                    then_arguments: vec![],
+                    else_target: next,
+                    else_arguments: vec![],
+                },
+            });
+            next = id;
+        }
+        blocks[0].terminator = MirTerminator::Goto {
+            target: next,
+            arguments: vec![],
+        };
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
+    /// Extract the ordinary completion which supplies a label's direct body.
+    /// The Core builder retains lexical blocks around expressions, so both the
+    /// bare form and a trailing block form are valid label bodies.
+    fn plain_label_completion_parts(
+        &self,
+        label: CoreId,
+    ) -> Option<(crate::LabelBrand, CoreId, Vec<CoreId>)> {
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (completion, prefix) = match self.body.expression(body).kind.clone() {
+            CoreKind::Completion { .. } => (body, Vec::new()),
+            CoreKind::Block(values) => {
+                let (completion, prefix) = values.split_last()?;
+                matches!(
+                    self.body.expression(*completion).kind,
+                    CoreKind::Completion { .. }
+                )
+                .then_some((*completion, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Completion { ref clauses, .. } = self.body.expression(completion).kind else {
+            return None;
+        };
+        clauses
+            .iter()
+            .any(|clause| self.contains_label_transfer(clause.body, brand))
+            .then_some((brand, completion, prefix))
+    }
+
+    /// Find the innermost directly executable label/completion pair.  This is
+    /// used when that label is itself an operand of an enclosing label or
+    /// other strict expression; `prepare_label_path` then evaluates exactly
+    /// the preceding context and the rejoin map lowers the suffix once.
+    fn find_plain_label_completion_transfer(&self, id: CoreId) -> Option<CoreId> {
+        if self.plain_label_completion_parts(id).is_some() {
+            return Some(id);
+        }
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Closure { .. } | CoreKind::Completion { .. } | CoreKind::Handle { .. } => {
+                None
+            }
+            CoreKind::Label { body, .. }
+            | CoreKind::Field { base: body, .. }
+            | CoreKind::PatternTest { subject: body, .. }
+            | CoreKind::Let { value: body, .. }
+            | CoreKind::Borrow { value: body, .. }
+            | CoreKind::Deref(body)
+            | CoreKind::Move(body)
+            | CoreKind::Unary { value: body, .. }
+            | CoreKind::Transfer { value: body, .. } => {
+                self.find_plain_label_completion_transfer(body)
+            }
+            CoreKind::Assign { value, .. } => self.find_plain_label_completion_transfer(value),
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
+                .into_iter()
+                .find_map(|value| self.find_plain_label_completion_transfer(value)),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .find_map(|field| self.find_plain_label_completion_transfer(field)),
+            CoreKind::Binary { left, right, .. } => self
+                .find_plain_label_completion_transfer(left)
+                .or_else(|| self.find_plain_label_completion_transfer(right)),
+            CoreKind::Call {
+                callee, arguments, ..
+            } => self
+                .find_plain_label_completion_transfer(callee)
+                .or_else(|| {
+                    arguments
+                        .into_iter()
+                        .find_map(|argument| self.find_plain_label_completion_transfer(argument))
+                }),
+            CoreKind::Perform { arguments, .. } => arguments
+                .into_iter()
+                .find_map(|argument| self.find_plain_label_completion_transfer(argument)),
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Error => None,
+        }
+    }
+
     /// Lower a lexical label transfer into its own checked CFG edge.  This is
     /// deliberately a source/Core operation rather than an emitter shortcut:
     /// the target block receives the transferred value as a typed parameter
