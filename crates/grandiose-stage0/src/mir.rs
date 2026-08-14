@@ -2548,6 +2548,9 @@ fn validate_mir_generic_argument(
         return Err("MIR generic argument has a non-canonical identity representation".into());
     }
     match argument {
+        GenericArgument::ConstInfer { .. } => {
+            Err("MIR generic argument contains unresolved const inference".into())
+        }
         GenericArgument::Type(ty) => validate_mir_type(ty, lifetime_binders),
         GenericArgument::EffectRow(effects) => validate_mir_effect_row(effects, lifetime_binders),
         GenericArgument::Lifetime(lifetime) => validate_mir_lifetime(*lifetime, lifetime_binders),

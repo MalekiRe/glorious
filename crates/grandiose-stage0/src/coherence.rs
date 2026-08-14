@@ -1001,7 +1001,8 @@ fn contains_overlap_argument_generic(
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
-        | GenericArgument::ConstGeneric { .. } => false,
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }
 

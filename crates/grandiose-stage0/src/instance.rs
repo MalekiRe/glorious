@@ -92,6 +92,9 @@ impl InstanceKey {
                 (GenericKind::Const(ConstKind::U32), InstanceArgument::ConstU32Expr(_)) => {
                     return Err(InstanceKeyError::NonConcreteConst { slot });
                 }
+                (GenericKind::Const(_), InstanceArgument::ConstInfer { .. }) => {
+                    return Err(InstanceKeyError::NonConcreteConst { slot });
+                }
                 (
                     GenericKind::Const(ConstKind::Quantity),
                     InstanceArgument::ConstQuantity(value),
@@ -155,7 +158,8 @@ fn instance_argument_depth(value: &InstanceArgument) -> usize {
         InstanceArgument::Lifetime(_)
         | InstanceArgument::ConstU32(_)
         | InstanceArgument::ConstQuantity(_)
-        | InstanceArgument::ConstGeneric { .. } => 1,
+        | InstanceArgument::ConstGeneric { .. }
+        | InstanceArgument::ConstInfer { .. } => 1,
         InstanceArgument::ConstU32Expr(value) => structural_u32_depth(value),
         InstanceArgument::ConstProjection {
             subject,
@@ -363,7 +367,9 @@ fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
         }
         GenericArgument::ConstU32(_) | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstU32Expr(_) => false,
-        GenericArgument::ConstGeneric { .. } | GenericArgument::ConstProjection { .. } => false,
+        GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstProjection { .. }
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }
 

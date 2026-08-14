@@ -2059,7 +2059,8 @@ fn install_item_argument(
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
-        | GenericArgument::ConstProjection { .. } => {
+        | GenericArgument::ConstProjection { .. }
+        | GenericArgument::ConstInfer { .. } => {
             substitution.generic_arguments.insert(index, argument);
         }
     }
@@ -2533,7 +2534,8 @@ fn generic_argument_contains_escaping_hrtb(value: &GenericArgument) -> bool {
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
-        | GenericArgument::ConstGeneric { .. } => false,
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }
 
@@ -2613,7 +2615,8 @@ fn generic_argument_contains_free_hrtb_placeholder(
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
-        | GenericArgument::ConstGeneric { .. } => false,
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }
 
@@ -3082,6 +3085,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         GenericArgument::ConstU32Expr(_) => false,
         GenericArgument::ConstProjection { .. } => false,
         GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. })
-        | GenericArgument::ConstGeneric { .. } => false,
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }

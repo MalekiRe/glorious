@@ -187,6 +187,40 @@ fn typed_core_retains_zonked_direct_call_specialization_arguments() {
 }
 
 #[test]
+fn typed_core_zonks_implicit_const_callable_specialization_arguments() {
+    let source = "pub struct Tag<n: u32> {} pub struct Budget<q: Quantity> {} pub fn retain<n: u32, q: Quantity>(value: Tag<n>, budget: Budget<q>) -> Tag<n> { value } pub fn main(value: Tag<7>, budget: Budget<[2, 4]>) -> i64 { retain(value, budget); 0 }";
+    let core = core_for("core-implicit-const-call@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(
+        core.expressions.iter().any(|expression| {
+            matches!(
+                &expression.kind,
+                CoreKind::Function { arguments, .. }
+                    if arguments == &vec![
+                        GenericArgument::ConstU32(7),
+                        GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
+                    ]
+            )
+        }),
+        "implicit const callable substitution did not freeze to the source-proven values: {core:#?}"
+    );
+}
+
+#[test]
+fn typed_core_rejects_an_unconstrained_implicit_const_callable_argument() {
+    let core = core_for(
+        "core-unconstrained-implicit-const-call@0.1.0",
+        "pub fn unconstrained<n: u32>() -> i64 { 42 } pub fn main() -> i64 { unconstrained() }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4116"),
+        "unresolved const hole escaped Typed Core sealing: {core:#?}"
+    );
+}
+
+#[test]
 fn typed_core_retains_explicit_direct_callable_generic_arguments() {
     let core = core_for(
         "core-explicit-direct-generic@0.1.0",

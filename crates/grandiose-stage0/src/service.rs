@@ -1809,6 +1809,7 @@ fn instance_argument_kind(argument: &GenericArgument) -> crate::GenericKind {
         GenericArgument::ConstU32Expr(_) => crate::GenericKind::Const(crate::ConstKind::U32),
         GenericArgument::ConstQuantity(_) => crate::GenericKind::Const(crate::ConstKind::Quantity),
         GenericArgument::ConstGeneric { kind, .. } => crate::GenericKind::Const(*kind),
+        GenericArgument::ConstInfer { kind, .. } => crate::GenericKind::Const(*kind),
         GenericArgument::ConstProjection { kind, .. } => crate::GenericKind::Const(*kind),
     }
 }

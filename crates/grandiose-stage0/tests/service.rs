@@ -3334,6 +3334,23 @@ fn service_rejects_source_self_application_without_recursive_inference() {
 }
 
 #[test]
+fn service_rejects_an_omitted_const_callable_argument_without_constraints() {
+    let source =
+        "pub fn unconstrained<n: u32>() -> i64 { 42 } pub fn main() -> i64 { unconstrained() }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("unconstrained omitted const generic unexpectedly reached executable Core");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4116"),
+        "missing unresolved const-inference diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_a_direct_one_resume_lowering_for_an_exact_two_shot_contract() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

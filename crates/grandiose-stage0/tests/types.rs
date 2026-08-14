@@ -16,6 +16,78 @@ fn canonical_generic_arguments_keep_lifetimes_and_effect_rows_out_of_type_slots(
 }
 
 #[test]
+fn const_generic_inference_is_kind_checked_occurs_checked_and_zonked() {
+    let carrier = DefKey(Digest::of_bytes(b"const-inference-carrier"));
+    let trait_definition = DefKey(Digest::of_bytes(b"const-inference-trait"));
+    let mut inference = InferContext::default();
+    let u32_hole = inference.fresh_const(grandiose_stage0::ConstKind::U32);
+    let quantity_hole = inference.fresh_const(grandiose_stage0::ConstKind::Quantity);
+
+    let inferred = inference
+        .unify(
+            Type::Nominal {
+                definition: carrier,
+                arguments: vec![u32_hole, quantity_hole],
+            },
+            Type::Nominal {
+                definition: carrier,
+                arguments: vec![
+                    GenericArgument::ConstU32(7),
+                    GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
+                ],
+            },
+        )
+        .expect("matching nominal arguments should solve each native const domain");
+    assert_eq!(
+        inference.zonk(inferred).unwrap(),
+        Type::Nominal {
+            definition: carrier,
+            arguments: vec![
+                GenericArgument::ConstU32(7),
+                GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
+            ],
+        }
+    );
+
+    let u32_hole = inference.fresh_const(grandiose_stage0::ConstKind::U32);
+    assert!(matches!(
+        inference.unify(
+            Type::Nominal {
+                definition: carrier,
+                arguments: vec![u32_hole],
+            },
+            Type::Nominal {
+                definition: carrier,
+                arguments: vec![GenericArgument::ConstQuantity(Quantity::ONCE)],
+            },
+        ),
+        Err(TypeError::Mismatch { .. })
+    ));
+
+    let recursive = inference.fresh_const(grandiose_stage0::ConstKind::U32);
+    let recursive_projection = GenericArgument::ConstProjection {
+        subject: Box::new(Type::Unit),
+        trait_definition,
+        trait_arguments: vec![recursive.clone()],
+        name: "Value".into(),
+        kind: grandiose_stage0::ConstKind::U32,
+    };
+    assert!(matches!(
+        inference.unify(
+            Type::Nominal {
+                definition: carrier,
+                arguments: vec![recursive],
+            },
+            Type::Nominal {
+                definition: carrier,
+                arguments: vec![recursive_projection],
+            },
+        ),
+        Err(TypeError::Mismatch { .. })
+    ));
+}
+
+#[test]
 fn unification_is_occurs_checked_and_zonks_body_local_uncertainty() {
     let mut inference = InferContext::default();
     let variable = inference.fresh();

@@ -2064,6 +2064,7 @@ fn generic_argument_contains_open_type_parameter(value: &crate::types::GenericAr
         | crate::types::GenericArgument::ConstQuantity(_)
         | crate::types::GenericArgument::ConstGeneric { .. }
         | crate::types::GenericArgument::ConstU32Expr(_) => false,
+        crate::types::GenericArgument::ConstInfer { .. } => true,
     }
 }
 

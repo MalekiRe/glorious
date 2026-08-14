@@ -14,6 +14,13 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InferVar(pub u32);
 
+/// A body-local structural-constant hole.  Const generics have their own
+/// finite domains and must not borrow either the type or effect-row variable
+/// spaces.  Just like [`InferVar`], this identity is allocation-local and is
+/// rejected before a frozen product is accepted.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ConstInferVar(pub u32);
+
 /// An inference variable in an effect row. This is deliberately not a
 /// `InferVar`: a type hole can never accidentally escape as an effect tail.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -256,6 +263,15 @@ pub enum GenericArgument {
         index: u32,
         kind: ConstKind,
     },
+    /// An omitted const argument on a generic invocation.  This is only
+    /// produced by body elaboration; source binders remain
+    /// [`Self::ConstGeneric`] and therefore rigid.  Keeping the declared
+    /// kind at the variable itself makes a `u32` hole impossible to bind to a
+    /// quantity term even during error recovery.
+    ConstInfer {
+        variable: ConstInferVar,
+        kind: ConstKind,
+    },
     /// A delayed associated structural-constant normalization.  This is the
     /// const-kinded counterpart of [`Type::Projection`]: a public generic
     /// contract may require `Array<T, <T as Width>::Value>` before `T` has a
@@ -471,12 +487,14 @@ pub enum TypeError {
     UnresolvedEffect(EffectVar),
     UnresolvedGenericEffectRow(u32),
     Unresolved(InferVar),
+    UnresolvedConst(ConstInferVar),
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct InferContext {
     bindings: Vec<Option<Type>>,
     effect_bindings: Vec<Option<EffectRow>>,
+    const_bindings: Vec<Option<GenericArgument>>,
 }
 
 impl InferContext {
@@ -501,6 +519,18 @@ impl InferContext {
             projections: vec![],
             tail: Some(EffectTail::Infer(variable)),
         }
+    }
+
+    /// Create one native-domain structural-constant hole for an omitted
+    /// generic callable argument.  It deliberately returns a
+    /// [`GenericArgument`] because consts cannot inhabit ordinary type slots.
+    pub fn fresh_const(&mut self, kind: ConstKind) -> GenericArgument {
+        let variable = ConstInferVar(
+            u32::try_from(self.const_bindings.len())
+                .expect("const inference variable arena exceeds G1 range"),
+        );
+        self.const_bindings.push(None);
+        GenericArgument::ConstInfer { variable, kind }
     }
 
     pub fn unify(&mut self, left: Type, right: Type) -> Result<Type, TypeError> {
@@ -885,52 +915,61 @@ impl InferContext {
         }
         left.into_iter()
             .zip(right)
-            .map(|(left, right)| match (left, right) {
-                (GenericArgument::Type(left), GenericArgument::Type(right)) => {
-                    self.unify(left, right).map(GenericArgument::Type)
+            .map(|(left, right)| {
+                let left = self.resolve_generic_argument(left);
+                let right = self.resolve_generic_argument(right);
+                match (left, right) {
+                    (GenericArgument::ConstInfer { variable, kind }, value)
+                    | (value, GenericArgument::ConstInfer { variable, kind }) => {
+                        self.bind_const(variable, kind, value.clone())?;
+                        Ok(self.resolve_generic_argument(value))
+                    }
+                    (GenericArgument::Type(left), GenericArgument::Type(right)) => {
+                        self.unify(left, right).map(GenericArgument::Type)
+                    }
+                    // Effect rows are first-class generic arguments, not opaque
+                    // identity bytes.  A body-local row tail in `Box<e>` must be
+                    // able to learn from `Box<{Trace}>` just as a type hole in
+                    // `Box<T>` learns from `Box<i64>`.  Keeping this at the
+                    // mixed-kind argument boundary also covers rows carried by
+                    // associated-item applications and effect instances.
+                    (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => self
+                        .unify_effect_rows(left, right)
+                        .map(GenericArgument::EffectRow),
+                    (
+                        GenericArgument::ConstProjection {
+                            subject: left_subject,
+                            trait_definition: left_trait,
+                            trait_arguments: left_arguments,
+                            name: left_name,
+                            kind: left_kind,
+                        },
+                        GenericArgument::ConstProjection {
+                            subject: right_subject,
+                            trait_definition: right_trait,
+                            trait_arguments: right_arguments,
+                            name: right_name,
+                            kind: right_kind,
+                        },
+                    ) if left_trait == right_trait
+                        && left_name == right_name
+                        && left_kind == right_kind =>
+                    {
+                        Ok(GenericArgument::ConstProjection {
+                            subject: Box::new(self.unify(*left_subject, *right_subject)?),
+                            trait_definition: left_trait,
+                            trait_arguments: self
+                                .unify_generic_arguments(left_arguments, right_arguments)?,
+                            name: left_name,
+                            kind: left_kind,
+                        })
+                    }
+                    (left, right) if left == right => Ok(left),
+                    _ => Err(TypeError::Mismatch {
+                        expected: Box::new(Type::Error),
+                        found: Box::new(Type::Error),
+                    }),
                 }
-                // Effect rows are first-class generic arguments, not opaque
-                // identity bytes.  A body-local row tail in `Box<e>` must be
-                // able to learn from `Box<{Trace}>` just as a type hole in
-                // `Box<T>` learns from `Box<i64>`.  Keeping this at the
-                // mixed-kind argument boundary also covers rows carried by
-                // associated-item applications and effect instances.
-                (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => self
-                    .unify_effect_rows(left, right)
-                    .map(GenericArgument::EffectRow),
-                (
-                    GenericArgument::ConstProjection {
-                        subject: left_subject,
-                        trait_definition: left_trait,
-                        trait_arguments: left_arguments,
-                        name: left_name,
-                        kind: left_kind,
-                    },
-                    GenericArgument::ConstProjection {
-                        subject: right_subject,
-                        trait_definition: right_trait,
-                        trait_arguments: right_arguments,
-                        name: right_name,
-                        kind: right_kind,
-                    },
-                ) if left_trait == right_trait
-                    && left_name == right_name
-                    && left_kind == right_kind =>
-                {
-                    Ok(GenericArgument::ConstProjection {
-                        subject: Box::new(self.unify(*left_subject, *right_subject)?),
-                        trait_definition: left_trait,
-                        trait_arguments: self
-                            .unify_generic_arguments(left_arguments, right_arguments)?,
-                        name: left_name,
-                        kind: left_kind,
-                    })
-                }
-                (left, right) if left == right => Ok(left),
-                _ => Err(TypeError::Mismatch {
-                    expected: Box::new(Type::Error),
-                    found: Box::new(Type::Error),
-                }),
             })
             .collect()
     }
@@ -1117,6 +1156,132 @@ impl InferContext {
         }
         self.bindings[variable.0 as usize] = Some(value);
         Ok(())
+    }
+
+    fn resolve_generic_argument(&mut self, value: GenericArgument) -> GenericArgument {
+        let GenericArgument::ConstInfer { variable, kind } = value else {
+            return value;
+        };
+        let Some(binding) = self.const_bindings[variable.0 as usize].clone() else {
+            return GenericArgument::ConstInfer { variable, kind };
+        };
+        let resolved = self.resolve_generic_argument(binding);
+        self.const_bindings[variable.0 as usize] = Some(resolved.clone());
+        resolved
+    }
+
+    fn bind_const(
+        &mut self,
+        variable: ConstInferVar,
+        kind: ConstKind,
+        value: GenericArgument,
+    ) -> Result<(), TypeError> {
+        let value = self.resolve_generic_argument(value);
+        if value == (GenericArgument::ConstInfer { variable, kind }) {
+            return Ok(());
+        }
+        if !generic_argument_matches_const_kind(&value, kind)
+            || self.const_argument_occurs(variable, &value)
+        {
+            return Err(TypeError::Mismatch {
+                expected: Box::new(Type::Error),
+                found: Box::new(Type::Error),
+            });
+        }
+        self.const_bindings[variable.0 as usize] = Some(value);
+        Ok(())
+    }
+
+    fn const_argument_occurs(&mut self, variable: ConstInferVar, value: &GenericArgument) -> bool {
+        match value {
+            GenericArgument::ConstInfer {
+                variable: found, ..
+            } => *found == variable,
+            GenericArgument::Type(value) => self.const_occurs_in_type(variable, value),
+            GenericArgument::EffectRow(value) => {
+                value.effects.iter().any(|effect| {
+                    effect
+                        .arguments
+                        .iter()
+                        .any(|argument| self.const_argument_occurs(variable, argument))
+                }) || value.projections.iter().any(|projection| {
+                    self.const_occurs_in_type(variable, &projection.subject)
+                        || projection
+                            .trait_arguments
+                            .iter()
+                            .any(|argument| self.const_argument_occurs(variable, argument))
+                        || projection
+                            .item_arguments
+                            .iter()
+                            .any(|argument| self.const_argument_occurs(variable, argument))
+                })
+            }
+            GenericArgument::ConstProjection {
+                subject,
+                trait_arguments,
+                ..
+            } => {
+                self.const_occurs_in_type(variable, subject)
+                    || trait_arguments
+                        .iter()
+                        .any(|argument| self.const_argument_occurs(variable, argument))
+            }
+            GenericArgument::Lifetime(_)
+            | GenericArgument::ConstU32(_)
+            | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstQuantity(_)
+            | GenericArgument::ConstGeneric { .. } => false,
+        }
+    }
+
+    fn const_occurs_in_type(&mut self, variable: ConstInferVar, value: &Type) -> bool {
+        match self.resolve(value.clone()) {
+            Type::Nominal { arguments, .. } => arguments
+                .iter()
+                .any(|argument| self.const_argument_occurs(variable, argument)),
+            Type::Tuple(values) => values
+                .iter()
+                .any(|value| self.const_occurs_in_type(variable, value)),
+            Type::Projection {
+                subject,
+                trait_arguments,
+                item_arguments,
+                ..
+            } => {
+                self.const_occurs_in_type(variable, &subject)
+                    || trait_arguments
+                        .iter()
+                        .any(|argument| self.const_argument_occurs(variable, argument))
+                    || item_arguments
+                        .iter()
+                        .any(|argument| self.const_argument_occurs(variable, argument))
+            }
+            Type::Array(value)
+            | Type::Reference {
+                referent: value, ..
+            } => self.const_occurs_in_type(variable, &value),
+            Type::Callable {
+                parameters,
+                result,
+                effects,
+                ..
+            } => {
+                parameters
+                    .iter()
+                    .any(|value| self.const_occurs_in_type(variable, value))
+                    || self.const_occurs_in_type(variable, &result)
+                    || self.const_argument_occurs(variable, &GenericArgument::EffectRow(effects))
+            }
+            Type::Unit
+            | Type::Never
+            | Type::Scalar(_)
+            | Type::ConstU32(_)
+            | Type::ConstQuantity(_)
+            | Type::ConstGeneric { .. }
+            | Type::Generic(_)
+            | Type::Infer(_)
+            | Type::Error => false,
+        }
     }
 
     /// Partition two effect-instance sets after unifying the arguments of a
@@ -1322,15 +1487,15 @@ impl InferContext {
         variable: EffectVar,
         argument: &GenericArgument,
     ) -> bool {
-        match argument {
-            GenericArgument::Type(value) => self.effect_occurs_in_type(variable, value),
-            GenericArgument::EffectRow(value) => self.effect_occurs_in_row(variable, value),
+        match self.resolve_generic_argument(argument.clone()) {
+            GenericArgument::Type(value) => self.effect_occurs_in_type(variable, &value),
+            GenericArgument::EffectRow(value) => self.effect_occurs_in_row(variable, &value),
             GenericArgument::ConstProjection {
                 subject,
                 trait_arguments,
                 ..
             } => {
-                self.effect_occurs_in_type(variable, subject)
+                self.effect_occurs_in_type(variable, &subject)
                     || trait_arguments
                         .iter()
                         .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
@@ -1339,7 +1504,8 @@ impl InferContext {
             | GenericArgument::ConstU32(_)
             | GenericArgument::ConstU32Expr(_)
             | GenericArgument::ConstQuantity(_)
-            | GenericArgument::ConstGeneric { .. } => false,
+            | GenericArgument::ConstGeneric { .. }
+            | GenericArgument::ConstInfer { .. } => false,
         }
     }
 
@@ -1535,11 +1701,11 @@ impl InferContext {
             })
     }
 
-    fn zonk_generic_argument(
+    pub(crate) fn zonk_generic_argument(
         &mut self,
         argument: GenericArgument,
     ) -> Result<GenericArgument, TypeError> {
-        match argument {
+        match self.resolve_generic_argument(argument) {
             GenericArgument::Type(value) => self.zonk(value).map(GenericArgument::Type),
             GenericArgument::EffectRow(value) => self
                 .zonk_effects_allowing_generic_tail(value)
@@ -1560,6 +1726,9 @@ impl InferContext {
                 name,
                 kind,
             }),
+            GenericArgument::ConstInfer { variable, .. } => {
+                Err(TypeError::UnresolvedConst(variable))
+            }
             argument => Ok(argument),
         }
     }
@@ -1582,7 +1751,8 @@ impl InferContext {
             | GenericArgument::ConstU32(_)
             | GenericArgument::ConstU32Expr(_)
             | GenericArgument::ConstQuantity(_)
-            | GenericArgument::ConstGeneric { .. } => false,
+            | GenericArgument::ConstGeneric { .. }
+            | GenericArgument::ConstInfer { .. } => false,
         }
     }
 
@@ -1632,6 +1802,57 @@ impl InferContext {
             Some(EffectTail::Infer(_)) | Some(EffectTail::Generic(_)) | None => false,
         }
     }
+}
+
+fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: ConstKind) -> bool {
+    matches!(
+        (argument, kind),
+        (GenericArgument::ConstU32(_), ConstKind::U32)
+            | (GenericArgument::ConstU32Expr(_), ConstKind::U32)
+            | (GenericArgument::ConstQuantity(_), ConstKind::Quantity)
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: ConstKind::U32,
+                    ..
+                },
+                ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: ConstKind::Quantity,
+                    ..
+                },
+                ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstInfer {
+                    kind: ConstKind::U32,
+                    ..
+                },
+                ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstInfer {
+                    kind: ConstKind::Quantity,
+                    ..
+                },
+                ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstProjection {
+                    kind: ConstKind::U32,
+                    ..
+                },
+                ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstProjection {
+                    kind: ConstKind::Quantity,
+                    ..
+                },
+                ConstKind::Quantity
+            )
+    )
 }
 
 fn encode_type(value: &Type, output: &mut Vec<u8>) {
@@ -1987,6 +2208,10 @@ fn generic_argument_identity_is_well_formed(value: &GenericArgument) -> bool {
         GenericArgument::Lifetime(_)
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstGeneric { .. } => true,
+        // Allocation-local const holes are not semantic identities.  They
+        // can be encoded transiently for deterministic body-local ordering,
+        // but no frozen Core/MIR/VM product may retain one.
+        GenericArgument::ConstInfer { .. } => false,
     }
 }
 
@@ -2255,6 +2480,17 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
         GenericArgument::ConstGeneric { index, kind } => {
             output.push(5);
             output.extend_from_slice(&index.to_le_bytes());
+            output.push(match kind {
+                ConstKind::U32 => 0,
+                ConstKind::Quantity => 1,
+            });
+        }
+        GenericArgument::ConstInfer { variable, kind } => {
+            // Body-local ordering needs a deterministic key while source
+            // elaboration matches effect instances. Frozen callers reject it
+            // through `generic_argument_identity_is_well_formed`.
+            output.push(8);
+            output.extend_from_slice(&variable.0.to_le_bytes());
             output.push(match kind {
                 ConstKind::U32 => 0,
                 ConstKind::Quantity => 1,

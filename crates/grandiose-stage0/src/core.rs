@@ -1983,7 +1983,8 @@ fn generic_argument_contains_out_of_scope_bound_lifetime(
         GenericArgument::ConstU32(_)
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
-        | GenericArgument::ConstGeneric { .. } => false,
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }
 
@@ -2007,7 +2008,22 @@ fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
     match argument {
         GenericArgument::Type(value) => type_contains_inference(value),
         GenericArgument::EffectRow(value) => effect_row_contains_inference(value),
-        _ => false,
+        GenericArgument::ConstInfer { .. } => true,
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            type_contains_inference(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_inference)
+        }
+        GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => false,
     }
 }
 
@@ -5485,12 +5501,22 @@ impl Elaborator<'_> {
     }
 
     fn zonk_generic_argument(&mut self, argument: GenericArgument, span: Span) -> GenericArgument {
-        match argument {
-            GenericArgument::Type(value) => GenericArgument::Type(self.zonk_type(value, span)),
-            GenericArgument::EffectRow(value) => {
-                GenericArgument::EffectRow(self.zonk_effect_row(value, span))
+        let fallback = argument.clone();
+        match self.inference.zonk_generic_argument(argument) {
+            Ok(argument) => argument,
+            Err(_) => {
+                self.error(
+                    span,
+                    "G4116",
+                    "cannot infer a complete Typed Core generic argument",
+                );
+                self.recovered = true;
+                // Keep the original body-local term so the independent Core
+                // and MIR validators also reject a forged/recovered product;
+                // replacing it with `Type::Error` would turn this into an
+                // unrelated generic-kind failure during instance discovery.
+                fallback
             }
-            argument => argument,
         }
     }
 
@@ -5840,11 +5866,8 @@ impl Elaborator<'_> {
                             (index, crate::GenericKind::Lifetime) => {
                                 GenericArgument::Lifetime(Lifetime::Generic(index as u32))
                             }
-                            (index, crate::GenericKind::Const(kind)) => {
-                                GenericArgument::ConstGeneric {
-                                    index: index as u32,
-                                    kind: *kind,
-                                }
+                            (_, crate::GenericKind::Const(kind)) => {
+                                self.inference.fresh_const(*kind)
                             }
                         })
                         .collect::<Vec<_>>();
@@ -8881,9 +8904,75 @@ fn align_lifetime_generic_argument(
             align_lifetime_effect_row(expected, actual, substitution, mode, depth)
                 .map(GenericArgument::EffectRow)
         }
+        // Structural constants carry no lifetime leaves, but their values can
+        // be body-local inference terms.  Preserve an omitted native-domain
+        // hole for the ordinary generic unifier below; treating a different
+        // concrete value as a lifetime failure prevented `Tag<n>` from
+        // learning `n = 7` at a direct call.
+        (
+            GenericArgument::ConstInfer {
+                kind: expected_kind,
+                ..
+            },
+            actual,
+        ) if generic_argument_matches_const_kind(actual, *expected_kind) => Ok(expected.clone()),
         (expected, actual) if expected == actual => Ok(expected.clone()),
         _ => Err(LifetimeError::UnsatisfiedOutlives),
     }
+}
+
+fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: crate::ConstKind) -> bool {
+    matches!(
+        (argument, kind),
+        (GenericArgument::ConstU32(_), crate::ConstKind::U32)
+            | (GenericArgument::ConstU32Expr(_), crate::ConstKind::U32)
+            | (
+                GenericArgument::ConstQuantity(_),
+                crate::ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
+                crate::ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstProjection {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstProjection {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
+                crate::ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstInfer {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstInfer {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
+                crate::ConstKind::Quantity
+            )
+    )
 }
 
 fn align_lifetime_effect_row(
@@ -9257,7 +9346,8 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. })
         | GenericArgument::ConstGeneric { .. }
-        | GenericArgument::ConstProjection { .. } => false,
+        | GenericArgument::ConstProjection { .. }
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }
 

@@ -798,7 +798,8 @@ fn generic_argument_contains_open_type_parameter(value: &GenericArgument) -> boo
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
-        | GenericArgument::ConstU32Expr(_) => false,
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInfer { .. } => false,
     }
 }
 

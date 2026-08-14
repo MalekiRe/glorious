@@ -1190,7 +1190,8 @@ impl ElaboratedInterface {
             | GenericArgument::ConstU32(_)
             | GenericArgument::ConstU32Expr(_)
             | GenericArgument::ConstQuantity(_)
-            | GenericArgument::ConstGeneric { .. } => {}
+            | GenericArgument::ConstGeneric { .. }
+            | GenericArgument::ConstInfer { .. } => {}
         }
     }
 
@@ -2493,6 +2494,20 @@ fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: ConstKi
             )
             | (
                 GenericArgument::ConstGeneric {
+                    kind: ConstKind::Quantity,
+                    ..
+                },
+                ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstInfer {
+                    kind: ConstKind::U32,
+                    ..
+                },
+                ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstInfer {
                     kind: ConstKind::Quantity,
                     ..
                 },
