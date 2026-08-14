@@ -5173,6 +5173,44 @@ fn lexical_closure_captures_are_stable_across_later_shadowing() {
 }
 
 #[test]
+fn nested_closures_preserve_the_source_environment_brand_and_capture_layout() {
+    let source = "pub fn main() -> i64 { let base = 30; let outer = (first: i64) -> i64 { let inner = (second: i64) -> i64 { base + first + second }; inner(2) }; outer(10) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("nested closures must retain their source-owned environments while lifting");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing() {
+    let unique = "pub fn main() -> i64 { let value = 40; let outer = () -> i64 { let inner = () -> i64 { value = value + 2; value }; inner() }; outer() }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(unique))
+        .expect("nested unique capture must be forwarded to the lifted inner callable");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let moved = "pub fn main() -> i64 { let value = 42; let outer = () -> i64 { let inner = () -> i64 { move value }; inner() }; outer() }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(moved))
+        .expect("nested move capture must be forwarded to the lifted inner callable");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn main() -> i64 { let value = 42; let outer = () -> i64 { let inner = () -> i64 { move value }; inner() }; value }",
+        ))
+    else {
+        panic!("outer source remained usable after a transitively moved capture")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5001"),
+        "missing transitive moved-capture diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_executes_sealed_capture_post_states_and_rejects_their_moved_source_use() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
@@ -5200,6 +5238,24 @@ fn service_executes_sealed_capture_post_states_and_rejects_their_moved_source_us
 fn callables_cross_direct_call_boundaries_and_remain_indirectly_invocable() {
     let source = "pub fn make(value: i64) -> (i64) -> i64 { (extra: i64) -> i64 { value + extra } } pub fn main() -> i64 { make(40)(2) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn generic_closure_values_preserve_indirect_call_contracts() {
+    let generic = "pub fn identity<T>(value: T) -> T { let invoke = (input: T) -> T { input }; invoke(value) } pub fn main() -> i64 { identity(42) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(generic))
+        .expect("generic closure value must materialize before its indirect call");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn callable_values_cross_record_and_return_indirect_boundaries() {
+    let source = "pub struct Holder { callback: (i64) -> i64 } pub fn make(value: i64) -> Holder { Holder { callback: (input: i64) -> i64 { value + input } } } pub fn main() -> i64 { let holder = make(40); holder.callback(2) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("record-stored returned closure must retain its indirect-call environment");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 

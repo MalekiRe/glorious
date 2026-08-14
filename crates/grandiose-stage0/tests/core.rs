@@ -4956,7 +4956,10 @@ fn closures_seal_distinct_owner_scoped_environment_brands() {
         .iter()
         .flat_map(|block| &block.instructions)
         .filter_map(|instruction| match instruction {
-            MirInstruction::MakeCallable { environment, .. } => *environment,
+            MirInstruction::MakeCallable {
+                environment: Some(environment),
+                ..
+            } => Some(environment.brand),
             _ => None,
         })
         .collect::<Vec<_>>();

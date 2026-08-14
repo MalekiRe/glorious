@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use grandiose_stage0::{
-    CoreId, DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument,
-    GenericKind, InferVar, InstanceKey, Lifetime, MirBlock, MirBlockId, MirContinuationPolicy,
+    CallableId, CaptureMode, CoreId, DefKey, Digest, EffectInstance, EffectRow,
+    EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar, InstanceKey,
+    Lifetime, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment, MirContinuationPolicy,
     MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl, MirPattern,
     MirPatternField, MirProgram, MirTerminator, Quantity, ScalarType, Type, VmArtifactError,
     emit_vm, emit_vm_program, optimize_mir, verify_vm,
@@ -1035,4 +1036,101 @@ fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
             ..
         }
     ));
+}
+
+#[test]
+fn mir_rejects_forged_callable_environment_brand_count_and_type() {
+    let owner = DefKey(Digest::of_bytes(b"mir-callable-environment-owner"));
+    let brand = EnvironmentBrand {
+        owner,
+        callable: CallableId(3),
+    };
+    let callable_index = brand.callable.0.to_le_bytes();
+    let callee = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable".as_slice(),
+        owner.0.as_bytes().as_slice(),
+        callable_index.as_slice(),
+    ]));
+    let entry = DefKey(Digest::of_bytes(b"mir-callable-environment-entry"));
+    let layout = MirCaptureEnvironment {
+        brand,
+        captures: vec![MirCapture {
+            mode: CaptureMode::Move,
+            ty: Type::Scalar(ScalarType::I64),
+        }],
+    };
+    let target = MirFunction {
+        definition: callee,
+        captures: 1,
+        parameters: vec![MirLocal(0)],
+        locals: vec![local(Type::Scalar(ScalarType::I64))],
+        result: Type::Scalar(ScalarType::I64),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+    let entry_function = |environment: Option<MirCaptureEnvironment>| MirFunction {
+        definition: entry,
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(Type::Scalar(ScalarType::I64)),
+            local(Type::Callable {
+                parameters: vec![],
+                result: Box::new(Type::Scalar(ScalarType::I64)),
+                effects: EffectRow::empty(),
+                lifetime_binders: 0,
+                invocation: Quantity::ONCE,
+            }),
+        ],
+        result: Type::Callable {
+            parameters: vec![],
+            result: Box::new(Type::Scalar(ScalarType::I64)),
+            effects: EffectRow::empty(),
+            lifetime_binders: 0,
+            invocation: Quantity::ONCE,
+        },
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 42,
+                },
+                MirInstruction::MakeCallable {
+                    dst: MirLocal(1),
+                    callee,
+                    captures: vec![MirLocal(0)],
+                    generic_arguments: vec![],
+                    trait_instance: None,
+                    environment,
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(1) },
+        }],
+    };
+    let valid = MirProgram {
+        entry,
+        functions: BTreeMap::from([
+            (entry, entry_function(Some(layout.clone()))),
+            (callee, target),
+        ]),
+        instances: BTreeMap::new(),
+    };
+    assert!(valid.validate().is_ok());
+
+    let mut forged_brand = layout.clone();
+    forged_brand.brand.callable = CallableId(4);
+    assert!(entry_function(Some(forged_brand)).validate().is_err());
+    let mut forged_count = layout.clone();
+    forged_count.captures.clear();
+    assert!(entry_function(Some(forged_count)).validate().is_err());
+    let mut forged_type = layout;
+    forged_type.captures[0].ty = Type::Scalar(ScalarType::Bool);
+    assert!(entry_function(Some(forged_type)).validate().is_err());
+    assert!(entry_function(None).validate().is_err());
 }

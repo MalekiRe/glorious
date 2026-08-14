@@ -446,17 +446,46 @@ pub enum MirInstruction {
         /// closures always carry an empty list.
         generic_arguments: Vec<GenericArgument>,
         trait_instance: Option<MirTraitMethodInstance>,
-        /// Sealed source-level environment evidence. It is intentionally
-        /// proof-only at Stage 0: VM closure layout checks capture types and
-        /// count independently, while this prevents a Core environment from
-        /// being replayed into a different lifted callable during lowering.
-        environment: Option<EnvironmentBrand>,
+        /// Sealed source-level environment evidence.  Unlike the former
+        /// brand-only marker, this preserves the exact ordered capture modes
+        /// and types through MIR so neither a forged lowering nor a later VM
+        /// producer can replay an environment into a different callable
+        /// layout.
+        environment: Option<MirCaptureEnvironment>,
     },
     CallIndirect {
         dst: MirLocal,
         callee: MirLocal,
         arguments: Vec<MirLocal>,
     },
+}
+
+/// Source-free callable-environment contract retained by a `MakeCallable`.
+/// Names are deliberately absent after Core: the owner-scoped brand plus
+/// ordered modes and types are the executable identity of the layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirCaptureEnvironment {
+    pub brand: EnvironmentBrand,
+    pub captures: Vec<MirCapture>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirCapture {
+    pub mode: CaptureMode,
+    pub ty: Type,
+}
+
+/// Canonical executable identity of one source-owned anonymous callable.
+/// Keeping this single derivation shared by lowering and validation prevents
+/// a nested environment brand from being silently associated with a sibling
+/// lifted body.
+pub(crate) fn lifted_callable_definition(brand: EnvironmentBrand) -> DefKey {
+    let callable = brand.callable.0.to_le_bytes();
+    DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable".as_slice(),
+        brand.owner.0.as_bytes().as_slice(),
+        callable.as_slice(),
+    ]))
 }
 
 /// The executable use policy for a handler continuation. Typed Core remains
@@ -1123,6 +1152,12 @@ impl MirLowering {
         let mut lowerer = Lowerer {
             body,
             bodies,
+            // Core environments are branded by the source callable that
+            // owns the whole body.  A lifted child has a synthetic VM key,
+            // but it must keep validating nested environments against this
+            // stable source owner instead of treating the generated key as a
+            // new identity space.
+            owner: definition,
             definition,
             locals: vec![],
             values: BTreeMap::new(),
@@ -1987,6 +2022,42 @@ impl MirFunction {
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
     fn validate_instruction(&self, instruction: &MirInstruction) -> Result<(), String> {
+        if let MirInstruction::MakeCallable {
+            callee,
+            captures,
+            environment,
+            ..
+        } = instruction
+        {
+            match environment {
+                Some(environment) => {
+                    if *callee != lifted_callable_definition(environment.brand) {
+                        return Err(
+                            "MIR callable environment brand does not match its lifted target"
+                                .into(),
+                        );
+                    }
+                    if captures.len() != environment.captures.len() {
+                        return Err(
+                            "MIR callable capture registers do not match their sealed layout"
+                                .into(),
+                        );
+                    }
+                    for (&local, capture) in captures.iter().zip(&environment.captures) {
+                        if self.local_type(local)? != &capture.ty {
+                            return Err(
+                                "MIR callable capture type does not match its sealed layout".into(),
+                            );
+                        }
+                    }
+                }
+                None if !captures.is_empty() => {
+                    return Err("MIR callable has captures but no sealed environment".into());
+                }
+                None => {}
+            }
+            return Ok(());
+        }
         if let MirInstruction::MakeArray {
             dst,
             fields,
@@ -2392,6 +2463,15 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
                 })?;
                 instance.method_arguments.iter().try_for_each(|argument| {
                     validate_mir_generic_argument(argument, &mut lifetime_binders)
+                })?;
+            }
+            if let MirInstruction::MakeCallable {
+                environment: Some(environment),
+                ..
+            } = instruction
+            {
+                environment.captures.iter().try_for_each(|capture| {
+                    validate_mir_type(&capture.ty, &mut lifetime_binders)
                 })?;
             }
             Ok(())
@@ -2853,6 +2933,29 @@ impl MirProgram {
                     {
                         return Err(format!("MIR call targets missing function {callee:?}"));
                     }
+                    if let MirInstruction::MakeCallable {
+                        callee,
+                        captures,
+                        environment: Some(environment),
+                        ..
+                    } = instruction
+                    {
+                        let target = &self.functions[callee];
+                        if target.captures != captures.len() as u32 {
+                            return Err(
+                                "MIR callable target capture count does not match sealed environment"
+                                    .into(),
+                            );
+                        }
+                        for (index, capture) in environment.captures.iter().enumerate() {
+                            if target.local_type(MirLocal(index as u32))? != &capture.ty {
+                                return Err(
+                                    "MIR callable target capture type does not match sealed environment"
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2960,6 +3063,11 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
 struct Lowerer<'a> {
     body: &'a TypedBody,
     bodies: &'a BTreeMap<DefKey, TypedBody>,
+    /// The source callable whose body-local `CallableId`s and environment
+    /// brands this lowering session consumes.  This remains unchanged while
+    /// recursively lowering lifted closures; `definition` below is only the
+    /// executable MIR identity currently being built.
+    owner: DefKey,
     definition: DefKey,
     locals: Vec<MirLocalDecl>,
     values: BTreeMap<CoreId, MirLocal>,
@@ -11369,7 +11477,17 @@ impl Lowerer<'_> {
                     captures,
                     generic_arguments: vec![],
                     trait_instance: None,
-                    environment: Some(environment.brand),
+                    environment: Some(MirCaptureEnvironment {
+                        brand: environment.brand,
+                        captures: environment
+                            .captures
+                            .iter()
+                            .map(|capture| MirCapture {
+                                mode: capture.mode,
+                                ty: capture.ty.clone(),
+                            })
+                            .collect(),
+                    }),
                 });
             }
             CoreKind::Block(values) => {
@@ -11947,7 +12065,10 @@ impl Lowerer<'_> {
             .zip(&capture_environment.post_states)
         {
             let Some(local) = self.named.get(&capture.name).copied() else {
-                self.error("G6007", "closure capture has no MIR local");
+                self.error(
+                    "G6007",
+                    &format!("closure capture `{}` has no MIR local", capture.name),
+                );
                 return None;
             };
             // PlaceFlow owns the capture-mode decision.  Keep an actual move
@@ -11977,25 +12098,21 @@ impl Lowerer<'_> {
         captures: Vec<ClosureCapture>,
         body: CoreId,
     ) -> Option<DefKey> {
-        if environment.brand.owner != self.definition || environment.brand.callable != callable {
+        if environment.brand.owner != self.owner || environment.brand.callable != callable {
             self.error(
                 "G6011",
                 "callable environment brand does not belong to the closure being lifted",
             );
             return None;
         }
-        let callable_bytes = callable.0.to_le_bytes();
-        let definition = DefKey(Digest::of_parts([
-            b"grandiose-stage0-lifted-callable".as_slice(),
-            self.definition.0.as_bytes().as_slice(),
-            callable_bytes.as_slice(),
-        ]));
+        let definition = lifted_callable_definition(environment.brand);
         if self.lifted.contains_key(&definition) {
             return Some(definition);
         }
         let mut child = Lowerer {
             body: self.body,
             bodies: self.bodies,
+            owner: self.owner,
             definition,
             locals: vec![],
             values: BTreeMap::new(),

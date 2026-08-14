@@ -80,9 +80,9 @@ pub use interface::{
     InterfaceSet, PackageInterface,
 };
 pub use mir::{
-    MirBlock, MirBlockId, MirCleanupPlan, MirContinuationPolicy, MirDiagnostic, MirEditor,
-    MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl, MirLowering,
-    MirOptimizationReport, MirPattern, MirPatternField, MirProgram, MirTerminator,
+    MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy,
+    MirDiagnostic, MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl,
+    MirLowering, MirOptimizationReport, MirPattern, MirPatternField, MirProgram, MirTerminator,
     MirTraitMethodInstance, optimize as optimize_mir,
 };
 pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
@@ -146,10 +146,11 @@ pub use useflow::{
 pub use vm_backend::{
     CandidateVmArtifact, CandidateVmProgram, STAGE0_MAX_DECODE_FUNCTIONS,
     STAGE0_MAX_DECODE_INSTRUCTIONS, STAGE0_MAX_DECODE_REGISTERS, STAGE0_MAX_DECODE_TEXT_BYTES,
-    STAGE0_VM_SCHEMA, VerifiedVmArtifact, VerifiedVmProgram, VmArtifactError, VmCleanupLoan,
-    VmCleanupPlace, VmCleanupProof, VmCompare, VmContinuationPolicy, VmEffectInstance, VmEffectRow,
-    VmEffectRowProjection, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
-    VmPattern, VmPatternField, VmType, decode_and_verify_artifact, decode_and_verify_program,
-    decode_artifact, decode_program, emit as emit_vm, emit_program as emit_vm_program,
-    encode_artifact, encode_program, verify as verify_vm, verify_program as verify_vm_program,
+    STAGE0_VM_SCHEMA, VerifiedVmArtifact, VerifiedVmProgram, VmArtifactError, VmCapture,
+    VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmCompare,
+    VmContinuationPolicy, VmEffectInstance, VmEffectRow, VmEffectRowProjection, VmExecutionLimits,
+    VmFunction, VmGenericArgument, VmInstruction, VmPattern, VmPatternField, VmType,
+    decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
+    emit as emit_vm, emit_program as emit_vm_program, encode_artifact, encode_program,
+    verify as verify_vm, verify_program as verify_vm_program,
 };

@@ -13,10 +13,11 @@ use std::{
 };
 
 use crate::{
+    core::{CallableId, CaptureMode, EnvironmentBrand},
     identity::{DefKey, Digest},
     mir::{
         MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern, MirPatternField,
-        MirProgram, MirTerminator,
+        MirProgram, MirTerminator, lifted_callable_definition,
     },
     types::{ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, Type},
 };
@@ -46,6 +47,30 @@ pub enum VmType {
         unique: bool,
         referent: Box<VmType>,
     },
+}
+
+/// Source-free capture authority carried by a verified callable value.  It is
+/// deliberately distinct from the runtime reference representation: this is
+/// the sealed compile-time layout contract that an independently decoded VM
+/// artifact checks before it can construct the value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VmCaptureMode {
+    SharedBorrow,
+    UniqueBorrow,
+    Move,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmCapture {
+    pub mode: VmCaptureMode,
+    pub ty: VmType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmCaptureEnvironment {
+    pub owner: DefKey,
+    pub callable: u32,
+    pub captures: Vec<VmCapture>,
 }
 
 /// A generic argument in a VM effect protocol identity.
@@ -431,6 +456,10 @@ pub enum VmInstruction {
         dst: u32,
         callee: DefKey,
         captures: Vec<u32>,
+        /// Exact sealed environment contract emitted by MIR for an anonymous
+        /// closure. Named function values retain `None` and must have no
+        /// captures. The verifier recomputes `callee` from this brand.
+        environment: Option<VmCaptureEnvironment>,
     },
     CallIndirect {
         dst: u32,
@@ -558,6 +587,11 @@ pub struct CandidateVmProgram {
     pub host_capabilities: Vec<String>,
     pub entry: DefKey,
     pub functions: BTreeMap<DefKey, VmFunction>,
+    /// The target-side sealed layout for every lifted callable. This registry
+    /// is independent of each construction instruction so the verifier can
+    /// reject a producer that changes capture authority while retaining the
+    /// same target and register types.
+    pub callable_environments: BTreeMap<DefKey, VmCaptureEnvironment>,
     pub fingerprint: Digest,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -622,6 +656,9 @@ pub enum VmArtifactError {
     },
     NotCallable {
         register: u32,
+    },
+    InvalidCallableEnvironment {
+        message: &'static str,
     },
     /// Stage 0 can rebase shared references into frame-independent callable
     /// captures, but must not snapshot a unique reference and lose write-back.
@@ -723,14 +760,11 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 28 adds explicit handler continuation replay policy after Schema
-/// 27 changed protocol identities to canonical tagged generic arguments.
-/// Older layouts cannot be decoded safely because `InstallHandler` changed
-/// in place.
-/// Schema 31 adds canonical program-level host capability declarations and
-/// complete nominal-pattern layouts. Older bytecode lacks these independent
-/// boundary proofs and must fail closed.
-pub const STAGE0_VM_SCHEMA: u32 = 31;
+/// Schema 32 adds sealed callable-environment brands, modes, and capture
+/// types to `MakeCallable` and the target-side program registry. Schema 31
+/// already carries host capabilities and complete nominal-pattern layouts;
+/// older payloads cannot be decoded safely with this new callable proof.
+pub const STAGE0_VM_SCHEMA: u32 = 32;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -811,6 +845,11 @@ pub fn encode_program(program: &CandidateVmProgram) -> Vec<u8> {
     for function in program.functions.values() {
         encode_function(function, &mut bytes);
     }
+    bytes.extend_from_slice(&(program.callable_environments.len() as u64).to_le_bytes());
+    for (callee, environment) in &program.callable_environments {
+        bytes.extend_from_slice(&callee.0.as_bytes());
+        encode_capture_environment(Some(environment), &mut bytes);
+    }
     bytes
 }
 
@@ -840,6 +879,21 @@ pub fn decode_program(bytes: &[u8]) -> Result<CandidateVmProgram, VmArtifactErro
             });
         }
     }
+    let environment_count = decoder.count("callable environment registry", MAX_DECODE_FUNCTIONS)?;
+    let mut callable_environments = BTreeMap::new();
+    for _ in 0..environment_count {
+        let callee = decoder.def_key()?;
+        let Some(environment) = decoder.capture_environment()? else {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "callable environment registry contains an absent layout",
+            });
+        };
+        if callable_environments.insert(callee, environment).is_some() {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "duplicate callable environment target in program",
+            });
+        }
+    }
     if decoder.remaining() != 0 {
         return Err(VmArtifactError::MalformedEncoding {
             message: "trailing bytes after program payload",
@@ -851,6 +905,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<CandidateVmProgram, VmArtifactErro
         host_capabilities,
         entry,
         functions,
+        callable_environments,
         fingerprint,
     };
     if encode_program(&program) != bytes {
@@ -869,6 +924,7 @@ impl CandidateVmProgram {
             self.runtime_manifest,
             &self.host_capabilities,
             &self.functions,
+            &self.callable_environments,
         )
     }
 }
@@ -1342,13 +1398,40 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
         .map(|(definition, function)| Ok((*definition, emit(function)?.function)))
         .collect::<Result<BTreeMap<_, _>, VmArtifactError>>()?;
     let host_capabilities = reachable_host_capabilities(program.entry, &functions);
+    let mut callable_environments = BTreeMap::new();
+    for function in functions.values() {
+        for instruction in &function.instructions {
+            let VmInstruction::MakeCallable {
+                callee,
+                environment: Some(environment),
+                ..
+            } = instruction
+            else {
+                continue;
+            };
+            if let Some(previous) = callable_environments.insert(*callee, environment.clone())
+                && previous != *environment
+            {
+                return Err(VmArtifactError::InvalidCallableEnvironment {
+                    message: "lifted callable has conflicting sealed environments",
+                });
+            }
+        }
+    }
     Ok(CandidateVmProgram {
         schema: STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         host_capabilities: host_capabilities.clone(),
         entry: program.entry,
-        fingerprint: program_fingerprint(program.entry, None, &host_capabilities, &functions),
+        fingerprint: program_fingerprint(
+            program.entry,
+            None,
+            &host_capabilities,
+            &functions,
+            &callable_environments,
+        ),
         functions,
+        callable_environments,
     })
 }
 fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
@@ -1536,6 +1619,26 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
     }
 }
 
+fn encode_capture_environment(value: Option<&VmCaptureEnvironment>, output: &mut Vec<u8>) {
+    match value {
+        None => output.push(0),
+        Some(value) => {
+            output.push(1);
+            output.extend_from_slice(&value.owner.0.as_bytes());
+            output.extend_from_slice(&value.callable.to_le_bytes());
+            output.extend_from_slice(&(value.captures.len() as u64).to_le_bytes());
+            for capture in &value.captures {
+                output.push(match capture.mode {
+                    VmCaptureMode::SharedBorrow => 0,
+                    VmCaptureMode::UniqueBorrow => 1,
+                    VmCaptureMode::Move => 2,
+                });
+                encode_type(&capture.ty, output);
+            }
+        }
+    }
+}
+
 fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
     match value {
         VmGenericArgument::Type(value) => {
@@ -1656,6 +1759,7 @@ fn program_fingerprint(
     runtime_manifest: Option<Digest>,
     host_capabilities: &[String],
     functions: &BTreeMap<DefKey, VmFunction>,
+    callable_environments: &BTreeMap<DefKey, VmCaptureEnvironment>,
 ) -> Digest {
     let mut bytes = b"grandiose-stage0-vm-program-v23".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
@@ -1667,6 +1771,10 @@ fn program_fingerprint(
     }
     for function in functions.values() {
         encode_function(function, &mut bytes);
+    }
+    for (callee, environment) in callable_environments {
+        bytes.extend_from_slice(&callee.0.as_bytes());
+        encode_capture_environment(Some(environment), &mut bytes);
     }
     Digest::of_bytes(&bytes)
 }
@@ -1744,6 +1852,41 @@ impl<'a> Decoder<'a> {
     }
     fn vm_type(&mut self) -> Result<VmType, VmArtifactError> {
         self.vm_type_at_depth(0)
+    }
+    fn capture_environment(&mut self) -> Result<Option<VmCaptureEnvironment>, VmArtifactError> {
+        match self.byte()? {
+            0 => Ok(None),
+            1 => {
+                let owner = self.def_key()?;
+                let callable = self.u32()?;
+                let count = self.count("callable environment captures", MAX_DECODE_REGISTERS)?;
+                let mut captures = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mode = match self.byte()? {
+                        0 => VmCaptureMode::SharedBorrow,
+                        1 => VmCaptureMode::UniqueBorrow,
+                        2 => VmCaptureMode::Move,
+                        _ => {
+                            return Err(VmArtifactError::MalformedEncoding {
+                                message: "invalid callable capture mode",
+                            });
+                        }
+                    };
+                    captures.push(VmCapture {
+                        mode,
+                        ty: self.vm_type()?,
+                    });
+                }
+                Ok(Some(VmCaptureEnvironment {
+                    owner,
+                    callable,
+                    captures,
+                }))
+            }
+            _ => Err(VmArtifactError::MalformedEncoding {
+                message: "invalid optional callable environment tag",
+            }),
+        }
     }
     fn vm_type_at_depth(&mut self, depth: u64) -> Result<VmType, VmArtifactError> {
         if depth > MAX_DECODE_TYPE_DEPTH {
@@ -2403,6 +2546,7 @@ impl<'a> Decoder<'a> {
                     dst,
                     callee,
                     captures,
+                    environment: self.capture_environment()?,
                 })
             }
             30 => {
@@ -2570,6 +2714,35 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             message: "host capability declarations do not match host imports",
         });
     }
+    for (callee, environment) in &program.callable_environments {
+        let Some(target) = program.functions.get(callee) else {
+            return Err(VmArtifactError::MissingFunction {
+                definition: *callee,
+            });
+        };
+        if *callee
+            != lifted_callable_definition(EnvironmentBrand {
+                owner: environment.owner,
+                callable: CallableId(environment.callable),
+            })
+        {
+            return Err(VmArtifactError::InvalidCallableEnvironment {
+                message: "callable environment registry brand does not match lifted target",
+            });
+        }
+        if target.captures != environment.captures.len() as u32 {
+            return Err(VmArtifactError::InvalidCallableEnvironment {
+                message: "callable environment registry count does not match target",
+            });
+        }
+        for (index, capture) in environment.captures.iter().enumerate() {
+            if register_type(target, index as u32)? != capture.ty {
+                return Err(VmArtifactError::InvalidCallableEnvironment {
+                    message: "callable environment registry type does not match target",
+                });
+            }
+        }
+    }
     for function in program.functions.values() {
         verify_function(function)?;
         for instruction in &function.instructions {
@@ -2622,6 +2795,7 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                 dst,
                 callee,
                 captures,
+                environment,
             } = instruction
             {
                 let Some(target) = program.functions.get(callee) else {
@@ -2634,6 +2808,54 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                         expected: target.captures,
                         found: captures.len() as u32,
                     });
+                }
+                match environment {
+                    Some(environment) => {
+                        if program.callable_environments.get(callee) != Some(environment) {
+                            return Err(VmArtifactError::InvalidCallableEnvironment {
+                                message: "callable producer does not match target sealed environment",
+                            });
+                        }
+                        let expected_callee = lifted_callable_definition(EnvironmentBrand {
+                            owner: environment.owner,
+                            callable: CallableId(environment.callable),
+                        });
+                        if *callee != expected_callee {
+                            return Err(VmArtifactError::InvalidCallableEnvironment {
+                                message: "callable environment brand does not match lifted target",
+                            });
+                        }
+                        if environment.captures.len() != captures.len() {
+                            return Err(VmArtifactError::InvalidCallableEnvironment {
+                                message: "callable environment layout does not match capture count",
+                            });
+                        }
+                        for (index, capture) in environment.captures.iter().enumerate() {
+                            let actual = register_type(function, captures[index])?;
+                            if actual != capture.ty {
+                                return Err(VmArtifactError::InvalidCallableEnvironment {
+                                    message: "callable capture register does not match sealed type",
+                                });
+                            }
+                            let target_type = register_type(target, index as u32)?;
+                            if target_type != capture.ty {
+                                return Err(VmArtifactError::InvalidCallableEnvironment {
+                                    message: "callable target capture does not match sealed type",
+                                });
+                            }
+                        }
+                    }
+                    None if !captures.is_empty() => {
+                        return Err(VmArtifactError::InvalidCallableEnvironment {
+                            message: "callable has captures but no sealed environment",
+                        });
+                    }
+                    None if program.callable_environments.contains_key(callee) => {
+                        return Err(VmArtifactError::InvalidCallableEnvironment {
+                            message: "lifted callable producer omitted its sealed environment",
+                        });
+                    }
+                    None => {}
                 }
                 let VmType::Callable { parameters, result } = register_type(function, *dst)? else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
@@ -3242,11 +3464,44 @@ fn lower_instruction(
             dst,
             callee,
             captures,
+            environment,
             ..
         } => VmInstruction::MakeCallable {
             dst: dst.0,
             callee: *callee,
             captures: captures.iter().map(|capture| capture.0).collect(),
+            environment: environment
+                .as_ref()
+                .map(|environment| {
+                    Ok(VmCaptureEnvironment {
+                        owner: environment.brand.owner,
+                        callable: environment.brand.callable.0,
+                        captures: environment
+                            .captures
+                            .iter()
+                            .map(|capture| {
+                                Ok(VmCapture {
+                                    mode: match capture.mode {
+                                        CaptureMode::SharedBorrow => VmCaptureMode::SharedBorrow,
+                                        CaptureMode::UniqueBorrow => VmCaptureMode::UniqueBorrow,
+                                        CaptureMode::Move => VmCaptureMode::Move,
+                                    },
+                                    // The corresponding value register is
+                                    // checked independently; this metadata
+                                    // type has no one register identity of
+                                    // its own.
+                                    ty: vm_type(&capture.ty).map_err(|ty| {
+                                        VmArtifactError::UnsupportedType {
+                                            local: u32::MAX,
+                                            ty,
+                                        }
+                                    })?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, VmArtifactError>>()?,
+                    })
+                })
+                .transpose()?,
         },
         MirInstruction::CallIndirect {
             dst,
@@ -7024,6 +7279,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             dst,
             callee,
             captures,
+            environment,
         } => {
             output.push(29);
             output.extend_from_slice(&dst.to_le_bytes());
@@ -7032,6 +7288,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             for capture in captures {
                 output.extend_from_slice(&capture.to_le_bytes());
             }
+            encode_capture_environment(environment.as_ref(), output);
         }
         VmInstruction::CallIndirect {
             dst,
@@ -8217,6 +8474,7 @@ fn execute_with_arguments(
                 dst,
                 callee,
                 captures,
+                ..
             } => {
                 budget.reserve_value("callable captures", captures.len())?;
                 let values = captures

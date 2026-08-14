@@ -4900,8 +4900,23 @@ impl Elaborator<'_> {
                     self.collect_captures(*value, &mut scoped, captures);
                 }
             }
-            CoreKind::Closure { .. }
-            | CoreKind::Literal(_)
+            // A nested closure is itself a runtime environment-construction
+            // site.  Its free captures which are not locals of this closure
+            // must therefore be forwarded through the enclosing environment:
+            // the lifted outer body cannot materialize the child from a
+            // grandparent register it does not own.  Captures of an enclosing
+            // parameter/local are already available to the outer lifted body
+            // and deliberately do not widen its layout.  Preserve the child
+            // mode here so a move or unique borrow cannot be weakened while
+            // it crosses more than one callable boundary.
+            CoreKind::Closure { environment, .. } => {
+                for capture in &environment.captures {
+                    if !locals.contains(&capture.name) {
+                        record_capture(captures, &capture.name, capture.mode, capture.ty.clone());
+                    }
+                }
+            }
+            CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }

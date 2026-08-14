@@ -1,13 +1,14 @@
 use grandiose_stage0::{
-    BodySyntax, CandidateVmArtifact, CandidateVmProgram, CoreId, DeclarationScan, DefKey,
-    DefinitionIndex, Digest, ElaboratedInterface, FileKey, GenericArgument, InterfaceSet,
-    LabelBrand, LexedFile, LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction,
-    MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey,
-    PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace,
-    VmCleanupProof, VmContinuationPolicy, VmExecutionLimits, VmFunction, VmGenericArgument,
-    VmInstruction, VmPattern, VmPatternField, VmType, decode_and_verify_artifact,
-    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
-    encode_artifact, encode_program, verify_vm, verify_vm_program,
+    BodySyntax, CallableId, CandidateVmArtifact, CandidateVmProgram, CoreId, DeclarationScan,
+    DefKey, DefinitionIndex, Digest, ElaboratedInterface, EnvironmentBrand, FileKey,
+    GenericArgument, InterfaceSet, LabelBrand, LexedFile, LogicalPath, MirBlock, MirBlockId,
+    MirCleanupPlan, MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram,
+    MirTerminator, PackageKey, PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture,
+    VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof,
+    VmContinuationPolicy, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
+    VmPattern, VmPatternField, VmType, decode_and_verify_artifact, decode_and_verify_program,
+    decode_artifact, decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program,
+    verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -67,6 +68,7 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
         host_capabilities: vec![],
         entry: artifact.function.definition,
         functions: BTreeMap::from([(artifact.function.definition, artifact.function.clone())]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"vm-effect-argument-program-stale"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -274,6 +276,7 @@ fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
                 },
             ),
         ]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"cross-frame-handler-stale"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -394,6 +397,7 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
                 },
             ),
         ]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"cross-frame-forward-stale"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -480,6 +484,7 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
                 },
             ),
         ]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"cross-frame-replay-stale"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -972,6 +977,7 @@ fn assert_continuation_budget_parity(function: VmFunction, max_instructions: u64
         host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"continuation-budget-program"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -1006,6 +1012,7 @@ fn assert_continuation_retention_parity(function: VmFunction) {
         host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"continuation-retention-program"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -1112,6 +1119,7 @@ fn program_envelope_rejects_truncation_and_function_count_amplification_before_a
         host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(entry, function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"program-decode-limit-fingerprint"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -1190,6 +1198,7 @@ fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
             (entry, entry_function.clone()),
             (helper, helper_function.clone()),
         ]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"leave-parity-program-fingerprint"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -1232,6 +1241,7 @@ fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
         host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(entry, malformed_entry_function), (helper, helper_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"leave-parity-malformed-program"),
     };
     malformed_program.fingerprint = malformed_program.computed_fingerprint();
@@ -1281,6 +1291,7 @@ fn cleanup_carrying_leave_cannot_evict_artifact_or_program_execution_limits() {
         host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, loop_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"leave-budget-loop-program"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -1321,6 +1332,7 @@ fn program_call_depth_limit_classifies_recursive_execution() {
         host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, recursive)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"recursive-call-depth-fingerprint"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -1378,6 +1390,7 @@ fn aggregate_and_handler_payload_allocation_limits_cover_both_vm_engines() {
         host_capabilities: vec![],
         entry: aggregate_definition,
         functions: BTreeMap::from([(aggregate_definition, aggregate_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"aggregate-allocation-program"),
     };
     aggregate_program.fingerprint = aggregate_program.computed_fingerprint();
@@ -1420,6 +1433,7 @@ fn aggregate_and_handler_payload_allocation_limits_cover_both_vm_engines() {
         host_capabilities: vec![],
         entry: payload_definition,
         functions: BTreeMap::from([(payload_definition, payload_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"handler-payload-allocation-program"),
     };
     payload_program.fingerprint = payload_program.computed_fingerprint();
@@ -1985,6 +1999,7 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
         host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"replay-handler-program"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -2135,6 +2150,7 @@ fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
                     dst: 0,
                     callee: DefKey(Digest::of_bytes(b"ordinary-callable")),
                     captures: vec![],
+                    environment: None,
                 },
                 VmInstruction::InstallHandler {
                     effect,
@@ -2953,6 +2969,7 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
                 dst: 0,
                 callee: closure,
                 captures: vec![],
+                environment: None,
             },
             VmInstruction::CallIndirect {
                 dst: 1,
@@ -2968,6 +2985,7 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
         host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(closure, closure_function), (entry, entry_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"callable-program"),
     };
     candidate.fingerprint = candidate.computed_fingerprint();
@@ -2979,6 +2997,128 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
         Some(Digest::of_bytes(b"trusted-runtime-manifest"))
     );
     assert_eq!(verified.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
+    let owner = DefKey(Digest::of_bytes(b"callable-environment-owner"));
+    let brand = EnvironmentBrand {
+        owner,
+        callable: CallableId(7),
+    };
+    let callable_index = brand.callable.0.to_le_bytes();
+    let callable = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable".as_slice(),
+        owner.0.as_bytes().as_slice(),
+        callable_index.as_slice(),
+    ]));
+    let entry = DefKey(Digest::of_bytes(b"callable-environment-entry"));
+    let environment = VmCaptureEnvironment {
+        owner: brand.owner,
+        callable: brand.callable.0,
+        captures: vec![VmCapture {
+            mode: VmCaptureMode::Move,
+            ty: VmType::I64,
+        }],
+    };
+    let closure = VmFunction {
+        definition: callable,
+        captures: 1,
+        parameters: 1,
+        registers: vec![VmType::I64],
+        instructions: vec![VmInstruction::Return { value: 0 }],
+    };
+    let entry_function = VmFunction {
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            VmType::Callable {
+                parameters: vec![],
+                result: Box::new(VmType::I64),
+            },
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::MakeCallable {
+                dst: 1,
+                callee: callable,
+                captures: vec![0],
+                environment: Some(environment.clone()),
+            },
+            VmInstruction::CallIndirect {
+                dst: 2,
+                callee: 1,
+                arguments: vec![],
+            },
+            VmInstruction::Return { value: 2 },
+        ],
+    };
+    let mut valid = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"trusted-runtime-manifest")),
+        entry,
+        functions: BTreeMap::from([(callable, closure), (entry, entry_function)]),
+        callable_environments: BTreeMap::from([(callable, environment.clone())]),
+        fingerprint: Digest::of_bytes(b"callable-environment-program"),
+    };
+    valid.fingerprint = valid.computed_fingerprint();
+    let encoded = encode_program(&valid);
+    assert_eq!(decode_program(&encoded).unwrap(), valid);
+    assert_eq!(
+        verify_vm_program(valid.clone()).unwrap().run_i64().unwrap(),
+        42
+    );
+
+    let mut forged_brand = valid.clone();
+    let instruction = &mut forged_brand.functions.get_mut(&entry).unwrap().instructions[1];
+    let VmInstruction::MakeCallable { environment, .. } = instruction else {
+        panic!("expected callable construction")
+    };
+    environment.as_mut().unwrap().callable += 1;
+    forged_brand.fingerprint = forged_brand.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(forged_brand),
+        Err(VmArtifactError::InvalidCallableEnvironment { .. })
+    ));
+
+    let mut forged_count = valid.clone();
+    let instruction = &mut forged_count.functions.get_mut(&entry).unwrap().instructions[1];
+    let VmInstruction::MakeCallable { environment, .. } = instruction else {
+        panic!("expected callable construction")
+    };
+    environment.as_mut().unwrap().captures.clear();
+    forged_count.fingerprint = forged_count.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(forged_count),
+        Err(VmArtifactError::InvalidCallableEnvironment { .. })
+    ));
+
+    let mut forged_type = valid.clone();
+    let instruction = &mut forged_type.functions.get_mut(&entry).unwrap().instructions[1];
+    let VmInstruction::MakeCallable { environment, .. } = instruction else {
+        panic!("expected callable construction")
+    };
+    environment.as_mut().unwrap().captures[0].ty = VmType::Bool;
+    forged_type.fingerprint = forged_type.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(forged_type),
+        Err(VmArtifactError::InvalidCallableEnvironment { .. })
+    ));
+
+    let mut forged_mode = valid;
+    let instruction = &mut forged_mode.functions.get_mut(&entry).unwrap().instructions[1];
+    let VmInstruction::MakeCallable { environment, .. } = instruction else {
+        panic!("expected callable construction")
+    };
+    environment.as_mut().unwrap().captures[0].mode = VmCaptureMode::SharedBorrow;
+    forged_mode.fingerprint = forged_mode.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(forged_mode),
+        Err(VmArtifactError::InvalidCallableEnvironment { .. })
+    ));
 }
 
 #[test]
@@ -3455,6 +3595,7 @@ fn program_verifier_rejects_inconsistent_generic_call_bindings() {
         host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(generic, generic_function), (entry, entry_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"generic-call-mismatch"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -3499,6 +3640,7 @@ fn generic_vm_programs_round_trip_and_execute_after_call_instantiation() {
         host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(generic, generic_function), (entry, entry_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"generic-identity-program"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -3618,6 +3760,7 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
         host_capabilities: vec![],
         entry: candidate.function.definition,
         functions: BTreeMap::from([(candidate.function.definition, candidate.function.clone())]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"cleanup-carrying-leave-program"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -3770,6 +3913,7 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
         host_capabilities: vec![],
         entry: function.definition,
         functions: BTreeMap::from([(function.definition, function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"leave-clause-program"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -3804,6 +3948,7 @@ fn cleanup_leave_program_artifacts_are_insertion_order_deterministic() {
             host_capabilities: vec![],
             entry,
             functions,
+            callable_environments: BTreeMap::new(),
             fingerprint: Digest::of_bytes(b"deterministic-leave-seed"),
         };
         program.fingerprint = program.computed_fingerprint();
