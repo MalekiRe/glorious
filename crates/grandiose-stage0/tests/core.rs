@@ -2765,20 +2765,26 @@ fn leave_edges_carry_canonical_placeflow_cleanup_evidence() {
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
-    let owner = core
+    let brand = core
         .expressions
         .iter()
         .find_map(|expression| match expression.kind {
-            CoreKind::Label { brand, .. } => Some(brand.owner),
+            CoreKind::Label { brand, .. } => Some(brand),
             _ => None,
         })
         .expect("label");
-    let mir = MirLowering::lower(owner, &core, &flow)
+    let mir = MirLowering::lower(brand.owner, &core, &flow)
         .function
         .expect("cleanup leave lowers");
-    let grandiose_stage0::MirTerminator::Leave { cleanup, .. } = &mir.blocks[0].terminator else {
+    let grandiose_stage0::MirTerminator::Leave {
+        brand: leave_brand,
+        cleanup,
+        ..
+    } = &mir.blocks[0].terminator
+    else {
         panic!("label transfer must use a Leave terminator")
     };
+    assert_eq!(*leave_brand, brand);
     assert_eq!(cleanup.moved_places, flow.moved_places);
     assert_eq!(cleanup.active_loans, flow.active_loans);
     grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("emit leave"))

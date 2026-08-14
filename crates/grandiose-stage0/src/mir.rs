@@ -416,6 +416,9 @@ pub enum MirTerminator {
     /// Stage-0 value runtime has no drop glue: validation and emission must
     /// agree on the exact ownership facts crossed by the edge.
     Leave {
+        /// The lexical destination identity is retained through MIR even
+        /// though a fully specialized VM edge may erase it to a jump.
+        brand: crate::LabelBrand,
         target: MirBlockId,
         arguments: Vec<MirLocal>,
         cleanup: MirCleanupPlan,
@@ -1645,6 +1648,7 @@ impl MirFunction {
                 target,
                 arguments,
                 cleanup,
+                ..
             } => {
                 if cleanup
                     .moved_places
@@ -2162,6 +2166,7 @@ impl Lowerer<'_> {
                     parameters: vec![],
                     instructions: self.instructions.clone(),
                     terminator: MirTerminator::Leave {
+                        brand,
                         target: MirBlockId(1),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
