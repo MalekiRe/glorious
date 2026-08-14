@@ -2677,6 +2677,34 @@ impl Elaborator<'_> {
                 .zip(kinds)
                 .map(|(argument, kind)| match (argument, kind) {
                     (
+                        crate::header::HeaderGenericArgument::Type(
+                            crate::header::HeaderType::Projection {
+                                subject,
+                                trait_path,
+                                trait_arguments,
+                                name,
+                                item_arguments,
+                            },
+                        ),
+                        crate::GenericKind::Const(expected),
+                    ) => match self.associated_const_argument(
+                        subject,
+                        trait_path,
+                        trait_arguments,
+                        name,
+                        item_arguments,
+                        *expected,
+                        self.body.expression(self.body.root).span,
+                        "G4158",
+                    ) {
+                        GenericArgument::ConstU32(value) => Type::ConstU32(value),
+                        GenericArgument::ConstQuantity(value) => Type::ConstQuantity(value),
+                        GenericArgument::ConstGeneric { index, kind } => {
+                            Type::ConstGeneric { index, kind }
+                        }
+                        _ => Type::Error,
+                    },
+                    (
                         crate::header::HeaderGenericArgument::Type(value),
                         crate::GenericKind::Type,
                     ) => self.header_type(value),

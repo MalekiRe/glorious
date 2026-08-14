@@ -248,11 +248,21 @@ impl Lexer<'_> {
                 self.push(TokenKind::Punctuation(byte as char), start);
             }
             byte if is_operator(byte) => {
-                self.index += 1;
-                while self.index < self.bytes.len() && is_operator(self.bytes[self.index]) {
+                // Nested generic applications naturally place two angle
+                // delimiters together (`Outer<Inner<T>>`).  Preserve those
+                // delimiters as individual tokens instead of inventing an
+                // undocumented shift operator, so every header/body parser
+                // can accept projection arguments without whitespace hacks.
+                if matches!(byte, b'<' | b'>') && self.peek(1) == Some(byte) {
                     self.index += 1;
+                    self.push(TokenKind::Operator, start);
+                } else {
+                    self.index += 1;
+                    while self.index < self.bytes.len() && is_operator(self.bytes[self.index]) {
+                        self.index += 1;
+                    }
+                    self.push(TokenKind::Operator, start);
                 }
-                self.push(TokenKind::Operator, start);
             }
             _ => {
                 self.index += utf8_width(byte);

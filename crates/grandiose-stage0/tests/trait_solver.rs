@@ -1,11 +1,12 @@
 use std::collections::BTreeSet;
 
 use grandiose_stage0::{
-    DeclarationScan, DefKey, EffectRow, EffectTail, ElaboratedInterface, ElaboratedTraitReference,
-    FileKey, GenericArgument, InterfaceSet, LexedFile, Lifetime, Mutability, PackageKey, Quantity,
-    ScalarType, TraitAnswer, TraitCandidateExplanation, TraitCandidateRejection,
-    TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer,
-    TraitSolver, TraitSolverLimits, Type, implementation_method_key,
+    ConstKind, DeclarationScan, DefKey, EffectRow, EffectTail, ElaboratedInterface,
+    ElaboratedTraitReference, FileKey, GenericArgument, InterfaceSet, LexedFile, Lifetime,
+    Mutability, PackageKey, Quantity, ScalarType, TraitAnswer, TraitCandidateExplanation,
+    TraitCandidateRejection, TraitConstProjectionAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
+    TraitMethodAnswer, TraitProjectionAnswer, TraitSolver, TraitSolverLimits, Type,
+    implementation_method_key,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -1009,5 +1010,54 @@ fn method_selection_substitutes_impl_and_method_generic_arguments() {
             if method == implementation_method_key(implementation.key, "convert")
                 && signature.parameters == vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)]
                 && signature.result == Type::Tuple(vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)])
+    ));
+}
+
+#[test]
+fn associated_constants_normalize_overrides_defaults_and_const_generics() {
+    let (interface, signatures) = signatures(
+        "trait Width<n: u32> { const Value: u32 = n; } struct Box<n: u32> {} impl<n: u32> Width<n> for Box<n> {} impl Width<9> for i64 { const Value = 12; }",
+    );
+    let width = key(&interface, "Width");
+    let boxed = key(&interface, "Box");
+    let mut solver = TraitSolver::new(&signatures);
+    let default = solver.normalize_associated_const(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: width,
+                arguments: vec![GenericArgument::ConstU32(7)],
+            },
+            subject: Type::Nominal {
+                definition: boxed,
+                arguments: vec![GenericArgument::ConstU32(7)],
+            },
+        },
+        "Value",
+        ConstKind::U32,
+    );
+    assert!(matches!(
+        default,
+        TraitConstProjectionAnswer::Normalized {
+            value: GenericArgument::ConstU32(7),
+            ..
+        }
+    ));
+    let override_value = solver.normalize_associated_const(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: width,
+                arguments: vec![GenericArgument::ConstU32(9)],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Value",
+        ConstKind::U32,
+    );
+    assert!(matches!(
+        override_value,
+        TraitConstProjectionAnswer::Normalized {
+            value: GenericArgument::ConstU32(12),
+            ..
+        }
     ));
 }

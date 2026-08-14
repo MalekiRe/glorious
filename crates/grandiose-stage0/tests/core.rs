@@ -1146,6 +1146,34 @@ fn typed_closures_normalize_structural_const_arithmetic_in_type_contracts() {
 }
 
 #[test]
+fn typed_closures_normalize_associated_constants_in_nominal_generic_slots() {
+    let core = core_for(
+        "core-associated-const@0.1.0",
+        "trait Width { const Value: u32 = 3; } struct Chosen<n: u32> {} impl Width for i64 { const Value = 7; } pub fn main() -> i64 { let identity = (value: Chosen<<i64 as Width>::Value>) -> Chosen<<i64 as Width>::Value> { value }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let closure = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Closure { .. }))
+        .expect("typed closure");
+    let Type::Callable {
+        parameters, result, ..
+    } = &closure.ty
+    else {
+        panic!("typed closure did not receive a callable type")
+    };
+    assert!(matches!(
+        parameters.as_slice(),
+        [Type::Nominal { arguments, .. }] if arguments == &vec![GenericArgument::ConstU32(7)]
+    ));
+    assert!(matches!(
+        result.as_ref(),
+        Type::Nominal { arguments, .. } if arguments == &vec![GenericArgument::ConstU32(7)]
+    ));
+}
+
+#[test]
 fn typed_closures_retain_mixed_nominal_annotation_identity_through_aliases() {
     let core = core_for(
         "core-closure-mixed-nominal-alias@0.1.0",

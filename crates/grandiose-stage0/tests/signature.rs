@@ -1821,3 +1821,39 @@ fn trait_self_is_instantiated_in_supertrait_obligations() {
         signatures.diagnostics
     );
 }
+
+#[test]
+fn associated_const_contracts_preserve_defaults_and_reject_missing_or_wrong_overrides() {
+    let package = PackageKey("signature-associated-const@0.1.0".into());
+    let source = "trait Shape { const Width: u32 = 4; const Demand: Quantity; } impl Shape for i64 { const Demand = [1, 2]; } impl Shape for Text { const Width = [1, 2]; const Demand = [1, 2]; const Extra = 9; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let shape = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Shape"))
+        .expect("Shape trait");
+    let ElaboratedHeader::Trait(shape) = signatures.definitions.get(&shape.key).unwrap() else {
+        panic!("expected trait")
+    };
+    assert_eq!(shape.associated_consts["Width"].kind, ConstKind::U32);
+    assert_eq!(
+        shape.associated_consts["Width"].default,
+        Some(GenericArgument::ConstU32(4))
+    );
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4160")
+    );
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4161")
+    );
+}

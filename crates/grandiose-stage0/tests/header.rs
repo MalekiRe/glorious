@@ -538,3 +538,27 @@ fn callable_headers_preserve_closed_effect_row_annotations() {
         matches!(value.effects.effects.as_slice(), [HeaderType::Path(first), HeaderType::Path(second)] if first == &["Console"] && second == &["Trace"])
     );
 }
+
+#[test]
+fn trait_and_implementation_headers_preserve_structural_associated_constants() {
+    let package = PackageKey("header-associated-const@0.1.0".into());
+    let source = "trait Shape { const Width: u32 = 4; const Demand: Quantity; } impl Shape for i64 { const Width = 8; const Demand = [1, *]; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let trait_header = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(trait_header.diagnostics.is_empty(), "{trait_header:#?}");
+    let ParsedHeader::Trait(trait_header) = trait_header.header else {
+        panic!("expected trait")
+    };
+    assert_eq!(trait_header.associated_consts.len(), 2);
+    assert_eq!(trait_header.associated_consts[0].kind, ConstKind::U32);
+    assert!(trait_header.associated_consts[0].default.is_some());
+    assert_eq!(trait_header.associated_consts[1].kind, ConstKind::Quantity);
+    let implementation = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
+    assert!(implementation.diagnostics.is_empty(), "{implementation:#?}");
+    let ParsedHeader::Implementation(implementation) = implementation.header else {
+        panic!("expected implementation")
+    };
+    assert_eq!(implementation.associated_consts.len(), 2);
+}
