@@ -1274,6 +1274,32 @@ impl MirLowering {
             };
         }
         if let Some(function) =
+            lowerer.lower_root_statement_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
             lowerer.lower_root_runtime_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -4586,6 +4612,161 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+    /// Lower a resumptive handler used as a statement in an enclosing block.
+    ///
+    /// The earlier root-only paths deliberately assumed that a handler was the
+    /// final expression. That assumption is unsound for lexical binders: a
+    /// continuation alias captured in the arm must close over the environment
+    /// at the handler boundary, not over a same-spelled local introduced by a
+    /// later statement.  This CFG keeps the protected `Perform`, its handler
+    /// entry, and the following block suffix in separate control regions.
+    ///
+    /// It is the first general statement-scope frame path. More elaborate
+    /// pattern matrices and multi-shot replay remain owned by their dedicated
+    /// lowering paths; this one only claims the complete, exact-one-shot,
+    /// irrefutable operation shape that the VM frame instruction represents.
+    fn lower_root_statement_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let CoreKind::Block(values) = self.body.expression(root).kind.clone() else {
+            return None;
+        };
+        let handler_index = values.iter().position(|value| {
+            matches!(self.body.expression(*value).kind, CoreKind::Handle { .. })
+        })?;
+        if handler_index + 1 >= values.len()
+            || values[handler_index + 1..]
+                .iter()
+                .any(|value| matches!(self.body.expression(*value).kind, CoreKind::Handle { .. }))
+        {
+            return None;
+        }
+        let handler = values[handler_index];
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(handler).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let exact_one_shot = matches!(
+            clause.resumption,
+            CoreHandlerResumption::Explicit {
+                quantity: crate::quantity::Quantity {
+                    lower: 1,
+                    upper: Some(1)
+                },
+                ..
+            } | CoreHandlerResumption::Tail {
+                quantity: crate::quantity::Quantity {
+                    lower: 1,
+                    upper: Some(1)
+                },
+            }
+        );
+        if !exact_one_shot
+            || clause.patterns.len() != argument_ids.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+
+        for expression in &values[..handler_index] {
+            self.statement(*expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let payload_destinations = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let resumed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payload_destinations.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            target: MirBlockId(1),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: resumed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        // Preserve the exact lexical environment at the handler boundary for
+        // its arm. The suffix is intentionally lowered only after that
+        // snapshot, so a later `let saved = ...` cannot change which Core
+        // resumption identity the arm's `saved` denotes.
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        let (last, statements) = values[handler_index + 1..].split_last()?;
+        for statement in statements {
+            self.statement(*statement)?;
+        }
+        let result = self.value(*last)?;
+        entry.extend(std::mem::take(&mut self.instructions));
+
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let handler_value = self.direct_handler_clause_value(clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            value: handler_value,
+        });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
     /// Lower one nonempty, exact-one-shot continuation through the VM handler
