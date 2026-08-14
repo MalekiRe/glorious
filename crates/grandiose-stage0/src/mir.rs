@@ -181,6 +181,89 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    U32CheckedAdd {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32CheckedSub {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32CheckedMul {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32CheckedDiv {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32CheckedRem {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32WrappingAdd {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32WrappingSub {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32WrappingMul {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32WrappingShl {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32WrappingShr {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32CheckedShl {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32CheckedShr {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32Eq {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32Lt {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32Le {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    U32ToUsize {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    UsizeToU32Checked {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1208,6 +1291,23 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::BytesFromArrayMove { dst, .. }
         | MirInstruction::BytesToArray { dst, .. }
         | MirInstruction::BytesUtf8ValidUpTo { dst, .. }
+        | MirInstruction::U32CheckedAdd { dst, .. }
+        | MirInstruction::U32CheckedSub { dst, .. }
+        | MirInstruction::U32CheckedMul { dst, .. }
+        | MirInstruction::U32CheckedDiv { dst, .. }
+        | MirInstruction::U32CheckedRem { dst, .. }
+        | MirInstruction::U32WrappingAdd { dst, .. }
+        | MirInstruction::U32WrappingSub { dst, .. }
+        | MirInstruction::U32WrappingMul { dst, .. }
+        | MirInstruction::U32WrappingShl { dst, .. }
+        | MirInstruction::U32WrappingShr { dst, .. }
+        | MirInstruction::U32CheckedShl { dst, .. }
+        | MirInstruction::U32CheckedShr { dst, .. }
+        | MirInstruction::U32Eq { dst, .. }
+        | MirInstruction::U32Lt { dst, .. }
+        | MirInstruction::U32Le { dst, .. }
+        | MirInstruction::U32ToUsize { dst, .. }
+        | MirInstruction::UsizeToU32Checked { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3098,6 +3198,23 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::BytesFromArrayMove { .. }
         | MirInstruction::BytesToArray { .. }
         | MirInstruction::BytesUtf8ValidUpTo { .. } => Ok(()),
+        MirInstruction::U32CheckedAdd { .. }
+        | MirInstruction::U32CheckedSub { .. }
+        | MirInstruction::U32CheckedMul { .. }
+        | MirInstruction::U32CheckedDiv { .. }
+        | MirInstruction::U32CheckedRem { .. }
+        | MirInstruction::U32WrappingAdd { .. }
+        | MirInstruction::U32WrappingSub { .. }
+        | MirInstruction::U32WrappingMul { .. }
+        | MirInstruction::U32WrappingShl { .. }
+        | MirInstruction::U32WrappingShr { .. }
+        | MirInstruction::U32CheckedShl { .. }
+        | MirInstruction::U32CheckedShr { .. }
+        | MirInstruction::U32Eq { .. }
+        | MirInstruction::U32Lt { .. }
+        | MirInstruction::U32Le { .. }
+        | MirInstruction::U32ToUsize { .. }
+        | MirInstruction::UsizeToU32Checked { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -3798,6 +3915,23 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             start,
             end,
         } => vec![*dst, *bytes, *start, *end],
+        MirInstruction::U32CheckedAdd { dst, left, right }
+        | MirInstruction::U32CheckedSub { dst, left, right }
+        | MirInstruction::U32CheckedMul { dst, left, right }
+        | MirInstruction::U32CheckedDiv { dst, left, right }
+        | MirInstruction::U32CheckedRem { dst, left, right }
+        | MirInstruction::U32WrappingAdd { dst, left, right }
+        | MirInstruction::U32WrappingSub { dst, left, right }
+        | MirInstruction::U32WrappingMul { dst, left, right }
+        | MirInstruction::U32WrappingShl { dst, left, right }
+        | MirInstruction::U32WrappingShr { dst, left, right }
+        | MirInstruction::U32CheckedShl { dst, left, right }
+        | MirInstruction::U32CheckedShr { dst, left, right }
+        | MirInstruction::U32Eq { dst, left, right }
+        | MirInstruction::U32Lt { dst, left, right }
+        | MirInstruction::U32Le { dst, left, right } => vec![*dst, *left, *right],
+        MirInstruction::U32ToUsize { dst, value }
+        | MirInstruction::UsizeToU32Checked { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -13260,6 +13394,178 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::BytesToArray { dst, value: *value });
+                            }
+                            Some(
+                                role @ (PrimitiveRole::U32CheckedAdd
+                                | PrimitiveRole::U32CheckedSub
+                                | PrimitiveRole::U32CheckedMul
+                                | PrimitiveRole::U32CheckedDiv
+                                | PrimitiveRole::U32CheckedRem
+                                | PrimitiveRole::U32WrappingAdd
+                                | PrimitiveRole::U32WrappingSub
+                                | PrimitiveRole::U32WrappingMul
+                                | PrimitiveRole::U32WrappingShl
+                                | PrimitiveRole::U32WrappingShr
+                                | PrimitiveRole::U32CheckedShl
+                                | PrimitiveRole::U32CheckedShr
+                                | PrimitiveRole::U32Eq
+                                | PrimitiveRole::U32Lt
+                                | PrimitiveRole::U32Le),
+                            ) => {
+                                let [left, right] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "u32 runtime primitive must have two u32 operands",
+                                    );
+                                    return None;
+                                };
+                                let result = if matches!(
+                                    role,
+                                    PrimitiveRole::U32Eq
+                                        | PrimitiveRole::U32Lt
+                                        | PrimitiveRole::U32Le
+                                ) {
+                                    crate::types::ScalarType::Bool
+                                } else {
+                                    crate::types::ScalarType::U32
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[left.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
+                                    || self.locals[right.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
+                                    || self.body.expression(id).ty != Type::Scalar(result)
+                                {
+                                    self.error("G6005", "u32 runtime primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(match role {
+                                    PrimitiveRole::U32CheckedAdd => MirInstruction::U32CheckedAdd {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32CheckedSub => MirInstruction::U32CheckedSub {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32CheckedMul => MirInstruction::U32CheckedMul {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32CheckedDiv => MirInstruction::U32CheckedDiv {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32CheckedRem => MirInstruction::U32CheckedRem {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32WrappingAdd => {
+                                        MirInstruction::U32WrappingAdd {
+                                            dst,
+                                            left: *left,
+                                            right: *right,
+                                        }
+                                    }
+                                    PrimitiveRole::U32WrappingSub => {
+                                        MirInstruction::U32WrappingSub {
+                                            dst,
+                                            left: *left,
+                                            right: *right,
+                                        }
+                                    }
+                                    PrimitiveRole::U32WrappingMul => {
+                                        MirInstruction::U32WrappingMul {
+                                            dst,
+                                            left: *left,
+                                            right: *right,
+                                        }
+                                    }
+                                    PrimitiveRole::U32WrappingShl => {
+                                        MirInstruction::U32WrappingShl {
+                                            dst,
+                                            left: *left,
+                                            right: *right,
+                                        }
+                                    }
+                                    PrimitiveRole::U32WrappingShr => {
+                                        MirInstruction::U32WrappingShr {
+                                            dst,
+                                            left: *left,
+                                            right: *right,
+                                        }
+                                    }
+                                    PrimitiveRole::U32CheckedShl => MirInstruction::U32CheckedShl {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32CheckedShr => MirInstruction::U32CheckedShr {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32Eq => MirInstruction::U32Eq {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32Lt => MirInstruction::U32Lt {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::U32Le => MirInstruction::U32Le {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    _ => {
+                                        unreachable!("role was constrained by the enclosing match")
+                                    }
+                                });
+                            }
+                            Some(
+                                role @ (PrimitiveRole::U32ToUsize
+                                | PrimitiveRole::UsizeToU32Checked),
+                            ) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "integer conversion primitive must have one operand",
+                                    );
+                                    return None;
+                                };
+                                let (input, output) = if matches!(role, PrimitiveRole::U32ToUsize) {
+                                    (
+                                        crate::types::ScalarType::U32,
+                                        crate::types::ScalarType::Usize,
+                                    )
+                                } else {
+                                    (
+                                        crate::types::ScalarType::Usize,
+                                        crate::types::ScalarType::U32,
+                                    )
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != Type::Scalar(input)
+                                    || self.body.expression(id).ty != Type::Scalar(output)
+                                {
+                                    self.error("G6005", "integer conversion primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(
+                                    if matches!(role, PrimitiveRole::U32ToUsize) {
+                                        MirInstruction::U32ToUsize { dst, value: *value }
+                                    } else {
+                                        MirInstruction::UsizeToU32Checked { dst, value: *value }
+                                    },
+                                );
                             }
                             Some(PrimitiveRole::BranchBool) => {
                                 // BranchBool remains a source-level callable until

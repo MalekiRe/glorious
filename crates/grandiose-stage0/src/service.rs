@@ -1142,6 +1142,23 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::BytesFromArrayMove,
                         crate::PrimitiveRole::BytesToArray,
                         crate::PrimitiveRole::BytesUtf8ValidUpTo,
+                        crate::PrimitiveRole::U32CheckedAdd,
+                        crate::PrimitiveRole::U32CheckedSub,
+                        crate::PrimitiveRole::U32CheckedMul,
+                        crate::PrimitiveRole::U32CheckedDiv,
+                        crate::PrimitiveRole::U32CheckedRem,
+                        crate::PrimitiveRole::U32WrappingAdd,
+                        crate::PrimitiveRole::U32WrappingSub,
+                        crate::PrimitiveRole::U32WrappingMul,
+                        crate::PrimitiveRole::U32WrappingShl,
+                        crate::PrimitiveRole::U32WrappingShr,
+                        crate::PrimitiveRole::U32CheckedShl,
+                        crate::PrimitiveRole::U32CheckedShr,
+                        crate::PrimitiveRole::U32Eq,
+                        crate::PrimitiveRole::U32Lt,
+                        crate::PrimitiveRole::U32Le,
+                        crate::PrimitiveRole::U32ToUsize,
+                        crate::PrimitiveRole::UsizeToU32Checked,
                     ]
                     .iter()
                     .any(|role| manifest.primitives.get(role) == Some(&declaration.key))

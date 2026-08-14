@@ -80,7 +80,7 @@ pub const STAGE0_LANGUAGE_GENERATION: u32 = 1;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 1;
 pub const STAGE0_CACHE_GENERATION: u32 = 2;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 11;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 12;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 6;
 
 impl CompilerBuildIdentity {
@@ -395,6 +395,23 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
                     crate::PrimitiveRole::BytesFromArrayMove => 12,
                     crate::PrimitiveRole::BytesToArray => 13,
                     crate::PrimitiveRole::BytesUtf8ValidUpTo => 14,
+                    crate::PrimitiveRole::U32CheckedAdd => 15,
+                    crate::PrimitiveRole::U32CheckedSub => 16,
+                    crate::PrimitiveRole::U32CheckedMul => 17,
+                    crate::PrimitiveRole::U32CheckedDiv => 18,
+                    crate::PrimitiveRole::U32CheckedRem => 19,
+                    crate::PrimitiveRole::U32WrappingAdd => 20,
+                    crate::PrimitiveRole::U32WrappingSub => 21,
+                    crate::PrimitiveRole::U32WrappingMul => 22,
+                    crate::PrimitiveRole::U32WrappingShl => 23,
+                    crate::PrimitiveRole::U32WrappingShr => 24,
+                    crate::PrimitiveRole::U32CheckedShl => 25,
+                    crate::PrimitiveRole::U32CheckedShr => 26,
+                    crate::PrimitiveRole::U32Eq => 27,
+                    crate::PrimitiveRole::U32Lt => 28,
+                    crate::PrimitiveRole::U32Le => 29,
+                    crate::PrimitiveRole::U32ToUsize => 30,
+                    crate::PrimitiveRole::UsizeToU32Checked => 31,
                 }],
             );
             put(&mut bytes, selector.module_path.as_bytes());

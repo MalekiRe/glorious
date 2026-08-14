@@ -326,6 +326,89 @@ pub enum VmInstruction {
         dst: u32,
         value: u32,
     },
+    U32CheckedAdd {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32CheckedSub {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32CheckedMul {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32CheckedDiv {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32CheckedRem {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32WrappingAdd {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32WrappingSub {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32WrappingMul {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32WrappingShl {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32WrappingShr {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32CheckedShl {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32CheckedShr {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32Eq {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32Lt {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32Le {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    U32ToUsize {
+        dst: u32,
+        value: u32,
+    },
+    UsizeToU32Checked {
+        dst: u32,
+        value: u32,
+    },
     MakeTuple {
         dst: u32,
         fields: Vec<u32>,
@@ -953,7 +1036,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 43;
+pub const STAGE0_VM_SCHEMA: u32 = 44;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3165,6 +3248,89 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
+            87 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32CheckedAdd {
+                dst,
+                left,
+                right,
+            }),
+            88 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32CheckedSub {
+                dst,
+                left,
+                right,
+            }),
+            89 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32CheckedMul {
+                dst,
+                left,
+                right,
+            }),
+            90 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32CheckedDiv {
+                dst,
+                left,
+                right,
+            }),
+            91 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32CheckedRem {
+                dst,
+                left,
+                right,
+            }),
+            92 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32WrappingAdd {
+                dst,
+                left,
+                right,
+            }),
+            93 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32WrappingSub {
+                dst,
+                left,
+                right,
+            }),
+            94 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32WrappingMul {
+                dst,
+                left,
+                right,
+            }),
+            95 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32WrappingShl {
+                dst,
+                left,
+                right,
+            }),
+            96 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32WrappingShr {
+                dst,
+                left,
+                right,
+            }),
+            97 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32CheckedShl {
+                dst,
+                left,
+                right,
+            }),
+            98 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32CheckedShr {
+                dst,
+                left,
+                right,
+            }),
+            99 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32Eq {
+                dst,
+                left,
+                right,
+            }),
+            100 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32Lt {
+                dst,
+                left,
+                right,
+            }),
+            101 => self.u32_runtime_binary(|dst, left, right| VmInstruction::U32Le {
+                dst,
+                left,
+                right,
+            }),
+            102 => Ok(VmInstruction::U32ToUsize {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            103 => Ok(VmInstruction::UsizeToU32Checked {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             25 => self.bool_equality(|dst, left, right| VmInstruction::EqText { dst, left, right }),
             26 => self.bool_equality(|dst, left, right| VmInstruction::NeText { dst, left, right }),
             27 => self.i64_arithmetic(|dst, left, right| VmInstruction::ConcatText {
@@ -3282,6 +3448,13 @@ impl<'a> Decoder<'a> {
         }
     }
     fn i64_arithmetic(
+        &mut self,
+        make: impl FnOnce(u32, u32, u32) -> VmInstruction,
+    ) -> Result<VmInstruction, VmArtifactError> {
+        let (dst, left, right) = self.register_triple()?;
+        Ok(make(dst, left, right))
+    }
+    fn u32_runtime_binary(
         &mut self,
         make: impl FnOnce(u32, u32, u32) -> VmInstruction,
     ) -> Result<VmInstruction, VmArtifactError> {
@@ -3951,6 +4124,89 @@ fn lower_instruction(
             value: value.0,
         },
         MirInstruction::BytesUtf8ValidUpTo { dst, value } => VmInstruction::BytesUtf8ValidUpTo {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::U32CheckedAdd { dst, left, right } => VmInstruction::U32CheckedAdd {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32CheckedSub { dst, left, right } => VmInstruction::U32CheckedSub {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32CheckedMul { dst, left, right } => VmInstruction::U32CheckedMul {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32CheckedDiv { dst, left, right } => VmInstruction::U32CheckedDiv {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32CheckedRem { dst, left, right } => VmInstruction::U32CheckedRem {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32WrappingAdd { dst, left, right } => VmInstruction::U32WrappingAdd {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32WrappingSub { dst, left, right } => VmInstruction::U32WrappingSub {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32WrappingMul { dst, left, right } => VmInstruction::U32WrappingMul {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32WrappingShl { dst, left, right } => VmInstruction::U32WrappingShl {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32WrappingShr { dst, left, right } => VmInstruction::U32WrappingShr {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32CheckedShl { dst, left, right } => VmInstruction::U32CheckedShl {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32CheckedShr { dst, left, right } => VmInstruction::U32CheckedShr {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32Eq { dst, left, right } => VmInstruction::U32Eq {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32Lt { dst, left, right } => VmInstruction::U32Lt {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32Le { dst, left, right } => VmInstruction::U32Le {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::U32ToUsize { dst, value } => VmInstruction::U32ToUsize {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::UsizeToU32Checked { dst, value } => VmInstruction::UsizeToU32Checked {
             dst: dst.0,
             value: value.0,
         },
@@ -4870,6 +5126,47 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::BytesToArray { dst, value } => {
                 expect_type(function, *dst, VmType::Array(Box::new(VmType::U8)))?;
                 expect_type(function, *value, VmType::Bytes)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::U32CheckedAdd { dst, left, right }
+            | VmInstruction::U32CheckedSub { dst, left, right }
+            | VmInstruction::U32CheckedMul { dst, left, right }
+            | VmInstruction::U32CheckedDiv { dst, left, right }
+            | VmInstruction::U32CheckedRem { dst, left, right }
+            | VmInstruction::U32WrappingAdd { dst, left, right }
+            | VmInstruction::U32WrappingSub { dst, left, right }
+            | VmInstruction::U32WrappingMul { dst, left, right }
+            | VmInstruction::U32WrappingShl { dst, left, right }
+            | VmInstruction::U32WrappingShr { dst, left, right }
+            | VmInstruction::U32CheckedShl { dst, left, right }
+            | VmInstruction::U32CheckedShr { dst, left, right } => {
+                expect_type(function, *dst, VmType::U32)?;
+                for value in [left, right] {
+                    expect_type(function, *value, VmType::U32)?;
+                    read(&states, *value)?;
+                }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::U32Eq { dst, left, right }
+            | VmInstruction::U32Lt { dst, left, right }
+            | VmInstruction::U32Le { dst, left, right } => {
+                expect_type(function, *dst, VmType::Bool)?;
+                for value in [left, right] {
+                    expect_type(function, *value, VmType::U32)?;
+                    read(&states, *value)?;
+                }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::U32ToUsize { dst, value } => {
+                expect_type(function, *dst, VmType::Usize)?;
+                expect_type(function, *value, VmType::U32)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::UsizeToU32Checked { dst, value } => {
+                expect_type(function, *dst, VmType::U32)?;
+                expect_type(function, *value, VmType::Usize)?;
                 read(&states, *value)?;
                 write(&mut states, *dst)?
             }
@@ -7250,6 +7547,99 @@ fn valid_utf8_prefix(bytes: &[u8]) -> usize {
     }
     0
 }
+
+fn u32_checked_binary(
+    registers: &mut [Option<VmValue>],
+    dst: u32,
+    left: u32,
+    right: u32,
+    operation: impl FnOnce(u32, u32) -> Option<u32>,
+) -> Result<(), VmArtifactError> {
+    let left = expect_u32(
+        registers[left as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    let right = expect_u32(
+        registers[right as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    let value = operation(left, right).ok_or(VmArtifactError::ArithmeticOverflow)?;
+    registers[dst as usize] = Some(VmValue::U32(value));
+    Ok(())
+}
+
+fn u32_wrapping_binary(
+    registers: &mut [Option<VmValue>],
+    dst: u32,
+    left: u32,
+    right: u32,
+    operation: impl FnOnce(u32, u32) -> u32,
+) -> Result<(), VmArtifactError> {
+    let left = expect_u32(
+        registers[left as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    let right = expect_u32(
+        registers[right as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    registers[dst as usize] = Some(VmValue::U32(operation(left, right)));
+    Ok(())
+}
+
+fn u32_checked_division(
+    registers: &mut [Option<VmValue>],
+    dst: u32,
+    left: u32,
+    right: u32,
+    remainder: bool,
+) -> Result<(), VmArtifactError> {
+    let left = expect_u32(
+        registers[left as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    let right = expect_u32(
+        registers[right as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    if right == 0 {
+        return Err(VmArtifactError::DivisionByZero);
+    }
+    let value = if remainder {
+        left % right
+    } else {
+        left / right
+    };
+    registers[dst as usize] = Some(VmValue::U32(value));
+    Ok(())
+}
+
+fn u32_compare(
+    registers: &mut [Option<VmValue>],
+    dst: u32,
+    left: u32,
+    right: u32,
+    operation: impl FnOnce(u32, u32) -> bool,
+) -> Result<(), VmArtifactError> {
+    let left = expect_u32(
+        registers[left as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    let right = expect_u32(
+        registers[right as usize]
+            .as_ref()
+            .expect("verified register"),
+    )?;
+    registers[dst as usize] = Some(VmValue::Bool(operation(left, right)));
+    Ok(())
+}
 fn parse_pattern_text(text: &str) -> Option<String> {
     parse_text_literal(text).ok()
 }
@@ -7464,6 +7854,73 @@ fn execute(
                         .expect("verified register"),
                 )?;
                 registers[dst as usize] = Some(VmValue::Usize(valid_utf8_prefix(&bytes) as u64));
+            }
+            VmInstruction::U32CheckedAdd { dst, left, right } => {
+                u32_checked_binary(&mut registers, dst, left, right, u32::checked_add)?
+            }
+            VmInstruction::U32CheckedSub { dst, left, right } => {
+                u32_checked_binary(&mut registers, dst, left, right, u32::checked_sub)?
+            }
+            VmInstruction::U32CheckedMul { dst, left, right } => {
+                u32_checked_binary(&mut registers, dst, left, right, u32::checked_mul)?
+            }
+            VmInstruction::U32CheckedDiv { dst, left, right } => {
+                u32_checked_division(&mut registers, dst, left, right, false)?
+            }
+            VmInstruction::U32CheckedRem { dst, left, right } => {
+                u32_checked_division(&mut registers, dst, left, right, true)?
+            }
+            VmInstruction::U32WrappingAdd { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, dst, left, right, u32::wrapping_add)?
+            }
+            VmInstruction::U32WrappingSub { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, dst, left, right, u32::wrapping_sub)?
+            }
+            VmInstruction::U32WrappingMul { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, dst, left, right, u32::wrapping_mul)?
+            }
+            VmInstruction::U32WrappingShl { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, dst, left, right, u32::wrapping_shl)?
+            }
+            VmInstruction::U32WrappingShr { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, dst, left, right, u32::wrapping_shr)?
+            }
+            VmInstruction::U32CheckedShl { dst, left, right } => {
+                u32_checked_binary(&mut registers, dst, left, right, u32::checked_shl)?
+            }
+            VmInstruction::U32CheckedShr { dst, left, right } => {
+                u32_checked_binary(&mut registers, dst, left, right, u32::checked_shr)?
+            }
+            VmInstruction::U32Eq { dst, left, right } => {
+                u32_compare(&mut registers, dst, left, right, |left, right| {
+                    left == right
+                })?
+            }
+            VmInstruction::U32Lt { dst, left, right } => {
+                u32_compare(&mut registers, dst, left, right, |left, right| left < right)?
+            }
+            VmInstruction::U32Le { dst, left, right } => {
+                u32_compare(&mut registers, dst, left, right, |left, right| {
+                    left <= right
+                })?
+            }
+            VmInstruction::U32ToUsize { dst, value } => {
+                let value = expect_u32(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::Usize(value as u64));
+            }
+            VmInstruction::UsizeToU32Checked { dst, value } => {
+                let value = expect_usize(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let value =
+                    u32::try_from(value).map_err(|_| VmArtifactError::ArithmeticOverflow)?;
+                registers[dst as usize] = Some(VmValue::U32(value));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
@@ -8983,6 +9440,53 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::U32CheckedAdd { dst, left, right }
+        | VmInstruction::U32CheckedSub { dst, left, right }
+        | VmInstruction::U32CheckedMul { dst, left, right }
+        | VmInstruction::U32CheckedDiv { dst, left, right }
+        | VmInstruction::U32CheckedRem { dst, left, right }
+        | VmInstruction::U32WrappingAdd { dst, left, right }
+        | VmInstruction::U32WrappingSub { dst, left, right }
+        | VmInstruction::U32WrappingMul { dst, left, right }
+        | VmInstruction::U32WrappingShl { dst, left, right }
+        | VmInstruction::U32WrappingShr { dst, left, right }
+        | VmInstruction::U32CheckedShl { dst, left, right }
+        | VmInstruction::U32CheckedShr { dst, left, right }
+        | VmInstruction::U32Eq { dst, left, right }
+        | VmInstruction::U32Lt { dst, left, right }
+        | VmInstruction::U32Le { dst, left, right } => {
+            output.push(match value {
+                VmInstruction::U32CheckedAdd { .. } => 87,
+                VmInstruction::U32CheckedSub { .. } => 88,
+                VmInstruction::U32CheckedMul { .. } => 89,
+                VmInstruction::U32CheckedDiv { .. } => 90,
+                VmInstruction::U32CheckedRem { .. } => 91,
+                VmInstruction::U32WrappingAdd { .. } => 92,
+                VmInstruction::U32WrappingSub { .. } => 93,
+                VmInstruction::U32WrappingMul { .. } => 94,
+                VmInstruction::U32WrappingShl { .. } => 95,
+                VmInstruction::U32WrappingShr { .. } => 96,
+                VmInstruction::U32CheckedShl { .. } => 97,
+                VmInstruction::U32CheckedShr { .. } => 98,
+                VmInstruction::U32Eq { .. } => 99,
+                VmInstruction::U32Lt { .. } => 100,
+                VmInstruction::U32Le { .. } => 101,
+                _ => unreachable!("instruction family matched above"),
+            });
+            for register in [dst, left, right] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+        }
+        VmInstruction::U32ToUsize { dst, value } => {
+            output.push(102);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::UsizeToU32Checked { dst, value } => {
+            output.push(103);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::MakeCallable {
             dst,
             callee,
@@ -9368,6 +9872,75 @@ fn execute_with_arguments(
                         .expect("verified register"),
                 )?;
                 registers[*dst as usize] = Some(VmValue::Usize(valid_utf8_prefix(&bytes) as u64));
+            }
+            VmInstruction::U32CheckedAdd { dst, left, right } => {
+                u32_checked_binary(&mut registers, *dst, *left, *right, u32::checked_add)?
+            }
+            VmInstruction::U32CheckedSub { dst, left, right } => {
+                u32_checked_binary(&mut registers, *dst, *left, *right, u32::checked_sub)?
+            }
+            VmInstruction::U32CheckedMul { dst, left, right } => {
+                u32_checked_binary(&mut registers, *dst, *left, *right, u32::checked_mul)?
+            }
+            VmInstruction::U32CheckedDiv { dst, left, right } => {
+                u32_checked_division(&mut registers, *dst, *left, *right, false)?
+            }
+            VmInstruction::U32CheckedRem { dst, left, right } => {
+                u32_checked_division(&mut registers, *dst, *left, *right, true)?
+            }
+            VmInstruction::U32WrappingAdd { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, *dst, *left, *right, u32::wrapping_add)?
+            }
+            VmInstruction::U32WrappingSub { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, *dst, *left, *right, u32::wrapping_sub)?
+            }
+            VmInstruction::U32WrappingMul { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, *dst, *left, *right, u32::wrapping_mul)?
+            }
+            VmInstruction::U32WrappingShl { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, *dst, *left, *right, u32::wrapping_shl)?
+            }
+            VmInstruction::U32WrappingShr { dst, left, right } => {
+                u32_wrapping_binary(&mut registers, *dst, *left, *right, u32::wrapping_shr)?
+            }
+            VmInstruction::U32CheckedShl { dst, left, right } => {
+                u32_checked_binary(&mut registers, *dst, *left, *right, u32::checked_shl)?
+            }
+            VmInstruction::U32CheckedShr { dst, left, right } => {
+                u32_checked_binary(&mut registers, *dst, *left, *right, u32::checked_shr)?
+            }
+            VmInstruction::U32Eq { dst, left, right } => {
+                u32_compare(&mut registers, *dst, *left, *right, |left, right| {
+                    left == right
+                })?
+            }
+            VmInstruction::U32Lt { dst, left, right } => {
+                u32_compare(&mut registers, *dst, *left, *right, |left, right| {
+                    left < right
+                })?
+            }
+            VmInstruction::U32Le { dst, left, right } => {
+                u32_compare(&mut registers, *dst, *left, *right, |left, right| {
+                    left <= right
+                })?
+            }
+            VmInstruction::U32ToUsize { dst, value } => {
+                let value = expect_u32(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::Usize(value as u64));
+            }
+            VmInstruction::UsizeToU32Checked { dst, value } => {
+                let value = expect_usize(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let value =
+                    u32::try_from(value).map_err(|_| VmArtifactError::ArithmeticOverflow)?;
+                registers[*dst as usize] = Some(VmValue::U32(value));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;

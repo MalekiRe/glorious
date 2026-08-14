@@ -44,6 +44,23 @@ pub enum PrimitiveRole {
     BytesFromArrayMove,
     BytesToArray,
     BytesUtf8ValidUpTo,
+    U32CheckedAdd,
+    U32CheckedSub,
+    U32CheckedMul,
+    U32CheckedDiv,
+    U32CheckedRem,
+    U32WrappingAdd,
+    U32WrappingSub,
+    U32WrappingMul,
+    U32WrappingShl,
+    U32WrappingShr,
+    U32CheckedShl,
+    U32CheckedShr,
+    U32Eq,
+    U32Lt,
+    U32Le,
+    U32ToUsize,
+    UsizeToU32Checked,
 }
 
 impl PrimitiveRole {
@@ -64,6 +81,23 @@ impl PrimitiveRole {
             Self::BytesFromArrayMove => "bytes-from-array-move",
             Self::BytesToArray => "bytes-to-array",
             Self::BytesUtf8ValidUpTo => "bytes-utf8-valid-up-to",
+            Self::U32CheckedAdd => "u32-checked-add",
+            Self::U32CheckedSub => "u32-checked-sub",
+            Self::U32CheckedMul => "u32-checked-mul",
+            Self::U32CheckedDiv => "u32-checked-div",
+            Self::U32CheckedRem => "u32-checked-rem",
+            Self::U32WrappingAdd => "u32-wrapping-add",
+            Self::U32WrappingSub => "u32-wrapping-sub",
+            Self::U32WrappingMul => "u32-wrapping-mul",
+            Self::U32WrappingShl => "u32-wrapping-shl",
+            Self::U32WrappingShr => "u32-wrapping-shr",
+            Self::U32CheckedShl => "u32-checked-shl",
+            Self::U32CheckedShr => "u32-checked-shr",
+            Self::U32Eq => "u32-eq",
+            Self::U32Lt => "u32-lt",
+            Self::U32Le => "u32-le",
+            Self::U32ToUsize => "u32-to-usize",
+            Self::UsizeToU32Checked => "usize-to-u32-checked",
         }
     }
 
@@ -84,6 +118,23 @@ impl PrimitiveRole {
             "bytes-from-array-move" => Self::BytesFromArrayMove,
             "bytes-to-array" => Self::BytesToArray,
             "bytes-utf8-valid-up-to" => Self::BytesUtf8ValidUpTo,
+            "u32-checked-add" => Self::U32CheckedAdd,
+            "u32-checked-sub" => Self::U32CheckedSub,
+            "u32-checked-mul" => Self::U32CheckedMul,
+            "u32-checked-div" => Self::U32CheckedDiv,
+            "u32-checked-rem" => Self::U32CheckedRem,
+            "u32-wrapping-add" => Self::U32WrappingAdd,
+            "u32-wrapping-sub" => Self::U32WrappingSub,
+            "u32-wrapping-mul" => Self::U32WrappingMul,
+            "u32-wrapping-shl" => Self::U32WrappingShl,
+            "u32-wrapping-shr" => Self::U32WrappingShr,
+            "u32-checked-shl" => Self::U32CheckedShl,
+            "u32-checked-shr" => Self::U32CheckedShr,
+            "u32-eq" => Self::U32Eq,
+            "u32-lt" => Self::U32Lt,
+            "u32-le" => Self::U32Le,
+            "u32-to-usize" => Self::U32ToUsize,
+            "usize-to-u32-checked" => Self::UsizeToU32Checked,
             _ => return None,
         })
     }
@@ -387,6 +438,63 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::U32CheckedAdd
+        | PrimitiveRole::U32CheckedSub
+        | PrimitiveRole::U32CheckedMul
+        | PrimitiveRole::U32CheckedDiv
+        | PrimitiveRole::U32CheckedRem
+        | PrimitiveRole::U32WrappingAdd
+        | PrimitiveRole::U32WrappingSub
+        | PrimitiveRole::U32WrappingMul
+        | PrimitiveRole::U32WrappingShl
+        | PrimitiveRole::U32WrappingShr
+        | PrimitiveRole::U32CheckedShl
+        | PrimitiveRole::U32CheckedShr => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::U32), Type::Scalar(ScalarType::U32)],
+            result: Type::Scalar(ScalarType::U32),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::U32Eq | PrimitiveRole::U32Lt | PrimitiveRole::U32Le => {
+            crate::CallableSignature {
+                generics: 0,
+                generic_kinds: vec![],
+                parameters: vec![Type::Scalar(ScalarType::U32), Type::Scalar(ScalarType::U32)],
+                result: Type::Scalar(ScalarType::Bool),
+                effects: EffectRow::empty(),
+                invocation: Quantity::ONCE,
+                where_bounds: vec![],
+                where_associated_type_bindings: vec![],
+                where_associated_effect_bindings: vec![],
+            }
+        }
+        PrimitiveRole::U32ToUsize => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::U32)],
+            result: Type::Scalar(ScalarType::Usize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::UsizeToU32Checked => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Usize)],
+            result: Type::Scalar(ScalarType::U32),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
     }
 }
 fn manifest_digest(
@@ -413,6 +521,23 @@ fn manifest_digest(
             PrimitiveRole::BytesFromArrayMove => 12,
             PrimitiveRole::BytesToArray => 13,
             PrimitiveRole::BytesUtf8ValidUpTo => 14,
+            PrimitiveRole::U32CheckedAdd => 15,
+            PrimitiveRole::U32CheckedSub => 16,
+            PrimitiveRole::U32CheckedMul => 17,
+            PrimitiveRole::U32CheckedDiv => 18,
+            PrimitiveRole::U32CheckedRem => 19,
+            PrimitiveRole::U32WrappingAdd => 20,
+            PrimitiveRole::U32WrappingSub => 21,
+            PrimitiveRole::U32WrappingMul => 22,
+            PrimitiveRole::U32WrappingShl => 23,
+            PrimitiveRole::U32WrappingShr => 24,
+            PrimitiveRole::U32CheckedShl => 25,
+            PrimitiveRole::U32CheckedShr => 26,
+            PrimitiveRole::U32Eq => 27,
+            PrimitiveRole::U32Lt => 28,
+            PrimitiveRole::U32Le => 29,
+            PrimitiveRole::U32ToUsize => 30,
+            PrimitiveRole::UsizeToU32Checked => 31,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

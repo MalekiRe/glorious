@@ -202,6 +202,141 @@ fn verifier_rejects_forged_bytes_family_opcode_abis() {
 }
 
 #[test]
+fn manifest_bound_u32_runtime_family_executes_wrapping_checked_and_conversion_abis() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"u32-runtime-family-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::Char,
+            VmType::U32,
+            VmType::Char,
+            VmType::U32,
+            VmType::U32,
+        ],
+        instructions: vec![
+            VmInstruction::ConstChar {
+                dst: 0,
+                value: '🦀' as u32,
+            },
+            VmInstruction::CharToU32 { dst: 1, value: 0 },
+            VmInstruction::ConstChar {
+                dst: 2,
+                value: '🦀' as u32,
+            },
+            VmInstruction::CharToU32 { dst: 3, value: 2 },
+            VmInstruction::U32WrappingMul {
+                dst: 4,
+                left: 1,
+                right: 3,
+            },
+            VmInstruction::Return { value: 4 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"u32-runtime-family-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(
+        decode_and_verify_artifact(&encoded)
+            .unwrap()
+            .run_u32()
+            .unwrap(),
+        ('🦀' as u32).wrapping_mul('🦀' as u32),
+    );
+}
+
+#[test]
+fn verifier_rejects_forged_u32_runtime_opcode_abi() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-u32-runtime-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Char, VmType::U32, VmType::Usize],
+        instructions: vec![
+            VmInstruction::ConstChar {
+                dst: 0,
+                value: 'a' as u32,
+            },
+            VmInstruction::CharToU32 { dst: 1, value: 0 },
+            VmInstruction::U32CheckedAdd {
+                dst: 2,
+                left: 1,
+                right: 1,
+            },
+            VmInstruction::Return { value: 2 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"forged-u32-runtime-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::TypeMismatch {
+            expected: VmType::U32,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn checked_u32_shifts_and_division_fail_deterministically() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"checked-u32-runtime-failure-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::Char,
+            VmType::U32,
+            VmType::Char,
+            VmType::U32,
+            VmType::U32,
+        ],
+        instructions: vec![
+            VmInstruction::ConstChar {
+                dst: 0,
+                value: 'a' as u32,
+            },
+            VmInstruction::CharToU32 { dst: 1, value: 0 },
+            VmInstruction::ConstChar {
+                dst: 2,
+                value: 'A' as u32,
+            },
+            VmInstruction::CharToU32 { dst: 3, value: 2 },
+            VmInstruction::U32CheckedShl {
+                dst: 4,
+                left: 1,
+                right: 3,
+            },
+            VmInstruction::Return { value: 4 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"checked-u32-runtime-failure-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate).unwrap().run_u32(),
+        Err(VmArtifactError::ArithmeticOverflow)
+    ));
+}
+
+#[test]
 fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols() {
     use grandiose_stage0::{ConstKind, Quantity, StructuralU32Expr};
 
