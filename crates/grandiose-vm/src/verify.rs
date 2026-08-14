@@ -18353,7 +18353,16 @@ mod tests {
 
     #[test]
     fn direct_verification_enforces_the_export_table_contract() {
-        let mut valid = base(vec![Instruction::Return { src: Some(1) }], vec![UNIT, I64]);
+        let mut valid = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(1) },
+            ],
+            vec![UNIT, I64],
+        );
         valid.functions[0].flags = EXPORTED;
         valid.exports = vec![Export {
             name: "main".into(),

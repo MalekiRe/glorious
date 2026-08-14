@@ -201,6 +201,8 @@ pub struct Vm {
     host: Option<Box<dyn Host>>,
     imports: Result<Vec<ResolvedImport>, HostLinkError>,
     slots: SlotStore,
+    enum_tag_tables: Vec<Box<[u32]>>,
+    constant_cache: RefCell<Vec<Option<Value>>>,
     last_location: Cell<Option<(u32, u32)>>,
     diagnostics_configured: bool,
 }
@@ -915,6 +917,8 @@ impl Vm {
             host: None,
             imports,
             slots: SlotStore::default(),
+            enum_tag_tables,
+            constant_cache,
             last_location: Cell::new(None),
             diagnostics_configured: diagnostics_configured(),
         }
@@ -954,6 +958,8 @@ impl Vm {
             host: Some(Box::new(host)),
             imports: Ok(imports),
             slots: SlotStore::default(),
+            enum_tag_tables,
+            constant_cache,
             last_location: Cell::new(None),
             diagnostics_configured: diagnostics_configured(),
         })
@@ -1022,6 +1028,10 @@ impl Vm {
             .diagnostics_configured
             .then(VmOpcodeProfile::from_env)
             .flatten();
+        let mut instruction_profile = self
+            .diagnostics_configured
+            .then(InstructionProfile::from_env)
+            .flatten();
         let breakpoint = self
             .diagnostics_configured
             .then(VmBreakpoint::from_env)
@@ -1032,6 +1042,8 @@ impl Vm {
             .flatten();
         let trace_errors = self.diagnostics_configured
             && std::env::var_os("G1_VM_ERROR_TRACE").is_some();
+        let diagnostics_active = self.diagnostics_configured;
+        let mut stack_depth = stack.len();
         let mut cached_function = None;
         let mut cached_descriptor = None;
         let mut cached_instructions = None;
@@ -1070,35 +1082,20 @@ impl Vm {
             if let Some(profile) = &mut opcode_profile {
                 profile.observe(ins);
             }
+            if let Some(profile) = &mut instruction_profile {
+                profile.observe(ins);
+            }
             if let Some(trace) = &mut progress_trace {
                 trace.observe(frame.function, &fun.name, frame.pc, stack_depth);
             }
-            // SAFETY: `frame.pc < fun.code_len == decoded.len()` was checked
-            // above, and `decoded` is this function's immutable, verifier-built
-            // instruction slice indexed by its function-local pc.
-            let ins =
-                unsafe { decoded.get_unchecked(frame.pc as usize) };
-            if diagnostics_active {
-                if instruction_profile_enabled {
-                    instruction_profile.as_mut().unwrap().observe(ins);
-                }
-                if let Some(trace) = &mut progress_trace {
-                    trace.observe(
-                        frame.function,
-                        &fun.name,
-                        frame.pc,
-                        stack_depth
-                    );
-                }
-                if trace_errors {
-                    self.last_location.set(Some((frame.function, frame.pc)));
-                }
-                if traced_function.as_deref() == Some(fun.name.as_str()) {
-                    eprintln!(
-                        "g1-vm function {} `{}` pc {}: {ins:?}",
-                        frame.function, fun.name, frame.pc
-                    );
-                }
+            if trace_errors {
+                self.last_location.set(Some((frame.function, frame.pc)));
+            }
+            if traced_function.as_deref() == Some(fun.name.as_str()) {
+                eprintln!(
+                    "g1-vm function {} `{}` pc {}: {ins:?}",
+                    frame.function, fun.name, frame.pc
+                );
             }
             match ins {
                 Instruction::Nop => frame.pc += 1,
@@ -3228,27 +3225,6 @@ fn get(f: &Frame, r: u32) -> Result<Value, RuntimeError> {
     match value {
         Value::Place(slot) => slot.get().map_err(|_| RuntimeError::EmptyRegister(r)),
         value => Ok(value.clone()),
-    }
-}
-
-/// Copy a register directly from its storage. `get` intentionally returns an
-/// owned value for ordinary reads, but COPY has already committed to creating
-/// the destination's independent value, so cloning the source first would do
-/// the work twice for text, references, and aggregate handles.
-fn copy_register(
-    a: &ExecutionImage,
-    f: &Frame,
-    r: u32,
-    ty: TypeId,
-) -> Result<Value, RuntimeError> {
-    let value = f.registers[r as usize]
-        .as_ref()
-        .ok_or(RuntimeError::EmptyRegister(r))?;
-    match value {
-        Value::Place(slot) => slot
-            .with_value(|value| copy_value(a, ty, value))
-            .map_err(|_| RuntimeError::EmptyRegister(r))?,
-        value => copy_value(a, ty, value),
     }
 }
 
@@ -8585,15 +8561,22 @@ mod tests {
         // At this size the former `Vec<Option<Value>>` backing alone exceeds
         // the VM's 64 MiB per-allocation limit on supported targets. The
         // compact byte backing remains linear in emitted artifact bytes.
-        let payload: Rc<[u8]> = vec![0x5a; 2_000_000].into();
+        let legacy_slot_count = MAX_PRIMITIVE_ALLOCATION_BYTES
+            .checked_div(std::mem::size_of::<Option<Value>>())
+            .expect("a value slot has nonzero size")
+            + 1;
+        let payload: Rc<[u8]> = vec![0x5a; legacy_slot_count].into();
         let array = primitive(&artifact, 19, Primitive::BytesToArray, &[Value::Bytes(payload)])
             .expect("packed byte array must fit below the allocation guard");
         let Value::Array(array) = array else { panic!("expected array") };
         let array = array.borrow();
         assert!(array.packed_bytes.is_some());
         assert!(array.slots.is_empty());
-        assert_eq!(array_len(&array), 2_000_000);
-        assert!(std::mem::size_of::<Option<Value>>() * 2_000_000 > MAX_PRIMITIVE_ALLOCATION_BYTES);
+        assert_eq!(array_len(&array), legacy_slot_count);
+        assert!(
+            std::mem::size_of::<Option<Value>>() * legacy_slot_count
+                > MAX_PRIMITIVE_ALLOCATION_BYTES
+        );
     }
 
     #[test]
