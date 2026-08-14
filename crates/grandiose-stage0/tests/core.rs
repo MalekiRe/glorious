@@ -86,6 +86,30 @@ fn typed_core_admits_calls_with_the_same_symbolic_effect_row_tail() {
 }
 
 #[test]
+fn typed_core_instantiates_unconstrained_effect_row_tails_to_a_closed_caller() {
+    let package = PackageKey("core-closed-effect-tail-instantiation@0.1.0".into());
+    let source = "pub fn forward<e: EffectRow>() -> i64 / { | e } { 0 } pub fn closed() -> i64 { forward() }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let closed = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("closed"))
+        .expect("closed definition");
+    let body = BodySyntax::parse(&lexed, source, closed.body.expect("closed body"));
+    let core = TypedBody::elaborate(
+        closed,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
 fn typed_core_retains_selected_trait_method_evidence() {
     let package = PackageKey("core-trait-method-evidence@0.1.0".into());
     let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn main() -> i64 { Increment::increment(41) }";
