@@ -4371,6 +4371,116 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
 }
 
 #[test]
+fn decoder_and_verifier_reject_a_forged_copy_of_a_unique_reference() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"forged-vm-unique-reference-copy")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::I64),
+                },
+                VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::I64),
+                },
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                VmInstruction::Copy { dst: 2, src: 1 },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-vm-unique-reference-copy-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::AffineValueCopy { register: 1 })
+    ));
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::AffineValueCopy { register: 1 })
+    ));
+}
+
+#[test]
+fn decoder_and_verifier_reject_a_forged_copy_of_an_opaque_nominal_carrier() {
+    let holder = DefKey(Digest::of_bytes(b"forged-vm-affine-holder"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"forged-vm-affine-nominal-copy")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::I64),
+                },
+                VmType::Nominal {
+                    definition: holder,
+                    arguments: vec![],
+                },
+                VmType::Nominal {
+                    definition: holder,
+                    arguments: vec![],
+                },
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                VmInstruction::MakeRecord {
+                    dst: 2,
+                    definition: holder,
+                    fields: vec![1],
+                    field_types: vec![VmType::Reference {
+                        unique: true,
+                        referent: Box::new(VmType::I64),
+                    }],
+                },
+                VmInstruction::Copy { dst: 3, src: 2 },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-vm-affine-nominal-copy-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::AffineValueCopy { register: 2 })
+    ));
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::AffineValueCopy { register: 2 })
+    ));
+}
+
+#[test]
 fn verifier_rejects_forged_reborrow_capability_and_whole_place_referent() {
     let mut shared_to_unique = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
