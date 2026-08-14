@@ -1,0 +1,488 @@
+//! Canonical, demand-driven generic instance identity and reachability.
+//!
+//! This is deliberately independent of MIR emission.  Discovery first proves
+//! that an executable substitution is closed and gives it a stable identity;
+//! a later lowering query may then materialize the body without making cache
+//! keys depend on traversal order or body-local inference variables.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use crate::{
+    ConstKind, DefKey, Digest, EffectRow, GenericKind, InferContext, Lifetime, Quantity, Type,
+    TypeError,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstanceArgument {
+    Type(Type),
+    EffectRow(EffectRow),
+    Lifetime(Lifetime),
+    ConstU32(u32),
+    ConstQuantity(Quantity),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstanceKeyError {
+    Arity { expected: usize, found: usize },
+    Kind { slot: usize, expected: GenericKind },
+    UnresolvedType { slot: usize, error: TypeError },
+    OpenEffectRow { slot: usize },
+    NonConcreteType { slot: usize },
+    NonConcreteLifetime { slot: usize },
+}
+
+/// A stable executable specialization identity. The private canonical bytes
+/// retain the full substitution identity while avoiding `Ord` implementations
+/// on semantic type trees solely for work-queue ordering.
+#[derive(Clone, Debug)]
+pub struct InstanceKey {
+    pub callable: DefKey,
+    arguments: Vec<InstanceArgument>,
+    canonical_substitution: Vec<u8>,
+    fingerprint: Digest,
+}
+
+impl InstanceKey {
+    pub fn new(
+        callable: DefKey,
+        kinds: &[GenericKind],
+        arguments: Vec<InstanceArgument>,
+    ) -> Result<Self, InstanceKeyError> {
+        if kinds.len() != arguments.len() {
+            return Err(InstanceKeyError::Arity {
+                expected: kinds.len(),
+                found: arguments.len(),
+            });
+        }
+        let mut canonical_substitution = Vec::new();
+        canonical_substitution.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+        for (slot, (kind, argument)) in kinds.iter().zip(&arguments).enumerate() {
+            match (kind, argument) {
+                (GenericKind::Type, InstanceArgument::Type(value)) => {
+                    let fingerprint = closed_type_fingerprint(value, slot)?;
+                    canonical_substitution.push(0);
+                    canonical_substitution.extend_from_slice(&fingerprint.as_bytes());
+                }
+                (GenericKind::EffectRow, InstanceArgument::EffectRow(value)) => {
+                    let fingerprint = closed_effect_row_fingerprint(value, slot)?;
+                    canonical_substitution.push(1);
+                    canonical_substitution.extend_from_slice(&fingerprint.as_bytes());
+                }
+                (GenericKind::Lifetime, InstanceArgument::Lifetime(value)) => {
+                    if !matches!(value, Lifetime::Static | Lifetime::Bound { .. }) {
+                        return Err(InstanceKeyError::NonConcreteLifetime { slot });
+                    }
+                    canonical_substitution.push(2);
+                    encode_lifetime(*value, &mut canonical_substitution);
+                }
+                (GenericKind::Const(ConstKind::U32), InstanceArgument::ConstU32(value)) => {
+                    canonical_substitution.push(3);
+                    canonical_substitution.extend_from_slice(&value.to_le_bytes());
+                }
+                (
+                    GenericKind::Const(ConstKind::Quantity),
+                    InstanceArgument::ConstQuantity(value),
+                ) => {
+                    canonical_substitution.push(4);
+                    encode_quantity(*value, &mut canonical_substitution);
+                }
+                (expected, _) => {
+                    return Err(InstanceKeyError::Kind {
+                        slot,
+                        expected: *expected,
+                    });
+                }
+            }
+        }
+        let fingerprint = Digest::of_parts([
+            b"grandiose-stage0-instance-key-v1".as_slice(),
+            callable.0.as_bytes().as_slice(),
+            canonical_substitution.as_slice(),
+        ]);
+        Ok(Self {
+            callable,
+            arguments,
+            canonical_substitution,
+            fingerprint,
+        })
+    }
+
+    pub fn arguments(&self) -> &[InstanceArgument] {
+        &self.arguments
+    }
+
+    pub fn fingerprint(&self) -> Digest {
+        self.fingerprint
+    }
+}
+
+impl PartialEq for InstanceKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.callable == other.callable
+            && self.canonical_substitution == other.canonical_substitution
+    }
+}
+
+impl Eq for InstanceKey {}
+
+impl Ord for InstanceKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.callable.cmp(&other.callable).then_with(|| {
+            self.canonical_substitution
+                .cmp(&other.canonical_substitution)
+        })
+    }
+}
+
+impl PartialOrd for InstanceKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn closed_type_fingerprint(value: &Type, slot: usize) -> Result<Digest, InstanceKeyError> {
+    if !is_concrete_type(value) {
+        return Err(InstanceKeyError::NonConcreteType { slot });
+    }
+    InferContext::default()
+        .type_fingerprint(value.clone())
+        .map_err(|error| InstanceKeyError::UnresolvedType { slot, error })
+}
+
+fn closed_effect_row_fingerprint(
+    value: &EffectRow,
+    slot: usize,
+) -> Result<Digest, InstanceKeyError> {
+    if value.tail.is_some() || !value.projections.is_empty() {
+        return Err(InstanceKeyError::OpenEffectRow { slot });
+    }
+    let wrapper = Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects: value.clone(),
+        invocation: Quantity::ONCE,
+    };
+    closed_type_fingerprint(&wrapper, slot)
+}
+
+fn is_concrete_type(value: &Type) -> bool {
+    match value {
+        Type::Generic(_) | Type::ConstGeneric { .. } | Type::Infer(_) | Type::Error => false,
+        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
+            arguments.iter().all(is_concrete_type)
+        }
+        Type::Projection { .. } => false,
+        Type::Array(element) => is_concrete_type(element),
+        Type::Reference {
+            lifetime, referent, ..
+        } => {
+            matches!(lifetime, Lifetime::Static | Lifetime::Bound { .. })
+                && is_concrete_type(referent)
+        }
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            parameters.iter().all(is_concrete_type)
+                && is_concrete_type(result)
+                && effects.tail.is_none()
+                && effects.projections.is_empty()
+                && effects
+                    .effects
+                    .iter()
+                    .all(|effect| effect.arguments.iter().all(is_concrete_type))
+        }
+        Type::Unit | Type::Never | Type::Scalar(_) | Type::ConstU32(_) | Type::ConstQuantity(_) => {
+            true
+        }
+    }
+}
+
+fn encode_lifetime(value: Lifetime, output: &mut Vec<u8>) {
+    match value {
+        Lifetime::Static => output.push(0),
+        Lifetime::Bound { depth, index } => {
+            output.push(1);
+            output.extend_from_slice(&depth.to_le_bytes());
+            output.extend_from_slice(&index.to_le_bytes());
+        }
+        Lifetime::Generic(_) | Lifetime::Elided => unreachable!("validated concrete lifetime"),
+    }
+}
+
+fn encode_quantity(value: Quantity, output: &mut Vec<u8>) {
+    output.extend_from_slice(&value.lower.to_le_bytes());
+    match value.upper {
+        Some(upper) => {
+            output.push(0);
+            output.extend_from_slice(&upper.to_le_bytes());
+        }
+        None => output.push(1),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InstanceLimits {
+    pub total: usize,
+    pub per_definition: usize,
+}
+
+impl Default for InstanceLimits {
+    fn default() -> Self {
+        Self {
+            total: 10_000,
+            per_definition: 1_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstanceRoot {
+    pub key: InstanceKey,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstanceGraphError {
+    TotalLimit {
+        limit: usize,
+        root: Box<InstanceKey>,
+    },
+    PerDefinitionLimit {
+        callable: DefKey,
+        limit: usize,
+        root: Box<InstanceKey>,
+    },
+}
+
+/// Deterministic demand queue. Recursive discovery reuses the existing node,
+/// leaving SCC calculation to a later graph pass instead of recursively
+/// cloning a body.
+#[derive(Clone, Debug, Default)]
+pub struct InstanceGraph {
+    roots: BTreeMap<InstanceKey, String>,
+    edges: BTreeMap<InstanceKey, BTreeSet<InstanceKey>>,
+    pending: BTreeSet<InstanceKey>,
+}
+
+impl InstanceGraph {
+    pub fn discover_root(
+        &mut self,
+        root: InstanceRoot,
+        limits: InstanceLimits,
+    ) -> Result<bool, InstanceGraphError> {
+        self.insert(root.key, Some(root.reason), limits)
+    }
+
+    pub fn discover_callee(
+        &mut self,
+        caller: &InstanceKey,
+        callee: InstanceKey,
+        limits: InstanceLimits,
+    ) -> Result<bool, InstanceGraphError> {
+        self.edges
+            .entry(caller.clone())
+            .or_default()
+            .insert(callee.clone());
+        self.insert(callee, None, limits)
+    }
+
+    fn insert(
+        &mut self,
+        key: InstanceKey,
+        reason: Option<String>,
+        limits: InstanceLimits,
+    ) -> Result<bool, InstanceGraphError> {
+        if self.edges.contains_key(&key) {
+            if let Some(reason) = reason {
+                self.roots.entry(key).or_insert(reason);
+            }
+            return Ok(false);
+        }
+        if self.edges.len() >= limits.total {
+            return Err(InstanceGraphError::TotalLimit {
+                limit: limits.total,
+                root: Box::new(key),
+            });
+        }
+        let count = self
+            .edges
+            .keys()
+            .filter(|existing| existing.callable == key.callable)
+            .count();
+        if count >= limits.per_definition {
+            return Err(InstanceGraphError::PerDefinitionLimit {
+                callable: key.callable,
+                limit: limits.per_definition,
+                root: Box::new(key),
+            });
+        }
+        if let Some(reason) = reason {
+            self.roots.insert(key.clone(), reason);
+        }
+        self.pending.insert(key.clone());
+        self.edges.insert(key, BTreeSet::new());
+        Ok(true)
+    }
+
+    pub fn pop_pending(&mut self) -> Option<InstanceKey> {
+        let key = self.pending.pop_first()?;
+        Some(key)
+    }
+
+    pub fn roots(&self) -> &BTreeMap<InstanceKey, String> {
+        &self.roots
+    }
+
+    pub fn callees(&self, key: &InstanceKey) -> Option<&BTreeSet<InstanceKey>> {
+        self.edges.get(key)
+    }
+
+    pub fn ordered(&self) -> Vec<InstanceKey> {
+        self.edges.keys().cloned().collect()
+    }
+
+    pub fn breadth_first_from_roots(&self) -> Vec<InstanceKey> {
+        let mut seen = BTreeSet::new();
+        let mut queue = self.roots.keys().cloned().collect::<VecDeque<_>>();
+        let mut ordered = vec![];
+        while let Some(key) = queue.pop_front() {
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            ordered.push(key.clone());
+            if let Some(callees) = self.edges.get(&key) {
+                queue.extend(callees.iter().cloned());
+            }
+        }
+        ordered
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Digest, EffectTail, ScalarType};
+
+    fn definition(name: &[u8]) -> DefKey {
+        DefKey(Digest::of_bytes(name))
+    }
+
+    #[test]
+    fn equivalent_instances_have_stable_identity_and_queue_order() {
+        let kinds = [GenericKind::Type, GenericKind::Const(ConstKind::Quantity)];
+        let left = InstanceKey::new(
+            definition(b"id"),
+            &kinds,
+            vec![
+                InstanceArgument::Type(Type::Scalar(ScalarType::I64)),
+                InstanceArgument::ConstQuantity(Quantity::AFFINE),
+            ],
+        )
+        .unwrap();
+        let right = InstanceKey::new(
+            definition(b"id"),
+            &kinds,
+            vec![
+                InstanceArgument::Type(Type::Scalar(ScalarType::I64)),
+                InstanceArgument::ConstQuantity(Quantity::AFFINE),
+            ],
+        )
+        .unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.fingerprint(), right.fingerprint());
+
+        let mut graph = InstanceGraph::default();
+        assert!(
+            graph
+                .discover_root(
+                    InstanceRoot {
+                        key: left.clone(),
+                        reason: "entry".into()
+                    },
+                    InstanceLimits::default(),
+                )
+                .unwrap()
+        );
+        assert!(
+            !graph
+                .discover_root(
+                    InstanceRoot {
+                        key: right,
+                        reason: "duplicate".into()
+                    },
+                    InstanceLimits::default(),
+                )
+                .unwrap()
+        );
+        assert_eq!(graph.pop_pending(), Some(left));
+        assert_eq!(graph.pop_pending(), None);
+    }
+
+    #[test]
+    fn executable_instances_reject_open_or_body_local_terms() {
+        let generic = InstanceKey::new(
+            definition(b"id"),
+            &[GenericKind::Type],
+            vec![InstanceArgument::Type(Type::Generic(0))],
+        );
+        assert!(matches!(
+            generic,
+            Err(InstanceKeyError::NonConcreteType { .. })
+        ));
+
+        let open_row = InstanceKey::new(
+            definition(b"effect"),
+            &[GenericKind::EffectRow],
+            vec![InstanceArgument::EffectRow(EffectRow {
+                effects: BTreeSet::new(),
+                projections: vec![],
+                tail: Some(EffectTail::Generic(0)),
+            })],
+        );
+        assert!(matches!(
+            open_row,
+            Err(InstanceKeyError::OpenEffectRow { .. })
+        ));
+    }
+
+    #[test]
+    fn graph_preserves_recursive_edges_without_duplicate_instances() {
+        let kinds = [GenericKind::Type];
+        let first = InstanceKey::new(
+            definition(b"first"),
+            &kinds,
+            vec![InstanceArgument::Type(Type::Scalar(ScalarType::I64))],
+        )
+        .unwrap();
+        let second = InstanceKey::new(
+            definition(b"second"),
+            &kinds,
+            vec![InstanceArgument::Type(Type::Scalar(ScalarType::I64))],
+        )
+        .unwrap();
+        let mut graph = InstanceGraph::default();
+        let limits = InstanceLimits::default();
+        graph
+            .discover_root(
+                InstanceRoot {
+                    key: first.clone(),
+                    reason: "entry".into(),
+                },
+                limits,
+            )
+            .unwrap();
+        graph
+            .discover_callee(&first, second.clone(), limits)
+            .unwrap();
+        assert!(
+            !graph
+                .discover_callee(&second, first.clone(), limits)
+                .unwrap()
+        );
+        assert_eq!(graph.breadth_first_from_roots(), vec![first, second]);
+    }
+}
