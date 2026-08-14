@@ -1,7 +1,8 @@
 use grandiose_stage0::{
     BodySyntax, CaptureMode, CoreHandlerResumption, CoreKind, DeclarationScan, DefinitionIndex,
     ElaboratedInterface, FileKey, FlowEventKind, InterfaceSet, LexedFile, Lifetime, LogicalPath,
-    MirInstruction, MirLowering, PackageKey, PlaceFlow, Type, TypedBody, implementation_method_key,
+    MirInstruction, MirLowering, PackageKey, PlaceFlow, Quantity, Type, TypedBody,
+    implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -2073,6 +2074,47 @@ fn affine_discarded_resumption_lowers_to_a_runtime_handler_cancellation() {
             .iter()
             .any(|instruction| matches!(instruction, MirInstruction::Cancel))
     }));
+}
+
+#[test]
+fn mir_lowering_rejects_cancellation_that_violates_a_frozen_required_resume_contract() {
+    let mut core = core_for(
+        "core-handler-frozen-cleanup-contract@0.1.0",
+        "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); value + 1 } { Ask::ask() with _ => 7 } }",
+    );
+    let clause = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Handle { clauses, .. } => clauses.first_mut(),
+            _ => None,
+        })
+        .expect("fixture must elaborate one handler clause");
+    // Simulate a malformed post-Core transformation. The static-to-MIR
+    // boundary must not lower a zero-use cleanup when the frozen contract has
+    // been forged to require exactly one continuation use.
+    clause
+        .continuation
+        .as_mut()
+        .expect("discarded arm retains its continuation contract")
+        .invocation = Quantity::ONCE;
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    let lowered = MirLowering::lower(
+        grandiose_stage0::DefKey(grandiose_stage0::Digest::of_bytes(
+            b"frozen-handler-cleanup-contract",
+        )),
+        &core,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "G6002"
+                    && diagnostic.message.contains("resumption quantity disagrees")
+            }),
+        "lowering accepted cancellation that contradicted its frozen contract: {lowered:#?}"
+    );
 }
 
 #[test]

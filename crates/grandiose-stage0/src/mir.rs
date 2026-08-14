@@ -965,7 +965,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_linear_resumptions(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -991,7 +991,7 @@ impl MirLowering {
             lowerer.lower_root_finite_replay_safe_resumption(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1017,7 +1017,7 @@ impl MirLowering {
             lowerer.lower_root_runtime_one_shot_resumption(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1043,7 +1043,7 @@ impl MirLowering {
             .lower_root_runtime_grouped_sibling_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1069,7 +1069,7 @@ impl MirLowering {
             .lower_root_runtime_multiple_sibling_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1095,7 +1095,7 @@ impl MirLowering {
             .lower_root_runtime_ordered_nested_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1121,7 +1121,7 @@ impl MirLowering {
             lowerer.lower_root_runtime_deep_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1147,7 +1147,7 @@ impl MirLowering {
             lowerer.lower_root_runtime_nested_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1171,7 +1171,7 @@ impl MirLowering {
         }
         if let Some(function) = lowerer.lower_root_let_resumption(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1197,7 +1197,7 @@ impl MirLowering {
             lowerer.lower_root_runtime_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1223,7 +1223,7 @@ impl MirLowering {
             lowerer.lower_root_terminal_pattern_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1248,7 +1248,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_completion_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1272,7 +1272,7 @@ impl MirLowering {
         }
         if let Some(function) = lowerer.lower_root_short_circuit(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
-                if let Err(message) = function.validate() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                     return Self {
                         function: None,
                         lifted: BTreeMap::new(),
@@ -1319,7 +1319,7 @@ impl MirLowering {
                     terminator: MirTerminator::Return { value: root },
                 }],
             };
-            if let Err(message) = function.validate() {
+            if let Err(message) = validate_lowered_handler_contracts(body, &function) {
                 return Self {
                     function: None,
                     lifted: BTreeMap::new(),
@@ -1545,6 +1545,273 @@ impl MirFunction {
             MirTerminator::Unreachable => Ok(()),
         }
     }
+}
+
+/// Check that handler instructions emitted by one of the specialised lowerers
+/// still implement the interface frozen by Typed Core.  The VM deliberately
+/// does not need to know about source quantities or effect rows; this is the
+/// last boundary where those source-level contracts and concrete handler
+/// frames coexist.
+///
+/// Besides matching frame identities, this makes cancellation an explicit
+/// cleanup choice.  A `Cancel` may only occur in the target region of an arm
+/// whose frozen resumption was discarded and whose quantity admits zero uses.
+/// Resumptive and partial arms must instead expose a `Resume` or `Forward`
+/// exit.  Normal execution must uninstall every lexical frame it installs.
+fn validate_lowered_handler_contracts(
+    body: &TypedBody,
+    function: &MirFunction,
+) -> Result<(), String> {
+    function.validate()?;
+
+    let clauses = body
+        .expressions
+        .iter()
+        .flat_map(|expression| match &expression.kind {
+            CoreKind::Handle { clauses, .. } => clauses.iter().collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let installs = function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match instruction {
+            MirInstruction::InstallHandler {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                resume_type,
+                target,
+            } => Some((
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                resume_type,
+                target,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if installs.is_empty() {
+        return Ok(());
+    }
+    if clauses.is_empty() {
+        return Err("MIR installs a handler without a frozen Typed Core handler contract".into());
+    }
+
+    let uninstall_count = function
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| matches!(instruction, MirInstruction::UninstallHandler))
+        .count();
+    if uninstall_count < installs.len() {
+        return Err(format!(
+            "MIR installs {} handler frame(s) but provides only {uninstall_count} normal cleanup(s)",
+            installs.len()
+        ));
+    }
+
+    for (effect, arguments, operation, payload_destinations, resume_type, target) in installs {
+        // Probe each source arm with independent substitutions: a refutable
+        // earlier arm must not leak a partial generic match into the selected
+        // arm's frozen contract.
+        let Some((clause, mut substitutions)) =
+            clauses.iter().copied().find_map(|clause| {
+                let mut substitutions = BTreeMap::new();
+                let matches =
+                    clause.effect.definition == *effect
+                        && clause.effect.arguments.len() == arguments.len()
+                        && clause.effect.arguments.iter().zip(arguments).all(
+                            |(expected, actual)| {
+                                type_contract_matches(expected, actual, &mut substitutions)
+                            },
+                        )
+                        && clause.operation == *operation
+                        && clause.payload_types.len() == payload_destinations.len()
+                        && clause.payload_types.iter().zip(payload_destinations).all(
+                            |(expected, local)| {
+                                function.local_type(*local).is_ok_and(|actual| {
+                                    type_contract_matches(expected, actual, &mut substitutions)
+                                })
+                            },
+                        );
+                matches.then_some((clause, substitutions))
+            })
+        else {
+            return Err(
+                "MIR handler frame has no matching frozen effect operation contract".into(),
+            );
+        };
+
+        if clause.terminal {
+            if clause.continuation.is_some()
+                || !matches!(clause.resumption, CoreHandlerResumption::Terminal)
+            {
+                return Err("terminal handler frame retained a continuation contract".into());
+            }
+            continue;
+        }
+        let Some(contract) = clause.continuation.as_ref() else {
+            return Err("nonterminal handler frame lost its frozen continuation contract".into());
+        };
+        let declared_quantity = match &clause.resumption {
+            CoreHandlerResumption::Tail { quantity }
+            | CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Discard { quantity } => *quantity,
+            CoreHandlerResumption::Terminal => unreachable!("terminal arms returned above"),
+        };
+        if contract.invocation != declared_quantity {
+            return Err(
+                "MIR handler resumption quantity disagrees with its frozen continuation contract"
+                    .into(),
+            );
+        }
+        // `InstallHandler::resume_type` is the value injected back into the
+        // suspended `Perform`, not the outer handler result returned by the
+        // continuation call.  The former is the frozen continuation
+        // parameter; confusing the two would reject handlers that transform
+        // an operation result before returning their final result.
+        if !type_contract_matches(&contract.parameter, resume_type, &mut substitutions) {
+            return Err(
+                "MIR handler resume type disagrees with the frozen continuation parameter".into(),
+            );
+        }
+
+        let exits = handler_region_exits(function, *target);
+        match &clause.resumption {
+            CoreHandlerResumption::Discard { .. } => {
+                if declared_quantity.requires_positive_use() || !exits.cancel {
+                    return Err(
+                        "MIR cancellation does not implement the frozen discarded-continuation contract"
+                            .into(),
+                    );
+                }
+            }
+            CoreHandlerResumption::Tail { .. } | CoreHandlerResumption::Explicit { .. } => {
+                if !declared_quantity.contains(crate::quantity::Quantity::ONCE)
+                    || (!exits.resume && !exits.forward)
+                {
+                    return Err(
+                        "MIR handler exit does not implement the frozen resumption contract".into(),
+                    );
+                }
+                if exits.cancel {
+                    return Err(
+                        "MIR cancellation is not permitted for a resumptive handler contract"
+                            .into(),
+                    );
+                }
+            }
+            CoreHandlerResumption::Terminal => {
+                return Err("nonterminal handler frame was lowered as terminal".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Frozen declarations can retain an operation-generic slot while the body
+/// has already inferred its concrete argument.  Treat those slots as
+/// unification variables *only inside this immutable contract match*, keeping
+/// repeated occurrences equal without allowing MIR to conflate distinct
+/// protocol instances.
+fn type_contract_matches(
+    expected: &Type,
+    actual: &Type,
+    substitutions: &mut BTreeMap<u32, Type>,
+) -> bool {
+    match expected {
+        Type::Generic(index) => match substitutions.get(index) {
+            Some(previous) => previous == actual,
+            None => {
+                substitutions.insert(*index, actual.clone());
+                true
+            }
+        },
+        Type::Nominal {
+            definition,
+            arguments,
+        } => {
+            matches!(actual, Type::Nominal { definition: actual_definition, arguments: actual_arguments }
+            if definition == actual_definition
+                && arguments.len() == actual_arguments.len()
+                && arguments.iter().zip(actual_arguments).all(|(expected, actual)| {
+                    type_contract_matches(expected, actual, substitutions)
+                }))
+        }
+        Type::Tuple(values) => matches!(actual, Type::Tuple(actual_values)
+        if values.len() == actual_values.len()
+            && values.iter().zip(actual_values).all(|(expected, actual)| {
+                type_contract_matches(expected, actual, substitutions)
+            })),
+        Type::Array(value) => matches!(actual, Type::Array(actual_value)
+            if type_contract_matches(value, actual_value, substitutions)),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => matches!(actual, Type::Reference {
+            mutability: actual_mutability,
+            lifetime: actual_lifetime,
+            referent: actual_referent,
+        } if mutability == actual_mutability
+            && lifetime == actual_lifetime
+            && type_contract_matches(referent, actual_referent, substitutions)),
+        // A frozen Core contract must not retain body inference variables, but
+        // recovery products do.  They never constrain a valid MIR frame.
+        Type::Infer(_) | Type::Error => true,
+        _ => expected == actual,
+    }
+}
+
+#[derive(Default)]
+struct HandlerRegionExits {
+    resume: bool,
+    forward: bool,
+    cancel: bool,
+}
+
+/// The normal CFG does not encode `Perform`'s dynamic jump to a handler
+/// target, but it does encode every structural decision within that target.
+/// Follow those edges to discover the cleanup transfer selected by each arm.
+fn handler_region_exits(function: &MirFunction, start: MirBlockId) -> HandlerRegionExits {
+    let mut pending = vec![start];
+    let mut visited = BTreeSet::new();
+    let mut exits = HandlerRegionExits::default();
+    while let Some(block) = pending.pop() {
+        if !visited.insert(block) {
+            continue;
+        }
+        let Some(block) = function.blocks.get(block.0 as usize) else {
+            continue;
+        };
+        for instruction in &block.instructions {
+            match instruction {
+                MirInstruction::Resume { .. } => exits.resume = true,
+                MirInstruction::Forward => exits.forward = true,
+                MirInstruction::Cancel => exits.cancel = true,
+                _ => {}
+            }
+        }
+        match block.terminator {
+            MirTerminator::Goto { target, .. } => pending.push(target),
+            MirTerminator::SwitchBool {
+                then_target,
+                else_target,
+                ..
+            } => {
+                pending.push(then_target);
+                pending.push(else_target);
+            }
+            MirTerminator::Return { .. } | MirTerminator::Unreachable => {}
+        }
+    }
+    exits
 }
 impl MirProgram {
     pub fn validate(&self) -> Result<(), String> {
