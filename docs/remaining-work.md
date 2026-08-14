@@ -14,9 +14,10 @@ retained below but scheduled after the core language and tooling tranche.
 
 - static-handler specialization beyond the implemented direct and one-hop
   forwarded terminal fusion, canonical single-performance one-shot
-  resume/cancel composition, and replay-safe pure-residual finite multi-shot
-  cloning: deeper forwarding graphs, branching or repeated performances,
-  captured continuations, and dynamic multishot/deep-reinstating cases.
+  resume/cancel composition, replay-safe pure-residual finite multi-shot
+  cloning, and arbitrary-depth direct exact-one-shot handler nesting with
+  refutable frame forwarding: branching or repeated performances, captured
+  continuations, and dynamic multishot/deep-reinstating cases.
 
 ## 5. MIR and bytecode backend
 
