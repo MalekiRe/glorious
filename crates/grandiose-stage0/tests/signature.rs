@@ -1,6 +1,6 @@
 use grandiose_stage0::{
-    DeclarationScan, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout, FileKey,
-    InterfaceSet, LexedFile, LogicalPath, PackageKey, Quantity, ScalarType, Type,
+    DeclarationScan, EffectTail, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
+    FileKey, InterfaceSet, LexedFile, LogicalPath, PackageKey, Quantity, ScalarType, Type,
 };
 
 #[test]
@@ -480,6 +480,32 @@ fn associated_effect_row_projections_are_preserved_in_frozen_signatures() {
             && name == "Effects"
             && item_arguments.is_empty()
     ));
+}
+
+#[test]
+fn kinded_effect_row_binders_preserve_open_row_tails() {
+    let package = PackageKey("signature-open-row@0.1.0".into());
+    let source = "pub fn relay<e: EffectRow>() -> i64 / { | e } { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let relay = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .unwrap()
+        .key;
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&relay).unwrap() else {
+        panic!("expected callable")
+    };
+    assert_eq!(signature.effects.tail, Some(EffectTail::Generic(0)));
 }
 
 #[test]

@@ -1126,12 +1126,19 @@ impl Elaborator<'_> {
         }
     }
     fn effect_row(&mut self, value: &EffectRowHeader) -> EffectRow {
-        if let Some(tail) = &value.tail {
-            self.error(
-                "G3311",
-                format!("effect-row tail `{tail}` requires a declared `EffectRow` generic binder"),
-            );
-        }
+        let tail = value.tail.as_ref().and_then(|tail| {
+            self.generics
+                .get(tail)
+                .copied()
+                .map(crate::EffectTail::Generic)
+                .or_else(|| {
+                    self.error(
+                        "G3311",
+                        format!("effect-row tail `{tail}` requires a declared `EffectRow` generic binder"),
+                    );
+                    None
+                })
+        });
         let mut effects = vec![];
         let mut projections = vec![];
         for effect in &value.effects {
@@ -1207,7 +1214,7 @@ impl Elaborator<'_> {
         EffectRow {
             effects: effects.into_iter().collect(),
             projections,
-            tail: None,
+            tail,
         }
     }
     fn nominal_layout(&mut self, layout: &NominalLayoutHeader) -> ElaboratedNominalLayout {

@@ -1212,6 +1212,13 @@ impl Parser<'_> {
         while self.current().is_some() && !self.at_operator(">") {
             if let Some(name) = self.identifier() {
                 names.push(name);
+                if self.punctuation(':') {
+                    if self.word() == Some("EffectRow") {
+                        self.position += 1;
+                    } else {
+                        self.error("G3205", "expected `EffectRow` after generic kind `:`");
+                    }
+                }
             } else {
                 self.position += 1;
                 self.recovered = true;

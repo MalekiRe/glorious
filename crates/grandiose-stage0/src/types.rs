@@ -19,6 +19,15 @@ pub struct InferVar(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EffectVar(pub u32);
 
+/// The one open tail permitted in a canonical effect row. Inference tails are
+/// body-local; generic tails survive frozen signatures but must be instantiated
+/// or proven closed before code generation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum EffectTail {
+    Infer(EffectVar),
+    Generic(u32),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mutability {
     Shared,
@@ -89,7 +98,7 @@ pub struct EffectRow {
     pub projections: Vec<EffectRowProjection>,
     /// Body-local row variable. It may not cross into a frozen interface or
     /// Typed Core product before elaboration has resolved it.
-    pub tail: Option<EffectVar>,
+    pub tail: Option<EffectTail>,
 }
 
 impl EffectRow {
@@ -165,6 +174,7 @@ pub enum TypeError {
     },
     EffectOccurs(EffectVar, EffectRow),
     UnresolvedEffect(EffectVar),
+    UnresolvedGenericEffectRow(u32),
     Unresolved(InferVar),
 }
 
@@ -194,7 +204,7 @@ impl InferContext {
         EffectRow {
             effects: BTreeSet::new(),
             projections: vec![],
-            tail: Some(variable),
+            tail: Some(EffectTail::Infer(variable)),
         }
     }
 
@@ -377,8 +387,11 @@ impl InferContext {
 
     pub fn zonk_effects(&mut self, effects: EffectRow) -> Result<EffectRow, TypeError> {
         let effects = self.resolve_effects(effects);
-        if let Some(variable) = effects.tail {
-            return Err(TypeError::UnresolvedEffect(variable));
+        if let Some(tail) = effects.tail {
+            return Err(match tail {
+                EffectTail::Infer(variable) => TypeError::UnresolvedEffect(variable),
+                EffectTail::Generic(index) => TypeError::UnresolvedGenericEffectRow(index),
+            });
         }
         Ok(EffectRow {
             effects: effects
@@ -441,28 +454,34 @@ impl InferContext {
                 expected: left,
                 found: right,
             }),
-            (Some(variable), None) if left_only.is_empty() => {
+            (Some(EffectTail::Infer(variable)), None) if left_only.is_empty() => {
                 self.bind_effect(variable, EffectRow::closed_instances(right_only))?;
                 Ok(right)
             }
-            (None, Some(variable)) if right_only.is_empty() => {
+            (None, Some(EffectTail::Infer(variable))) if right_only.is_empty() => {
                 self.bind_effect(variable, EffectRow::closed_instances(left_only))?;
                 Ok(left)
             }
-            (Some(variable), Some(other)) if variable == other => Ok(EffectRow {
-                effects: left.effects.union(&right.effects).cloned().collect(),
-                projections: vec![],
-                tail: Some(variable),
-            }),
-            (Some(variable), Some(other)) => {
+            (Some(EffectTail::Infer(variable)), Some(EffectTail::Infer(other)))
+                if variable == other =>
+            {
+                Ok(EffectRow {
+                    effects: left.effects.union(&right.effects).cloned().collect(),
+                    projections: vec![],
+                    tail: Some(EffectTail::Infer(variable)),
+                })
+            }
+            (Some(EffectTail::Infer(variable)), Some(EffectTail::Infer(other))) => {
                 let remainder = self.fresh_effects();
-                let tail = remainder.tail.expect("fresh effect row is open");
+                let Some(EffectTail::Infer(tail)) = remainder.tail else {
+                    unreachable!("fresh effect row has an inference tail")
+                };
                 self.bind_effect(
                     variable,
                     EffectRow {
                         effects: right_only,
                         projections: vec![],
-                        tail: Some(tail),
+                        tail: Some(EffectTail::Infer(tail)),
                     },
                 )?;
                 self.bind_effect(
@@ -470,13 +489,13 @@ impl InferContext {
                     EffectRow {
                         effects: left_only,
                         projections: vec![],
-                        tail: Some(tail),
+                        tail: Some(EffectTail::Infer(tail)),
                     },
                 )?;
                 Ok(EffectRow {
                     effects: left.effects.union(&right.effects).cloned().collect(),
                     projections: vec![],
-                    tail: Some(tail),
+                    tail: Some(EffectTail::Infer(tail)),
                 })
             }
             _ => Err(TypeError::EffectRow {
@@ -627,7 +646,7 @@ impl InferContext {
     }
 
     fn bind_effect(&mut self, variable: EffectVar, value: EffectRow) -> Result<(), TypeError> {
-        if value.tail == Some(variable) && value.effects.is_empty() {
+        if value.tail == Some(EffectTail::Infer(variable)) && value.effects.is_empty() {
             return Ok(());
         }
         if self.effect_occurs(variable, &value) {
@@ -638,7 +657,7 @@ impl InferContext {
     }
 
     fn resolve_effects(&mut self, effects: EffectRow) -> EffectRow {
-        let Some(variable) = effects.tail else {
+        let Some(EffectTail::Infer(variable)) = effects.tail else {
             return effects;
         };
         let Some(binding) = self.effect_bindings[variable.0 as usize].clone() else {
@@ -659,7 +678,7 @@ impl InferContext {
 
     fn effect_occurs(&mut self, variable: EffectVar, effects: &EffectRow) -> bool {
         let effects = self.resolve_effects(effects.clone());
-        effects.tail == Some(variable)
+        effects.tail == Some(EffectTail::Infer(variable))
     }
 
     fn occurs(&mut self, variable: InferVar, value: &Type) -> bool {
@@ -792,11 +811,15 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
                 encode_types(&projection.item_arguments, output);
             }
             match effects.tail {
-                Some(variable) => {
+                Some(EffectTail::Infer(variable)) => {
                     output.push(0);
                     output.extend_from_slice(&variable.0.to_le_bytes());
                 }
-                None => output.push(1),
+                Some(EffectTail::Generic(index)) => {
+                    output.push(1);
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                None => output.push(2),
             }
             output.extend_from_slice(&invocation.lower.to_le_bytes());
             match invocation.upper {
