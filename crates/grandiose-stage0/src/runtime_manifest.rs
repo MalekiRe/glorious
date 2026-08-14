@@ -106,6 +106,7 @@ pub enum PrimitiveRole {
     /// frozen specialization accepts an i64 value and a u32 wrapping count.
     IntShl,
     IntConvertCheckedToU32,
+    IntConvertCheckedToUsize,
 }
 
 impl PrimitiveRole {
@@ -160,6 +161,7 @@ impl PrimitiveRole {
             Self::IntShr => "int-shr",
             Self::IntShl => "int-shl",
             Self::IntConvertCheckedToU32 => "int-convert-checked-to-u32",
+            Self::IntConvertCheckedToUsize => "int-convert-checked-to-usize",
         }
     }
 
@@ -214,6 +216,7 @@ impl PrimitiveRole {
             "int-shr" => Self::IntShr,
             "int-shl" => Self::IntShl,
             "int-convert-checked-to-u32" => Self::IntConvertCheckedToU32,
+            "int-convert-checked-to-usize" => Self::IntConvertCheckedToUsize,
             _ => return None,
         })
     }
@@ -635,6 +638,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntConvertCheckedToUsize => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Scalar(crate::ScalarType::Usize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntBitNot => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
@@ -741,6 +755,7 @@ fn manifest_digest(
             PrimitiveRole::IntShr => 44,
             PrimitiveRole::IntShl => 43,
             PrimitiveRole::IntConvertCheckedToU32 => 47,
+            PrimitiveRole::IntConvertCheckedToUsize => 49,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
