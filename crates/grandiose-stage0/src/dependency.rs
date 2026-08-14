@@ -15,6 +15,7 @@ pub enum DependencyNode {
     Input(FileKey),
     Interface(ModuleKey),
     Fixity(ModuleKey),
+    Body(DefKey),
     Core(DefKey),
     Mir(DefKey),
     Artifact(PackageKey),

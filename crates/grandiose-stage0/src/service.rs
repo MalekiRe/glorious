@@ -763,6 +763,11 @@ impl StageZeroCompiler {
                 } else {
                     BodySyntax::parse(&lexed, text, body_range)
                 };
+                dependencies.record(
+                    DependencyNode::Body(declaration.key),
+                    body_fingerprint(&body),
+                    vec![DependencyNode::Input(node.file)],
+                );
                 diagnostics.extend(body.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
                         diagnostic.code,
@@ -853,7 +858,7 @@ impl StageZeroCompiler {
                     .values()
                     .map(|module| DependencyNode::Interface(module.key.clone()))
                     .collect::<Vec<_>>();
-                core_dependencies.push(DependencyNode::Input(node.file));
+                core_dependencies.push(DependencyNode::Body(declaration.key));
                 core_dependencies.push(DependencyNode::Fixity(node.key.clone()));
                 dependencies.record(
                     DependencyNode::Core(declaration.key),
@@ -900,6 +905,12 @@ impl StageZeroCompiler {
                         continue;
                     };
                     let body = BodySyntax::parse(&lexed, text, body_range);
+                    let method_key = implementation_method_key(implementation.key, &method.name);
+                    dependencies.record(
+                        DependencyNode::Body(method_key),
+                        body_fingerprint(&body),
+                        vec![DependencyNode::Input(node.file)],
+                    );
                     diagnostics.extend(body.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
                             diagnostic.code,
@@ -980,13 +991,12 @@ impl StageZeroCompiler {
                         && core_validation.is_empty()
                         && core.diagnostics.is_empty()
                         && body.diagnostics.is_empty();
-                    let method_key = implementation_method_key(implementation.key, &method.name);
                     let mut core_dependencies = graph
                         .modules
                         .values()
                         .map(|module| DependencyNode::Interface(module.key.clone()))
                         .collect::<Vec<_>>();
-                    core_dependencies.push(DependencyNode::Input(node.file));
+                    core_dependencies.push(DependencyNode::Body(method_key));
                     core_dependencies.push(DependencyNode::Fixity(node.key.clone()));
                     dependencies.record(
                         DependencyNode::Core(method_key),
@@ -1213,6 +1223,17 @@ fn mir_fingerprint(function: &MirFunction) -> Digest {
     Digest::of_parts([
         b"grandiose-stage0-mir-v1".as_slice(),
         format!("{function:?}").as_bytes(),
+    ])
+}
+
+/// Body syntax is a request-local frontend product. It includes recovery and
+/// spans, because a source edit must cause that exact parsed body to be
+/// checked again; downstream Core receives a span-free semantic fingerprint
+/// and can still go green when the elaborated meaning is unchanged.
+fn body_fingerprint(body: &BodySyntax) -> Digest {
+    Digest::of_parts([
+        b"grandiose-stage0-body-syntax-v1".as_slice(),
+        format!("{body:?}").as_bytes(),
     ])
 }
 

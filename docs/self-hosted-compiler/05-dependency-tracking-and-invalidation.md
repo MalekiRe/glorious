@@ -11,12 +11,13 @@ Stage zero tracks these typed products:
 - `Input(FileKey)` — supplied source bytes.
 - `Interface(ModuleKey)` — the frozen public interface of one module.
 - `Fixity(ModuleKey)` — source-defined operator environment.
+- `Body(DefKey)` — parsed body syntax before semantic elaboration.
 - `Core(DefKey)` — frozen, validated typed Core for one declaration.
 - `Mir(DefKey)` — lowered MIR for one callable.
 - `Artifact(PackageKey)` — a verified VM program.
 
 The service records source-to-interface, interface-to-fixity,
-source/interface/fixity-to-Core, Core-to-MIR, and reachable-MIR-to-artifact
+source-to-body, body/interface/fixity-to-Core, Core-to-MIR, and reachable-MIR-to-artifact
 edges while it runs the real semantic phases. Facts are staged with the
 request's interface-cache transaction and publish only after the final
 cancellation check accepts the outcome. Failed, cancelled, and
