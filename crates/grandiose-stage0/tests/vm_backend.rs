@@ -119,6 +119,52 @@ fn verifier_rejects_forged_text_family_opcode_abis() {
 }
 
 #[test]
+fn verifier_rejects_forged_checked_char_opcode_abi() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-char-family-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Text, VmType::Text, VmType::U32, VmType::U32],
+        instructions: vec![
+            VmInstruction::ConstText {
+                dst: 0,
+                value: "same".into(),
+            },
+            VmInstruction::ConstText {
+                dst: 1,
+                value: "same".into(),
+            },
+            VmInstruction::TextEq {
+                dst: 2,
+                left: 0,
+                right: 1,
+            },
+            VmInstruction::CharFromU32Checked { dst: 3, value: 2 },
+            VmInstruction::Return { value: 3 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"forged-char-family-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let error = verify_vm(candidate).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            VmArtifactError::TypeMismatch {
+                expected: VmType::Char,
+                ..
+            }
+        ),
+        "unexpected verifier result: {error:?}"
+    );
+}
+
+#[test]
 fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols() {
     use grandiose_stage0::{ConstKind, Quantity, StructuralU32Expr};
 

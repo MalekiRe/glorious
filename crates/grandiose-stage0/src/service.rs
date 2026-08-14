@@ -1133,6 +1133,8 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::TextEq,
                         crate::PrimitiveRole::TextFromUtf8Checked,
                         crate::PrimitiveRole::TextAsBytes,
+                        crate::PrimitiveRole::CharFromU32Checked,
+                        crate::PrimitiveRole::CharToU32,
                     ]
                     .iter()
                     .any(|role| manifest.primitives.get(role) == Some(&declaration.key))

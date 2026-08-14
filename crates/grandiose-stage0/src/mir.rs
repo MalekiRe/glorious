@@ -141,6 +141,14 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    CharFromU32Checked {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    CharToU32 {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1159,6 +1167,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::TextEq { dst, .. }
         | MirInstruction::TextFromUtf8Checked { dst, .. }
         | MirInstruction::TextAsBytes { dst, .. }
+        | MirInstruction::CharFromU32Checked { dst, .. }
+        | MirInstruction::CharToU32 { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3041,6 +3051,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::TextEq { .. }
         | MirInstruction::TextFromUtf8Checked { .. }
         | MirInstruction::TextAsBytes { .. } => Ok(()),
+        MirInstruction::CharFromU32Checked { .. } | MirInstruction::CharToU32 { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -3727,6 +3738,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::TextEq { dst, left, right } => vec![*dst, *left, *right],
         MirInstruction::TextFromUtf8Checked { dst, value }
         | MirInstruction::TextAsBytes { dst, value } => vec![*dst, *value],
+        MirInstruction::CharFromU32Checked { dst, value }
+        | MirInstruction::CharToU32 { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -12982,6 +12995,49 @@ impl Lowerer<'_> {
                             }
                             self.instructions
                                 .push(MirInstruction::TextAsBytes { dst, value: *value });
+                        }
+                        Some(PrimitiveRole::CharFromU32Checked) => {
+                            let [value] = arguments.as_slice() else {
+                                self.error(
+                                    "G6005",
+                                    "CharFromU32Checked primitive must have one u32 operand",
+                                );
+                                return None;
+                            };
+                            if !generic_arguments.is_empty()
+                                || self.locals[value.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::U32)
+                                || self.body.expression(id).ty
+                                    != Type::Scalar(crate::types::ScalarType::Char)
+                            {
+                                self.error("G6005", "CharFromU32Checked primitive ABI does not match manifest contract");
+                                return None;
+                            }
+                            self.instructions
+                                .push(MirInstruction::CharFromU32Checked { dst, value: *value });
+                        }
+                        Some(PrimitiveRole::CharToU32) => {
+                            let [value] = arguments.as_slice() else {
+                                self.error(
+                                    "G6005",
+                                    "CharToU32 primitive must have one Char operand",
+                                );
+                                return None;
+                            };
+                            if !generic_arguments.is_empty()
+                                || self.locals[value.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Char)
+                                || self.body.expression(id).ty
+                                    != Type::Scalar(crate::types::ScalarType::U32)
+                            {
+                                self.error(
+                                    "G6005",
+                                    "CharToU32 primitive ABI does not match manifest contract",
+                                );
+                                return None;
+                            }
+                            self.instructions
+                                .push(MirInstruction::CharToU32 { dst, value: *value });
                         }
                         Some(PrimitiveRole::BranchBool) => {
                             // BranchBool remains a source-level callable until

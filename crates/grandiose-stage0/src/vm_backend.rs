@@ -285,6 +285,14 @@ pub enum VmInstruction {
         dst: u32,
         value: u32,
     },
+    CharFromU32Checked {
+        dst: u32,
+        value: u32,
+    },
+    CharToU32 {
+        dst: u32,
+        value: u32,
+    },
     MakeTuple {
         dst: u32,
         fields: Vec<u32>,
@@ -760,6 +768,10 @@ pub enum VmArtifactError {
     Trap,
     /// Checked text construction rejected a byte sequence that is not UTF-8.
     InvalidUtf8,
+    /// Checked character construction rejected a non-Unicode-scalar `u32`.
+    InvalidChar {
+        value: u32,
+    },
     InstructionAfterReturn,
     MissingFunction {
         definition: DefKey,
@@ -891,7 +903,8 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 40 adds `u32`/`Bytes` values and opcodes 65 through 68 for the
+/// Schema 42 reserves G1 opcodes 48 and 49 for the checked Char/u32
+/// conversion family and relocates internal control encodings. Schema 40 adds `u32`/`Bytes` values and opcodes 65 through 68 for the
 /// manifest-bound Text family. Schema 39 adds a target-independent `usize`
 /// scalar and opcode 64 for the manifest-bound `TextByteLen` leaf. Schema 38 adds recursively validated
 /// nominal copy descriptors to each VM
@@ -907,7 +920,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 40;
+pub const STAGE0_VM_SCHEMA: u32 = 42;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2898,8 +2911,8 @@ impl<'a> Decoder<'a> {
                 value: self.u32()?,
             }),
             47 => Ok(VmInstruction::Forward),
-            48 => Ok(VmInstruction::Cancel),
-            49 => Ok(VmInstruction::CaptureResumption { dst: self.u32()? }),
+            69 => Ok(VmInstruction::Cancel),
+            70 => Ok(VmInstruction::CaptureResumption { dst: self.u32()? }),
             50 => Ok(VmInstruction::ResumeSnapshot {
                 snapshot: self.u32()?,
                 value: self.u32()?,
@@ -3056,6 +3069,14 @@ impl<'a> Decoder<'a> {
                 value: self.u32()?,
             }),
             68 => Ok(VmInstruction::TextAsBytes {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            48 => Ok(VmInstruction::CharFromU32Checked {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            49 => Ok(VmInstruction::CharToU32 {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
@@ -3800,6 +3821,14 @@ fn lower_instruction(
             value: value.0,
         },
         MirInstruction::TextAsBytes { dst, value } => VmInstruction::TextAsBytes {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::CharFromU32Checked { dst, value } => VmInstruction::CharFromU32Checked {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::CharToU32 { dst, value } => VmInstruction::CharToU32 {
             dst: dst.0,
             value: value.0,
         },
@@ -4657,6 +4686,18 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::TextAsBytes { dst, value } => {
                 expect_type(function, *dst, VmType::Bytes)?;
                 expect_type(function, *value, VmType::Text)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::CharFromU32Checked { dst, value } => {
+                expect_type(function, *dst, VmType::Char)?;
+                expect_type(function, *value, VmType::U32)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::CharToU32 { dst, value } => {
+                expect_type(function, *dst, VmType::U32)?;
+                expect_type(function, *value, VmType::Char)?;
                 read(&states, *value)?;
                 write(&mut states, *dst)?
             }
@@ -7078,6 +7119,24 @@ fn execute(
                 )?;
                 registers[dst as usize] = Some(VmValue::Bytes(Arc::from(text.as_bytes())));
             }
+            VmInstruction::CharFromU32Checked { dst, value } => {
+                let value = expect_u32(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let character =
+                    char::from_u32(value).ok_or(VmArtifactError::InvalidChar { value })?;
+                registers[dst as usize] = Some(VmValue::Char(character));
+            }
+            VmInstruction::CharToU32 { dst, value } => {
+                let value = expect_char(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::U32(value as u32));
+            }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
@@ -8297,9 +8356,9 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&value.to_le_bytes());
         }
         VmInstruction::Forward => output.push(47),
-        VmInstruction::Cancel => output.push(48),
+        VmInstruction::Cancel => output.push(69),
         VmInstruction::CaptureResumption { dst } => {
-            output.push(49);
+            output.push(70);
             output.extend_from_slice(&dst.to_le_bytes());
         }
         VmInstruction::ResumeSnapshot { snapshot, value } => {
@@ -8540,6 +8599,16 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         }
         VmInstruction::TextAsBytes { dst, value } => {
             output.push(68);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::CharFromU32Checked { dst, value } => {
+            output.push(48);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::CharToU32 { dst, value } => {
+            output.push(49);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
@@ -8804,6 +8873,24 @@ fn execute_with_arguments(
                         .expect("verified register"),
                 )?;
                 registers[*dst as usize] = Some(VmValue::Bytes(Arc::from(text.as_bytes())));
+            }
+            VmInstruction::CharFromU32Checked { dst, value } => {
+                let value = expect_u32(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                let character =
+                    char::from_u32(value).ok_or(VmArtifactError::InvalidChar { value })?;
+                registers[*dst as usize] = Some(VmValue::Char(character));
+            }
+            VmInstruction::CharToU32 { dst, value } => {
+                let value = expect_char(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::U32(value as u32));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;

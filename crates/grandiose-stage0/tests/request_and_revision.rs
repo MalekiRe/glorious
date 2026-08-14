@@ -72,7 +72,7 @@ fn stage_zero_build_identity_advances_the_vm_artifact_boundary() {
     let identity = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-vm"));
     assert_eq!(identity.bytecode_generation, STAGE0_BYTECODE_GENERATION);
     assert_eq!(identity.verifier_generation, STAGE0_VERIFIER_GENERATION);
-    assert_eq!(STAGE0_BYTECODE_GENERATION, 8);
+    assert_eq!(STAGE0_BYTECODE_GENERATION, 10);
     assert_eq!(STAGE0_VERIFIER_GENERATION, 6);
 
     let package = PackageKey("app@0.1.0".into());
@@ -228,6 +228,16 @@ fn runtime_manifest_selectors_are_canonical_semantic_world_inputs() {
                 role: PrimitiveRole::TextAsBytes,
                 module_path: "crate".into(),
                 name: "__g1_text_as_bytes".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::CharFromU32Checked,
+                module_path: "crate".into(),
+                name: "__g1_char_from_u32_checked".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::CharToU32,
+                module_path: "crate".into(),
+                name: "__g1_char_to_u32".into(),
             },
         ],
     });

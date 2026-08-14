@@ -33,6 +33,10 @@ pub enum PrimitiveRole {
     TextFromUtf8Checked,
     /// Borrow-free frozen byte snapshot of a UTF-8 text value.
     TextAsBytes,
+    /// Checked Unicode scalar construction from the G1 `u32` character ABI.
+    CharFromU32Checked,
+    /// Canonical Unicode scalar extraction to the G1 `u32` character ABI.
+    CharToU32,
 }
 
 impl PrimitiveRole {
@@ -44,6 +48,8 @@ impl PrimitiveRole {
             Self::TextEq => "text-eq",
             Self::TextFromUtf8Checked => "text-from-utf8-checked",
             Self::TextAsBytes => "text-as-bytes",
+            Self::CharFromU32Checked => "char-from-u32-checked",
+            Self::CharToU32 => "char-to-u32",
         }
     }
 
@@ -55,6 +61,8 @@ impl PrimitiveRole {
             "text-eq" => Self::TextEq,
             "text-from-utf8-checked" => Self::TextFromUtf8Checked,
             "text-as-bytes" => Self::TextAsBytes,
+            "char-from-u32-checked" => Self::CharFromU32Checked,
+            "char-to-u32" => Self::CharToU32,
             _ => return None,
         })
     }
@@ -260,6 +268,28 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::CharFromU32Checked => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::U32)],
+            result: Type::Scalar(ScalarType::Char),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::CharToU32 => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Char)],
+            result: Type::Scalar(ScalarType::U32),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
     }
 }
 fn manifest_digest(
@@ -277,6 +307,8 @@ fn manifest_digest(
             PrimitiveRole::TextEq => 3,
             PrimitiveRole::TextFromUtf8Checked => 4,
             PrimitiveRole::TextAsBytes => 5,
+            PrimitiveRole::CharFromU32Checked => 6,
+            PrimitiveRole::CharToU32 => 7,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
