@@ -1670,6 +1670,45 @@ fn associated_constants_normalize_overrides_defaults_and_const_generics() {
 }
 
 #[test]
+fn associated_constants_recursively_normalize_nested_projection_values_and_cycles() {
+    let (interface, signatures) = signatures(
+        "trait First { const Value: u32; } trait Second { const Value: u32; } struct Chosen<n: u32> {} impl Second for i64 { const Value = 7; } impl First for i64 { const Value = <i64 as Second>::Value; } trait Loop { const Value: u32; } impl Loop for i64 { const Value = <i64 as Loop>::Value; }",
+    );
+    let first = key(&interface, "First");
+    let looping = key(&interface, "Loop");
+    let chosen = key(&interface, "Chosen");
+    let nested = |trait_definition| GenericArgument::ConstProjection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition,
+        trait_arguments: vec![],
+        name: "Value".into(),
+        kind: ConstKind::U32,
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    assert_eq!(
+        solver.normalize_type(Type::Nominal {
+            definition: chosen,
+            arguments: vec![nested(first)],
+        }),
+        Ok(Type::Nominal {
+            definition: chosen,
+            arguments: vec![GenericArgument::ConstU32(7)],
+        }),
+        "a selected associated const must recursively reduce its own projection value"
+    );
+    assert!(
+        matches!(
+            solver.normalize_type(Type::Nominal {
+                definition: chosen,
+                arguments: vec![nested(looping)],
+            }),
+            Err(answer) if *answer == TraitProjectionAnswer::RecursiveProjection
+        ),
+        "recursive associated const definitions must not leak as VM-facing structural terms"
+    );
+}
+
+#[test]
 fn auto_traits_structurally_traverse_source_nominals_and_type_forms() {
     let (interface, signatures) = signatures(
         "auto trait Sendish {} struct Pair<T> { left: T, right: T } enum Choice<T> { Empty, One(T), Named { value: T } } impl !Sendish for Text {}",

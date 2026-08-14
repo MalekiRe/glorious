@@ -2861,6 +2861,11 @@ impl Elaborator<'_> {
             .associated_consts
             .iter()
             .map(|item| {
+                // Keep literal and binder values source-faithful so the
+                // implementation/trait contract pass reports its established
+                // kind-mismatch diagnostic. A projection, however, has no
+                // intrinsic literal kind: freeze it against the declaration
+                // contract that owns this associated item.
                 let value = match &item.value {
                     HeaderStructuralConst::U32(value) => GenericArgument::ConstU32(*value),
                     HeaderStructuralConst::Quantity(value) => {
@@ -2883,6 +2888,22 @@ impl Elaborator<'_> {
                         }),
                     HeaderStructuralConst::U32Expression(value) => {
                         self.elaborate_structural_u32_expression(value)
+                    }
+                    HeaderStructuralConst::Projection(_) => {
+                        let expected = self
+                            .index
+                            .associated_const_kind(relation.definition, &item.name)
+                            .unwrap_or_else(|| {
+                                self.error(
+                                    "G4161",
+                                    format!(
+                                        "implementation defines unknown associated constant `{}`",
+                                        item.name
+                                    ),
+                                );
+                                ConstKind::U32
+                            });
+                        self.structural_const(&item.value, expected)
                     }
                 };
                 (item.name.clone(), value)
@@ -2951,6 +2972,8 @@ impl Elaborator<'_> {
                         GenericArgument::ConstU32Expr(_) => ConstKind::U32,
                         GenericArgument::ConstQuantity(_) => ConstKind::Quantity,
                         GenericArgument::ConstGeneric { kind, .. } => *kind,
+                        GenericArgument::ConstProjection { kind, .. }
+                        | GenericArgument::ConstInfer { kind, .. } => *kind,
                         _ => ConstKind::U32,
                     };
                     (name, ElaboratedAssociatedConstDefinition { kind, value })
@@ -3058,6 +3081,20 @@ impl Elaborator<'_> {
             HeaderStructuralConst::U32Expression(value) if expected == ConstKind::U32 => {
                 self.elaborate_structural_u32_expression(value)
             }
+            HeaderStructuralConst::Projection(HeaderType::Projection {
+                subject,
+                trait_path,
+                trait_arguments,
+                name,
+                item_arguments,
+            }) => self.associated_const_projection_argument(
+                subject,
+                trait_path,
+                trait_arguments,
+                name,
+                item_arguments,
+                expected,
+            ),
             value => {
                 self.error(
                     "G4134",

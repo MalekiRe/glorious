@@ -85,6 +85,11 @@ pub struct DefinitionIndex {
     trait_generic_arities: BTreeMap<DefKey, u32>,
     trait_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     associated_type_generic_kinds: BTreeMap<(DefKey, String), Vec<GenericKind>>,
+    /// Associated structural constants are declaration-owned contracts just
+    /// like associated type binders.  Implementation headers need the kind
+    /// before their value can be frozen, especially when that value is a
+    /// delayed associated-constant projection rather than a literal.
+    associated_const_kinds: BTreeMap<(DefKey, String), crate::types::ConstKind>,
     effect_generic_arities: BTreeMap<DefKey, u32>,
     effect_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
 }
@@ -184,6 +189,10 @@ impl DefinitionIndex {
                     for item in &header.associated_types {
                         self.associated_type_generic_kinds
                             .insert((definition.key, item.name.clone()), item.generics.kinds());
+                    }
+                    for item in &header.associated_consts {
+                        self.associated_const_kinds
+                            .insert((definition.key, item.name.clone()), item.kind);
                     }
                 }
                 ParsedHeader::Effect(header) => {
@@ -532,6 +541,19 @@ impl DefinitionIndex {
         self.associated_type_generic_kinds
             .get(&(trait_definition, name.to_owned()))
             .map(Vec::as_slice)
+    }
+
+    /// Declared kind of an associated structural constant.  This is queried
+    /// while freezing an implementation member, before later interface
+    /// validation can compare its final elaborated value with the trait.
+    pub fn associated_const_kind(
+        &self,
+        trait_definition: DefKey,
+        name: &str,
+    ) -> Option<crate::types::ConstKind> {
+        self.associated_const_kinds
+            .get(&(trait_definition, name.to_owned()))
+            .copied()
     }
 
     pub fn effect_generic_arity(&self, definition: DefKey) -> Option<u32> {

@@ -340,6 +340,11 @@ fn mir_validation_rejects_unresolved_associated_const_projection_identity() {
     assert!(function.validate().is_err_and(|error| {
         error.contains("unresolved associated structural-constant projection")
     }));
+    // The VM emitter independently refuses to turn a forged, unresolved
+    // frozen projection into an executable artifact.  Source elaboration
+    // must normalize selected projections, but a hostile pre-VM producer
+    // cannot rely on that path to smuggle one across the backend boundary.
+    assert!(emit_vm(&function).is_err());
 }
 
 #[test]

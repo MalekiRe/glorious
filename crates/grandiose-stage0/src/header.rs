@@ -248,6 +248,11 @@ pub enum HeaderStructuralConst {
     Quantity(Quantity),
     Generic(String),
     U32Expression(HeaderStructuralU32Expr),
+    /// A delayed associated structural-constant selection. This is kept in
+    /// the header rather than parsed as a runtime expression so interface
+    /// elaboration can retain its mixed-kind trait evidence for later
+    /// concrete normalization.
+    Projection(HeaderType),
 }
 
 /// Source-shaped structural arithmetic.  Names are intentionally preserved
@@ -1774,6 +1779,9 @@ impl Parser<'_> {
     fn structural_const_value(&mut self) -> HeaderStructuralConst {
         if self.at_punctuation('[') {
             return HeaderStructuralConst::Quantity(self.structural_quantity_argument());
+        }
+        if self.at_operator("<") {
+            return HeaderStructuralConst::Projection(self.ty());
         }
         if self.starts_symbolic_structural_u32_expression() {
             return self

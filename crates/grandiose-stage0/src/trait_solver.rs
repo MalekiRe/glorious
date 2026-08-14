@@ -1857,18 +1857,31 @@ impl TraitSolver {
                         kind,
                     });
                 }
-                match self.normalize_associated_const(
-                    TraitGoal {
-                        relation: ElaboratedTraitReference {
-                            definition: trait_definition,
-                            arguments: trait_arguments,
-                        },
-                        subject: *subject,
+                let goal = TraitGoal {
+                    relation: ElaboratedTraitReference {
+                        definition: trait_definition,
+                        arguments: trait_arguments,
                     },
-                    &name,
-                    kind,
-                ) {
-                    TraitConstProjectionAnswer::Normalized { value, .. } => Ok(value),
+                    subject: *subject,
+                };
+                let key = associated_const_projection_key(&goal, &name, kind);
+                if active.contains(&key) {
+                    return Err(Box::new(TraitProjectionAnswer::RecursiveProjection));
+                }
+                if active.len() >= self.limits.max_depth as usize {
+                    return Err(Box::new(TraitProjectionAnswer::Overflow));
+                }
+                active.push(key);
+                let answer = self.normalize_associated_const(goal, &name, kind);
+                let result = match answer {
+                    // An associated const may itself be specified through a
+                    // second associated const. Keep reducing through the same
+                    // active stack so a concrete `A::X = B::Y` reaches a VM
+                    // structural term, while recursive definitions fail
+                    // closed instead of leaking an unresolved projection.
+                    TraitConstProjectionAnswer::Normalized { value, .. } => {
+                        self.normalize_trait_argument(value, active)
+                    }
                     TraitConstProjectionAnswer::Ambiguous => {
                         Err(Box::new(TraitProjectionAnswer::Ambiguous))
                     }
@@ -1881,7 +1894,9 @@ impl TraitSolver {
                     | TraitConstProjectionAnswer::AssociatedConstKind { .. } => {
                         Err(Box::new(TraitProjectionAnswer::NoSolution))
                     }
-                }
+                };
+                active.pop();
+                result
             }
             // The runtime projection carriers are still type-only. Trait
             // selection nevertheless preserves every other kind exactly;
@@ -3037,6 +3052,23 @@ fn associated_effect_row_projection_key(
         subject.as_slice(),
         name.as_bytes(),
         arguments.as_slice(),
+    ])
+}
+
+fn associated_const_projection_key(goal: &TraitGoal, name: &str, kind: crate::ConstKind) -> Digest {
+    let relation_arguments = canonical_generic_arguments_encoding(&goal.relation.arguments);
+    let subject = canonical_type_encoding(&goal.subject);
+    let kind = match kind {
+        crate::ConstKind::U32 => b"u32".as_slice(),
+        crate::ConstKind::Quantity => b"quantity".as_slice(),
+    };
+    Digest::of_parts([
+        b"grandiose-stage0-associated-const-projection-v1".as_slice(),
+        goal.relation.definition.0.as_bytes().as_slice(),
+        relation_arguments.as_slice(),
+        subject.as_slice(),
+        name.as_bytes(),
+        kind,
     ])
 }
 

@@ -2237,6 +2237,14 @@ fn service_normalizes_concrete_associated_const_signature_projections_before_vm(
 }
 
 #[test]
+fn service_recursively_normalizes_associated_const_projection_values_before_vm() {
+    let source = "trait First { const Value: u32; } trait Second { const Value: u32; } pub struct Chosen<n: u32> {} impl Second for i64 { const Value = 7; } impl First for i64 { const Value = <i64 as Second>::Value; } pub fn mirror(value: Chosen<<i64 as First>::Value>) -> Chosen<<i64 as First>::Value> { value } pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_unselected_concrete_associated_const_signature_projection() {
     let source = "trait Width { const Value: u32; } pub struct Chosen<n: u32> {} pub fn invalid(value: Chosen<<i64 as Width>::Value>) -> i64 { 0 } pub fn main() -> i64 { 42 }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
