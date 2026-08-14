@@ -87,6 +87,11 @@ runtime_manifest=(
     --runtime-leaf text-eq crate __g1_text_eq
     --runtime-leaf text-from-utf8-checked crate __g1_text_from_utf8_checked
     --runtime-leaf text-as-bytes crate __g1_text_as_bytes
+    --runtime-leaf int-checked-add crate __g1_int_checked_add
+    --runtime-leaf int-wrapping-add crate __g1_int_wrapping_add
+    --runtime-leaf int-equal crate __g1_int_equal
+    --runtime-leaf int-less crate __g1_int_less
+    --runtime-leaf int-greater crate __g1_int_greater
 )
 
 case "$mode" in

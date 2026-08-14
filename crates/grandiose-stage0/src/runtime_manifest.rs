@@ -159,6 +159,7 @@ impl PrimitiveRole {
             "int-wrapping-add" => Self::IntWrappingAdd,
             "int-equal" => Self::IntEqual,
             "int-less" => Self::IntLess,
+            "int-greater" => Self::IntGreater,
             _ => return None,
         })
     }
