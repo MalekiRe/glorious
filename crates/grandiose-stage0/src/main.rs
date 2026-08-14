@@ -3,12 +3,26 @@
 use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 use grandiose_stage0::{
-    CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest, LogicalPath, PackageKey,
-    SourceInput, StageZeroCompiler, decode_and_verify_program,
+    CompilationMode, CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, Digest,
+    LogicalPath, PackageKey, SourceInput, StageZeroCompiler, decode_and_verify_program,
 };
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DiagnosticFormat {
+    Text,
+    Json,
+}
+
 fn main() -> ExitCode {
-    let mut arguments = env::args().skip(1);
+    let (diagnostic_format, arguments) = match split_diagnostic_format(env::args().skip(1)) {
+        Ok(arguments) => arguments,
+        Err(message) => {
+            eprintln!("grc-stage0: {message}");
+            usage();
+            return ExitCode::from(2);
+        }
+    };
+    let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
         usage();
         return ExitCode::from(2);
@@ -72,9 +86,7 @@ fn main() -> ExitCode {
     };
     match StageZeroCompiler::new().compile(request) {
         Ok(outcome) => {
-            for diagnostic in outcome.diagnostics {
-                eprintln!("{}: {}", diagnostic.code, diagnostic.message);
-            }
+            render_diagnostics(&outcome.diagnostics, diagnostic_format);
             if command == "run" {
                 match outcome
                     .artifact
@@ -99,10 +111,45 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            for diagnostic in error.diagnostics() {
-                eprintln!("{}: {}", diagnostic.code, diagnostic.message);
-            }
+            render_diagnostics(&error.diagnostics(), diagnostic_format);
             ExitCode::from(1)
+        }
+    }
+}
+
+fn split_diagnostic_format(
+    arguments: impl IntoIterator<Item = String>,
+) -> Result<(DiagnosticFormat, Vec<String>), String> {
+    let mut format = DiagnosticFormat::Text;
+    let mut seen_format = false;
+    let mut positional = Vec::new();
+    let mut arguments = arguments.into_iter();
+    while let Some(argument) = arguments.next() {
+        if argument != "--diagnostics" {
+            positional.push(argument);
+            continue;
+        }
+        if seen_format {
+            return Err("--diagnostics may be specified at most once".into());
+        }
+        let Some(value) = arguments.next() else {
+            return Err("--diagnostics requires `text` or `json`".into());
+        };
+        format = match value.as_str() {
+            "text" => DiagnosticFormat::Text,
+            "json" => DiagnosticFormat::Json,
+            _ => return Err("--diagnostics requires `text` or `json`".into()),
+        };
+        seen_format = true;
+    }
+    Ok((format, positional))
+}
+
+fn render_diagnostics(diagnostics: &[CompileDiagnostic], format: DiagnosticFormat) {
+    for diagnostic in diagnostics {
+        match format {
+            DiagnosticFormat::Text => eprintln!("{}: {}", diagnostic.code, diagnostic.message),
+            DiagnosticFormat::Json => eprintln!("{}", diagnostic.to_json_line()),
         }
     }
 }
@@ -128,7 +175,7 @@ fn verify_program(path: &str) -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("usage: grc-stage0 <check|run> FILE");
-    eprintln!("       grc-stage0 emit-vm SOURCE OUTPUT");
-    eprintln!("       grc-stage0 verify-vm PROGRAM");
+    eprintln!("usage: grc-stage0 [--diagnostics text|json] <check|run> FILE");
+    eprintln!("       grc-stage0 [--diagnostics text|json] emit-vm SOURCE OUTPUT");
+    eprintln!("       grc-stage0 [--diagnostics text|json] verify-vm PROGRAM");
 }

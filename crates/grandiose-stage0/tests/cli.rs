@@ -84,3 +84,33 @@ fn cli_renders_invalid_request_failures_as_stable_diagnostics() {
 
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn cli_emits_structured_json_lines_for_compiler_diagnostics() {
+    let directory = temporary_directory();
+    let source = directory.join("invalid-utf8.glorious");
+    fs::write(&source, [0xff]).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args(["--diagnostics", "json", "check", source.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "expected exactly one JSON line: {stderr}"
+    );
+    assert!(
+        stderr.starts_with(
+            "{\"code\":\"G7018\",\"class\":\"input_corruption\",\"severity\":\"error\","
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("\"primary\":null"), "{stderr}");
+    assert!(stderr.contains("\"input_fingerprint\":null"), "{stderr}");
+    assert!(!stderr.contains("grc-stage0:"), "{stderr}");
+
+    fs::remove_dir_all(directory).unwrap();
+}

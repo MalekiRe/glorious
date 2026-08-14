@@ -35,6 +35,40 @@ impl CompileDiagnostic {
     /// explicit explanation that additional facts were suppressed.
     pub const DEFAULT_ERROR_LIMIT: usize = 100;
 
+    /// Serialize one published diagnostic as a self-contained JSON object.
+    ///
+    /// The service deliberately owns this small serializer instead of exposing
+    /// Rust `Debug` output to editor and build-tool clients. Field order is
+    /// fixed, source locations use stable file identities plus byte offsets,
+    /// and every control character in a diagnostic message is escaped
+    /// according to JSON's string grammar. Callers should emit one returned
+    /// value per line (JSON Lines), after the batch has crossed the ordinary
+    /// canonicalization and span-validation boundary.
+    pub fn to_json_line(&self) -> String {
+        let primary = self.primary.map_or_else(
+            || "null".to_owned(),
+            |primary| {
+                format!(
+                    "{{\"file\":\"{}\",\"start_byte\":{},\"end_byte\":{}}}",
+                    primary.file.0, primary.start, primary.end
+                )
+            },
+        );
+        let input_fingerprint = self.input_fingerprint.map_or_else(
+            || "null".to_owned(),
+            |fingerprint| format!("\"{fingerprint}\""),
+        );
+        format!(
+            "{{\"code\":\"{}\",\"class\":\"{}\",\"severity\":\"{}\",\"message\":\"{}\",\"primary\":{},\"input_fingerprint\":{}}}",
+            self.code,
+            self.class.json_name(),
+            self.severity.json_name(),
+            json_escape(&self.message),
+            primary,
+            input_fingerprint,
+        )
+    }
+
     fn source(code: &'static str, message: impl Into<String>, span: Option<Span>) -> Self {
         Self::new(code, message, DiagnosticClass::Source, span)
     }
@@ -213,6 +247,55 @@ impl CompileDiagnostic {
             &self.message,
         )
     }
+}
+
+impl Severity {
+    fn json_name(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Note => "note",
+        }
+    }
+}
+
+impl DiagnosticClass {
+    fn json_name(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::InputCorruption => "input_corruption",
+            Self::Source => "source",
+            Self::Recovery => "recovery",
+            Self::Resource => "resource",
+            Self::Cancellation => "cancellation",
+            Self::Cache => "cache",
+            Self::Invariant => "invariant",
+            Self::Verification => "verification",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0C}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write;
+                write!(&mut escaped, "\\u{:04x}", character as u32)
+                    .expect("writing into a String cannot fail");
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 #[derive(Debug)]
 pub struct CompilationOutcome {

@@ -256,6 +256,32 @@ fn compile_diagnostic_canonicalization_is_stable_and_deduplicates_exact_facts() 
 }
 
 #[test]
+fn compile_diagnostic_json_lines_are_deterministic_and_escape_control_text() {
+    let request = request("pub fn main() -> i64 { 0 }");
+    let diagnostic = CompileDiagnostic {
+        code: "G0001",
+        message: "line\n\"quoted\"\\tab\t\u{001b}🙂".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Warning,
+        primary: Some(grandiose_stage0::SourceSpan {
+            file: request.sources[0].key,
+            start: 4,
+            end: 9,
+        }),
+        input_fingerprint: Some(Digest::of_bytes(b"json-world")),
+    };
+
+    assert_eq!(
+        diagnostic.to_json_line(),
+        format!(
+            "{{\"code\":\"G0001\",\"class\":\"source\",\"severity\":\"warning\",\"message\":\"line\\n\\\"quoted\\\"\\\\tab\\t\\u001b🙂\",\"primary\":{{\"file\":\"{}\",\"start_byte\":4,\"end_byte\":9}},\"input_fingerprint\":\"{}\"}}",
+            request.sources[0].key.0,
+            Digest::of_bytes(b"json-world"),
+        )
+    );
+}
+
+#[test]
 fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severity_and_code() {
     let request = request("pub fn main() -> i64 { missing_name }");
     let file = request.sources[0].key;
