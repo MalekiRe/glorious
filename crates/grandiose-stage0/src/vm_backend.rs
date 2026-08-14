@@ -620,6 +620,12 @@ pub enum VmInstruction {
         left: u32,
         right: u32,
     },
+    /// Exact manifest-bound i64 bitwise-not. This is unary in the frozen
+    /// bytecode contract.
+    BitNotI64 {
+        dst: u32,
+        value: u32,
+    },
     SubI64 {
         dst: u32,
         left: u32,
@@ -1079,7 +1085,8 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 53 adds opcode 112 for manifest-bound i64 bitwise-xor. Schema 52
+/// Schema 54 adds opcode 113 for manifest-bound unary i64 bitwise-not. Schema
+/// 53 adds opcode 112 for manifest-bound i64 bitwise-xor. Schema 52
 /// adds opcode 111 for manifest-bound i64 bitwise-or. Schema 51
 /// adds opcode 107 for manifest-bound wrapping i64 multiplication.
 /// Schema 50 adds opcode 106 for manifest-bound wrapping i64 subtraction.
@@ -1108,7 +1115,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 53;
+pub const STAGE0_VM_SCHEMA: u32 = 54;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3221,6 +3228,10 @@ impl<'a> Decoder<'a> {
             111 => {
                 self.i64_arithmetic(|dst, left, right| VmInstruction::BitOrI64 { dst, left, right })
             }
+            113 => Ok(VmInstruction::BitNotI64 {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
             6 => {
@@ -4589,6 +4600,10 @@ fn lower_instruction(
             dst: dst.0,
             left: left.0,
             right: right.0,
+        },
+        MirInstruction::BitNotI64 { dst, value } => VmInstruction::BitNotI64 {
+            dst: dst.0,
+            value: value.0,
         },
         MirInstruction::SubI64 { dst, left, right } => VmInstruction::SubI64 {
             dst: dst.0,
@@ -6176,6 +6191,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 read(&states, *value)?;
                 expect_type(function, *dst, VmType::Bool)?;
                 expect_type(function, *value, VmType::Bool)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::BitNotI64 { dst, value } => {
+                read(&states, *value)?;
+                expect_type(function, *dst, VmType::I64)?;
+                expect_type(function, *value, VmType::I64)?;
                 write(&mut states, *dst)?
             }
             VmInstruction::AddI64 { dst, left, right }
@@ -8862,6 +8883,13 @@ fn execute(
                     )?,
                 ))
             }
+            VmInstruction::BitNotI64 { dst, value } => {
+                registers[dst as usize] = Some(VmValue::I64(!expect_i64(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?))
+            }
             VmInstruction::SubI64 { dst, left, right } => {
                 registers[dst as usize] = Some(VmValue::I64(
                     expect_i64(
@@ -9529,6 +9557,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(19);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes())
+        }
+        VmInstruction::BitNotI64 { dst, value } => {
+            output.push(113);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
         }
         VmInstruction::EqBool { dst, left, right } | VmInstruction::NeBool { dst, left, right } => {
             output.push(if matches!(value, VmInstruction::EqBool { .. }) {
@@ -11073,6 +11106,13 @@ fn execute_with_arguments(
                             .expect("verified register"),
                     )?,
                 ))
+            }
+            VmInstruction::BitNotI64 { dst, value } => {
+                registers[*dst as usize] = Some(VmValue::I64(!expect_i64(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?))
             }
             VmInstruction::SubI64 { dst, left, right } => {
                 registers[*dst as usize] = Some(VmValue::I64(

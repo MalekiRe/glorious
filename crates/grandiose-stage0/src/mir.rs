@@ -497,6 +497,12 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// Exact manifest-bound i64 bitwise-not. This remains a unary frozen MIR
+    /// operation and cannot be reconstructed from the source body.
+    BitNotI64 {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     SubI64 {
         dst: MirLocal,
         left: MirLocal,
@@ -1082,8 +1088,9 @@ fn fold_block(
             | MirInstruction::IntLessI64 { .. }
             | MirInstruction::IntGreaterI64 { .. }
             | MirInstruction::BitAndI64 { .. }
-            | MirInstruction::BitXorI64 { .. } => None,
-            MirInstruction::BitOrI64 { .. } => None,
+            | MirInstruction::BitOrI64 { .. }
+            | MirInstruction::BitXorI64 { .. }
+            | MirInstruction::BitNotI64 { .. } => None,
             MirInstruction::SubI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_sub)
             }
@@ -1322,6 +1329,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::BitAndI64 { dst, .. }
         | MirInstruction::BitXorI64 { dst, .. }
         | MirInstruction::BitOrI64 { dst, .. }
+        | MirInstruction::BitNotI64 { dst, .. }
         | MirInstruction::SubI64 { dst, .. }
         | MirInstruction::MulI64 { dst, .. }
         | MirInstruction::DivI64 { dst, .. }
@@ -3325,6 +3333,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::BitAndI64 { .. }
         | MirInstruction::BitXorI64 { .. }
         | MirInstruction::BitOrI64 { .. }
+        | MirInstruction::BitNotI64 { .. }
         | MirInstruction::SubI64 { .. }
         | MirInstruction::MulI64 { .. }
         | MirInstruction::DivI64 { .. }
@@ -4058,6 +4067,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::DerefCopy { dst, reference } => vec![*dst, *reference],
         MirInstruction::DerefStore { reference, src } => vec![*reference, *src],
         MirInstruction::NotBool { dst, value } => vec![*dst, *value],
+        MirInstruction::BitNotI64 { dst, value } => vec![*dst, *value],
         MirInstruction::AddI64 { dst, left, right }
         | MirInstruction::WrappingAddI64 { dst, left, right }
         | MirInstruction::WrappingSubI64 { dst, left, right }
@@ -13675,6 +13685,29 @@ impl Lowerer<'_> {
                                     trait_instance: None,
                                     arguments,
                                 });
+                            }
+                            Some(PrimitiveRole::IntBitNot) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error("G6005", "generic int bit-not requires one operand");
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic int bit-not is only VM-specialized for frozen i64",
+                                    );
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::BitNotI64 { dst, value: *value });
                             }
                             Some(
                                 role @ (PrimitiveRole::IntCheckedAdd

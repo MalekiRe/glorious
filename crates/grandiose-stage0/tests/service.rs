@@ -389,6 +389,30 @@ fn manifest_bound_generic_int_bit_or_uses_distinct_bitwise_vm_semantics() {
     }));
 }
 
+#[test]
+fn manifest_bound_generic_int_bit_not_uses_distinct_unary_vm_semantics() {
+    let mut input = request(
+        "fn __g1_int_bit_not<T>(value: T) -> T { () } pub fn main() -> i64 { __g1_int_bit_not<i64>(10) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntBitNot,
+        "__g1_int_bit_not",
+    ));
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("the exact unary generic int declaration must specialize for frozen i64")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), !10);
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::BitNotI64 { .. }))
+    }));
+}
+
 const TEXT_RUNTIME_LEAVES: &str = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { let ignored = on_true(); on_false() } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () } ";
 
 const PRIVATE_TEXT_RUNTIME_LEAVES: &str = "fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { let ignored = on_true(); on_false() } fn __g1_text_byte_len(value: Text) -> usize { () } fn __g1_text_concat(left: Text, right: Text) -> Text { () } fn __g1_text_eq(left: Text, right: Text) -> u32 { () } fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } fn __g1_text_as_bytes(value: Text) -> Bytes { () } fn __g1_char_from_u32_checked(value: u32) -> char { () } fn __g1_char_to_u32(value: char) -> u32 { () } ";

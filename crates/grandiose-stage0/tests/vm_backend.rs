@@ -688,6 +688,50 @@ fn i64_bit_or_round_trips_and_verifier_rejects_type_confusion() {
 }
 
 #[test]
+fn i64_bit_not_round_trips_and_verifier_rejects_type_confusion() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"i64-bit-not-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 10 },
+            VmInstruction::BitNotI64 { dst: 1, value: 0 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"i64-bit-not-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(
+        decode_and_verify_artifact(&encoded)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        !10,
+    );
+
+    let mut forged = candidate;
+    forged.function.registers[0] = VmType::Bool;
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(forged),
+        Err(VmArtifactError::TypeMismatch {
+            register: 0,
+            expected: VmType::I64,
+            found: VmType::Bool,
+        })
+    ));
+}
+
+#[test]
 fn i64_greater_to_u32_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
         nominal_copy_descriptors: vec![],

@@ -91,6 +91,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_bit_xor<T>` in distributed std.
     /// Its frozen i64 specialization is a distinct bitwise VM operation.
     IntBitXor,
+    /// Exact generic declaration `__g1_int_bit_not<T>` in distributed std.
+    /// Its frozen i64 specialization is a distinct unary VM operation.
+    IntBitNot,
 }
 
 impl PrimitiveRole {
@@ -138,6 +141,7 @@ impl PrimitiveRole {
             Self::IntBitAnd => "int-bit-and",
             Self::IntBitOr => "int-bit-or",
             Self::IntBitXor => "int-bit-xor",
+            Self::IntBitNot => "int-bit-not",
         }
     }
 
@@ -185,6 +189,7 @@ impl PrimitiveRole {
             "int-bit-and" => Self::IntBitAnd,
             "int-bit-or" => Self::IntBitOr,
             "int-bit-xor" => Self::IntBitXor,
+            "int-bit-not" => Self::IntBitNot,
             _ => return None,
         })
     }
@@ -562,6 +567,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntBitNot => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Generic(0),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
             crate::CallableSignature {
                 generics: 1,
@@ -628,6 +644,7 @@ fn manifest_digest(
             PrimitiveRole::IntBitAnd => 37,
             PrimitiveRole::IntBitOr => 40,
             PrimitiveRole::IntBitXor => 41,
+            PrimitiveRole::IntBitNot => 42,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
