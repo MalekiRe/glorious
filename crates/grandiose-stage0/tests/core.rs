@@ -2565,6 +2565,70 @@ fn concrete_associated_effect_rows_normalize_at_call_boundaries() {
 }
 
 #[test]
+fn typed_core_forwards_symbolic_associated_effect_rows_with_the_same_evidence() {
+    let package = PackageKey("core-symbolic-associated-effect-row-forwarding@0.1.0".into());
+    let source = "trait Capability { type Effects: EffectRow; } pub fn worker<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { 1 } pub fn relay<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { worker(value) }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn typed_core_rejects_symbolic_associated_effect_rows_without_subset_evidence() {
+    let package = PackageKey("core-symbolic-associated-effect-row-mismatch@0.1.0".into());
+    let source = "trait First { type Effects: EffectRow; } trait Second { type Effects: EffectRow; } pub fn worker<T>(value: T) -> i64 / { <T as First>::Effects } where T: First { 1 } pub fn relay<T>(value: T) -> i64 / { <T as Second>::Effects } where T: First, T: Second { worker(value) }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4155"),
+        "{:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn generic_associated_effect_rows_normalize_item_arguments() {
     let package = PackageKey("core-gat-effect-row-normalization@0.1.0".into());
     let source = "effect Trace<T> { note(value: T); } trait Capability { type Effects<T>: EffectRow; } struct Value {} impl Capability for Value { type Effects<T> = {Trace<T>}; } pub fn worker() -> i64 / { <Value as Capability>::Effects<Text> } { 1 } pub fn main() -> i64 / { Trace<Text> } { worker() }";

@@ -1776,6 +1776,14 @@ fn service_instantiates_non_type_direct_callable_arguments_at_the_contract_bound
 }
 
 #[test]
+fn service_monomorphizes_symbolic_associated_effect_row_forwarding() {
+    let source = "trait Capability { type Effects: EffectRow; } struct Value { value: i64 } impl Capability for Value { type Effects = {}; } pub fn worker<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { 41 } pub fn relay<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { worker(value) } pub fn main() -> i64 { let value = Value { value: 0 }; relay(value) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_opens_higher_ranked_callback_lifetimes_without_leaking_them() {
     let accepted = "pub fn apply(callback: for<'a> (&'a i64) -> &'a i64) -> i64 { let value = 42; let loan = &value; callback(loan); value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();

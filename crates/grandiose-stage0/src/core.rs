@@ -8100,6 +8100,29 @@ impl Elaborator<'_> {
             self.recovered = true;
             return;
         }
+        // Preserve a symbolic associated row when the caller has supplied
+        // the *same lexical evidence*.  A generic forwarding function such
+        // as
+        //
+        //   relay<T>() / { <T as Capability>::Effects }
+        //       where T: Capability
+        //
+        // may call another callable with that exact contract without choosing
+        // an implementation for `T`.  Requiring concrete normalization here
+        // would reject valid effect polymorphism (and tempt a later phase to
+        // guess an impl).  `constrain_effect_subset` compares named members,
+        // delayed associated projections, and the one permitted tail with the
+        // same inference discipline as ordinary generic arguments.  A
+        // concrete projection which is only compatible after selection simply
+        // falls through to the normalization path below; executable instance
+        // construction still requires that selection to close the row.
+        if self
+            .inference
+            .constrain_effect_subset(effects.clone(), self.declared_effects.clone())
+            .is_ok()
+        {
+            return;
+        }
         let mut projections = std::mem::take(&mut effects.projections);
         while let Some(projection) = projections.pop() {
             if !projection_is_concrete(&projection.subject)
