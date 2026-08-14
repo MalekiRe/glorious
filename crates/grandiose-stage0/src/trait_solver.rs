@@ -403,6 +403,29 @@ fn match_type(
             }
             _ => None,
         },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+        } => match actual {
+            Type::Projection {
+                subject: actual_subject,
+                trait_definition: actual_trait_definition,
+                trait_arguments: actual_trait_arguments,
+                name: actual_name,
+            } if trait_definition == actual_trait_definition
+                && name == actual_name
+                && trait_arguments.len() == actual_trait_arguments.len() =>
+            {
+                match_type(subject, actual_subject, substitution)?;
+                trait_arguments
+                    .iter()
+                    .zip(actual_trait_arguments)
+                    .try_for_each(|(template, actual)| match_type(template, actual, substitution))
+            }
+            _ => None,
+        },
         Type::Tuple(values) => match actual {
             Type::Tuple(actual_values) if values.len() == actual_values.len() => values
                 .iter()
@@ -486,6 +509,20 @@ fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
                 .iter()
                 .map(|value| substitute_type(value, substitution))
                 .collect(),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+        } => Type::Projection {
+            subject: Box::new(substitute_type(subject, substitution)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|value| substitute_type(value, substitution))
+                .collect(),
+            name: name.clone(),
         },
         Type::Tuple(values) => Type::Tuple(
             values

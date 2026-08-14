@@ -6168,6 +6168,20 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
                 .map(|argument| substitute_generic_type(argument, substitutions))
                 .collect::<Option<_>>()?,
         }),
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+        } => Some(Type::Projection {
+            subject: Box::new(substitute_generic_type(*subject, substitutions)?),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|argument| substitute_generic_type(argument, substitutions))
+                .collect::<Option<_>>()?,
+            name,
+        }),
         Type::Tuple(values) => Some(Type::Tuple(
             values
                 .into_iter()

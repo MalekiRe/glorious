@@ -212,6 +212,16 @@ fn collect_generic_names(
                 collect_generic_names(argument, declared, used);
             }
         }
+        HeaderType::Projection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            collect_generic_names(subject, declared, used);
+            for argument in trait_arguments {
+                collect_generic_names(argument, declared, used);
+            }
+        }
         HeaderType::Tuple(values) => {
             for value in values {
                 collect_generic_names(value, declared, used);

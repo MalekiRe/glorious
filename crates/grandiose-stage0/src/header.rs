@@ -16,6 +16,17 @@ use crate::{
 pub enum HeaderType {
     Path(Vec<String>),
     Application(Box<HeaderType>, Vec<HeaderType>),
+    /// An associated type selected through an explicit trait relation.  The
+    /// angle-bracket form avoids treating a qualified path as either a module
+    /// path or an associated item before its receiver has been elaborated.
+    ///
+    /// Canonical spelling: `<Subject as Trait<Args>>::Item`.
+    Projection {
+        subject: Box<HeaderType>,
+        trait_path: Vec<String>,
+        trait_arguments: Vec<HeaderType>,
+        name: String,
+    },
     Tuple(Vec<HeaderType>),
     Callable {
         parameters: Vec<HeaderType>,
@@ -1193,6 +1204,38 @@ impl Parser<'_> {
         names
     }
     fn ty(&mut self) -> HeaderType {
+        if self.operator("<") {
+            let subject = self.ty();
+            if self.word() != Some("as") {
+                self.error("G3209", "expected `as` in associated type projection");
+                return HeaderType::Recovered;
+            }
+            self.position += 1;
+            let trait_path = self.path();
+            if trait_path.is_empty() {
+                self.error("G3210", "expected trait path in associated type projection");
+                return HeaderType::Recovered;
+            }
+            let trait_arguments = self.type_arguments();
+            if !self.operator(">") {
+                self.error("G3211", "expected `>` in associated type projection");
+                return HeaderType::Recovered;
+            }
+            if !self.path_separator() {
+                self.error("G3212", "expected `::` before associated type name");
+                return HeaderType::Recovered;
+            }
+            let Some(name) = self.identifier() else {
+                self.error("G3213", "expected associated type name");
+                return HeaderType::Recovered;
+            };
+            return HeaderType::Projection {
+                subject: Box::new(subject),
+                trait_path,
+                trait_arguments,
+                name,
+            };
+        }
         if self.operator("!") {
             return HeaderType::Never;
         }
@@ -1231,20 +1274,28 @@ impl Parser<'_> {
             return HeaderType::Recovered;
         }
         let mut value = HeaderType::Path(path);
-        if self.operator("<") {
-            let mut arguments = vec![];
-            while self.current().is_some() && !self.at_operator(">") {
-                arguments.push(self.ty());
-                if !self.punctuation(',') {
-                    break;
-                }
-            }
-            if !self.operator(">") {
-                self.error("G3208", "expected `>` after type arguments");
-            }
+        if self.at_operator("<") {
+            let arguments = self.type_arguments();
             value = HeaderType::Application(Box::new(value), arguments);
         }
         value
+    }
+    fn type_arguments(&mut self) -> Vec<HeaderType> {
+        if !self.at_operator("<") {
+            return vec![];
+        }
+        self.position += 1;
+        let mut arguments = vec![];
+        while self.current().is_some() && !self.at_operator(">") {
+            arguments.push(self.ty());
+            if !self.punctuation(',') {
+                break;
+            }
+        }
+        if !self.operator(">") {
+            self.error("G3208", "expected `>` after type arguments");
+        }
+        arguments
     }
     fn path(&mut self) -> Vec<String> {
         let mut path = vec![];

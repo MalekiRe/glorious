@@ -10,7 +10,9 @@ use crate::{
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface},
     source::Span,
-    trait_solver::{TraitAnswer, TraitGoal, TraitMethodAnswer, TraitSolver},
+    trait_solver::{
+        TraitAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer, TraitSolver,
+    },
     types::{EffectInstance, EffectRow, InferContext, Mutability, ScalarType, Type},
 };
 
@@ -1038,6 +1040,12 @@ impl Elaborator<'_> {
                 },
                 referent: Box::new(self.header_type(referent)),
             },
+            HeaderType::Projection {
+                subject,
+                trait_path,
+                trait_arguments,
+                name,
+            } => self.header_projection(subject, trait_path, trait_arguments, name),
             HeaderType::Path(path) => self.header_path(path, vec![]),
             HeaderType::Application(base, arguments) => {
                 let arguments = arguments
@@ -1048,6 +1056,132 @@ impl Elaborator<'_> {
                     HeaderType::Path(path) => self.header_path(path, arguments),
                     _ => Type::Error,
                 }
+            }
+        }
+    }
+    fn header_projection(
+        &mut self,
+        subject: &crate::header::HeaderType,
+        trait_path: &[String],
+        trait_arguments: &[crate::header::HeaderType],
+        name: &str,
+    ) -> Type {
+        let subject = self.header_type(subject);
+        let trait_arguments = trait_arguments
+            .iter()
+            .map(|argument| self.header_type(argument))
+            .collect::<Vec<_>>();
+        let trait_definition =
+            match self
+                .index
+                .resolve_path(DefinitionNamespace::Trait, self.module, trait_path)
+            {
+                ResolutionState::Resolved(definition) => definition,
+                ResolutionState::Ambiguous(_) => {
+                    self.projection_error(
+                        "G4146",
+                        "associated type projection has an ambiguous trait",
+                    );
+                    return Type::Error;
+                }
+                ResolutionState::Inaccessible(_)
+                | ResolutionState::Unresolved
+                | ResolutionState::Recovered => {
+                    self.projection_error(
+                        "G4147",
+                        "associated type projection has an unresolved trait",
+                    );
+                    return Type::Error;
+                }
+            };
+        let Some(ElaboratedHeader::Trait(trait_header)) =
+            self.signatures.definitions.get(&trait_definition)
+        else {
+            self.projection_error("G4148", "associated type projection target is not a trait");
+            return Type::Error;
+        };
+        match trait_header.associated_types.get(name) {
+            Some(item) if item.effect_row => {
+                self.projection_error(
+                    "G4149",
+                    "associated effect rows require the pending effect-row projection syntax",
+                );
+                return Type::Error;
+            }
+            Some(item) if item.generics == 0 => {}
+            Some(_) => {
+                self.projection_error(
+                    "G4149",
+                    "generic associated types require the pending item-argument projection syntax",
+                );
+                return Type::Error;
+            }
+            None => {
+                self.projection_error("G4150", "trait does not declare this associated type");
+                return Type::Error;
+            }
+        }
+        let projection = Type::Projection {
+            subject: Box::new(subject),
+            trait_definition,
+            trait_arguments,
+            name: name.to_owned(),
+        };
+        if !projection_is_concrete(&projection) {
+            return projection;
+        }
+        let Type::Projection {
+            subject,
+            trait_arguments,
+            name,
+            ..
+        } = &projection
+        else {
+            unreachable!("projection was just constructed")
+        };
+        let answer = TraitSolver::new(self.signatures).normalize_associated_type(
+            TraitGoal {
+                relation: crate::ElaboratedTraitReference {
+                    definition: trait_definition,
+                    arguments: trait_arguments.clone(),
+                },
+                subject: *subject.clone(),
+            },
+            name,
+        );
+        match answer {
+            TraitProjectionAnswer::Normalized { ty, .. } => ty,
+            TraitProjectionAnswer::Refuted { .. } => {
+                self.projection_error(
+                    "G4151",
+                    "associated type projection is refuted by a negative implementation",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::NoSolution => {
+                self.projection_error(
+                    "G4152",
+                    "no implementation can normalize this associated type projection",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::Ambiguous => {
+                self.projection_error("G4153", "associated type projection is ambiguous");
+                Type::Error
+            }
+            TraitProjectionAnswer::Overflow => {
+                self.projection_error(
+                    "G4154",
+                    "associated type projection exceeded the trait solver limit",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::MissingAssociatedType { .. } => {
+                self.projection_error(
+                    "G4155",
+                    "selected implementation does not define this associated type",
+                );
+                Type::Error
             }
         }
     }
@@ -1090,6 +1224,11 @@ impl Elaborator<'_> {
             | ResolutionState::Unresolved
             | ResolutionState::Recovered => Type::Error,
         }
+    }
+    fn projection_error(&mut self, code: &'static str, message: &str) {
+        let span = self.body.expression(self.body.root).span;
+        self.error(span, code, message);
+        self.recovered = true;
     }
     fn closure_effects(
         &mut self,
@@ -3121,6 +3260,28 @@ impl Elaborator<'_> {
             span,
             message: message.into(),
         });
+    }
+}
+
+fn projection_is_concrete(value: &Type) -> bool {
+    match value {
+        Type::Generic(_) | Type::Infer(_) => false,
+        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
+            arguments.iter().all(projection_is_concrete)
+        }
+        Type::Projection {
+            subject,
+            trait_arguments,
+            ..
+        } => projection_is_concrete(subject) && trait_arguments.iter().all(projection_is_concrete),
+        Type::Array(element)
+        | Type::Reference {
+            referent: element, ..
+        } => projection_is_concrete(element),
+        Type::Callable {
+            parameters, result, ..
+        } => parameters.iter().all(projection_is_concrete) && projection_is_concrete(result),
+        Type::Unit | Type::Never | Type::Scalar(_) | Type::Error => true,
     }
 }
 

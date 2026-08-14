@@ -202,6 +202,76 @@ fn typed_closures_become_callable_core_values_with_explicit_capture_modes() {
 }
 
 #[test]
+fn concrete_associated_type_projections_normalize_in_typed_closure_contracts() {
+    let package = PackageKey("core-associated-projection@0.1.0".into());
+    let source = "trait Iterator { type Item; } struct Range<T> {} impl<T> Iterator for Range<T> { type Item = T; } pub fn main() -> i64 { let identity = (value: <Range<Text> as Iterator>::Item) -> Text { value }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    assert!(body.diagnostics.is_empty(), "{body:#?}");
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        expression.kind,
+        CoreKind::Closure { ref parameters, .. }
+            if parameters[0].1 == grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::Text)
+    )));
+}
+
+#[test]
+fn associated_effect_rows_are_rejected_by_the_type_projection_surface() {
+    let package = PackageKey("core-associated-effect-row@0.1.0".into());
+    let source = "trait HasEffects { type Effects: EffectRow; } struct Value {} impl HasEffects for Value { type Effects = i64; } pub fn main() -> i64 { let value = (input: <Value as HasEffects>::Effects) -> i64 { 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .unwrap();
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4149"),
+        "{:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn placeflow_applies_a_closure_move_capture_when_the_closure_is_created() {
     let package = PackageKey("core-closure-move@0.1.0".into());
     let source = "pub fn main(value: i64) -> i64 { let consume = (extra: i64) -> i64 { move value + extra }; value }";

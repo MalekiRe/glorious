@@ -1038,6 +1038,37 @@ impl Parser<'_> {
     }
 
     fn closure_type(&mut self) -> Option<HeaderType> {
+        if self.at_operator("<") {
+            self.position += 1;
+            let subject = self.closure_type()?;
+            if self.word() != Some("as") {
+                self.error_current("G4010", "expected `as` in associated type projection");
+                return None;
+            }
+            self.position += 1;
+            let mut trait_path = vec![self.expect_identifier()?];
+            while self.at_punctuation(':') && self.peek_punctuation(1, ':') {
+                self.position += 2;
+                trait_path.push(self.expect_identifier()?);
+            }
+            let trait_arguments = self.closure_type_arguments()?;
+            if !self.at_operator(">") {
+                self.error_current("G4011", "expected `>` in associated type projection");
+                return None;
+            }
+            self.position += 1;
+            if !self.at_punctuation(':') || !self.peek_punctuation(1, ':') {
+                self.error_current("G4012", "expected `::` before associated type name");
+                return None;
+            }
+            self.position += 2;
+            return Some(HeaderType::Projection {
+                subject: Box::new(subject),
+                trait_path,
+                trait_arguments,
+                name: self.expect_identifier()?,
+            });
+        }
         if self.at_operator("!") {
             self.position += 1;
             return Some(HeaderType::Never);
@@ -1082,6 +1113,14 @@ impl Parser<'_> {
         if !self.at_operator("<") {
             return Some(base);
         }
+        let arguments = self.closure_type_arguments()?;
+        Some(HeaderType::Application(Box::new(base), arguments))
+    }
+
+    fn closure_type_arguments(&mut self) -> Option<Vec<HeaderType>> {
+        if !self.at_operator("<") {
+            return Some(vec![]);
+        }
         self.position += 1;
         let mut arguments = vec![];
         while !self.at_operator(">") && self.current().is_some() {
@@ -1096,7 +1135,7 @@ impl Parser<'_> {
             return None;
         }
         self.position += 1;
-        Some(HeaderType::Application(Box::new(base), arguments))
+        Some(arguments)
     }
 
     fn parse_call(&mut self, callee: ExprId) -> Option<ExprId> {

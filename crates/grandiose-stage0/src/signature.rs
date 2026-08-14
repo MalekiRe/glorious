@@ -34,8 +34,18 @@ pub struct ElaboratedTraitReference {
 pub struct ElaboratedTrait {
     pub generics: u32,
     pub supertraits: Vec<ElaboratedTraitReference>,
-    pub associated_types: BTreeMap<String, u32>,
+    /// Declared associated type names and their item-generic arities. The
+    /// first projection surface is zero-arity, but preserving the declared
+    /// arity here keeps the frozen interface ready to reject unsupported GAT
+    /// applications rather than silently treating them as ordinary types.
+    pub associated_types: BTreeMap<String, ElaboratedAssociatedType>,
     pub methods: BTreeMap<String, CallableSignature>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElaboratedAssociatedType {
+    pub generics: u32,
+    pub effect_row: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -807,8 +817,16 @@ impl Elaborator<'_> {
             associated_types: header
                 .associated_types
                 .iter()
-                .map(|item| (item.name.clone(), item.generics.len() as u32))
-                .collect(),
+                 .map(|item| {
+                     (
+                         item.name.clone(),
+                        ElaboratedAssociatedType {
+                            generics: item.generics.len() as u32,
+                            effect_row: item.effect_row,
+                        },
+                    )
+                 })
+                 .collect(),
             methods,
         }
     }
@@ -953,14 +971,20 @@ impl Elaborator<'_> {
         }
     }
     fn trait_ref(&mut self, value: &TraitRefHeader) -> ElaboratedTraitReference {
-        let arguments = value
-            .arguments
+        self.trait_ref_parts(&value.path, &value.arguments)
+    }
+    fn trait_ref_parts(
+        &mut self,
+        path: &[String],
+        source_arguments: &[HeaderType],
+    ) -> ElaboratedTraitReference {
+        let arguments = source_arguments
             .iter()
             .map(|argument| self.ty(argument))
             .collect::<Vec<_>>();
         match self
             .index
-            .resolve_path(DefinitionNamespace::Trait, self.module, &value.path)
+            .resolve_path(DefinitionNamespace::Trait, self.module, path)
         {
             ResolutionState::Resolved(definition) => {
                 let expected = self.index.trait_generic_arity(definition).unwrap_or(0) as usize;
@@ -969,7 +993,7 @@ impl Elaborator<'_> {
                         "G3308",
                         format!(
                             "trait `{}` expects {expected} arguments, found {}",
-                            value.path.join("::"),
+                            path.join("::"),
                             arguments.len()
                         ),
                     );
@@ -980,30 +1004,21 @@ impl Elaborator<'_> {
                 }
             }
             ResolutionState::Ambiguous(_) => {
-                self.error(
-                    "G3309",
-                    format!("ambiguous trait `{}`", value.path.join("::")),
-                );
+                self.error("G3309", format!("ambiguous trait `{}`", path.join("::")));
                 ElaboratedTraitReference {
                     definition: DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait")),
                     arguments,
                 }
             }
             ResolutionState::Inaccessible(_) => {
-                self.error(
-                    "G3310",
-                    format!("private trait `{}`", value.path.join("::")),
-                );
+                self.error("G3310", format!("private trait `{}`", path.join("::")));
                 ElaboratedTraitReference {
                     definition: DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait")),
                     arguments,
                 }
             }
             _ => {
-                self.error(
-                    "G3310",
-                    format!("unresolved trait `{}`", value.path.join("::")),
-                );
+                self.error("G3310", format!("unresolved trait `{}`", path.join("::")));
                 ElaboratedTraitReference {
                     definition: DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait")),
                     arguments,
@@ -1141,6 +1156,21 @@ impl Elaborator<'_> {
                 },
                 referent: Box::new(self.ty(referent)),
             },
+            HeaderType::Projection {
+                subject,
+                trait_path,
+                trait_arguments,
+                name,
+            } => {
+                let subject = self.ty(subject);
+                let relation = self.trait_ref_parts(trait_path, trait_arguments);
+                Type::Projection {
+                    subject: Box::new(subject),
+                    trait_definition: relation.definition,
+                    trait_arguments: relation.arguments,
+                    name: name.clone(),
+                }
+            }
             HeaderType::Path(path) => self.path(path, vec![]),
             HeaderType::Application(base, arguments) => {
                 let arguments = arguments.iter().map(|argument| self.ty(argument)).collect();
@@ -1300,6 +1330,25 @@ fn normalize_alias_type(
             stack.pop();
             normalized
         }
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+        } => Type::Projection {
+            subject: Box::new(normalize_alias_type(
+                *subject,
+                definitions,
+                stack,
+                diagnostics,
+            )),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|argument| normalize_alias_type(argument, definitions, stack, diagnostics))
+                .collect(),
+            name,
+        },
         Type::Tuple(values) => Type::Tuple(
             values
                 .into_iter()
@@ -1405,6 +1454,20 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
                 .into_iter()
                 .map(|value| substitute_alias_generics(value, arguments))
                 .collect(),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+        } => Type::Projection {
+            subject: Box::new(substitute_alias_generics(*subject, arguments)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|value| substitute_alias_generics(value, arguments))
+                .collect(),
+            name,
         },
         Type::Tuple(values) => Type::Tuple(
             values

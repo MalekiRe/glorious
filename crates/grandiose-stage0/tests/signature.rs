@@ -344,6 +344,50 @@ fn trait_impl_and_effect_contracts_elaborate_with_stable_declaration_identity() 
 }
 
 #[test]
+fn generic_associated_type_projections_are_preserved_in_frozen_signatures() {
+    let package = PackageKey("signature-associated-projection@0.1.0".into());
+    let source = "trait Iterator { type Item; } pub fn collect<T>(value: T) -> <T as Iterator>::Item { ignored }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let iterator = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Iterator"))
+        .unwrap()
+        .key;
+    let collect = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("collect"))
+        .unwrap()
+        .key;
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&collect).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        &signature.result,
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+        } if **subject == Type::Generic(0)
+            && *trait_definition == iterator
+            && trait_arguments.is_empty()
+            && name == "Item"
+    ));
+}
+
+#[test]
 fn callable_effect_rows_resolve_effect_declaration_identities() {
     let package = PackageKey("signature-effect-row@0.1.0".into());
     let source = "effect Console { write() } effect Trace { note() } pub fn run() -> i64 / { Trace, Console } { 42 }";

@@ -106,6 +106,14 @@ pub enum Type {
         definition: DefKey,
         arguments: Vec<Type>,
     },
+    /// A delayed associated-type normalization. Generic interfaces retain this
+    /// term until a concrete trait goal can select implementation evidence.
+    Projection {
+        subject: Box<Type>,
+        trait_definition: DefKey,
+        trait_arguments: Vec<Type>,
+        name: String,
+    },
     Tuple(Vec<Type>),
     Array(Box<Type>),
     Reference {
@@ -202,6 +210,25 @@ impl InferContext {
                 definition: left,
                 arguments: self.unify_many(left_arguments, right_arguments)?,
             }),
+            (
+                Type::Projection {
+                    subject: left_subject,
+                    trait_definition: left_trait,
+                    trait_arguments: left_arguments,
+                    name: left_name,
+                },
+                Type::Projection {
+                    subject: right_subject,
+                    trait_definition: right_trait,
+                    trait_arguments: right_arguments,
+                    name: right_name,
+                },
+            ) if left_trait == right_trait && left_name == right_name => Ok(Type::Projection {
+                subject: Box::new(self.unify(*left_subject, *right_subject)?),
+                trait_definition: left_trait,
+                trait_arguments: self.unify_many(left_arguments, right_arguments)?,
+                name: left_name,
+            }),
             (Type::Tuple(left), Type::Tuple(right)) => {
                 Ok(Type::Tuple(self.unify_many(left, right)?))
             }
@@ -262,6 +289,20 @@ impl InferContext {
                     .into_iter()
                     .map(|argument| self.zonk(argument))
                     .collect::<Result<_, _>>()?,
+            }),
+            Type::Projection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+            } => Ok(Type::Projection {
+                subject: Box::new(self.zonk(*subject)?),
+                trait_definition,
+                trait_arguments: trait_arguments
+                    .into_iter()
+                    .map(|argument| self.zonk(argument))
+                    .collect::<Result<_, _>>()?,
+                name,
             }),
             Type::Tuple(elements) => Ok(Type::Tuple(
                 elements
@@ -487,6 +528,29 @@ impl InferContext {
                     .zip(&right_arguments)
                     .all(|(left, right)| self.types_may_unify(left, right))
             }
+            (
+                Type::Projection {
+                    subject: left_subject,
+                    trait_definition: left_trait,
+                    trait_arguments: left_arguments,
+                    name: left_name,
+                },
+                Type::Projection {
+                    subject: right_subject,
+                    trait_definition: right_trait,
+                    trait_arguments: right_arguments,
+                    name: right_name,
+                },
+            ) if left_trait == right_trait
+                && left_name == right_name
+                && left_arguments.len() == right_arguments.len() =>
+            {
+                self.types_may_unify(&left_subject, &right_subject)
+                    && left_arguments
+                        .iter()
+                        .zip(&right_arguments)
+                        .all(|(left, right)| self.types_may_unify(left, right))
+            }
             (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => left
                 .iter()
                 .zip(&right)
@@ -557,6 +621,16 @@ impl InferContext {
             Type::Nominal { arguments, .. } | Type::Tuple(arguments) => arguments
                 .iter()
                 .any(|argument| self.occurs(variable, argument)),
+            Type::Projection {
+                subject,
+                trait_arguments,
+                ..
+            } => {
+                self.occurs(variable, &subject)
+                    || trait_arguments
+                        .iter()
+                        .any(|argument| self.occurs(variable, argument))
+            }
             Type::Array(element)
             | Type::Reference {
                 referent: element, ..
@@ -608,6 +682,19 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.push(3);
             output.extend_from_slice(&definition.0.as_bytes());
             encode_types(arguments, output);
+        }
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+        } => {
+            output.push(11);
+            encode_type(subject, output);
+            output.extend_from_slice(&trait_definition.0.as_bytes());
+            encode_types(trait_arguments, output);
+            output.extend_from_slice(&(name.len() as u64).to_le_bytes());
+            output.extend_from_slice(name.as_bytes());
         }
         Type::Tuple(elements) => {
             output.push(4);
