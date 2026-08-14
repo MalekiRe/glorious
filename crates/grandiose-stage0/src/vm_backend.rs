@@ -500,6 +500,10 @@ pub enum VmInstruction {
         dst: u32,
         value: u32,
     },
+    I64ToU128Wrapping {
+        dst: u32,
+        value: u32,
+    },
     MakeTuple {
         dst: u32,
         fields: Vec<u32>,
@@ -1237,7 +1241,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 75;
+pub const STAGE0_VM_SCHEMA: u32 = 76;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3805,6 +3809,10 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
+            135 => Ok(VmInstruction::I64ToU128Wrapping {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             25 => self.bool_equality(|dst, left, right| VmInstruction::EqText { dst, left, right }),
             26 => self.bool_equality(|dst, left, right| VmInstruction::NeText { dst, left, right }),
             27 => self.i64_arithmetic(|dst, left, right| VmInstruction::ConcatText {
@@ -4757,6 +4765,10 @@ fn lower_instruction(
             value: value.0,
         },
         MirInstruction::I64ToU128Checked { dst, value } => VmInstruction::I64ToU128Checked {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::I64ToU128Wrapping { dst, value } => VmInstruction::I64ToU128Wrapping {
             dst: dst.0,
             value: value.0,
         },
@@ -5888,6 +5900,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?
             }
             VmInstruction::I64ToU128Checked { dst, value } => {
+                read(&states, *value)?;
+                expect_type(function, *dst, VmType::U128)?;
+                expect_type(function, *value, VmType::I64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::I64ToU128Wrapping { dst, value } => {
                 read(&states, *value)?;
                 expect_type(function, *dst, VmType::U128)?;
                 expect_type(function, *value, VmType::I64)?;
@@ -8935,6 +8953,13 @@ fn execute(
                 .map_err(|_| VmArtifactError::ArithmeticOverflow)?;
                 registers[dst as usize] = Some(VmValue::U128(value));
             }
+            VmInstruction::I64ToU128Wrapping { dst, value } => {
+                registers[dst as usize] = Some(VmValue::U128(expect_i64(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )? as u128));
+            }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
@@ -10781,6 +10806,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::I64ToU128Wrapping { dst, value } => {
+            output.push(135);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::MakeCallable {
             dst,
             callee,
@@ -11389,6 +11419,13 @@ fn execute_with_arguments(
                 )?)
                 .map_err(|_| VmArtifactError::ArithmeticOverflow)?;
                 registers[*dst as usize] = Some(VmValue::U128(value));
+            }
+            VmInstruction::I64ToU128Wrapping { dst, value } => {
+                registers[*dst as usize] = Some(VmValue::U128(expect_i64(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )? as u128));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;

@@ -535,6 +535,27 @@ fn manifest_bound_checked_i64_to_u128_converts_and_rejects_negative_values() {
 }
 
 #[test]
+fn manifest_bound_wrapping_i64_to_u128_retains_twos_complement_bits() {
+    let mut input = request(
+        "fn __g1_int_convert_wrapping_to_u128<T>(value: T) -> u128 { () } pub fn main() -> u128 { __g1_int_convert_wrapping_to_u128<i64>(-1) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertWrappingToU128,
+        "__g1_int_convert_wrapping_to_u128",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_u128()
+            .unwrap(),
+        u128::MAX
+    );
+}
+
+#[test]
 fn manifest_bound_checked_i64_to_isize_preserves_the_frozen_signed_width() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_isize<T>(value: T) -> isize { () } pub fn main() -> isize { __g1_int_convert_checked_to_isize<i64>(-42) }",
