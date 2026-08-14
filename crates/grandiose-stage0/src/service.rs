@@ -33,7 +33,40 @@ pub struct CompileDiagnostic {
     pub primary: Option<SourceSpan>,
     /// The immutable request world from which this diagnostic was derived.
     pub input_fingerprint: Option<Digest>,
+    /// Source locations which explain the primary fact without competing with
+    /// it for the editor's primary highlight.
+    pub related: Vec<RelatedDiagnosticLocation>,
+    /// Canonical semantic facts suitable for both a human explanation and a
+    /// machine client.  These deliberately retain names and values as
+    /// separate fields rather than encoding a second sentence in `message`.
+    pub facts: Vec<DiagnosticFact>,
+    /// Ordered explanation frames from the semantic boundary to the reported
+    /// failure.  Frames are canonicalized before publication, so phase and
+    /// map traversal order cannot affect a diagnostic product.
+    pub explanation: Vec<DiagnosticExplanationFrame>,
 }
+
+/// A non-primary source location participating in a compiler diagnostic.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RelatedDiagnosticLocation {
+    pub label: String,
+    pub span: SourceSpan,
+}
+
+/// A typed-by-name semantic observation attached to a diagnostic.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DiagnosticFact {
+    pub name: String,
+    pub value: String,
+}
+
+/// One stable step in a semantic explanation chain.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DiagnosticExplanationFrame {
+    pub kind: String,
+    pub message: String,
+}
+
 impl CompileDiagnostic {
     /// The maximum number of error diagnostics published for one failed
     /// request. Keeping this bound at the service boundary protects hosts and
@@ -64,15 +97,90 @@ impl CompileDiagnostic {
             || "null".to_owned(),
             |fingerprint| format!("\"{fingerprint}\""),
         );
+        let related = json_array(self.related.iter().map(|related| {
+            format!(
+                "{{\"label\":\"{}\",\"span\":{{\"file\":\"{}\",\"start_byte\":{},\"end_byte\":{}}}}}",
+                json_escape(&related.label),
+                related.span.file.0,
+                related.span.start,
+                related.span.end,
+            )
+        }));
+        let facts = json_array(self.facts.iter().map(|fact| {
+            format!(
+                "{{\"name\":\"{}\",\"value\":\"{}\"}}",
+                json_escape(&fact.name),
+                json_escape(&fact.value),
+            )
+        }));
+        let explanation = json_array(self.explanation.iter().map(|frame| {
+            format!(
+                "{{\"kind\":\"{}\",\"message\":\"{}\"}}",
+                json_escape(&frame.kind),
+                json_escape(&frame.message),
+            )
+        }));
         format!(
-            "{{\"code\":\"{}\",\"class\":\"{}\",\"severity\":\"{}\",\"message\":\"{}\",\"primary\":{},\"input_fingerprint\":{}}}",
+            "{{\"code\":\"{}\",\"class\":\"{}\",\"severity\":\"{}\",\"message\":\"{}\",\"primary\":{},\"related\":{},\"facts\":{},\"explanation\":{},\"input_fingerprint\":{}}}",
             self.code,
             self.class.json_name(),
             self.severity.json_name(),
             json_escape(&self.message),
             primary,
+            related,
+            facts,
+            explanation,
             input_fingerprint,
         )
+    }
+
+    /// Render a deterministic, line-oriented human projection of this
+    /// structured fact.  Hosts may choose their own presentation, but the
+    /// stage-zero CLI uses this stable fallback rather than discarding
+    /// semantic context.
+    pub fn text_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("{}: {}", self.code, self.message)];
+        lines.extend(self.related.iter().map(|related| {
+            format!(
+                "  related {} at {}:{}..{}",
+                related.label, related.span.file.0, related.span.start, related.span.end
+            )
+        }));
+        lines.extend(
+            self.facts
+                .iter()
+                .map(|fact| format!("  fact {}: {}", fact.name, fact.value)),
+        );
+        lines.extend(
+            self.explanation
+                .iter()
+                .map(|frame| format!("  because {}: {}", frame.kind, frame.message)),
+        );
+        lines
+    }
+
+    pub fn with_related_location(mut self, label: impl Into<String>, span: SourceSpan) -> Self {
+        self.related.push(RelatedDiagnosticLocation {
+            label: label.into(),
+            span,
+        });
+        self
+    }
+
+    pub fn with_fact(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.facts.push(DiagnosticFact {
+            name: name.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    pub fn with_explanation(mut self, kind: impl Into<String>, message: impl Into<String>) -> Self {
+        self.explanation.push(DiagnosticExplanationFrame {
+            kind: kind.into(),
+            message: message.into(),
+        });
+        self
     }
 
     fn source(code: &'static str, message: impl Into<String>, span: Option<Span>) -> Self {
@@ -120,6 +228,9 @@ impl CompileDiagnostic {
                 end: span.end,
             }),
             input_fingerprint: None,
+            related: Vec::new(),
+            facts: Vec::new(),
+            explanation: Vec::new(),
         }
     }
 
@@ -133,8 +244,25 @@ impl CompileDiagnostic {
         // source priority.  Keep those two concerns separate: sorting by the
         // identity key first makes `dedup_by` deterministic, then the public
         // batch is reordered according to the documented source-first order.
+        for diagnostic in &mut diagnostics {
+            diagnostic.canonicalize_provenance();
+        }
         diagnostics.sort_by(|left, right| left.fact_key().cmp(&right.fact_key()));
-        diagnostics.dedup_by(|left, right| left.fact_key() == right.fact_key());
+        let mut merged = Vec::<Self>::with_capacity(diagnostics.len());
+        for diagnostic in diagnostics {
+            if let Some(previous) = merged
+                .last_mut()
+                .filter(|previous| previous.fact_key() == diagnostic.fact_key())
+            {
+                previous.related.extend(diagnostic.related);
+                previous.facts.extend(diagnostic.facts);
+                previous.explanation.extend(diagnostic.explanation);
+                previous.canonicalize_provenance();
+            } else {
+                merged.push(diagnostic);
+            }
+        }
+        let mut diagnostics = merged;
         diagnostics.sort_by(|left, right| left.presentation_key().cmp(&right.presentation_key()));
         diagnostics
     }
@@ -150,19 +278,23 @@ impl CompileDiagnostic {
         diagnostics
             .into_iter()
             .map(|diagnostic| {
-                let Some(primary) = diagnostic.primary else {
-                    return diagnostic;
-                };
-                let valid = source_lengths
-                    .get(&primary.file)
-                    .is_some_and(|length| primary.start <= primary.end && primary.end <= *length);
-                if valid {
+                let primary_valid = diagnostic.primary.is_none_or(|primary| {
+                    source_lengths
+                        .get(&primary.file)
+                        .is_some_and(|length| primary.start <= primary.end && primary.end <= *length)
+                });
+                let related_valid = diagnostic.related.iter().all(|related| {
+                    source_lengths.get(&related.span.file).is_some_and(|length| {
+                        related.span.start <= related.span.end && related.span.end <= *length
+                    })
+                });
+                if primary_valid && related_valid {
                     diagnostic
                 } else {
                     let mut replacement = Self::invariant(
                         "G7014",
                         format!(
-                            "compiler produced diagnostic {} with an invalid primary source span",
+                            "compiler produced diagnostic {} with an invalid source provenance span",
                             diagnostic.code
                         ),
                     );
@@ -234,6 +366,15 @@ impl CompileDiagnostic {
         )
     }
 
+    fn canonicalize_provenance(&mut self) {
+        self.related.sort();
+        self.related.dedup();
+        self.facts.sort();
+        self.facts.dedup();
+        self.explanation.sort();
+        self.explanation.dedup();
+    }
+
     fn presentation_key(
         &self,
     ) -> (
@@ -257,6 +398,10 @@ impl CompileDiagnostic {
             &self.message,
         )
     }
+}
+
+fn json_array(values: impl IntoIterator<Item = String>) -> String {
+    format!("[{}]", values.into_iter().collect::<Vec<_>>().join(","))
 }
 
 impl Severity {
@@ -625,12 +770,29 @@ impl StageZeroCompiler {
             graph.modules.values().map(|node| &node.interface.interface),
             &index,
         );
-        diagnostics.extend(coherence.diagnostics.iter().map(|diagnostic| {
-            CompileDiagnostic::source(
-                diagnostic.code,
-                diagnostic.message.clone(),
-                Some(diagnostic.span),
+        diagnostics.extend(coherence.diagnostics.iter().map(|coherence_diagnostic| {
+            let diagnostic = CompileDiagnostic::source(
+                coherence_diagnostic.code,
+                coherence_diagnostic.message.clone(),
+                Some(coherence_diagnostic.span),
             )
+            .with_fact("semantic_phase", "trait coherence");
+            match coherence_diagnostic.related_span {
+                Some(span) => diagnostic
+                    .with_related_location(
+                        "conflicting implementation",
+                        SourceSpan {
+                            file: span.file,
+                            start: span.start,
+                            end: span.end,
+                        },
+                    )
+                    .with_explanation(
+                        "coherence",
+                        "the two frozen implementation heads can apply to the same trait goal",
+                    ),
+                None => diagnostic,
+            }
         }));
         let signatures = ElaboratedInterface::merge(graph.modules.values().map(|node| {
             ElaboratedInterface::elaborate_with_index(&node.interface.interface, &index)
@@ -662,6 +824,12 @@ impl StageZeroCompiler {
                         import.symbol, import.capability
                     ),
                     span,
+                )
+                .with_fact("host_symbol", import.symbol.clone())
+                .with_fact("required_capability", import.capability.clone())
+                .with_explanation(
+                    "capability-boundary",
+                    "a host import is admitted only when its frozen capability is declared by the request",
                 ));
             }
         }
@@ -710,28 +878,55 @@ impl StageZeroCompiler {
         match signatures.definitions.get(&entry.key) {
             Some(ElaboratedHeader::Callable(signature)) => {
                 if signature.generics != 0 {
-                    diagnostics.push(CompileDiagnostic::source(
-                        "G7028",
-                        "executable entry `main` cannot declare generic binders",
-                        Some(entry.span),
-                    ));
+                    diagnostics.push(
+                        CompileDiagnostic::source(
+                            "G7028",
+                            "executable entry `main` cannot declare generic binders",
+                            Some(entry.span),
+                        )
+                        .with_fact("entry_rule", "monomorphic")
+                        .with_fact("observed_generic_binders", signature.generics.to_string())
+                        .with_explanation(
+                            "vm-entry-boundary",
+                            "the VM invokes `main` without a generic argument environment",
+                        ),
+                    );
                 }
                 if !signature.parameters.is_empty() {
-                    diagnostics.push(CompileDiagnostic::source(
-                        "G7028",
-                        "executable entry `main` must not declare parameters",
-                        Some(entry.span),
-                    ));
+                    diagnostics.push(
+                        CompileDiagnostic::source(
+                            "G7028",
+                            "executable entry `main` must not declare parameters",
+                            Some(entry.span),
+                        )
+                        .with_fact("entry_rule", "zero parameters")
+                        .with_fact(
+                            "observed_parameters",
+                            signature.parameters.len().to_string(),
+                        )
+                        .with_explanation(
+                            "vm-entry-boundary",
+                            "the VM invokes `main` without call arguments",
+                        ),
+                    );
                 }
                 if !signature.effects.effects.is_empty()
                     || !signature.effects.projections.is_empty()
                     || signature.effects.tail.is_some()
                 {
-                    diagnostics.push(CompileDiagnostic::source(
-                        "G7028",
-                        "executable entry `main` must have a closed empty outward effect row",
-                        Some(entry.span),
-                    ));
+                    diagnostics.push(
+                        CompileDiagnostic::source(
+                            "G7028",
+                            "executable entry `main` must have a closed empty outward effect row",
+                            Some(entry.span),
+                        )
+                        .with_fact("entry_rule", "closed empty outward effect row")
+                        .with_fact("observed_effects", format!("{:?}", signature.effects))
+                        .with_explanation(
+                            "vm-entry-boundary",
+                            "the VM entrypoint has no ambient source-level effect handler",
+                        ),
+                    );
                 }
             }
             Some(_) => diagnostics.push(CompileDiagnostic::source(
@@ -1907,6 +2102,7 @@ fn failed(
 ) -> ServiceError {
     let mut diagnostics = CompileDiagnostic::validate_primary_spans(diagnostics, source_lengths);
     for diagnostic in &mut diagnostics {
+        enrich_semantic_provenance(diagnostic);
         diagnostic.input_fingerprint = Some(input_fingerprint);
     }
     let mut diagnostics =
@@ -1917,6 +2113,70 @@ fn failed(
         diagnostic.input_fingerprint = Some(input_fingerprint);
     }
     ServiceError::Failed(diagnostics)
+}
+
+/// Attach the immutable semantic boundary that produced diagnostics whose
+/// phase-local representation predates the structured reporting API.  The
+/// facts are deliberately code-driven rather than message-driven: wording
+/// can improve without changing a machine consumer's contract.
+fn enrich_semantic_provenance(diagnostic: &mut CompileDiagnostic) {
+    type FactSet = &'static [(&'static str, &'static str)];
+    type Explanation = Option<(&'static str, &'static str)>;
+    let (facts, explanation): (FactSet, Explanation) = match diagnostic.code {
+        "G4104" => (
+            &[
+                ("expected", "a declaration visible from the lexical scope"),
+                ("observed", "an unresolved name"),
+                ("semantic_phase", "name resolution"),
+            ],
+            Some((
+                "name-resolution",
+                "lexical lookup completed before type checking the expression",
+            )),
+        ),
+        "G5013" | "G5014" | "G5015" | "G5017" | "G5019" => (
+            &[("semantic_phase", "place and ownership flow")],
+            Some((
+                "ownership",
+                "the frozen Core place graph was checked across every control-flow exit",
+            )),
+        ),
+        "G5022" => (
+            &[("semantic_phase", "escape analysis")],
+            Some((
+                "escape-boundary",
+                "body-local borrows cannot outlive the body through an outward value or effect payload",
+            )),
+        ),
+        "G6005" => (
+            &[("semantic_phase", "handler resumption lowering")],
+            Some((
+                "handler-lifetime",
+                "a resumed continuation cannot retain an uninstalled inner handler payload",
+            )),
+        ),
+        _ => (&[], None),
+    };
+    for (name, value) in facts {
+        if !diagnostic.facts.iter().any(|fact| fact.name == *name) {
+            diagnostic.facts.push(DiagnosticFact {
+                name: (*name).into(),
+                value: (*value).into(),
+            });
+        }
+    }
+    if let Some((kind, message)) = explanation
+        && !diagnostic
+            .explanation
+            .iter()
+            .any(|frame| frame.kind == kind && frame.message == message)
+    {
+        diagnostic.explanation.push(DiagnosticExplanationFrame {
+            kind: kind.into(),
+            message: message.into(),
+        });
+    }
+    diagnostic.canonicalize_provenance();
 }
 
 fn constant_cycle(

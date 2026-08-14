@@ -1239,6 +1239,30 @@ fn service_failures_preserve_source_identity_classification_and_request_provenan
         "source diagnostic lost its span"
     );
     assert_eq!(diagnostic.input_fingerprint, Some(expected_world));
+    assert_eq!(
+        diagnostic.facts,
+        vec![
+            grandiose_stage0::DiagnosticFact {
+                name: "expected".into(),
+                value: "a declaration visible from the lexical scope".into(),
+            },
+            grandiose_stage0::DiagnosticFact {
+                name: "observed".into(),
+                value: "an unresolved name".into(),
+            },
+            grandiose_stage0::DiagnosticFact {
+                name: "semantic_phase".into(),
+                value: "name resolution".into(),
+            },
+        ]
+    );
+    assert_eq!(
+        diagnostic.explanation,
+        vec![grandiose_stage0::DiagnosticExplanationFrame {
+            kind: "name-resolution".into(),
+            message: "lexical lookup completed before type checking the expression".into(),
+        }]
+    );
 }
 
 #[test]
@@ -1257,6 +1281,9 @@ fn compile_diagnostic_canonicalization_is_stable_and_deduplicates_exact_facts() 
         severity: Severity::Error,
         primary: Some(source),
         input_fingerprint: Some(Digest::of_bytes(b"first-world")),
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
     let same_code_different_location = CompileDiagnostic {
         primary: Some(grandiose_stage0::SourceSpan {
@@ -1293,15 +1320,100 @@ fn compile_diagnostic_json_lines_are_deterministic_and_escape_control_text() {
             end: 9,
         }),
         input_fingerprint: Some(Digest::of_bytes(b"json-world")),
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
 
     assert_eq!(
         diagnostic.to_json_line(),
         format!(
-            "{{\"code\":\"G0001\",\"class\":\"source\",\"severity\":\"warning\",\"message\":\"line\\n\\\"quoted\\\"\\\\tab\\t\\u001b🙂\",\"primary\":{{\"file\":\"{}\",\"start_byte\":4,\"end_byte\":9}},\"input_fingerprint\":\"{}\"}}",
+            "{{\"code\":\"G0001\",\"class\":\"source\",\"severity\":\"warning\",\"message\":\"line\\n\\\"quoted\\\"\\\\tab\\t\\u001b🙂\",\"primary\":{{\"file\":\"{}\",\"start_byte\":4,\"end_byte\":9}},\"related\":[],\"facts\":[],\"explanation\":[],\"input_fingerprint\":\"{}\"}}",
             request.sources[0].key.0,
             Digest::of_bytes(b"json-world"),
         )
+    );
+}
+
+#[test]
+fn compile_diagnostic_provenance_is_merged_sorted_and_rendered_independent_of_phase_order() {
+    let request = request("pub fn main() -> i64 { 0 }");
+    let primary = grandiose_stage0::SourceSpan {
+        file: request.sources[0].key,
+        start: 4,
+        end: 8,
+    };
+    let base = CompileDiagnostic {
+        code: "G0008",
+        message: "a structured semantic failure".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Error,
+        primary: Some(primary),
+        input_fingerprint: None,
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
+    };
+    let left = base
+        .clone()
+        .with_fact("observed", "open effect row")
+        .with_explanation("effect-boundary", "the entrypoint has no ambient handler")
+        .with_related_location(
+            "effect declaration",
+            grandiose_stage0::SourceSpan {
+                start: 9,
+                end: 12,
+                ..primary
+            },
+        );
+    let right = base
+        .with_fact("expected", "closed effect row")
+        .with_explanation("type-boundary", "the ABI must be fully concrete")
+        .with_related_location(
+            "call site",
+            grandiose_stage0::SourceSpan {
+                start: 13,
+                end: 16,
+                ..primary
+            },
+        );
+    let first = CompileDiagnostic::canonicalize(vec![left.clone(), right.clone()]);
+    let second = CompileDiagnostic::canonicalize(vec![right, left]);
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 1);
+    let diagnostic = &first[0];
+    assert_eq!(
+        diagnostic
+            .related
+            .iter()
+            .map(|related| &related.label)
+            .collect::<Vec<_>>(),
+        vec!["call site", "effect declaration"]
+    );
+    assert_eq!(
+        diagnostic
+            .facts
+            .iter()
+            .map(|fact| &fact.name)
+            .collect::<Vec<_>>(),
+        vec!["expected", "observed"]
+    );
+    assert_eq!(
+        diagnostic.text_lines(),
+        vec![
+            "G0008: a structured semantic failure".into(),
+            format!("  related call site at {}:13..16", primary.file.0),
+            format!("  related effect declaration at {}:9..12", primary.file.0),
+            "  fact expected: closed effect row".into(),
+            "  fact observed: open effect row".into(),
+            "  because effect-boundary: the entrypoint has no ambient handler".into(),
+            "  because type-boundary: the ABI must be fully concrete".into(),
+        ]
+    );
+    assert!(
+        diagnostic
+            .to_json_line()
+            .contains("\"related\":[{\"label\":\"call site\"")
     );
 }
 
@@ -1326,6 +1438,9 @@ fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severi
         severity: Severity::Warning,
         primary: Some(at_ten),
         input_fingerprint: None,
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
     let at_ten_error_later_code = CompileDiagnostic {
         code: "G0003",
@@ -1334,6 +1449,9 @@ fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severi
         severity: Severity::Error,
         primary: Some(at_ten),
         input_fingerprint: None,
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
     let at_ten_error_earlier_code = CompileDiagnostic {
         code: "G0001",
@@ -1342,6 +1460,9 @@ fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severi
         severity: Severity::Error,
         primary: Some(at_ten),
         input_fingerprint: None,
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
     let at_twenty_error = CompileDiagnostic {
         code: "G0000",
@@ -1350,6 +1471,9 @@ fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severi
         severity: Severity::Error,
         primary: Some(at_twenty),
         input_fingerprint: None,
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
     let unspanned_request = CompileDiagnostic {
         code: "G9999",
@@ -1358,6 +1482,9 @@ fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severi
         severity: Severity::Error,
         primary: None,
         input_fingerprint: None,
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
 
     let diagnostics = CompileDiagnostic::canonicalize(vec![
@@ -1402,6 +1529,9 @@ fn compile_diagnostic_span_validation_replaces_invalid_phase_locations() {
             end: 1,
         }),
         input_fingerprint: Some(fingerprint),
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     };
     let past_end = CompileDiagnostic {
         code: "G0002",
@@ -1450,7 +1580,7 @@ fn compile_diagnostic_span_validation_replaces_invalid_phase_locations() {
     }
     assert_eq!(
         diagnostics[1].message,
-        "compiler produced diagnostic G0002 with an invalid primary source span"
+        "compiler produced diagnostic G0002 with an invalid source provenance span"
     );
 }
 
@@ -1471,6 +1601,9 @@ fn compile_diagnostic_error_limit_keeps_the_earliest_facts_and_reports_suppressi
                 end: start + 1,
             }),
             input_fingerprint: None,
+            related: vec![],
+            facts: vec![],
+            explanation: vec![],
         });
     }
     diagnostics.push(CompileDiagnostic {
@@ -1480,6 +1613,9 @@ fn compile_diagnostic_error_limit_keeps_the_earliest_facts_and_reports_suppressi
         severity: Severity::Warning,
         primary: None,
         input_fingerprint: None,
+        related: vec![],
+        facts: vec![],
+        explanation: vec![],
     });
 
     let diagnostics = CompileDiagnostic::limit_errors(diagnostics, 3);
@@ -1724,11 +1860,26 @@ fn service_rejects_overlapping_direct_qualified_trait_call_candidates_at_coheren
     else {
         panic!("overlapping trait implementations unexpectedly compiled");
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G3404"),
-        "missing trait coherence diagnostic: {diagnostics:#?}"
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "G3404")
+        .expect("missing trait coherence diagnostic");
+    assert_eq!(
+        diagnostic.facts,
+        vec![grandiose_stage0::DiagnosticFact {
+            name: "semantic_phase".into(),
+            value: "trait coherence".into(),
+        }]
+    );
+    assert_eq!(diagnostic.related.len(), 1, "{diagnostic:#?}");
+    assert_eq!(diagnostic.related[0].label, "conflicting implementation");
+    assert_ne!(diagnostic.related[0].span, diagnostic.primary.unwrap());
+    assert_eq!(
+        diagnostic.explanation,
+        vec![grandiose_stage0::DiagnosticExplanationFrame {
+            kind: "coherence".into(),
+            message: "the two frozen implementation heads can apply to the same trait goal".into(),
+        }]
     );
 }
 

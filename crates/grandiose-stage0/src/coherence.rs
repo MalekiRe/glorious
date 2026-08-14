@@ -21,6 +21,11 @@ use crate::{
 pub struct CoherenceDiagnostic {
     pub code: &'static str,
     pub span: Span,
+    /// The prior implementation participating in an overlap, when this is a
+    /// two-site coherence failure.  This remains a source fact rather than a
+    /// byte offset embedded in the message so the service can publish it as a
+    /// structured related location.
+    pub related_span: Option<Span>,
     pub message: String,
 }
 
@@ -107,6 +112,7 @@ impl CoherenceSet {
                 result.diagnostics.push(CoherenceDiagnostic {
                     code: "G3407",
                     span,
+                    related_span: None,
                     message: "implementation violates the orphan boundary: trait and self type are both foreign".into(),
                 });
                 continue;
@@ -154,10 +160,8 @@ impl CoherenceSet {
                 result.diagnostics.push(CoherenceDiagnostic {
                     code,
                     span: right.span,
-                    message: format!(
-                        "{message}; conflicts with implementation at byte {}",
-                        left.span.start
-                    ),
+                    related_span: Some(left.span),
+                    message: message.into(),
                 });
             }
         }
@@ -212,6 +216,7 @@ fn resolve_self_head(
             diagnostics.push(CoherenceDiagnostic {
                 code: "G3408",
                 span,
+                related_span: None,
                 message: format!(
                     "implementation self type `{}` is ambiguous",
                     path.join("::")
@@ -223,6 +228,7 @@ fn resolve_self_head(
             diagnostics.push(CoherenceDiagnostic {
                 code: "G3409",
                 span,
+                related_span: None,
                 message: format!("implementation self type `{}` is private", path.join("::")),
             });
             SelfHeadResolution::Invalid
@@ -243,6 +249,7 @@ fn resolve_trait(
             diagnostics.push(CoherenceDiagnostic {
                 code: "G3401",
                 span: header.relation.span,
+                related_span: None,
                 message: format!(
                     "implementation trait `{}` is ambiguous",
                     header.relation.path.join("::")
@@ -254,6 +261,7 @@ fn resolve_trait(
             diagnostics.push(CoherenceDiagnostic {
                 code: "G3402",
                 span: header.relation.span,
+                related_span: None,
                 message: format!(
                     "implementation trait `{}` is private",
                     header.relation.path.join("::")
@@ -265,6 +273,7 @@ fn resolve_trait(
             diagnostics.push(CoherenceDiagnostic {
                 code: "G3403",
                 span: header.relation.span,
+                related_span: None,
                 message: format!(
                     "implementation trait `{}` is unresolved",
                     header.relation.path.join("::")
@@ -293,6 +302,7 @@ fn validate_negative_generics(
         diagnostics.push(CoherenceDiagnostic {
             code: "G3407",
             span,
+            related_span: None,
             message: format!(
                 "negative implementation has unconstrained generic parameter `{name}`"
             ),

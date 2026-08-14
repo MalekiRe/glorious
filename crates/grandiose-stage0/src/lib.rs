@@ -114,7 +114,10 @@ pub use runtime_manifest::{
     ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, TrustedRuntimeManifest,
 };
 pub use scanner::{DeclarationKind, DeclarationScan, DeclarationShell, ScanDiagnostic, TokenRange};
-pub use service::{CompilationOutcome, CompileDiagnostic, ServiceError, StageZeroCompiler};
+pub use service::{
+    CompilationOutcome, CompileDiagnostic, DiagnosticExplanationFrame, DiagnosticFact,
+    RelatedDiagnosticLocation, ServiceError, StageZeroCompiler,
+};
 pub use signature::{
     CallableSignature, ElaboratedAssociatedConst, ElaboratedAssociatedConstDefinition,
     ElaboratedAssociatedEffectRowDefinition, ElaboratedAssociatedType,

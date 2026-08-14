@@ -148,7 +148,11 @@ fn split_diagnostic_format(
 fn render_diagnostics(diagnostics: &[CompileDiagnostic], format: DiagnosticFormat) {
     for diagnostic in diagnostics {
         match format {
-            DiagnosticFormat::Text => eprintln!("{}: {}", diagnostic.code, diagnostic.message),
+            DiagnosticFormat::Text => {
+                for line in diagnostic.text_lines() {
+                    eprintln!("{line}");
+                }
+            }
             DiagnosticFormat::Json => eprintln!("{}", diagnostic.to_json_line()),
         }
     }
