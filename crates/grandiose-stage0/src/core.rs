@@ -10,9 +10,7 @@ use crate::{
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface},
     source::Span,
-    trait_solver::{
-        TraitAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer, TraitSolver,
-    },
+    trait_solver::{TraitAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer, TraitSolver},
     types::{EffectInstance, EffectRow, InferContext, Mutability, ScalarType, Type},
 };
 
@@ -1181,6 +1179,10 @@ impl Elaborator<'_> {
                     "G4155",
                     "selected implementation does not define this associated type",
                 );
+                Type::Error
+            }
+            TraitProjectionAnswer::AssociatedTypeArity { .. } => {
+                self.projection_error("G4156", "associated type projection has the wrong arity");
                 Type::Error
             }
         }

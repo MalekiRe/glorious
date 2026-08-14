@@ -203,12 +203,12 @@ impl ElaboratedInterface {
             };
             for (name, item) in &implementation.associated_types {
                 match trait_header.associated_types.get(name) {
-                    Some(expected) if *expected == item.generics => {}
+                    Some(expected) if expected.generics == item.generics => {}
                     Some(expected) => diagnostics.push(SignatureDiagnostic {
                         code: "G4114",
                         message: format!(
-                            "associated type `{name}` has arity {}, but the trait requires {expected}",
-                            item.generics
+                            "associated type `{name}` has arity {}, but the trait requires {}",
+                            item.generics, expected.generics
                         ),
                     }),
                     None => diagnostics.push(SignatureDiagnostic {
@@ -817,16 +817,16 @@ impl Elaborator<'_> {
             associated_types: header
                 .associated_types
                 .iter()
-                 .map(|item| {
-                     (
-                         item.name.clone(),
+                .map(|item| {
+                    (
+                        item.name.clone(),
                         ElaboratedAssociatedType {
                             generics: item.generics.len() as u32,
                             effect_row: item.effect_row,
                         },
                     )
-                 })
-                 .collect(),
+                })
+                .collect(),
             methods,
         }
     }

@@ -97,9 +97,9 @@ pub use service::{CompilationOutcome, CompileDiagnostic, ServiceError, StageZero
 pub use signature::{
     CallableSignature, ElaboratedAssociatedType, ElaboratedAssociatedTypeDefinition,
     ElaboratedEffect, ElaboratedEffectOperation, ElaboratedEnumVariant,
-    ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedImplementation,
-    ElaboratedInterface, ElaboratedNominalLayout, ElaboratedTrait, ElaboratedTraitReference,
-    NominalField, SignatureDiagnostic,
+    ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface,
+    ElaboratedNominalLayout, ElaboratedTrait, ElaboratedTraitReference, NominalField,
+    SignatureDiagnostic,
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{
