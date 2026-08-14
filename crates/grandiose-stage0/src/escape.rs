@@ -228,6 +228,7 @@ impl Analyzer<'_> {
                 callee,
                 arguments,
                 reference_origin,
+                ..
             } => {
                 // A call result is a boundary value in its own right. The
                 // frozen Core contract names the caller argument whose region

@@ -3534,6 +3534,113 @@ fn generic_lifetime_relation_selects_the_precise_call_reference_argument() {
 }
 
 #[test]
+fn callable_contract_traverses_nominal_generic_reference_fields_before_opening() {
+    let core = core_for(
+        "core-call-reference-nominal-generic-contract@0.1.0",
+        "type Ref = &i64; pub struct Pair<T> { value: T } pub struct Envelope<T> { pair: Pair<T> } pub fn relay<T>(value: Envelope<T>) -> Envelope<T> { value } pub fn main() -> Envelope<&i64> { let value = 1; let pair = Pair { value: &value }; let envelope = Envelope { pair: pair }; relay<Ref>(envelope) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let paths = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_contract: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(origin),
+                ..
+            } => Some((paths, origin)),
+            _ => None,
+        })
+        .expect("nominal callable contract did not freeze its reference field path");
+    assert_eq!(paths.0[0].result_fields, [0, 0]);
+    assert_eq!(paths.0[0].argument_fields, [0, 0]);
+    assert_eq!(paths.1, paths.0);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        !flow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "nominal generic reference path became opaque: {flow:#?}"
+    );
+}
+
+#[test]
+fn inferred_generic_aggregate_reference_paths_refine_after_instantiation() {
+    let core = core_for(
+        "core-call-reference-inferred-generic-aggregate@0.1.0",
+        "pub fn relay<T>(value: T) -> T { value } pub fn main() -> (&i64, i64) { let value = 1; let pair = (&value, 0); relay(pair) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let call = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_contract: grandiose_stage0::CallReferenceOrigin::Opaque,
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                ..
+            } => Some(paths),
+            _ => None,
+        })
+        .expect("inferred generic aggregate did not refine its concrete reference path");
+    assert_eq!(call[0].result_fields, [0]);
+    assert_eq!(call[0].argument_fields, [0]);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        !flow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "inferred generic aggregate result stayed opaque: {flow:#?}"
+    );
+}
+
+#[test]
+fn forged_nominal_callable_contract_cannot_retarget_a_sibling_argument() {
+    let mut core = core_for(
+        "core-forged-nominal-call-reference-relation@0.1.0",
+        "type Ref = &i64; type FlagRef = &Bool; pub struct Pair<T> { value: T } pub fn first<T, U>(left: Pair<T>, right: Pair<U>) -> Pair<T> { left } pub fn main() -> Pair<&i64> { let left = 1; let right = true; let left_pair = Pair { value: &left }; let right_pair = Pair { value: &right }; first<Ref, FlagRef>(left_pair, right_pair) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let (contract, origin) = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Call {
+                reference_contract: grandiose_stage0::CallReferenceOrigin::Paths(contract),
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(origin),
+                ..
+            } => Some((contract, origin)),
+            _ => None,
+        })
+        .expect("nominal callable relation did not reach frozen Core");
+    assert_eq!(contract[0].argument, 0);
+    origin[0].argument = 1;
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4187"),
+        "forged nominal relation retargeted a sibling argument: {:#?}",
+        core.validate()
+    );
+    let flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-nominal-call-reference-relation")),
+        &core,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR accepted a forged nominal callable relation: {lowered:#?}"
+    );
+}
+
+#[test]
 fn forged_call_reference_paths_fail_closed_before_ownership() {
     let mut core = core_for(
         "core-forged-call-reference-path@0.1.0",

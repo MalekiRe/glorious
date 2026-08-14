@@ -440,6 +440,10 @@ pub enum CoreKind {
     Call {
         callee: CoreId,
         arguments: Vec<CoreId>,
+        /// The declaration-level relation observed before generic/HRTB
+        /// lifetimes are opened into caller-local regions.  This independently
+        /// seals interface-aware nominal paths for Core validation.
+        reference_contract: CallReferenceOrigin,
         reference_origin: CallReferenceOrigin,
     },
     /// Canonical effect performance selected by the effect namespace, never a
@@ -947,11 +951,13 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Call {
                 callee,
                 arguments,
+                reference_contract,
                 reference_origin,
             } => {
                 self.bytes(b"call");
                 self.id(*callee);
                 self.ids(arguments);
+                self.debug(reference_contract);
                 self.debug(reference_origin);
             }
             CoreKind::Perform {
@@ -1177,17 +1183,18 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
 fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type) -> Option<String> {
     let (arguments, reference_origin, boundary, callable_contract) = match kind {
         CoreKind::Call {
-            callee,
             arguments,
+            reference_contract,
             reference_origin,
             ..
         } => (
             arguments,
             reference_origin,
             "call",
-            body.expressions
-                .get(callee.0 as usize)
-                .and_then(|callee| callable_reference_origin_from_type(&callee.ty)),
+            // The callee expression may have already opened its lifetime
+            // binders. The separately frozen contract retains the
+            // interface-aware nominal relation from before that opening.
+            Some(reference_contract.clone()),
         ),
         CoreKind::Perform {
             arguments,
@@ -5975,7 +5982,8 @@ impl Elaborator<'_> {
         // generic or higher-ranked regions can legitimately both become
         // `Elided` at this boundary; deriving provenance afterwards would
         // make a precise result look ambiguous or, worse, pick a wrong loan.
-        let reference_origin = callable_reference_origin_from_contract(&parameters, &result);
+        let reference_contract =
+            callable_reference_origin_from_contract(self.signatures, &parameters, &result);
         let Ok((parameters, result, effects)) =
             self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span)
         else {
@@ -6004,7 +6012,8 @@ impl Elaborator<'_> {
             CoreKind::Call {
                 callee,
                 arguments,
-                reference_origin,
+                reference_contract: reference_contract.clone(),
+                reference_origin: reference_contract,
             },
             result,
             span,
@@ -9067,27 +9076,16 @@ fn call_reference_origin(
     CallReferenceOrigin::Paths(paths)
 }
 
-/// Recover the reference-result relation directly from a callable contract,
-/// before call instantiation turns distinct declaration/HRTB lifetimes into
-/// caller-local `Elided` regions.  This intentionally covers only structural
-/// shapes whose paths are self-describing in Core; richer nominal layouts use
-/// the interface-aware fallback after sealing.
-fn callable_reference_origin_from_type(ty: &Type) -> Option<CallReferenceOrigin> {
-    let Type::Callable {
-        parameters, result, ..
-    } = ty
-    else {
-        return None;
-    };
-    Some(callable_reference_origin_from_contract(parameters, result))
-}
-
+/// Recover the reference-result relation directly from the interface-aware
+/// callable contract, before call instantiation turns distinct declaration or
+/// higher-ranked regions into caller-local `Elided` lifetimes.
 fn callable_reference_origin_from_contract(
+    signatures: &ElaboratedInterface,
     parameters: &[Type],
     result: &Type,
 ) -> CallReferenceOrigin {
     let mut result_leaves = vec![];
-    if contract_reference_leaf_paths(result, &mut vec![], &mut result_leaves).is_err() {
+    if reference_leaf_paths(signatures, result, &mut vec![], &mut result_leaves).is_err() {
         return CallReferenceOrigin::Opaque;
     }
     if result_leaves.is_empty() {
@@ -9107,7 +9105,7 @@ fn callable_reference_origin_from_contract(
     let mut argument_leaves = vec![];
     for (argument, parameter) in parameters.iter().enumerate() {
         let mut leaves = vec![];
-        if contract_reference_leaf_paths(parameter, &mut vec![], &mut leaves).is_err() {
+        if reference_leaf_paths(signatures, parameter, &mut vec![], &mut leaves).is_err() {
             return CallReferenceOrigin::Opaque;
         }
         argument_leaves.extend(
@@ -9144,41 +9142,6 @@ fn callable_reference_origin_from_contract(
         });
     }
     CallReferenceOrigin::Paths(paths)
-}
-
-fn contract_reference_leaf_paths(
-    ty: &Type,
-    path: &mut Vec<u32>,
-    leaves: &mut Vec<(Vec<u32>, Type)>,
-) -> Result<(), ()> {
-    match ty {
-        Type::Reference { .. } => leaves.push((path.clone(), ty.clone())),
-        Type::Tuple(fields) => {
-            for (index, field) in fields.iter().enumerate() {
-                path.push(index as u32);
-                contract_reference_leaf_paths(field, path, leaves)?;
-                path.pop();
-            }
-        }
-        Type::Array(_)
-        | Type::Nominal { .. }
-        | Type::Projection { .. }
-        | Type::Generic(_)
-        | Type::Infer(_) => {
-            // Layout or a possible reference leaf is declaration-owned and
-            // cannot be reconstructed from an isolated callable value.
-            return Err(());
-        }
-        Type::Callable { .. }
-        | Type::Unit
-        | Type::Never
-        | Type::Scalar(_)
-        | Type::ConstU32(_)
-        | Type::ConstQuantity(_)
-        | Type::ConstGeneric { .. }
-        | Type::Error => {}
-    }
-    Ok(())
 }
 
 /// Discover direct reference leaves through the sealed structural shapes that

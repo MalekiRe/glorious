@@ -1505,6 +1505,7 @@ mod tests {
                     kind: CoreKind::Call {
                         callee: CoreId(0),
                         arguments: vec![CoreId(1)],
+                        reference_contract: crate::core::CallReferenceOrigin::None,
                         reference_origin: crate::core::CallReferenceOrigin::None,
                     },
                     ty: Type::Scalar(crate::types::ScalarType::I64),
@@ -1539,6 +1540,7 @@ mod tests {
                     kind: CoreKind::Call {
                         callee: CoreId(3),
                         arguments: vec![],
+                        reference_contract: crate::core::CallReferenceOrigin::None,
                         reference_origin: crate::core::CallReferenceOrigin::None,
                     },
                     ty: Type::Scalar(crate::types::ScalarType::I64),
