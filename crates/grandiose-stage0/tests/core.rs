@@ -3205,10 +3205,13 @@ fn ordered_refutable_completion_transfers_chain_through_each_test() {
         mir.blocks[2].terminator,
         grandiose_stage0::MirTerminator::SwitchBool { .. }
     ));
-    assert!(matches!(
-        mir.blocks[3].terminator,
-        grandiose_stage0::MirTerminator::Leave { .. }
-    ));
+    let grandiose_stage0::MirTerminator::Leave { brand, cleanup, .. } = &mir.blocks[3].terminator
+    else {
+        panic!("first matched completion arm must leave the enclosing label")
+    };
+    assert_eq!(brand.owner, owner);
+    assert_eq!(cleanup.moved_places, flow.moved_places);
+    assert_eq!(cleanup.active_loans, flow.active_loans);
     assert!(matches!(
         mir.blocks[4].terminator,
         grandiose_stage0::MirTerminator::Leave { .. }
@@ -3262,4 +3265,56 @@ fn ordered_refutable_completion_preserves_first_match_and_final_fallback() {
             expected
         );
     }
+}
+
+#[test]
+fn ordered_completion_fallback_transfer_leaves_after_all_tests_fail() {
+    let core = core_for(
+        "core-ordered-completion-fallback-transfer@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { 1 => 1, value => transfer done value, Ask::ask() => 42 } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("fallback transfer chain lowers");
+    assert!(
+        mir.blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::UninstallHandler))
+    );
+    assert!(matches!(
+        mir.blocks[1].terminator,
+        grandiose_stage0::MirTerminator::SwitchBool {
+            else_target: grandiose_stage0::MirBlockId(3),
+            ..
+        }
+    ));
+    assert!(matches!(
+        mir.blocks[2].terminator,
+        grandiose_stage0::MirTerminator::Return { .. }
+    ));
+    let grandiose_stage0::MirTerminator::Leave { brand, cleanup, .. } = &mir.blocks[3].terminator
+    else {
+        panic!("final fallback must leave the enclosing label")
+    };
+    assert_eq!(brand.owner, owner);
+    assert_eq!(cleanup.moved_places, flow.moved_places);
+    assert_eq!(cleanup.active_loans, flow.active_loans);
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
 }

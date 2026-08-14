@@ -2289,9 +2289,10 @@ impl Lowerer<'_> {
     /// label.  Every refutable clause receives the protected computation's
     /// result on an explicit block edge; a failed test carries that exact
     /// subject forward to the next clause.  This remains intentionally narrow
-    /// (direct one-shot handler and a final ordinary fallback) so multi-shot
+    /// (direct one-shot handler and a final irrefutable fallback) so multi-shot
     /// continuations and closure-captured control cannot acquire a synthetic
-    /// CFG path here.
+    /// CFG path here.  The final arm may itself take the enclosing label
+    /// after every preceding refutable test has failed.
     fn lower_root_label_completion_chain(
         &mut self,
         root: CoreId,
@@ -2324,13 +2325,13 @@ impl Lowerer<'_> {
         let (fallback_clause, refutable_clauses) = completion_clauses.split_last()?;
         if refutable_clauses.is_empty()
             || !pattern_is_irrefutable(&fallback_clause.pattern)
-            || self.contains_label_transfer(fallback_clause.body, brand)
             || !refutable_clauses
                 .iter()
                 .all(|clause| !pattern_is_irrefutable(&clause.pattern))
-            || !refutable_clauses
-                .iter()
-                .any(|clause| self.contains_label_transfer(clause.body, brand))
+            || !(self.contains_label_transfer(fallback_clause.body, brand)
+                || refutable_clauses
+                    .iter()
+                    .any(|clause| self.contains_label_transfer(clause.body, brand)))
         {
             return None;
         }
@@ -2446,8 +2447,19 @@ impl Lowerer<'_> {
             std::slice::from_ref(&fallback_clause.pattern),
             &[completion_subjects[completion_count - 1]],
         )?;
-        let fallback_value = self.value(fallback_clause.body)?;
-        let fallback_instructions = std::mem::take(&mut self.instructions);
+        let fallback = if self.contains_label_transfer(fallback_clause.body, brand) {
+            let value = self.lower_label_transfer_path(fallback_clause.body, brand)?;
+            CompletionChainArm::Leave {
+                instructions: std::mem::take(&mut self.instructions),
+                value,
+            }
+        } else {
+            let value = self.value(fallback_clause.body)?;
+            CompletionChainArm::Return {
+                instructions: std::mem::take(&mut self.instructions),
+                value,
+            }
+        };
 
         self.instructions = Vec::new();
         self.named = boundary_named;
@@ -2522,12 +2534,31 @@ impl Lowerer<'_> {
                 terminator,
             });
         }
+        let (instructions, terminator) = match fallback {
+            CompletionChainArm::Leave {
+                instructions,
+                value,
+            } => (
+                instructions,
+                MirTerminator::Leave {
+                    brand,
+                    target: MirBlockId(join_block),
+                    arguments: vec![value],
+                    cleanup: MirCleanupPlan {
+                        moved_places: self.leave_cleanup.moved_places.clone(),
+                        active_loans: self.leave_cleanup.active_loans.clone(),
+                    },
+                },
+            ),
+            CompletionChainArm::Return {
+                instructions,
+                value,
+            } => (instructions, MirTerminator::Return { value }),
+        };
         blocks.push(MirBlock {
             parameters: vec![],
-            instructions: fallback_instructions,
-            terminator: MirTerminator::Return {
-                value: fallback_value,
-            },
+            instructions,
+            terminator,
         });
         blocks.push(MirBlock {
             parameters: vec![],
