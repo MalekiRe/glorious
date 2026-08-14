@@ -365,7 +365,11 @@ impl InferContext {
                     .map(|parameter| self.zonk(parameter))
                     .collect::<Result<_, _>>()?,
                 result: Box::new(self.zonk(*result)?),
-                effects: self.zonk_effects(effects)?,
+                // A callable type can legitimately retain a declaration-owned
+                // row binder while it is nested in a generic body.  The row
+                // itself is closed only when that callable is invoked or an
+                // executable interface is finalized.
+                effects: self.zonk_effects_allowing_generic_tail(effects)?,
                 invocation,
             }),
             value => Ok(value),
@@ -386,12 +390,25 @@ impl InferContext {
     }
 
     pub fn zonk_effects(&mut self, effects: EffectRow) -> Result<EffectRow, TypeError> {
+        let effects = self.zonk_effects_allowing_generic_tail(effects)?;
+        if let Some(EffectTail::Generic(index)) = effects.tail {
+            return Err(TypeError::UnresolvedGenericEffectRow(index));
+        }
+        Ok(effects)
+    }
+
+    /// Resolve inference-owned pieces of a row without treating a declared
+    /// row-polymorphic binder as an unresolved inference hole.  Body checking
+    /// uses this before comparing a callee's symbolic outward row with its
+    /// caller's declared symbolic row; persistence boundaries still use
+    /// [`Self::zonk_effects`] and therefore require a closed row.
+    pub fn zonk_effects_allowing_generic_tail(
+        &mut self,
+        effects: EffectRow,
+    ) -> Result<EffectRow, TypeError> {
         let effects = self.resolve_effects(effects);
-        if let Some(tail) = effects.tail {
-            return Err(match tail {
-                EffectTail::Infer(variable) => TypeError::UnresolvedEffect(variable),
-                EffectTail::Generic(index) => TypeError::UnresolvedGenericEffectRow(index),
-            });
+        if let Some(EffectTail::Infer(variable)) = effects.tail {
+            return Err(TypeError::UnresolvedEffect(variable));
         }
         Ok(EffectRow {
             effects: effects
@@ -409,7 +426,7 @@ impl InferContext {
                 })
                 .collect::<Result<_, _>>()?,
             projections: effects.projections,
-            tail: None,
+            tail: effects.tail,
         })
     }
 

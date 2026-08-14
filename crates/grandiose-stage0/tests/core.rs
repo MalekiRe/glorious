@@ -62,6 +62,30 @@ fn typed_core_checks_a_function_body_against_its_declared_result() {
 }
 
 #[test]
+fn typed_core_admits_calls_with_the_same_symbolic_effect_row_tail() {
+    let package = PackageKey("core-symbolic-effect-tail@0.1.0".into());
+    let source = "pub fn forward<e: EffectRow>() -> i64 / { | e } { 0 } pub fn relay<e: EffectRow>() -> i64 / { | e } { forward() }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let relay = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .expect("relay definition");
+    let body = BodySyntax::parse(&lexed, source, relay.body.expect("relay body"));
+    let core = TypedBody::elaborate(
+        relay,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
 fn typed_core_retains_selected_trait_method_evidence() {
     let package = PackageKey("core-trait-method-evidence@0.1.0".into());
     let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn main() -> i64 { Increment::increment(41) }";

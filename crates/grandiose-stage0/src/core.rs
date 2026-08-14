@@ -3023,7 +3023,10 @@ impl Elaborator<'_> {
         })
     }
     fn check_effects(&mut self, effects: &EffectRow, span: Span) {
-        let effects = match self.inference.zonk_effects(effects.clone()) {
+        let effects = match self
+            .inference
+            .zonk_effects_allowing_generic_tail(effects.clone())
+        {
             Ok(effects) => effects,
             Err(_) => {
                 self.error(span, "G4155", "call has an unresolved outward effect row");
@@ -3032,6 +3035,17 @@ impl Elaborator<'_> {
             }
         };
         let mut effects = effects;
+        if let Some(tail) = effects.tail
+            && self.declared_effects.tail != Some(tail)
+        {
+            self.error(
+                span,
+                "G4155",
+                "call has an outward effect-row tail not admitted by this callable",
+            );
+            self.recovered = true;
+            return;
+        }
         let mut projections = std::mem::take(&mut effects.projections);
         while let Some(projection) = projections.pop() {
             if !projection_is_concrete(&projection.subject)
