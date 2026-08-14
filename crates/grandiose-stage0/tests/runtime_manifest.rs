@@ -199,6 +199,40 @@ fn u32_runtime_leaves_bind_by_exact_identity_and_abi() {
 }
 
 #[test]
+fn generic_int_bit_xor_requires_its_exact_generic_abi() {
+    let standard = PackageKey("std@0.1.0".into());
+    let input = RuntimeManifestInput {
+        standard_library: standard.clone(),
+        selectors: vec![PrimitiveSelector {
+            role: PrimitiveRole::IntBitXor,
+            module_path: "crate".into(),
+            name: "__g1_int_bit_xor".into(),
+        }],
+    };
+    let package_interface = interface(
+        standard.clone(),
+        "pub fn __g1_int_bit_xor<T>(left: T, right: T) -> T { () }",
+    );
+    let signatures = ElaboratedInterface::elaborate(&package_interface);
+    input
+        .bind(vec![package_interface], &signatures)
+        .expect("the exact generic int bit-xor ABI must bind");
+
+    let invalid_interface = interface(
+        standard,
+        "pub fn __g1_int_bit_xor(left: i64, right: i64) -> i64 { () }",
+    );
+    let invalid_signatures = ElaboratedInterface::elaborate(&invalid_interface);
+    assert!(matches!(
+        input.bind(vec![invalid_interface], &invalid_signatures),
+        Err(ManifestError::IncompatibleSignature {
+            role: PrimitiveRole::IntBitXor,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn generic_int_bit_and_requires_its_exact_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
