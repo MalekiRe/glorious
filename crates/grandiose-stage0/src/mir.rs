@@ -13578,15 +13578,6 @@ impl Lowerer<'_> {
                     (Type::Scalar(crate::types::ScalarType::U32), "==") => {
                         MirInstruction::U32Eq { dst, left, right }
                     }
-                    (Type::Scalar(crate::types::ScalarType::U32), "!=") => {
-                        let equal = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
-                        self.instructions.push(MirInstruction::U32Eq {
-                            dst: equal,
-                            left,
-                            right,
-                        });
-                        MirInstruction::NotBool { dst, value: equal }
-                    }
                     (Type::Scalar(crate::types::ScalarType::U32), "<") => {
                         MirInstruction::U32Lt { dst, left, right }
                     }

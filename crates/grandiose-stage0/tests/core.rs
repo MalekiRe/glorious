@@ -2397,7 +2397,7 @@ fn contextual_u32_comparisons_lower_to_typed_vm_primitives() {
         mir.entry_block()
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::I64ToU32Checked { .. }))
+            .any(|instruction| matches!(instruction, MirInstruction::ConstU32 { .. }))
     );
     assert!(
         mir.entry_block()
