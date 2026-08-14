@@ -1439,7 +1439,7 @@ impl<'a> Decoder<'a> {
                 let (dst, src) = self.register_pair()?;
                 Ok(VmInstruction::Store { dst, src })
             }
-            49 => {
+            52 => {
                 let dst = self.u32()?;
                 let src = self.u32()?;
                 let unique = match self.byte()? {
@@ -1463,11 +1463,11 @@ impl<'a> Decoder<'a> {
                     unique,
                 })
             }
-            50 => Ok(VmInstruction::DerefCopy {
+            53 => Ok(VmInstruction::DerefCopy {
                 dst: self.u32()?,
                 reference: self.u32()?,
             }),
-            51 => Ok(VmInstruction::DerefStore {
+            54 => Ok(VmInstruction::DerefStore {
                 reference: self.u32()?,
                 src: self.u32()?,
             }),
@@ -5058,7 +5058,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             fields,
             unique,
         } => {
-            output.push(49);
+            output.push(52);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&src.to_le_bytes());
             output.push(*unique as u8);
@@ -5068,12 +5068,12 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             }
         }
         VmInstruction::DerefCopy { dst, reference } => {
-            output.push(50);
+            output.push(53);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&reference.to_le_bytes());
         }
         VmInstruction::DerefStore { reference, src } => {
-            output.push(51);
+            output.push(54);
             output.extend_from_slice(&reference.to_le_bytes());
             output.extend_from_slice(&src.to_le_bytes());
         }
