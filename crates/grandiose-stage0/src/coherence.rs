@@ -89,9 +89,19 @@ impl CoherenceSet {
             let trait_local = index
                 .owner(trait_definition)
                 .is_some_and(|owner| owner.package == module.package);
-            let self_local = resolve_self_head(index, &module, &header.self_ty)
-                .and_then(|definition| index.owner(definition))
-                .is_some_and(|owner| owner.package == module.package);
+            let self_head = resolve_self_head(
+                index,
+                &module,
+                &header.self_ty,
+                span,
+                &mut result.diagnostics,
+            );
+            if self_head == SelfHeadResolution::Invalid {
+                continue;
+            }
+            let self_local = matches!(self_head, SelfHeadResolution::Resolved(definition) if index
+                .owner(definition)
+                .is_some_and(|owner| owner.package == module.package));
             if !trait_local && !self_local {
                 result.diagnostics.push(CoherenceDiagnostic {
                     code: "G3407",
@@ -164,19 +174,53 @@ impl CoherenceSet {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelfHeadResolution {
+    Resolved(DefKey),
+    /// Primitives, generic parameters, and recovered type syntax do not have
+    /// a declaration owner. They remain valid anchors only for a local trait.
+    Unowned,
+    /// A nominal path that was ambiguous or private is a resolution failure,
+    /// not evidence that the self type is foreign.
+    Invalid,
+}
+
 fn resolve_self_head(
     index: &DefinitionIndex,
     module: &ModuleKey,
     ty: &HeaderType,
-) -> Option<DefKey> {
+    span: Span,
+    diagnostics: &mut Vec<CoherenceDiagnostic>,
+) -> SelfHeadResolution {
     let path = match ty {
         HeaderType::Path(path) => path,
-        HeaderType::Application(base, _) => return resolve_self_head(index, module, base),
-        _ => return None,
+        HeaderType::Application(base, _) => {
+            return resolve_self_head(index, module, base, span, diagnostics);
+        }
+        _ => return SelfHeadResolution::Unowned,
     };
     match index.resolve_path(DefinitionNamespace::Type, module, path) {
-        ResolutionState::Resolved(definition) => Some(definition),
-        _ => None,
+        ResolutionState::Resolved(definition) => SelfHeadResolution::Resolved(definition),
+        ResolutionState::Ambiguous(_) => {
+            diagnostics.push(CoherenceDiagnostic {
+                code: "G3408",
+                span,
+                message: format!(
+                    "implementation self type `{}` is ambiguous",
+                    path.join("::")
+                ),
+            });
+            SelfHeadResolution::Invalid
+        }
+        ResolutionState::Inaccessible(_) => {
+            diagnostics.push(CoherenceDiagnostic {
+                code: "G3409",
+                span,
+                message: format!("implementation self type `{}` is private", path.join("::")),
+            });
+            SelfHeadResolution::Invalid
+        }
+        ResolutionState::Unresolved | ResolutionState::Recovered => SelfHeadResolution::Unowned,
     }
 }
 

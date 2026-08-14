@@ -62,6 +62,10 @@ pub struct DefinitionIndex {
     entries: BTreeMap<(DefinitionNamespace, String), Vec<IndexedDefinition>>,
     qualified: BTreeMap<(DefinitionNamespace, ModuleKey, String), Vec<IndexedDefinition>>,
     modules: BTreeMap<ModuleKey, ()>,
+    /// Dependency roots linked into this frozen interface set. Source uses
+    /// the package-name component before `@`; full package keys remain the
+    /// ownership identities used by coherence.
+    package_roots: BTreeMap<String, Vec<ModuleKey>>,
     /// Visibility is a property of the declaration which introduces a module,
     /// not a property recovered from definitions nested below it.  Keeping the
     /// edge in the same immutable index as definitions prevents a public item
@@ -231,6 +235,17 @@ impl DefinitionIndex {
         for imports in self.imports.values_mut() {
             imports.sort();
             imports.dedup();
+        }
+        self.package_roots.clear();
+        for module in self.modules.keys().filter(|module| module.path == "crate") {
+            self.package_roots
+                .entry(package_name(&module.package))
+                .or_default()
+                .push(module.clone());
+        }
+        for roots in self.package_roots.values_mut() {
+            roots.sort();
+            roots.dedup();
         }
     }
 
@@ -750,10 +765,23 @@ impl DefinitionIndex {
                 ModuleLookup::Absent => {}
             }
             let Some(parent) = parent_module_path(&base) else {
-                return ModuleLookup::Absent;
+                break;
             };
             base = parent;
         }
+
+        // Select a dependency only from interfaces explicitly linked into
+        // this index.  Ordinary lexical modules win a same-name tie, keeping
+        // existing local path semantics stable.
+        let Some(roots) = self.package_roots.get(first) else {
+            return ModuleLookup::Absent;
+        };
+        let [root] = roots.as_slice() else {
+            // An ambiguous package spelling must not pick an arbitrary
+            // dependency by insertion order.
+            return ModuleLookup::Absent;
+        };
+        self.module_key(root, requester, "crate", rest)
     }
 
     fn module_key(
@@ -788,7 +816,7 @@ impl DefinitionIndex {
     /// happens to be `pub`.
     fn module_path_visible_to(&self, module: &ModuleKey, requester: &ModuleKey) -> bool {
         if module.package != requester.package {
-            return false;
+            return self.module_path_is_public(module);
         }
         let mut prefix = String::from("crate");
         if module.path == prefix {
@@ -862,6 +890,13 @@ impl DefinitionIndex {
         visited.remove(&(module.clone(), namespace));
         names
     }
+}
+
+fn package_name(package: &crate::identity::PackageKey) -> String {
+    package
+        .0
+        .split_once('@')
+        .map_or_else(|| package.0.clone(), |(name, _)| name.to_owned())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
