@@ -23,6 +23,13 @@ pub struct TraitGoal {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraitGoalQuery {
+    pub fingerprint: Digest,
+    pub trait_definition: DefKey,
+    pub candidate_implementations: Vec<DefKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TraitAnswer {
     Proven { evidence: DefKey },
     Refuted { evidence: DefKey },
@@ -232,6 +239,19 @@ impl TraitSolver {
 
     pub fn solve(&mut self, goal: TraitGoal) -> TraitAnswer {
         self.solve_at(goal, 0).into()
+    }
+
+    pub fn query(&self, goal: &TraitGoal) -> TraitGoalQuery {
+        TraitGoalQuery {
+            fingerprint: goal_key(goal),
+            trait_definition: goal.relation.definition,
+            candidate_implementations: self
+                .rules
+                .iter()
+                .filter(|rule| rule.implementation.relation.definition == goal.relation.definition)
+                .map(|rule| rule.definition)
+                .collect(),
+        }
     }
 
     /// Inspect deterministic candidate shape alongside the ordinary tabled
