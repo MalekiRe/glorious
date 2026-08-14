@@ -2901,6 +2901,40 @@ fn call_lifetime_contract_rejects_a_short_argument_for_static_reference() {
 }
 
 #[test]
+fn callable_reference_parameters_are_checked_contravariantly() {
+    let accepted = core_for(
+        "core-callable-reference-variance@0.1.0",
+        r#"
+            pub fn accepts_any(value: &i64) -> i64 { 0 }
+            pub fn requires_static(callback: (&'static i64) -> i64) -> i64 { 0 }
+            pub fn main() -> i64 { requires_static(accepts_any) }
+        "#,
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:#?}",
+        accepted.diagnostics
+    );
+
+    let rejected = core_for(
+        "core-callable-reference-variance-rejected@0.1.0",
+        r#"
+            pub fn accepts_static(value: &'static i64) -> i64 { 0 }
+            pub fn requires_any(callback: (&i64) -> i64) -> i64 { 0 }
+            pub fn main() -> i64 { requires_any(accepts_static) }
+        "#,
+    );
+    assert!(
+        rejected
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "{:#?}",
+        rejected.diagnostics
+    );
+}
+
+#[test]
 fn higher_ranked_call_opens_its_bound_lifetime_without_leaking_it() {
     let valid = core_for(
         "core-hrtb-call@0.1.0",

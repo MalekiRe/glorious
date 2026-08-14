@@ -7145,15 +7145,19 @@ fn align_lifetime_types(
             && expected_parameters.len() == actual_parameters.len()
             && expected_invocation == actual_invocation =>
         {
+            // Callable inputs are contravariant: a callback that accepts a
+            // shorter/elided reference can safely stand in for one that will
+            // only ever receive a `'static` reference.  Results and effect
+            // payloads remain covariant below.  Keep the actual parameter
+            // spelling in the returned type so the ordinary equality-based
+            // inference pass sees the already-proven coercion rather than
+            // trying to rediscover it as an equality.
+            for (expected, actual) in expected_parameters.iter().zip(actual_parameters) {
+                align_lifetime_types(actual, expected, substitution, mode, depth + 1)?;
+            }
             Ok(Type::Callable {
                 lifetime_binders: *expected_binders,
-                parameters: expected_parameters
-                    .iter()
-                    .zip(actual_parameters)
-                    .map(|(expected, actual)| {
-                        align_lifetime_types(expected, actual, substitution, mode, depth + 1)
-                    })
-                    .collect::<Result<_, _>>()?,
+                parameters: actual_parameters.clone(),
                 result: Box::new(align_lifetime_types(
                     expected_result,
                     actual_result,

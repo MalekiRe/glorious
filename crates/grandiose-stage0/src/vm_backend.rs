@@ -576,6 +576,9 @@ pub enum VmArtifactError {
     NotCallable {
         register: u32,
     },
+    /// Stage 0 can rebase shared references into frame-independent callable
+    /// captures, but must not snapshot a unique reference and lose write-back.
+    UnsupportedEscapingUniqueReference,
     CallDepthLimit {
         limit: u32,
     },
@@ -4462,7 +4465,7 @@ enum VmValue {
         signature: VmType,
     },
     Reference {
-        target: u32,
+        target: ReferenceTarget,
         fields: Arc<[u32]>,
         unique: bool,
         referent: VmType,
@@ -4484,6 +4487,12 @@ enum VmValue {
         frame: u64,
         signature: VmType,
     },
+}
+
+#[derive(Clone, Debug)]
+enum ReferenceTarget {
+    Register(u32),
+    Captured(Arc<VmValue>),
 }
 
 #[derive(Clone)]
@@ -4659,12 +4668,12 @@ fn borrow_value(
     } = value
     {
         if unique && !parent_unique {
-            return Err(VmArtifactError::InvalidRegister { register: *target });
+            return Err(VmArtifactError::InvalidRegister { register: source });
         }
         let mut path = parent_fields.to_vec();
         path.extend_from_slice(fields);
         return Ok(VmValue::Reference {
-            target: *target,
+            target: target.clone(),
             fields: path.into(),
             unique,
             referent: if fields.is_empty() {
@@ -4675,11 +4684,54 @@ fn borrow_value(
         });
     }
     Ok(VmValue::Reference {
-        target: source,
+        target: ReferenceTarget::Register(source),
         fields: fields.to_vec().into(),
         unique,
         referent: project_reference(value, fields)?.ty(),
     })
+}
+
+fn reference_target<'a>(
+    registers: &'a [Option<VmValue>],
+    target: &'a ReferenceTarget,
+) -> Result<&'a VmValue, VmArtifactError> {
+    match target {
+        ReferenceTarget::Register(target) => registers
+            .get(*target as usize)
+            .and_then(Option::as_ref)
+            .ok_or(VmArtifactError::InvalidRegister { register: *target }),
+        ReferenceTarget::Captured(value) => Ok(value),
+    }
+}
+
+/// A callable runs in a fresh frame, so a shared reference captured from its
+/// creator must not retain a raw creator-register index. Rebase it to the
+/// immutable referent snapshot. Unique references are deliberately refused:
+/// snapshotting would silently lose their write-back alias.
+fn freeze_callable_capture(
+    value: &VmValue,
+    registers: &[Option<VmValue>],
+) -> Result<VmValue, VmArtifactError> {
+    match value {
+        VmValue::Reference { unique: true, .. } => {
+            Err(VmArtifactError::UnsupportedEscapingUniqueReference)
+        }
+        VmValue::Reference {
+            target,
+            fields,
+            unique: false,
+            referent,
+        } => Ok(VmValue::Reference {
+            target: ReferenceTarget::Captured(Arc::new(project_reference(
+                reference_target(registers, target)?,
+                fields,
+            )?)),
+            fields: Arc::from([]),
+            unique: false,
+            referent: referent.clone(),
+        }),
+        value => Ok(value.clone()),
+    }
 }
 
 fn format_vm_value(value: &VmValue) -> String {
@@ -4734,6 +4786,10 @@ fn format_vm_value(value: &VmValue) -> String {
         } => format!("callable@{callee:?}[captures={}]", captures.len()),
         VmValue::Resumption { frame, .. } => format!("resumption@{frame}"),
         VmValue::Reference { target, fields, .. } => {
+            let target = match target {
+                ReferenceTarget::Register(target) => format!("register@{target}"),
+                ReferenceTarget::Captured(_) => "captured".into(),
+            };
             format!("reference@{target}[fields={}]", fields.len())
         }
     }
@@ -5547,9 +5603,7 @@ fn execute(
                     });
                 };
                 registers[dst as usize] = Some(project_reference(
-                    registers[*target as usize]
-                        .as_ref()
-                        .expect("live reference target"),
+                    reference_target(&registers, target)?,
                     fields,
                 )?);
             }
@@ -5566,6 +5620,9 @@ fn execute(
                     return Err(VmArtifactError::InvalidRegister {
                         register: reference,
                     });
+                };
+                let ReferenceTarget::Register(target) = target else {
+                    return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
                 };
                 let (target, fields) = (*target, fields.clone());
                 let replacement = registers[src as usize]
@@ -7031,9 +7088,7 @@ fn execute_with_arguments(
                     });
                 };
                 registers[*dst as usize] = Some(project_reference(
-                    registers[*target as usize]
-                        .as_ref()
-                        .expect("live reference target"),
+                    reference_target(&registers, target)?,
                     fields,
                 )?);
             }
@@ -7050,6 +7105,9 @@ fn execute_with_arguments(
                     return Err(VmArtifactError::InvalidRegister {
                         register: *reference,
                     });
+                };
+                let ReferenceTarget::Register(target) = target else {
+                    return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
                 };
                 let (target, fields) = (*target, fields.clone());
                 let replacement = registers[*src as usize]
@@ -7380,8 +7438,9 @@ fn execute_with_arguments(
                     .iter()
                     .map(|capture| {
                         registers[*capture as usize]
-                            .clone()
+                            .as_ref()
                             .ok_or(VmArtifactError::ReadBeforeWrite { register: *capture })
+                            .and_then(|value| freeze_callable_capture(value, &registers))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, *dst)?;

@@ -3818,6 +3818,64 @@ fn service_rejects_closure_and_effect_payload_lifetime_escapes() {
 }
 
 #[test]
+fn service_tracks_move_captured_references_through_callables_aggregates_and_effects() {
+    let local_callable = r#"
+        pub fn main() -> i64 {
+            let value = 42;
+            let loan = &value;
+            let callback = () -> i64 { *move loan };
+            callback()
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(local_callable))
+        .expect("a move-captured reference remains valid while its callable stays local");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let returned_aggregate = r#"
+        pub fn bad() -> (() -> &i64, ) {
+            let value = 1;
+            let loan = &value;
+            (() -> &i64 { move loan }, )
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(returned_aggregate))
+    else {
+        panic!("aggregate containing a moved reference closure unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5014"),
+        "{diagnostics:#?}"
+    );
+
+    let effect_payload = r#"
+        effect Store { save(callback: () -> &i64); }
+        pub fn bad() -> i64 / {Store} {
+            let value = 1;
+            let loan = &value;
+            Store::save(() -> &i64 { move loan });
+            0
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(effect_payload))
+    else {
+        panic!("effect payload containing a moved reference closure unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5015"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_reports_outlives_contract_failures_before_vm_lowering() {
     let source = r#"
         pub fn needs_static(value: &'static i64) -> i64 { 0 }

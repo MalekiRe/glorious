@@ -8,7 +8,7 @@
 //! completion exits all use the same provenance model.
 
 use crate::{
-    core::{CaptureMode, CoreId, CoreKind, CorePlace, EnvironmentBrand, TypedBody},
+    core::{CoreId, CoreKind, CorePlace, EnvironmentBrand, TypedBody},
     placeflow::PlaceFlow,
     source::Span,
 };
@@ -166,25 +166,27 @@ impl Analyzer<'_> {
                 captures: environment
                     .captures
                     .into_iter()
-                    .flat_map(|capture| match capture.mode {
-                        CaptureMode::Move => Vec::new(),
-                        CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow => {
-                            let value = self
-                                .values
-                                .get(&capture.name)
-                                .cloned()
-                                .unwrap_or(Value::None);
-                            // Capturing a reference reborrows its backing
-                            // place. Keep every exact root, not the local
-                            // reference slot, for diagnostics.
-                            borrowed_roots(&value)
-                                .into_iter()
-                                .map(|root| Capture::Borrowed {
-                                    root,
-                                    environment: environment.brand,
-                                })
-                                .collect()
-                        }
+                    .flat_map(|capture| {
+                        let value = self
+                            .values
+                            .get(&capture.name)
+                            .cloned()
+                            .unwrap_or(Value::None);
+                        // Moving a reference into a callable changes the
+                        // owner of the reference slot, not the provenance of
+                        // its backing place.  Treat move captures exactly as
+                        // borrowed captures at this outlives boundary: a
+                        // returned callable, aggregate, or effect payload
+                        // must still carry every backing root.  PlaceFlow
+                        // separately records the move/reborrow and keeps the
+                        // loan live for the callable environment.
+                        borrowed_roots(&value)
+                            .into_iter()
+                            .map(|root| Capture::Borrowed {
+                                root,
+                                environment: environment.brand,
+                            })
+                            .collect::<Vec<_>>()
                     })
                     .collect(),
             },
