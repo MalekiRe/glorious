@@ -23,6 +23,7 @@ struct CliSource {
 
 struct CliOptions {
     diagnostic_format: DiagnosticFormat,
+    capability_manifest: Vec<String>,
     runtime_manifest: Option<RuntimeManifestInput>,
     root_package: PackageKey,
     additional_sources: Vec<CliSource>,
@@ -32,6 +33,7 @@ struct CliOptions {
 fn main() -> ExitCode {
     let CliOptions {
         diagnostic_format,
+        capability_manifest,
         runtime_manifest,
         root_package,
         additional_sources,
@@ -177,7 +179,7 @@ fn main() -> ExitCode {
         target: "stage0-vm".into(),
         semantic_options: BTreeMap::new(),
         codegen_options: BTreeMap::new(),
-        capability_manifest: vec![],
+        capability_manifest,
         runtime_manifest,
     };
     match StageZeroCompiler::new().compile(request) {
@@ -233,6 +235,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
     let mut format = DiagnosticFormat::Text;
     let mut seen_format = false;
     let mut standard_library = None;
+    let mut capability_manifest = Vec::new();
     let mut selectors = Vec::new();
     let mut root_package = None;
     let mut additional_sources = Vec::new();
@@ -240,6 +243,13 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         if argument != "--diagnostics" {
+            if argument == "--capability" {
+                let Some(capability) = arguments.next() else {
+                    return Err("--capability requires a CAPABILITY".into());
+                };
+                capability_manifest.push(capability);
+                continue;
+            }
             if argument == "--runtime-standard-library" {
                 if standard_library.is_some() {
                     return Err("--runtime-standard-library may be specified at most once".into());
@@ -368,6 +378,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
     };
     Ok(CliOptions {
         diagnostic_format: format,
+        capability_manifest,
         runtime_manifest,
         root_package: root_package.unwrap_or_else(|| PackageKey("command@0.1.0".into())),
         additional_sources,
@@ -480,6 +491,7 @@ fn usage() {
     );
     eprintln!("RUNTIME: --runtime-standard-library PACKAGE");
     eprintln!("         --runtime-leaf ROLE MODULE NAME  (repeatable)");
+    eprintln!("         --capability CAPABILITY  (repeatable, explicit host authority)");
     eprintln!("SOURCES: --root-package PACKAGE");
     eprintln!("         --source PACKAGE LOGICAL_PATH FILE  (repeatable)");
 }

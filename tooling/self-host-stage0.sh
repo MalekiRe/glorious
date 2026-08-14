@@ -13,8 +13,9 @@ usage:
 
 `check` verifies the canonical self-host source under the exact supported
 Stage-0 runtime manifest. `emit` additionally writes a verified stage-one VM
-artifact and its bound bootstrap manifest. No ambient source files or runtime
-capabilities are supplied to the compiler service.
+artifact and its bound bootstrap manifest. All source files, primitive leaves,
+and the four frozen host capabilities are explicitly supplied to the compiler
+service; no ambient authority is used.
 USAGE
     exit 2
 }
@@ -81,6 +82,10 @@ stage0_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 stage0="$stage0_target/release/grc-stage0"
 
 runtime_manifest=(
+    --capability process_args
+    --capability file_read
+    --capability file_write
+    --capability diagnostic
     --runtime-standard-library command@0.1.0
     --runtime-leaf text-byte-len crate __g1_text_byte_len
     --runtime-leaf text-concat crate __g1_text_concat

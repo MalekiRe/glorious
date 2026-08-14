@@ -242,6 +242,27 @@ fn cli_binds_a_private_generic_int_leaf_from_an_explicit_manifest() {
 }
 
 #[test]
+fn cli_forwards_an_explicit_host_capability_to_the_request_world() {
+    let directory = temporary_directory();
+    let source = directory.join("host.glorious");
+    fs::write(
+        &source,
+        "host clock fn now() -> i64; pub fn main() -> i64 { now() }",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args(["--capability", "clock", "check", source.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "capability request failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn cli_binds_a_private_standard_library_leaf_from_an_explicit_package_source() {
     let directory = temporary_directory();
     let root = directory.join("main.glorious");
