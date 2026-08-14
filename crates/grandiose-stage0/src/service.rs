@@ -930,6 +930,37 @@ impl StageZeroCompiler {
                 }
             }
         }
+        let runtime_manifest = snapshot
+            .world()
+            .runtime_manifest
+            .as_ref()
+            .and_then(|input| {
+                match input.bind(
+                    graphs
+                        .values()
+                        .flat_map(|graph| graph.modules.values())
+                        .map(|node| node.interface.interface.clone()),
+                    &signatures,
+                ) {
+                    Ok(manifest) => Some(manifest),
+                    Err(error) => {
+                        diagnostics.push(CompileDiagnostic::request(
+                            "G7011",
+                            format!("trusted runtime manifest is invalid: {error:?}"),
+                        ));
+                        None
+                    }
+                }
+            });
+        if let Some(manifest) = &runtime_manifest {
+            // A materialized bootstrap source may carry a seed-only `{ () }`
+            // placeholder where its original source declared `host CAP fn`.
+            // Only the trusted manifest can reattach that exact declaration
+            // identity to the frozen host ABI boundary.
+            signatures
+                .host_imports
+                .extend(manifest.host_imports.clone());
+        }
         // Host declarations are source-visible only when their exact frozen
         // capability is present in this request world.  This check happens
         // before bodies/Core are produced, so an unauthorized import can
@@ -963,28 +994,6 @@ impl StageZeroCompiler {
                 ));
             }
         }
-        let runtime_manifest = snapshot
-            .world()
-            .runtime_manifest
-            .as_ref()
-            .and_then(|input| {
-                match input.bind(
-                    graphs
-                        .values()
-                        .flat_map(|graph| graph.modules.values())
-                        .map(|node| node.interface.interface.clone()),
-                    &signatures,
-                ) {
-                    Ok(manifest) => Some(manifest),
-                    Err(error) => {
-                        diagnostics.push(CompileDiagnostic::request(
-                            "G7011",
-                            format!("trusted runtime manifest is invalid: {error:?}"),
-                        ));
-                        None
-                    }
-                }
-            });
         // The reverse table is the only authority passed to MIR lowering.
         // Source names and package paths intentionally disappear here: a
         // primitive leaf is selected exclusively by the frozen declaration
@@ -1134,93 +1143,94 @@ impl StageZeroCompiler {
             {
                 session.checkpoint(1)?;
                 if runtime_manifest.as_ref().is_some_and(|manifest| {
-                    [
-                        crate::PrimitiveRole::Abort,
-                        crate::PrimitiveRole::TextByteLen,
-                        crate::PrimitiveRole::TextConcat,
-                        crate::PrimitiveRole::TextEq,
-                        crate::PrimitiveRole::TextFromUtf8Checked,
-                        crate::PrimitiveRole::TextAsBytes,
-                        crate::PrimitiveRole::CharFromU32Checked,
-                        crate::PrimitiveRole::CharToU32,
-                        crate::PrimitiveRole::BytesLen,
-                        crate::PrimitiveRole::BytesConcat,
-                        crate::PrimitiveRole::BytesGet,
-                        crate::PrimitiveRole::BytesSlice,
-                        crate::PrimitiveRole::BytesFromArrayMove,
-                        crate::PrimitiveRole::BytesToArray,
-                        crate::PrimitiveRole::BytesUtf8ValidUpTo,
-                        crate::PrimitiveRole::ArrayNew,
-                        crate::PrimitiveRole::ArrayLen,
-                        crate::PrimitiveRole::ArrayGetCopy,
-                        crate::PrimitiveRole::ArrayGetMove,
-                        crate::PrimitiveRole::ArrayGetBorrowShared,
-                        crate::PrimitiveRole::ArrayGetBorrowUnique,
-                        crate::PrimitiveRole::ArraySetMove,
-                        crate::PrimitiveRole::ArrayEmpty,
-                        crate::PrimitiveRole::ArrayPushMove,
-                        crate::PrimitiveRole::ArrayPopMove,
-                        crate::PrimitiveRole::ArrayCapacity,
-                        crate::PrimitiveRole::ArrayReserve,
-                        crate::PrimitiveRole::ArrayFinishDrained,
-                        crate::PrimitiveRole::U32CheckedAdd,
-                        crate::PrimitiveRole::U32CheckedSub,
-                        crate::PrimitiveRole::U32CheckedMul,
-                        crate::PrimitiveRole::U32CheckedDiv,
-                        crate::PrimitiveRole::U32CheckedRem,
-                        crate::PrimitiveRole::U32WrappingAdd,
-                        crate::PrimitiveRole::U32WrappingSub,
-                        crate::PrimitiveRole::U32WrappingMul,
-                        crate::PrimitiveRole::U32WrappingShl,
-                        crate::PrimitiveRole::U32WrappingShr,
-                        crate::PrimitiveRole::U32CheckedShl,
-                        crate::PrimitiveRole::U32CheckedShr,
-                        crate::PrimitiveRole::U32Eq,
-                        crate::PrimitiveRole::U32Lt,
-                        crate::PrimitiveRole::U32Le,
-                        crate::PrimitiveRole::U32ToUsize,
-                        crate::PrimitiveRole::UsizeToU32Checked,
-                        crate::PrimitiveRole::IntCheckedAdd,
-                        crate::PrimitiveRole::IntWrappingAdd,
-                        crate::PrimitiveRole::IntConvertCheckedToI64,
-                        crate::PrimitiveRole::IntConvertWrappingToI64,
-                        crate::PrimitiveRole::IntConvertCheckedToU32,
-                        crate::PrimitiveRole::IntConvertCheckedToUsize,
-                        crate::PrimitiveRole::IntConvertCheckedToU8,
-                        crate::PrimitiveRole::IntConvertCheckedToU16,
-                        crate::PrimitiveRole::IntConvertCheckedToI16,
-                        crate::PrimitiveRole::IntConvertCheckedToI32,
-                        crate::PrimitiveRole::IntConvertWrappingToI32,
-                        crate::PrimitiveRole::IntConvertCheckedToI8,
-                        crate::PrimitiveRole::IntConvertWrappingToI8,
-                        crate::PrimitiveRole::IntConvertCheckedToU64,
-                        crate::PrimitiveRole::IntConvertWrappingToU64,
-                        crate::PrimitiveRole::IntConvertCheckedToIsize,
-                        crate::PrimitiveRole::IntConvertWrappingToIsize,
-                        crate::PrimitiveRole::IntConvertCheckedToU128,
-                        crate::PrimitiveRole::IntConvertWrappingToU128,
-                        crate::PrimitiveRole::IntConvertCheckedToI128,
-                        crate::PrimitiveRole::IntConvertWrappingToI128,
-                        crate::PrimitiveRole::IntWrappingSub,
-                        crate::PrimitiveRole::IntWrappingMul,
-                        crate::PrimitiveRole::IntWrappingNeg,
-                        crate::PrimitiveRole::IntEqual,
-                        crate::PrimitiveRole::IntLess,
-                        crate::PrimitiveRole::IntGreater,
-                        crate::PrimitiveRole::IntBitAnd,
-                        crate::PrimitiveRole::IntBitOr,
-                        crate::PrimitiveRole::IntBitXor,
-                        crate::PrimitiveRole::IntBitNot,
-                        crate::PrimitiveRole::IntConvertWrappingToU32,
-                        crate::PrimitiveRole::IntConvertWrappingToUsize,
-                        crate::PrimitiveRole::IntConvertWrappingToU8,
-                        crate::PrimitiveRole::IntConvertWrappingToU16,
-                        crate::PrimitiveRole::IntConvertWrappingToI16,
-                        crate::PrimitiveRole::IntShr,
-                        crate::PrimitiveRole::IntShl,
-                    ]
-                    .iter()
-                    .any(|role| manifest.primitives.get(role) == Some(&declaration.key))
+                    manifest.host_imports.contains_key(&declaration.key)
+                        || [
+                            crate::PrimitiveRole::Abort,
+                            crate::PrimitiveRole::TextByteLen,
+                            crate::PrimitiveRole::TextConcat,
+                            crate::PrimitiveRole::TextEq,
+                            crate::PrimitiveRole::TextFromUtf8Checked,
+                            crate::PrimitiveRole::TextAsBytes,
+                            crate::PrimitiveRole::CharFromU32Checked,
+                            crate::PrimitiveRole::CharToU32,
+                            crate::PrimitiveRole::BytesLen,
+                            crate::PrimitiveRole::BytesConcat,
+                            crate::PrimitiveRole::BytesGet,
+                            crate::PrimitiveRole::BytesSlice,
+                            crate::PrimitiveRole::BytesFromArrayMove,
+                            crate::PrimitiveRole::BytesToArray,
+                            crate::PrimitiveRole::BytesUtf8ValidUpTo,
+                            crate::PrimitiveRole::ArrayNew,
+                            crate::PrimitiveRole::ArrayLen,
+                            crate::PrimitiveRole::ArrayGetCopy,
+                            crate::PrimitiveRole::ArrayGetMove,
+                            crate::PrimitiveRole::ArrayGetBorrowShared,
+                            crate::PrimitiveRole::ArrayGetBorrowUnique,
+                            crate::PrimitiveRole::ArraySetMove,
+                            crate::PrimitiveRole::ArrayEmpty,
+                            crate::PrimitiveRole::ArrayPushMove,
+                            crate::PrimitiveRole::ArrayPopMove,
+                            crate::PrimitiveRole::ArrayCapacity,
+                            crate::PrimitiveRole::ArrayReserve,
+                            crate::PrimitiveRole::ArrayFinishDrained,
+                            crate::PrimitiveRole::U32CheckedAdd,
+                            crate::PrimitiveRole::U32CheckedSub,
+                            crate::PrimitiveRole::U32CheckedMul,
+                            crate::PrimitiveRole::U32CheckedDiv,
+                            crate::PrimitiveRole::U32CheckedRem,
+                            crate::PrimitiveRole::U32WrappingAdd,
+                            crate::PrimitiveRole::U32WrappingSub,
+                            crate::PrimitiveRole::U32WrappingMul,
+                            crate::PrimitiveRole::U32WrappingShl,
+                            crate::PrimitiveRole::U32WrappingShr,
+                            crate::PrimitiveRole::U32CheckedShl,
+                            crate::PrimitiveRole::U32CheckedShr,
+                            crate::PrimitiveRole::U32Eq,
+                            crate::PrimitiveRole::U32Lt,
+                            crate::PrimitiveRole::U32Le,
+                            crate::PrimitiveRole::U32ToUsize,
+                            crate::PrimitiveRole::UsizeToU32Checked,
+                            crate::PrimitiveRole::IntCheckedAdd,
+                            crate::PrimitiveRole::IntWrappingAdd,
+                            crate::PrimitiveRole::IntConvertCheckedToI64,
+                            crate::PrimitiveRole::IntConvertWrappingToI64,
+                            crate::PrimitiveRole::IntConvertCheckedToU32,
+                            crate::PrimitiveRole::IntConvertCheckedToUsize,
+                            crate::PrimitiveRole::IntConvertCheckedToU8,
+                            crate::PrimitiveRole::IntConvertCheckedToU16,
+                            crate::PrimitiveRole::IntConvertCheckedToI16,
+                            crate::PrimitiveRole::IntConvertCheckedToI32,
+                            crate::PrimitiveRole::IntConvertWrappingToI32,
+                            crate::PrimitiveRole::IntConvertCheckedToI8,
+                            crate::PrimitiveRole::IntConvertWrappingToI8,
+                            crate::PrimitiveRole::IntConvertCheckedToU64,
+                            crate::PrimitiveRole::IntConvertWrappingToU64,
+                            crate::PrimitiveRole::IntConvertCheckedToIsize,
+                            crate::PrimitiveRole::IntConvertWrappingToIsize,
+                            crate::PrimitiveRole::IntConvertCheckedToU128,
+                            crate::PrimitiveRole::IntConvertWrappingToU128,
+                            crate::PrimitiveRole::IntConvertCheckedToI128,
+                            crate::PrimitiveRole::IntConvertWrappingToI128,
+                            crate::PrimitiveRole::IntWrappingSub,
+                            crate::PrimitiveRole::IntWrappingMul,
+                            crate::PrimitiveRole::IntWrappingNeg,
+                            crate::PrimitiveRole::IntEqual,
+                            crate::PrimitiveRole::IntLess,
+                            crate::PrimitiveRole::IntGreater,
+                            crate::PrimitiveRole::IntBitAnd,
+                            crate::PrimitiveRole::IntBitOr,
+                            crate::PrimitiveRole::IntBitXor,
+                            crate::PrimitiveRole::IntBitNot,
+                            crate::PrimitiveRole::IntConvertWrappingToU32,
+                            crate::PrimitiveRole::IntConvertWrappingToUsize,
+                            crate::PrimitiveRole::IntConvertWrappingToU8,
+                            crate::PrimitiveRole::IntConvertWrappingToU16,
+                            crate::PrimitiveRole::IntConvertWrappingToI16,
+                            crate::PrimitiveRole::IntShr,
+                            crate::PrimitiveRole::IntShl,
+                        ]
+                        .iter()
+                        .any(|role| manifest.primitives.get(role) == Some(&declaration.key))
                         || manifest.primitives.iter().any(|(role, definition)| {
                             role.is_float() && definition == &declaration.key
                         })
@@ -1946,6 +1956,10 @@ fn materialize_concrete_instances(
                 // requested as ordinary materialized callable instances.
                 && !runtime_primitives
                     .is_some_and(|primitives| primitives.contains_key(&key.callable))
+                // A manifest-bound host declaration has no source body to
+                // specialize. Direct calls lower through its frozen Host ABI
+                // identity instead.
+                && !signatures.host_imports.contains_key(&key.callable)
     }) {
         let executable = DefKey(key.fingerprint());
         if functions.contains_key(&executable) {

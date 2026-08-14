@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 use grandiose_stage0::{
     BootstrapLimits, BootstrapManifest, BootstrapStage, CompilationMode, CompilationRequest,
-    CompileDiagnostic, CompilerBuildIdentity, Digest, LogicalPath, PackageKey, PrimitiveRole,
-    PrimitiveSelector, RuntimeManifestInput, SourceInput, StageZeroCompiler,
+    CompileDiagnostic, CompilerBuildIdentity, Digest, HostImportSelector, LogicalPath, PackageKey,
+    PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, SourceInput, StageZeroCompiler,
     decode_and_verify_program,
 };
 
@@ -237,6 +237,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
     let mut standard_library = None;
     let mut capability_manifest = Vec::new();
     let mut selectors = Vec::new();
+    let mut host_imports = Vec::new();
     let mut root_package = None;
     let mut additional_sources = Vec::new();
     let mut positional = Vec::new();
@@ -337,6 +338,27 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                 });
                 continue;
             }
+            if argument == "--runtime-host" {
+                let Some(capability) = arguments.next() else {
+                    return Err("--runtime-host requires CAPABILITY SYMBOL MODULE NAME".into());
+                };
+                let Some(symbol) = arguments.next() else {
+                    return Err("--runtime-host requires CAPABILITY SYMBOL MODULE NAME".into());
+                };
+                let Some(module_path) = arguments.next() else {
+                    return Err("--runtime-host requires CAPABILITY SYMBOL MODULE NAME".into());
+                };
+                let Some(name) = arguments.next() else {
+                    return Err("--runtime-host requires CAPABILITY SYMBOL MODULE NAME".into());
+                };
+                host_imports.push(HostImportSelector {
+                    module_path,
+                    name,
+                    capability,
+                    symbol,
+                });
+                continue;
+            }
             if argument == "--root-package" {
                 if root_package.is_some() {
                     return Err("--root-package may be specified at most once".into());
@@ -386,9 +408,15 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
         Some(standard_library) => Some(RuntimeManifestInput {
             standard_library,
             selectors,
+            host_imports,
         }),
-        None if selectors.is_empty() => None,
-        None => return Err("--runtime-leaf requires --runtime-standard-library PACKAGE".into()),
+        None if selectors.is_empty() && host_imports.is_empty() => None,
+        None => {
+            return Err(
+                "--runtime-leaf and --runtime-host require --runtime-standard-library PACKAGE"
+                    .into(),
+            );
+        }
     };
     Ok(CliOptions {
         diagnostic_format: format,

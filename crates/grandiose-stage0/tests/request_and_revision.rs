@@ -198,6 +198,7 @@ fn runtime_manifest_selectors_are_canonical_semantic_world_inputs() {
     let mut with_manifest = request(vec![source]);
     with_manifest.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("std@0.1.0".into()),
+        host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::BranchBool,

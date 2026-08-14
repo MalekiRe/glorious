@@ -16,6 +16,7 @@ fn interface(package: PackageKey, source: &str) -> grandiose_stage0::PackageInte
 fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library,
+        host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::BranchBool,
@@ -115,6 +116,7 @@ fn manifest_can_grant_a_strict_runtime_leaf_subset() {
     let signatures = ElaboratedInterface::elaborate(&interface);
     let manifest = RuntimeManifestInput {
         standard_library: standard,
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::TextByteLen,
             module_path: "crate".into(),
@@ -139,6 +141,7 @@ fn bytes_runtime_leaves_bind_by_exact_identity_and_abi() {
     let signatures = ElaboratedInterface::elaborate(&package_interface);
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::BytesGet,
             module_path: "crate".into(),
@@ -169,6 +172,7 @@ fn u32_runtime_leaves_bind_by_exact_identity_and_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::U32CheckedAdd,
             module_path: "crate".into(),
@@ -203,6 +207,7 @@ fn generic_int_shr_requires_its_exact_mixed_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntShr,
             module_path: "crate".into(),
@@ -236,6 +241,7 @@ fn generic_int_bit_xor_requires_its_exact_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitXor,
             module_path: "crate".into(),
@@ -270,6 +276,7 @@ fn generic_int_bit_and_requires_its_exact_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitAnd,
             module_path: "crate".into(),
@@ -304,6 +311,7 @@ fn generic_int_bit_or_requires_its_exact_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitOr,
             module_path: "crate".into(),
@@ -338,6 +346,7 @@ fn generic_int_bit_not_requires_its_exact_unary_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitNot,
             module_path: "crate".into(),
@@ -372,6 +381,7 @@ fn generic_int_shift_left_requires_its_exact_i64_u32_i64_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntShl,
             module_path: "crate".into(),
@@ -406,6 +416,7 @@ fn generic_int_wrapping_to_u32_requires_its_exact_i64_to_u32_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToU32,
             module_path: "crate".into(),
@@ -440,6 +451,7 @@ fn generic_int_wrapping_to_usize_requires_its_exact_i64_to_usize_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToUsize,
             module_path: "crate".into(),
@@ -474,6 +486,7 @@ fn generic_int_wrapping_to_u8_requires_its_exact_i64_to_u8_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToU8,
             module_path: "crate".into(),
@@ -508,6 +521,7 @@ fn generic_int_wrapping_to_u16_requires_its_exact_i64_to_u16_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToU16,
             module_path: "crate".into(),
@@ -542,6 +556,7 @@ fn generic_int_wrapping_to_i16_requires_its_exact_i64_to_i16_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToI16,
             module_path: "crate".into(),
@@ -575,6 +590,7 @@ fn generic_int_checked_to_i32_requires_its_exact_i64_to_i32_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToI32,
             module_path: "crate".into(),
@@ -609,6 +625,7 @@ fn generic_int_wrapping_to_i32_requires_its_exact_i64_to_i32_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToI32,
             module_path: "crate".into(),
@@ -642,6 +659,7 @@ fn generic_int_checked_to_usize_requires_its_exact_i64_to_usize_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToUsize,
             module_path: "crate".into(),
@@ -676,6 +694,7 @@ fn generic_int_checked_to_u8_requires_its_exact_i64_to_u8_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToU8,
             module_path: "crate".into(),
@@ -710,6 +729,7 @@ fn generic_int_checked_to_u16_requires_its_exact_i64_to_u16_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToU16,
             module_path: "crate".into(),

@@ -381,6 +381,13 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
             put(&mut bytes, selector.module_path.as_bytes());
             put(&mut bytes, selector.name.as_bytes());
         }
+        for host in &manifest.host_imports {
+            put(&mut bytes, b"runtime-host");
+            put(&mut bytes, host.module_path.as_bytes());
+            put(&mut bytes, host.name.as_bytes());
+            put(&mut bytes, host.capability.as_bytes());
+            put(&mut bytes, host.symbol.as_bytes());
+        }
     }
     Digest::of_bytes(&bytes)
 }

@@ -87,6 +87,10 @@ runtime_manifest=(
     --capability file_write
     --capability diagnostic
     --runtime-standard-library command@0.1.0
+    --runtime-host process_args __g1_process_args_get crate __g1_process_args_get
+    --runtime-host file_read __g1_fs_read crate __g1_fs_read
+    --runtime-host file_write __g1_fs_write crate __g1_fs_write
+    --runtime-host diagnostic __g1_diagnostic_write crate __g1_diagnostic_write
     --runtime-leaf abort crate __g1_abort
     --runtime-leaf text-byte-len crate __g1_text_byte_len
     --runtime-leaf text-concat crate __g1_text_concat

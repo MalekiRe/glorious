@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::signature::HostImport;
 use crate::{
     ElaboratedHeader, ElaboratedInterface, PackageInterface, PackageKey, Quantity, ScalarType,
     Type,
@@ -830,15 +831,33 @@ pub struct PrimitiveSelector {
     pub module_path: String,
     pub name: String,
 }
+
+/// An exact source declaration admitted as a host boundary by the trusted
+/// runtime manifest.  Unlike a source `host` declaration, the canonical
+/// self-host source materialized by an earlier seed carries an opaque `{ () }`
+/// placeholder body; this selector restores the same capability-bound
+/// identity without inferring authority from its spelling.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct HostImportSelector {
+    pub module_path: String,
+    pub name: String,
+    pub capability: String,
+    pub symbol: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeManifestInput {
     pub standard_library: PackageKey,
     pub selectors: Vec<PrimitiveSelector>,
+    pub host_imports: Vec<HostImportSelector>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrustedRuntimeManifest {
     pub standard_library: PackageKey,
     pub primitives: BTreeMap<PrimitiveRole, DefKey>,
+    /// Frozen source declaration identities that lower directly to host ABI
+    /// calls, rather than elaborating their seed-only placeholder bodies.
+    pub host_imports: BTreeMap<DefKey, HostImport>,
     pub digest: Digest,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -852,8 +871,22 @@ pub enum ManifestError {
         module_path: String,
         name: String,
     },
+    DuplicateHostImport {
+        module_path: String,
+        name: String,
+    },
+    InvalidHostImport {
+        module_path: String,
+        name: String,
+    },
+    ConflictingRuntimeBinding {
+        definition: DefKey,
+    },
     IncompatibleSignature {
         role: PrimitiveRole,
+        definition: DefKey,
+    },
+    IncompatibleHostImport {
         definition: DefKey,
     },
 }
@@ -864,6 +897,29 @@ impl RuntimeManifestInput {
         for pair in self.selectors.windows(2) {
             if pair[0].role == pair[1].role {
                 return Err(ManifestError::DuplicateRole(pair[0].role));
+            }
+        }
+        self.host_imports.sort();
+        for selector in &self.host_imports {
+            if selector.module_path.is_empty()
+                || selector.name.is_empty()
+                || selector.capability.is_empty()
+                || selector.symbol.is_empty()
+                || selector.capability.contains('*')
+                || selector.capability.chars().any(char::is_whitespace)
+            {
+                return Err(ManifestError::InvalidHostImport {
+                    module_path: selector.module_path.clone(),
+                    name: selector.name.clone(),
+                });
+            }
+        }
+        for pair in self.host_imports.windows(2) {
+            if pair[0].module_path == pair[1].module_path && pair[0].name == pair[1].name {
+                return Err(ManifestError::DuplicateHostImport {
+                    module_path: pair[0].module_path.clone(),
+                    name: pair[0].name.clone(),
+                });
             }
         }
         Ok(())
@@ -884,6 +940,7 @@ impl RuntimeManifestInput {
             }
         }
         let mut primitives = BTreeMap::new();
+        let mut host_imports = BTreeMap::new();
         // A manifest is an exact finite grant set, rather than a statement
         // that every primitive known to this compiler generation is present.
         // A bootstrap world can therefore expose only the leaves supplied by
@@ -934,10 +991,58 @@ impl RuntimeManifestInput {
             }
             primitives.insert(role, definition.key);
         }
+        for selector in &self.host_imports {
+            let candidates = interfaces
+                .iter()
+                .filter(|interface| interface.module.path == selector.module_path)
+                .flat_map(|interface| interface.definitions.iter())
+                .filter(|definition| definition.name.as_deref() == Some(selector.name.as_str()))
+                .collect::<Vec<_>>();
+            let definition = match candidates.as_slice() {
+                [] => {
+                    return Err(ManifestError::MissingDeclaration {
+                        module_path: selector.module_path.clone(),
+                        name: selector.name.clone(),
+                    });
+                }
+                [definition] => *definition,
+                _ => {
+                    return Err(ManifestError::AmbiguousDeclaration {
+                        module_path: selector.module_path.clone(),
+                        name: selector.name.clone(),
+                    });
+                }
+            };
+            if !matches!(
+                signatures.definitions.get(&definition.key),
+                Some(ElaboratedHeader::Callable(_))
+            ) {
+                return Err(ManifestError::IncompatibleHostImport {
+                    definition: definition.key,
+                });
+            }
+            if primitives
+                .values()
+                .any(|primitive| primitive == &definition.key)
+                || host_imports.contains_key(&definition.key)
+            {
+                return Err(ManifestError::ConflictingRuntimeBinding {
+                    definition: definition.key,
+                });
+            }
+            host_imports.insert(
+                definition.key,
+                HostImport {
+                    capability: selector.capability.clone(),
+                    symbol: selector.symbol.clone(),
+                },
+            );
+        }
         Ok(TrustedRuntimeManifest {
             standard_library: self.standard_library.clone(),
-            digest: manifest_digest(&self.standard_library, &primitives),
+            digest: manifest_digest(&self.standard_library, &primitives, &host_imports),
             primitives,
+            host_imports,
         })
     }
 }
@@ -1677,6 +1782,7 @@ impl CallableSignatureExt for crate::CallableSignature {
 fn manifest_digest(
     standard_library: &PackageKey,
     primitives: &BTreeMap<PrimitiveRole, DefKey>,
+    host_imports: &BTreeMap<DefKey, HostImport>,
 ) -> Digest {
     let mut bytes = b"grandiose-stage0-runtime-manifest-v1".to_vec();
     bytes.extend_from_slice(&(standard_library.0.len() as u64).to_le_bytes());
@@ -1684,6 +1790,13 @@ fn manifest_digest(
     for (role, definition) in primitives {
         bytes.push(role.stable_tag());
         bytes.extend_from_slice(&definition.0.as_bytes());
+    }
+    for (definition, import) in host_imports {
+        bytes.extend_from_slice(&definition.0.as_bytes());
+        bytes.extend_from_slice(&(import.capability.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(import.capability.as_bytes());
+        bytes.extend_from_slice(&(import.symbol.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(import.symbol.as_bytes());
     }
     Digest::of_bytes(&bytes)
 }

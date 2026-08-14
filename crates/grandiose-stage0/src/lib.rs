@@ -111,7 +111,8 @@ pub use revision::{
     RevisionError, RevisionMetadata,
 };
 pub use runtime_manifest::{
-    ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, TrustedRuntimeManifest,
+    HostImportSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,
+    TrustedRuntimeManifest,
 };
 pub use scanner::{DeclarationKind, DeclarationScan, DeclarationShell, ScanDiagnostic, TokenRange};
 pub use service::{

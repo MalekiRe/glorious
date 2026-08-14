@@ -3,8 +3,8 @@ use grandiose_stage0::{
     BootstrapConvergenceError, BootstrapLimits, BootstrapManifest, BootstrapManifestError,
     BootstrapStage, Budget, CancellationToken, CompilationMode, CompilationRequest,
     CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus, DiagnosticClass,
-    Digest, FileKey, InstanceLimits, LogicalPath, ModuleKey, PackageKey, PrimitiveRole,
-    PrimitiveSelector, RetentionReport, RuntimeManifestInput, Severity, SourceInput,
+    Digest, FileKey, HostImportSelector, InstanceLimits, LogicalPath, ModuleKey, PackageKey,
+    PrimitiveRole, PrimitiveSelector, RetentionReport, RuntimeManifestInput, Severity, SourceInput,
     StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits, VmGenericArgument,
     VmInstruction, VmType, decode_and_verify_program, decode_program, encode_program,
     query::{Query, QueryCompleteness, QueryContext, QueryEngine, QueryFailure, QueryValue},
@@ -87,6 +87,7 @@ fn request_with_dependency(root: &str, package: &str, source: &str) -> Compilati
 fn text_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::BranchBool,
@@ -135,6 +136,7 @@ fn text_runtime_manifest() -> RuntimeManifestInput {
 fn bytes_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: [
             (PrimitiveRole::TextByteLen, "__g1_text_byte_len"),
             (PrimitiveRole::TextAsBytes, "__g1_text_as_bytes"),
@@ -165,6 +167,7 @@ fn bytes_runtime_manifest() -> RuntimeManifestInput {
 fn u32_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: [
             (PrimitiveRole::CharToU32, "__g1_char_to_u32"),
             (PrimitiveRole::U32CheckedAdd, "__g1_u32_checked_add"),
@@ -201,6 +204,7 @@ fn u32_runtime_manifest() -> RuntimeManifestInput {
 fn int_runtime_manifest(role: PrimitiveRole, name: &str) -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role,
             module_path: "crate".into(),
@@ -749,6 +753,7 @@ fn manifest_bound_generic_int_shr_uses_its_mixed_vm_abi() {
     );
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::IntShr,
@@ -880,6 +885,7 @@ fn manifest_bound_generic_int_shift_left_uses_wrapping_i64_u32_vm_semantics() {
     );
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::CharToU32,
@@ -1039,6 +1045,7 @@ const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_new<T>(length: usize, fill
 fn array_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: [
             (PrimitiveRole::ArrayNew, "__g1_array_new"),
             (PrimitiveRole::ArrayLen, "__g1_array_len"),
@@ -1432,10 +1439,66 @@ fn service_emits_an_authorized_direct_host_import_without_an_ordinary_callee_bod
 }
 
 #[test]
+fn manifest_bound_host_placeholder_skips_seed_only_unit_body() {
+    let mut input = request(
+        "fn __g1_process_args_get() -> Array<Text> { () } pub fn main() -> Array<Text> { __g1_process_args_get() }",
+    );
+    input.capability_manifest.push("process_args".into());
+    input.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        selectors: vec![],
+        host_imports: vec![HostImportSelector {
+            module_path: "crate".into(),
+            name: "__g1_process_args_get".into(),
+            capability: "process_args".into(),
+            symbol: "__g1_process_args_get".into(),
+        }],
+    });
+
+    let outcome = StageZeroCompiler::new().compile(input).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{outcome:#?}");
+    let artifact = outcome
+        .artifact
+        .expect("host placeholder emits an artifact");
+    assert!(matches!(
+        artifact.run_i64(),
+        Err(VmArtifactError::HostCallRequiresAuthority { capability, symbol })
+            if capability == "process_args" && symbol == "__g1_process_args_get"
+    ));
+}
+
+#[test]
+fn manifest_host_placeholder_requires_its_declared_capability() {
+    let mut input = request(
+        "fn __g1_process_args_get() -> Array<Text> { () } pub fn main() -> Array<Text> { __g1_process_args_get() }",
+    );
+    input.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        selectors: vec![],
+        host_imports: vec![HostImportSelector {
+            module_path: "crate".into(),
+            name: "__g1_process_args_get".into(),
+            capability: "process_args".into(),
+            symbol: "__g1_process_args_get".into(),
+        }],
+    });
+
+    let error = StageZeroCompiler::new().compile(input).unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G7032"),
+        "{error:#?}"
+    );
+}
+
+#[test]
 fn service_lowers_only_the_manifest_bound_abort_leaf_to_a_terminal_vm_trap() {
     let mut input = request("fn __g1_abort() -> ! { () } pub fn main() -> ! { __g1_abort() }");
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::Abort,
             module_path: "crate".into(),
