@@ -2829,6 +2829,106 @@ fn bound_label_transfer_rejoins_its_source_continuation_before_vm_execution() {
 }
 
 #[test]
+fn label_transfer_used_as_a_binary_operand_rejoins_through_typed_mir() {
+    let core = core_for(
+        "core-operand-label-transfer@0.1.0",
+        "pub fn main() -> i64 { label done { transfer done 40; 0 } + 2 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("operand transfer lowers without G6012");
+    assert!(mir.blocks.len() >= 2);
+    assert!(matches!(
+        mir.blocks[0].terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    ));
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
+fn label_operand_transfer_preserves_preceding_left_to_right_computation() {
+    let core = core_for(
+        "core-operand-label-prefix@0.1.0",
+        "pub fn main() -> i64 { 1 + label done { transfer done 40; 0 } + 1 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("operand transfer preserves prefix");
+    assert!(matches!(
+        mir.blocks[0].instructions.as_slice(),
+        [
+            grandiose_stage0::MirInstruction::ConstI64 { value: 1, .. },
+            ..
+        ]
+    ));
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
+fn inner_label_transfer_rejoins_its_enclosing_label_expression() {
+    let core = core_for(
+        "core-inner-label-transfer@0.1.0",
+        "pub fn main() -> i64 { label outer { label inner { transfer inner 40; 0 } + 2 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("inner transfer lowers through enclosing label");
+    assert!(matches!(
+        mir.blocks[0].terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    ));
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
 fn nested_label_transfer_preserves_cleanup_and_the_outer_continuation() {
     let core = core_for(
         "core-nested-bound-label-cleanup@0.1.0",

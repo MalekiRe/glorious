@@ -3,8 +3,8 @@
 use crate::{
     core::{
         CallableId, CaptureEnvironment, CaptureMode, ClosureCapture, CoreCompletionClause,
-        CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern, EnvironmentBrand,
-        ResumptionId, TypedBody,
+        CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern, CorePlace,
+        EnvironmentBrand, ResumptionId, TypedBody,
     },
     identity::{DefKey, Digest},
     placeflow::PlaceFlow,
@@ -1031,6 +1031,7 @@ impl MirLowering {
                 active_loans: flow.active_loans.clone(),
             },
             resumption_snapshots: BTreeMap::new(),
+            label_rejoins: BTreeMap::new(),
             direct_resumption: None,
         };
         let parameters = body
@@ -2156,6 +2157,11 @@ struct Lowerer<'a> {
     /// Multiple aliases of the same Core identity must share this register so
     /// a stale copy cannot silently target a different frame.
     resumption_snapshots: BTreeMap<ResumptionId, MirLocal>,
+    /// A label expression whose transfer has been split into a `Leave` edge
+    /// and a typed rejoin block.  Re-lowering the surrounding Core
+    /// continuation reads this local instead of replaying the lexical label
+    /// body (and, critically, instead of encountering its `Transfer` again).
+    label_rejoins: BTreeMap<CoreId, MirLocal>,
     /// Active only while lowering a statically specialized handler clause.
     /// The plan makes the captured continuation explicit even when its
     /// representation can be eliminated: either the root identity or a
@@ -2207,53 +2213,63 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (label, binding, prefix, suffix) = match self.body.expression(root).kind.clone() {
+        let direct_site = match self.body.expression(root).kind.clone() {
             CoreKind::Label { brand, body } if self.contains_label_transfer(body, brand) => {
-                (root, None, Vec::new(), Vec::new())
+                Some((root, None, Vec::new(), Vec::new()))
             }
-            CoreKind::Block(values) => {
-                let (index, label, binding) =
-                    values.iter().enumerate().find_map(|(index, id)| {
-                        match self.body.expression(*id).kind.clone() {
-                            CoreKind::Label { brand, body }
-                                if self.contains_label_transfer(body, brand) =>
-                            {
-                                Some((index, *id, None))
-                            }
-                            CoreKind::Let { name, value }
-                                if matches!(
-                                    self.body.expression(value).kind,
-                                    CoreKind::Label { .. }
-                                ) =>
-                            {
-                                let CoreKind::Label { brand, body } =
-                                    self.body.expression(value).kind.clone()
-                                else {
-                                    unreachable!("matched label value")
-                                };
-                                self.contains_label_transfer(body, brand).then_some((
-                                    index,
-                                    value,
-                                    Some((name, *id)),
-                                ))
-                            }
-                            _ => None,
-                        }
-                    })?;
-                (
-                    label,
-                    binding,
-                    values[..index].to_vec(),
-                    values[index + 1..].to_vec(),
-                )
-            }
-            _ => return None,
+            CoreKind::Block(values) => values
+                .iter()
+                .enumerate()
+                .find_map(|(index, id)| match self.body.expression(*id).kind.clone() {
+                    CoreKind::Label { brand, body }
+                        if self.contains_label_transfer(body, brand) =>
+                    {
+                        Some((index, *id, None))
+                    }
+                    CoreKind::Let { name, value }
+                        if matches!(self.body.expression(value).kind, CoreKind::Label { .. }) =>
+                    {
+                        let CoreKind::Label { brand, body } =
+                            self.body.expression(value).kind.clone()
+                        else {
+                            unreachable!("matched label value")
+                        };
+                        self.contains_label_transfer(body, brand).then_some((
+                            index,
+                            value,
+                            Some((name, *id)),
+                        ))
+                    }
+                    _ => None,
+                })
+                .map(|(index, label, binding)| {
+                    (
+                        label,
+                        binding,
+                        values[..index].to_vec(),
+                        values[index + 1..].to_vec(),
+                    )
+                }),
+            _ => None,
+        };
+        let (label, binding, prefix, suffix, replay_root_continuation) = match direct_site {
+            Some((label, binding, prefix, suffix)) => (label, binding, prefix, suffix, false),
+            None => (
+                self.find_transfer_label(root)?,
+                None,
+                Vec::new(),
+                Vec::new(),
+                true,
+            ),
         };
         let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
             return None;
         };
         for value in prefix {
             self.statement(value)?;
+        }
+        if replay_root_continuation && !self.prepare_label_path(root, label) {
+            return None;
         }
         let value = self.lower_label_transfer_path(body, brand)?;
         let label_result = self.body.expression(label).ty.clone();
@@ -2262,7 +2278,10 @@ impl Lowerer<'_> {
         if let Some((name, _let_id)) = binding {
             self.named.insert(name, join);
         }
-        let result = if suffix.is_empty() {
+        let result = if replay_root_continuation {
+            self.label_rejoins.insert(label, join);
+            self.value(root)?
+        } else if suffix.is_empty() {
             join
         } else {
             for value in suffix.iter().take(suffix.len() - 1) {
@@ -2339,6 +2358,181 @@ impl Lowerer<'_> {
                 );
                 None
             }
+        }
+    }
+
+    /// Locate an inner lexical label whose own transfer is still valid when
+    /// the label is used as an operand (for example `label done { ... } + 2`).
+    /// Closures are an execution boundary: Core rejects outer-label captures,
+    /// and lowering must not tunnel through that proof boundary.
+    fn find_transfer_label(&self, id: CoreId) -> Option<CoreId> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Label { brand, body } => self
+                .contains_label_transfer(body, brand)
+                .then_some(id)
+                .or_else(|| self.find_transfer_label(body)),
+            CoreKind::Closure { .. } => None,
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
+                .into_iter()
+                .find_map(|value| self.find_transfer_label(value)),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .find_map(|field| self.find_transfer_label(field)),
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Unary { value: base, .. }
+            | CoreKind::Transfer { value: base, .. } => self.find_transfer_label(base),
+            CoreKind::Assign { place, value } => match place {
+                CorePlace::Deref { reference, .. } => self
+                    .find_transfer_label(reference)
+                    .or_else(|| self.find_transfer_label(value)),
+                _ => self.find_transfer_label(value),
+            },
+            CoreKind::Call { callee, arguments } => {
+                self.find_transfer_label(callee).or_else(|| {
+                    arguments
+                        .into_iter()
+                        .find_map(|value| self.find_transfer_label(value))
+                })
+            }
+            CoreKind::Perform { arguments, .. } => arguments
+                .into_iter()
+                .find_map(|value| self.find_transfer_label(value)),
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => self.find_transfer_label(computation).or_else(|| {
+                clauses
+                    .into_iter()
+                    .find_map(|clause| self.find_transfer_label(clause.body))
+            }),
+            CoreKind::Completion {
+                computation,
+                clauses,
+            } => self.find_transfer_label(computation).or_else(|| {
+                clauses
+                    .into_iter()
+                    .find_map(|clause| self.find_transfer_label(clause.body))
+            }),
+            CoreKind::Binary { left, right, .. } => self
+                .find_transfer_label(left)
+                .or_else(|| self.find_transfer_label(right)),
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant(_)
+            | CoreKind::Error => None,
+        }
+    }
+
+    /// Evaluate exactly the left-to-right work that precedes `target` on its
+    /// enclosing source path.  The resulting locals remain in `values` and
+    /// are therefore reused by the rejoin block; this is the small CPS bridge
+    /// that prevents an operand-position label transfer from dropping or
+    /// replaying a preceding computation.
+    fn prepare_label_path(&mut self, id: CoreId, target: CoreId) -> bool {
+        if id == target {
+            return true;
+        }
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Closure { .. } => false,
+            CoreKind::Label { body, .. } => self.prepare_label_path(body, target),
+            CoreKind::Block(values) => {
+                for value in values {
+                    if self.prepare_label_path(value, target) {
+                        return true;
+                    }
+                    if self.statement(value).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Tuple(values) | CoreKind::Array(values) => {
+                for value in values {
+                    if self.prepare_label_path(value, target) {
+                        return true;
+                    }
+                    if self.value(value).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                for field in fields {
+                    if self.prepare_label_path(field, target) {
+                        return true;
+                    }
+                    if self.value(field).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Binary { left, right, .. } => {
+                if self.prepare_label_path(left, target) {
+                    true
+                } else {
+                    self.value(left).is_some() && self.prepare_label_path(right, target)
+                }
+            }
+            CoreKind::Call { callee, arguments } => {
+                if self.prepare_label_path(callee, target) {
+                    return true;
+                }
+                if self.value(callee).is_none() {
+                    return false;
+                }
+                for argument in arguments {
+                    if self.prepare_label_path(argument, target) {
+                        return true;
+                    }
+                    if self.value(argument).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Perform { arguments, .. } => {
+                for argument in arguments {
+                    if self.prepare_label_path(argument, target) {
+                        return true;
+                    }
+                    if self.value(argument).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Unary { value: base, .. }
+            | CoreKind::Transfer { value: base, .. } => self.prepare_label_path(base, target),
+            CoreKind::Assign { value, .. } => self.prepare_label_path(value, target),
+            // Handler/completion clauses introduce independently checked
+            // continuation scopes. Their label transfers are either rejected
+            // by Core or lowered by the dedicated handler paths, never by
+            // this lexical expression rejoin.
+            CoreKind::Handle { .. }
+            | CoreKind::Completion { .. }
+            | CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant(_)
+            | CoreKind::Error => false,
         }
     }
 
@@ -6593,6 +6787,9 @@ impl Lowerer<'_> {
         }
     }
     fn value(&mut self, id: CoreId) -> Option<MirLocal> {
+        if let Some(rejoin) = self.label_rejoins.get(&id) {
+            return Some(*rejoin);
+        }
         if let Some(v) = self.values.get(&id) {
             return Some(*v);
         };
@@ -7724,6 +7921,7 @@ impl Lowerer<'_> {
                 active_loans: vec![],
             },
             resumption_snapshots: BTreeMap::new(),
+            label_rejoins: BTreeMap::new(),
             direct_resumption: None,
         };
         let mut lifted_parameters = Vec::with_capacity(captures.len() + parameters.len());
