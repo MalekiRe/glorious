@@ -211,6 +211,70 @@ fn core_pattern_is_irrefutable(pattern: &CorePattern) -> bool {
     }
 }
 
+fn direct_replay_split(
+    body: &TypedBody,
+    computation: CoreId,
+    clauses: &[CoreHandlerClause],
+) -> Option<DirectReplaySplit> {
+    let CoreKind::Block(values) = &body.expression(computation).kind else {
+        return None;
+    };
+    for (index, value) in values.iter().copied().enumerate() {
+        let (effect, operation, arguments, result_binding) = match &body.expression(value).kind {
+            CoreKind::Perform {
+                effect,
+                operation,
+                arguments,
+                ..
+            } => (effect, *operation, arguments.clone(), None),
+            CoreKind::Let { name, value } => {
+                let CoreKind::Perform {
+                    effect,
+                    operation,
+                    arguments,
+                    ..
+                } = &body.expression(*value).kind
+                else {
+                    continue;
+                };
+                (effect, *operation, arguments.clone(), Some(name.clone()))
+            }
+            _ => continue,
+        };
+        if handler_definitely_replays(clauses, effect, operation) {
+            return Some(DirectReplaySplit {
+                prefix: values[..index].to_vec(),
+                operation_arguments: arguments,
+                residual: values[index + 1..].to_vec(),
+                result_binding,
+            });
+        }
+    }
+    None
+}
+
+/// Prove that the direct operation dispatch always re-enters its residual.
+/// All matching clauses must be resumptive and irrefutable; a terminal,
+/// discard, or payload-sensitive arm leaves ordinary conservative handling in
+/// place rather than inventing a replay multiplier.
+fn handler_definitely_replays(
+    clauses: &[CoreHandlerClause],
+    effect: &crate::EffectInstance,
+    operation: u32,
+) -> bool {
+    let matching = clauses
+        .iter()
+        .filter(|clause| clause.effect == *effect && clause.operation == operation)
+        .collect::<Vec<_>>();
+    !matching.is_empty()
+        && matching.iter().all(|clause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Tail { .. } | CoreHandlerResumption::Explicit { .. }
+            ) && clause.patterns.iter().all(core_pattern_is_irrefutable)
+        })
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ContractKey(u32);
 
@@ -229,6 +293,18 @@ struct ClosureValue {
     captures: BTreeMap<String, Binding>,
     parameters: Vec<(String, Type)>,
     invocation: Quantity,
+}
+
+/// A straight-line handled computation with one directly intercepted
+/// operation. The prefix executes once before dispatch; each resumption
+/// replays the residual. Keeping this shape explicit avoids claiming CFG
+/// precision for nested control that Core has not yet made first-class.
+#[derive(Clone, Debug)]
+struct DirectReplaySplit {
+    prefix: Vec<CoreId>,
+    operation_arguments: Vec<CoreId>,
+    residual: Vec<CoreId>,
+    result_binding: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -477,13 +553,31 @@ impl Analyzer<'_> {
                 // conservative summary path until their residual CFG is
                 // represented explicitly in Core.
                 let before_computation = environment.clone();
+                let mut replay_residual = None;
                 let (computation, incoming) =
-                    match self.discarded_prefix(computation, &clauses, environment) {
-                        Some(prefix) => (prefix, before_computation),
-                        None => (
-                            self.expression(computation, environment),
-                            environment.clone(),
-                        ),
+                    if let Some(split) = direct_replay_split(self.body, computation, &clauses) {
+                        let prefix = self.sequence(split.prefix, environment, expression.span);
+                        let arguments =
+                            self.sequence(split.operation_arguments, environment, expression.span);
+                        let prefix = self.compose(expression.span, prefix, arguments);
+                        let mut residual_environment = environment.clone();
+                        if let Some(name) = split.result_binding {
+                            residual_environment.bindings.insert(name, Binding::Other);
+                        }
+                        replay_residual = Some(self.sequence(
+                            split.residual,
+                            &mut residual_environment,
+                            expression.span,
+                        ));
+                        (prefix, before_computation)
+                    } else {
+                        match self.discarded_prefix(computation, &clauses, environment) {
+                            Some(prefix) => (prefix, before_computation),
+                            None => (
+                                self.expression(computation, environment),
+                                environment.clone(),
+                            ),
+                        }
                     };
                 let mut arms = None::<Summary>;
                 for clause in clauses {
@@ -534,7 +628,7 @@ impl Analyzer<'_> {
                         )),
                         CoreHandlerResumption::Terminal => None,
                     };
-                    let arm = self.expression(clause.body, &mut arm_environment);
+                    let mut arm = self.expression(clause.body, &mut arm_environment);
                     if let Some(key) = continuation_key {
                         let actual = match clause.resumption {
                             CoreHandlerResumption::Tail { .. } => Quantity::ONCE,
@@ -546,6 +640,15 @@ impl Analyzer<'_> {
                         };
                         self.facts.insert(key, actual);
                         self.check_contract(key, actual);
+                        // The generated continuation is checked above as its
+                        // own contract. Its call count is instead the replay
+                        // multiplier for residual callable obligations, so it
+                        // must not leak into the enclosing branch summary.
+                        arm.uses.remove(&key);
+                        if let Some(residual) = replay_residual.clone() {
+                            let replayed = self.repeat(clause.span, residual, actual);
+                            arm = self.compose(clause.span, arm, replayed);
+                        }
                     }
                     arms = Some(match arms {
                         Some(previous) => previous.branch_hull(arm),

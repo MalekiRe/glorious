@@ -2603,6 +2603,46 @@ fn service_counts_callable_prefix_before_a_discarded_handler_operation() {
 }
 
 #[test]
+fn service_rejects_callable_replayed_by_a_direct_handler_continuation() {
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replay(function: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); function(value) } { Ask::ask() with k => k(20) + k(21) } } pub fn main() -> i64 { replay(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("replayed callback unexpectedly satisfied its exact use obligation");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing continuation-replay callable-use diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_multiplies_closure_captures_by_direct_handler_replay() {
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replay(function: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); let call = (input: i64) -> i64 { function(input) }; call(value) } { Ask::ask() with k => k(20) + k(21) } } pub fn main() -> i64 { replay(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("replayed closure capture unexpectedly satisfied exact use");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing replayed closure-capture diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_executes_a_once_replayed_direct_handler_residual() {
+    let source = "effect Ask { [1,1] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replay(function: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); function(value) } { Ask::ask() with k => k(41) } } pub fn main() -> i64 { replay(add_one) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_materializes_a_concretely_instantiated_generic_function_value() {
     let source = "pub fn identity<T>(value: T) -> T { value } pub fn apply(function: (i64) -> i64) -> i64 { function(42) } pub fn main() -> i64 { apply(identity) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
