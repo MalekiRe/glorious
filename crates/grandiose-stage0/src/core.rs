@@ -2688,14 +2688,9 @@ impl Elaborator<'_> {
                         ),
                         crate::GenericKind::Const(expected),
                     ) => match self.associated_const_argument(
-                        subject,
-                        trait_path,
-                        trait_arguments,
-                        name,
-                        item_arguments,
+                        (subject, trait_path, trait_arguments, name, item_arguments),
                         *expected,
-                        self.body.expression(self.body.root).span,
-                        "G4158",
+                        (self.body.expression(self.body.root).span, "G4158"),
                     ) {
                         GenericArgument::ConstU32(value) => Type::ConstU32(value),
                         GenericArgument::ConstQuantity(value) => Type::ConstQuantity(value),
@@ -2774,14 +2769,9 @@ impl Elaborator<'_> {
                     ),
                     crate::GenericKind::Const(expected),
                 ) => self.associated_const_argument(
-                    subject,
-                    trait_path,
-                    trait_arguments,
-                    name,
-                    item_arguments,
+                    (subject, trait_path, trait_arguments, name, item_arguments),
                     *expected,
-                    span,
-                    code,
+                    (span, code),
                 ),
                 (
                     crate::header::HeaderGenericArgument::Type(crate::header::HeaderType::Path(
@@ -2843,15 +2833,18 @@ impl Elaborator<'_> {
     /// implementation evidence and insert the normalized structural term.
     fn associated_const_argument(
         &mut self,
-        subject: &crate::header::HeaderType,
-        trait_path: &[String],
-        source_arguments: &[crate::header::HeaderGenericArgument],
-        name: &str,
-        item_arguments: &[crate::header::HeaderGenericArgument],
+        projection: (
+            &crate::header::HeaderType,
+            &[String],
+            &[crate::header::HeaderGenericArgument],
+            &str,
+            &[crate::header::HeaderGenericArgument],
+        ),
         expected: crate::ConstKind,
-        span: Span,
-        code: &'static str,
+        context: (Span, &'static str),
     ) -> GenericArgument {
+        let (subject, trait_path, source_arguments, name, item_arguments) = projection;
+        let (span, code) = context;
         if !item_arguments.is_empty() {
             self.error(
                 span,
