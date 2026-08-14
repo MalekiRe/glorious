@@ -8,18 +8,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    ConstKind, DefKey, Digest, EffectRow, EffectTail, GenericKind, InferContext, Lifetime,
-    Quantity, Type, TypeError,
+    ConstKind, DefKey, Digest, EffectRow, EffectTail, GenericArgument, GenericKind, InferContext,
+    Lifetime, Quantity, Type, TypeError,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum InstanceArgument {
-    Type(Type),
-    EffectRow(EffectRow),
-    Lifetime(Lifetime),
-    ConstU32(u32),
-    ConstQuantity(Quantity),
-}
+/// Executable instance arguments use the one canonical generic vocabulary.
+/// The alias keeps the instance API readable while ensuring declaration,
+/// solver, effect, and specialization identities cannot drift into parallel
+/// representations.
+pub type InstanceArgument = GenericArgument;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstanceKeyError {
