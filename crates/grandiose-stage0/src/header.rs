@@ -118,6 +118,10 @@ pub enum HeaderType {
 pub enum HeaderGenericArgument {
     Type(HeaderType),
     U32(u32),
+    /// A structural quantity interval supplied to a `Quantity` const slot.
+    /// Keeping this distinct from `HeaderType` makes the source kind boundary
+    /// explicit before signature elaboration.
+    Quantity(Quantity),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1450,7 +1454,11 @@ impl Parser<'_> {
         self.position += 1;
         let mut arguments = vec![];
         while self.current().is_some() && !self.at_operator(">") {
-            if let Some(index) = self.current()
+            if self.at_punctuation('[') {
+                arguments.push(HeaderGenericArgument::Quantity(
+                    self.structural_quantity_argument(),
+                ));
+            } else if let Some(index) = self.current()
                 && self.lexed.tokens[index].kind == TokenKind::Integer
             {
                 let text = self.text(index).to_owned();
@@ -1473,6 +1481,39 @@ impl Parser<'_> {
             self.error("G3208", "expected `>` after generic arguments");
         }
         arguments
+    }
+    fn structural_quantity_argument(&mut self) -> Quantity {
+        debug_assert!(self.at_punctuation('['));
+        self.position += 1;
+        let lower = self.integer(
+            "G3223",
+            "structural quantity lower bound must be a non-negative integer",
+        );
+        if !self.punctuation(',') {
+            self.error("G3224", "expected `,` between structural quantity bounds");
+        }
+        let upper = if self.at_operator("*") || self.word() == Some("infinity") {
+            self.position += 1;
+            None
+        } else {
+            Some(self.integer(
+                "G3225",
+                "structural quantity upper bound must be a non-negative integer or `*`",
+            ))
+        };
+        if !self.punctuation(']') {
+            self.error("G3226", "expected `]` after structural quantity argument");
+        }
+        match Quantity::new(lower, upper) {
+            Ok(value) => value,
+            Err(_) => {
+                self.error(
+                    "G3227",
+                    "structural quantity lower bound exceeds upper bound",
+                );
+                Quantity::ONCE
+            }
+        }
     }
     fn path(&mut self) -> Vec<String> {
         let mut path = vec![];

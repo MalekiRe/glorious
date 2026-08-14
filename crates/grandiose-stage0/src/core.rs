@@ -1499,6 +1499,10 @@ impl Elaborator<'_> {
                                 crate::GenericKind::Const(crate::ConstKind::U32),
                             ) => Type::ConstU32(*value),
                             (
+                                crate::header::HeaderGenericArgument::Quantity(value),
+                                crate::GenericKind::Const(crate::ConstKind::Quantity),
+                            ) => Type::ConstQuantity(*value),
+                            (
                                 crate::header::HeaderGenericArgument::Type(
                                     crate::header::HeaderType::Path(path),
                                 ),
@@ -1599,6 +1603,7 @@ impl Elaborator<'_> {
                                     self.header_type(argument)
                                 }
                                 crate::header::HeaderGenericArgument::U32(_) => Type::Error,
+                                crate::header::HeaderGenericArgument::Quantity(_) => Type::Error,
                             })
                             .collect(),
                     });
@@ -3878,6 +3883,7 @@ fn projection_is_concrete(value: &Type) -> bool {
         | Type::Never
         | Type::Scalar(_)
         | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Error => true,
     }

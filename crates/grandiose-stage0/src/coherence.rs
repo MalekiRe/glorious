@@ -325,6 +325,10 @@ fn unify_type(
                             crate::header::HeaderGenericArgument::U32(left),
                             crate::header::HeaderGenericArgument::U32(right),
                         ) => left == right,
+                        (
+                            crate::header::HeaderGenericArgument::Quantity(left),
+                            crate::header::HeaderGenericArgument::Quantity(right),
+                        ) => left == right,
                         _ => false,
                     })
         }

@@ -835,6 +835,7 @@ fn match_type(
         | Type::Never
         | Type::Scalar(_)
         | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Error => (template == actual).then_some(()),
         Type::Nominal {
@@ -1151,6 +1152,7 @@ fn projection_is_concrete(value: &Type) -> bool {
         | Type::Never
         | Type::Scalar(_)
         | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. } => true,
     }
 }

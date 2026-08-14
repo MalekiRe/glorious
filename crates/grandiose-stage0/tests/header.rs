@@ -48,6 +48,32 @@ fn nominal_headers_retain_structural_u32_arguments() {
 }
 
 #[test]
+fn nominal_headers_retain_structural_quantity_arguments() {
+    let package = PackageKey("header-structural-quantity-argument@0.1.0".into());
+    let source =
+        "pub fn bounded() -> Tag<[0, 1]> { bounded } pub fn open() -> Tag<[1, *]> { open }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+
+    for (declaration, expected) in scan.declarations.iter().zip([
+        Quantity::ZERO.branch_hull(Quantity::ONCE),
+        Quantity::new(1, None).unwrap(),
+    ]) {
+        let parsed = HeaderParse::parse(&lexed, source, declaration);
+        assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+        let ParsedHeader::Function(header) = parsed.header else {
+            panic!("expected callable header")
+        };
+        assert!(matches!(
+            header.result,
+            Some(HeaderType::Application(_, arguments))
+                if arguments == vec![HeaderGenericArgument::Quantity(expected)]
+        ));
+    }
+}
+
+#[test]
 fn callable_headers_retain_generic_kind_metadata() {
     let package = PackageKey("header-generic-kinds@0.1.0".into());
     let source = "pub fn relay<T, e: EffectRow>(value: T) -> i64 / { | e } { 0 }";

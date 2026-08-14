@@ -208,6 +208,9 @@ pub enum Type {
     /// is an argument term, not a standalone source type; header elaboration
     /// enforces that it only occupies a `ConstKind::U32` slot.
     ConstU32(u32),
+    /// A normalized structural quantity interval supplied to a const generic
+    /// slot. Like `ConstU32`, it is an identity-only argument term.
+    ConstQuantity(Quantity),
     /// A const binder occurrence retained in a nominal identity.  It shares
     /// the owner-local source slot numbering with other generic kinds, while
     /// its explicit kind prevents type substitution from accepting it.
@@ -288,6 +291,9 @@ impl InferContext {
             (Type::Scalar(left), Type::Scalar(right)) if left == right => Ok(Type::Scalar(left)),
             (Type::ConstU32(left), Type::ConstU32(right)) if left == right => {
                 Ok(Type::ConstU32(left))
+            }
+            (Type::ConstQuantity(left), Type::ConstQuantity(right)) if left == right => {
+                Ok(Type::ConstQuantity(left))
             }
             (
                 Type::ConstGeneric {
@@ -1026,6 +1032,17 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
         Type::ConstU32(value) => {
             output.push(12);
             output.extend_from_slice(&value.to_le_bytes());
+        }
+        Type::ConstQuantity(value) => {
+            output.push(14);
+            output.extend_from_slice(&value.lower.to_le_bytes());
+            match value.upper {
+                Some(upper) => {
+                    output.push(0);
+                    output.extend_from_slice(&upper.to_le_bytes());
+                }
+                None => output.push(1),
+            }
         }
         Type::ConstGeneric { index, kind } => {
             output.push(13);

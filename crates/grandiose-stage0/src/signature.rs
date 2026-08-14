@@ -1575,6 +1575,14 @@ impl Elaborator<'_> {
                                     );
                                     Type::Error
                                 }
+                                HeaderGenericArgument::Quantity(_) => {
+                                    self.error(
+                                        "G3318",
+                                        "effect arguments must be types, not structural constants"
+                                            .into(),
+                                    );
+                                    Type::Error
+                                }
                             })
                             .collect(),
                     ),
@@ -1932,6 +1940,10 @@ impl Elaborator<'_> {
                 (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
                     Type::ConstU32(*value)
                 }
+                (
+                    HeaderGenericArgument::Quantity(value),
+                    GenericKind::Const(ConstKind::Quantity),
+                ) => Type::ConstQuantity(*value),
                 (HeaderGenericArgument::Type(HeaderType::Path(path)), GenericKind::Const(kind))
                     if path.len() == 1 =>
                 {
@@ -1965,6 +1977,13 @@ impl Elaborator<'_> {
                     }
                 }
                 (HeaderGenericArgument::U32(_), GenericKind::Type) => {
+                    self.error(
+                        "G3318",
+                        format!("type slot of `{name}` cannot receive a structural constant"),
+                    );
+                    Type::Error
+                }
+                (HeaderGenericArgument::Quantity(_), GenericKind::Type) => {
                     self.error(
                         "G3318",
                         format!("type slot of `{name}` cannot receive a structural constant"),

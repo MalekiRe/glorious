@@ -105,6 +105,75 @@ fn nominal_const_applications_preserve_literals_and_binder_identity() {
 }
 
 #[test]
+fn nominal_quantity_const_applications_preserve_intervals_and_binder_identity() {
+    let package = PackageKey("signature-quantity-const-generic-applications@0.1.0".into());
+    let source = "pub struct Budget<q: Quantity> {} pub type Alias<q: Quantity> = Budget<q>; pub fn exact() -> Budget<[1, 1]> { panic } pub fn open() -> Budget<[2, *]> { panic } pub fn inherited<q: Quantity>() -> Budget<q> { panic } pub fn through_alias() -> Alias<[0, 1]> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let lookup = |name: &str| {
+        let key = interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some(name))
+            .expect("callable definition")
+            .key;
+        match signatures.definitions.get(&key).expect("signature") {
+            ElaboratedHeader::Callable(signature) => signature.result.clone(),
+            _ => panic!("expected callable"),
+        }
+    };
+    assert!(matches!(
+        lookup("exact"),
+        Type::Nominal { arguments, .. }
+            if arguments == vec![Type::ConstQuantity(Quantity::ONCE)]
+    ));
+    assert!(matches!(
+        lookup("open"),
+        Type::Nominal { arguments, .. }
+            if arguments == vec![Type::ConstQuantity(Quantity::new(2, None).unwrap())]
+    ));
+    assert!(matches!(
+        lookup("inherited"),
+        Type::Nominal { arguments, .. }
+            if arguments == vec![Type::ConstGeneric { index: 0, kind: ConstKind::Quantity }]
+    ));
+    assert!(matches!(
+        lookup("through_alias"),
+        Type::Nominal { arguments, .. }
+            if arguments == vec![Type::ConstQuantity(Quantity::AFFINE)]
+    ));
+}
+
+#[test]
+fn nominal_quantity_const_applications_reject_wrong_slot_kinds() {
+    let package = PackageKey("signature-quantity-const-generic-slot-kinds@0.1.0".into());
+    let source = "pub struct Budget<q: Quantity> {} pub struct Box<T> {} pub fn u32_in_quantity() -> Budget<7> { panic } pub fn quantity_in_type() -> Box<[0, 1]> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert_eq!(
+        signatures
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G3318")
+            .count(),
+        2,
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn nominal_const_applications_reject_wrong_slot_kinds() {
     let package = PackageKey("signature-const-generic-slot-kinds@0.1.0".into());
     let source = "pub struct Tag<n: u32> {} pub struct Box<T> {} pub fn type_in_const() -> Tag<i64> { panic } pub fn const_in_type() -> Box<7> { panic }";
