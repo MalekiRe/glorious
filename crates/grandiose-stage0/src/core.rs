@@ -148,7 +148,7 @@ pub enum CoreHandlerResumption {
 struct ActiveResumption {
     id: ResumptionId,
     name: String,
-    binding_generation: usize,
+    binding_generation: u64,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResumptionUseTracker {
@@ -1451,7 +1451,7 @@ struct Elaborator<'a> {
     /// Every lexical alias of an active snapshot points to its original
     /// generated identity. Scope generations are never reused, so stale
     /// entries cannot make a shadowing local resumptive.
-    resumption_bindings: std::collections::BTreeMap<(String, usize), ActiveResumption>,
+    resumption_bindings: std::collections::BTreeMap<(String, u64), ActiveResumption>,
     /// Installed only while one explicit handler arm is elaborated. Nested
     /// handler arms replace and restore it, preserving lexical continuation
     /// identity rather than counting an accidentally shadowed spelling.

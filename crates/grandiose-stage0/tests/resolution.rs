@@ -20,6 +20,25 @@ fn journaled_scopes_restore_shadowed_bindings_exactly() {
 }
 
 #[test]
+fn journaled_scope_binding_identities_do_not_reuse_a_closed_scope_depth() {
+    let mut scopes = ScopeMap::<String, u32>::default();
+    scopes.enter();
+    scopes.define("value".into(), 1);
+    let outer = scopes.binding_generation(&"value".into()).unwrap();
+
+    scopes.enter();
+    scopes.define("saved".into(), 2);
+    let first_sibling = scopes.binding_generation(&"saved".into()).unwrap();
+    assert!(scopes.leave());
+
+    scopes.enter();
+    scopes.define("saved".into(), 3);
+    let second_sibling = scopes.binding_generation(&"saved".into()).unwrap();
+    assert_ne!(first_sibling, second_sibling);
+    assert_ne!(outer, second_sibling);
+}
+
+#[test]
 fn qualified_paths_are_lexical_and_enforce_module_visibility() {
     let package = PackageKey("resolution@0.1.0".into());
     let root_source = "mod math; mod hidden;";

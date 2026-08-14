@@ -642,6 +642,12 @@ fn canonicalize_keys(keys: &mut Vec<DefKey>) {
 #[derive(Clone, Debug)]
 pub struct ScopeMap<K, V> {
     values: BTreeMap<K, Vec<V>>,
+    /// A definition receives an owner-local identity which is never reused,
+    /// even after its scope is rolled back.  Stack depth alone is not an
+    /// identity: a later sibling scope may recreate the same depth for a
+    /// different binding.
+    binding_ids: BTreeMap<K, Vec<u64>>,
+    next_binding_id: u64,
     journal: Vec<K>,
     markers: Vec<usize>,
 }
@@ -653,6 +659,8 @@ where
     fn default() -> Self {
         Self {
             values: BTreeMap::new(),
+            binding_ids: BTreeMap::new(),
+            next_binding_id: 0,
             journal: vec![],
             markers: vec![],
         }
@@ -669,6 +677,12 @@ where
 
     pub fn define(&mut self, key: K, value: V) {
         self.values.entry(key.clone()).or_default().push(value);
+        let identity = self.next_binding_id;
+        self.next_binding_id = self.next_binding_id.saturating_add(1);
+        self.binding_ids
+            .entry(key.clone())
+            .or_default()
+            .push(identity);
         self.journal.push(key);
     }
 
@@ -676,14 +690,14 @@ where
         self.values.get(key).and_then(|values| values.last())
     }
 
-    /// Return the lexical generation of the currently visible binding for a
-    /// key.  A generation is stable while that exact binding remains in
-    /// scope, and changes when a nested scope shadows it.  Consumers that
-    /// attach non-value facts to a local (for example a frame-bound handler
-    /// resumption) can therefore retain the local's identity without making
-    /// `ScopeMap` impose an identifier representation on every value.
-    pub fn binding_generation(&self, key: &K) -> Option<usize> {
-        self.values.get(key).map(Vec::len)
+    /// Return the non-reusable lexical identity of the currently visible
+    /// binding for a key. Consumers may retain it past a scope exit without
+    /// risking an accidental match with a later sibling binding.
+    pub fn binding_generation(&self, key: &K) -> Option<u64> {
+        self.binding_ids
+            .get(key)
+            .and_then(|identities| identities.last())
+            .copied()
     }
 
     pub fn leave(&mut self) -> bool {
@@ -694,8 +708,14 @@ where
             let key = self.journal.pop().expect("journal length checked");
             let values = self.values.get_mut(&key).expect("journal key exists");
             values.pop();
+            let identities = self
+                .binding_ids
+                .get_mut(&key)
+                .expect("journal binding identity exists");
+            identities.pop();
             if values.is_empty() {
                 self.values.remove(&key);
+                self.binding_ids.remove(&key);
             }
         }
         true
