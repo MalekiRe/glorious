@@ -6,7 +6,10 @@
 //! belong to later semantic queries, not parser heuristics.
 
 use crate::{
-    header::{EffectRowHeader, HeaderGenericArgument, HeaderType},
+    header::{
+        EffectRowHeader, HeaderGenericArgument, HeaderStructuralConst, HeaderStructuralU32Expr,
+        HeaderType,
+    },
     quantity::Quantity,
     scanner::TokenRange,
     source::{LexedFile, Span, TokenKind},
@@ -845,16 +848,8 @@ impl Parser<'_> {
                 arguments.push(HeaderGenericArgument::Quantity(
                     self.closure_structural_quantity_argument()?,
                 ));
-            } else if let Some(index) = self.current()
-                && self.lexed.tokens[index].kind == TokenKind::Integer
-            {
-                match u32::try_from(self.closure_structural_integer_expression()) {
-                    Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
-                    Err(_) => {
-                        self.error_current(code, "structural u32 generic argument is out of range");
-                        return None;
-                    }
-                }
+            } else if self.starts_structural_u32_argument() {
+                arguments.push(self.closure_structural_u32_argument(code)?);
             } else {
                 arguments.push(HeaderGenericArgument::Type(self.closure_type()?));
             }
@@ -869,6 +864,115 @@ impl Parser<'_> {
         }
         self.position += 1;
         Some(arguments)
+    }
+
+    /// Body applications retain the same symbolic `u32` language as
+    /// declaration headers.  In particular, a direct call such as
+    /// `advance<n + 1>(value)` must not be forced through the type parser
+    /// merely because its target generic kind is only known during Core
+    /// elaboration.
+    fn starts_structural_u32_argument(&self) -> bool {
+        self.current().is_some_and(|index| {
+            self.lexed.tokens[index].kind == TokenKind::Integer
+                || self.lexed.tokens[index].kind == TokenKind::Punctuation('(')
+                || (self.lexed.tokens[index].kind == TokenKind::Identifier
+                    && self.tokens.get(self.position + 1).is_some_and(|next| {
+                        self.lexed.tokens[*next].kind == TokenKind::Operator
+                            && matches!(self.text(*next), "+" | "-" | "*" | "/" | "%")
+                    }))
+        })
+    }
+
+    fn closure_structural_u32_argument(
+        &mut self,
+        code: &'static str,
+    ) -> Option<HeaderGenericArgument> {
+        let expression = self.closure_structural_u32_expression(code)?;
+        Some(match expression {
+            HeaderStructuralU32Expr::Literal(value) => HeaderGenericArgument::U32(value),
+            expression => HeaderGenericArgument::StructuralConst(
+                HeaderStructuralConst::U32Expression(expression),
+            ),
+        })
+    }
+
+    fn closure_structural_u32_expression(
+        &mut self,
+        code: &'static str,
+    ) -> Option<HeaderStructuralU32Expr> {
+        let mut value = self.closure_structural_u32_product(code)?;
+        while let Some(operator) = self
+            .at_operator("+")
+            .then_some('+')
+            .or_else(|| self.at_operator("-").then_some('-'))
+        {
+            self.position += 1;
+            let right = self.closure_structural_u32_product(code)?;
+            value = match operator {
+                '+' => HeaderStructuralU32Expr::Add(Box::new(value), Box::new(right)),
+                '-' => HeaderStructuralU32Expr::Sub(Box::new(value), Box::new(right)),
+                _ => unreachable!("only additive structural operators are accepted"),
+            };
+        }
+        Some(value)
+    }
+
+    fn closure_structural_u32_product(
+        &mut self,
+        code: &'static str,
+    ) -> Option<HeaderStructuralU32Expr> {
+        let mut value = self.closure_structural_u32_primary(code)?;
+        while let Some(operator) = self
+            .at_operator("*")
+            .then_some('*')
+            .or_else(|| self.at_operator("/").then_some('/'))
+            .or_else(|| self.at_operator("%").then_some('%'))
+        {
+            self.position += 1;
+            let right = self.closure_structural_u32_primary(code)?;
+            value = match operator {
+                '*' => HeaderStructuralU32Expr::Mul(Box::new(value), Box::new(right)),
+                '/' => HeaderStructuralU32Expr::Div(Box::new(value), Box::new(right)),
+                '%' => HeaderStructuralU32Expr::Rem(Box::new(value), Box::new(right)),
+                _ => unreachable!("only multiplicative structural operators are accepted"),
+            };
+        }
+        Some(value)
+    }
+
+    fn closure_structural_u32_primary(
+        &mut self,
+        code: &'static str,
+    ) -> Option<HeaderStructuralU32Expr> {
+        if self.at_punctuation('(') {
+            self.position += 1;
+            let value = self.closure_structural_u32_expression(code)?;
+            if !self.at_punctuation(')') {
+                self.error_current(code, "expected `)` in structural constant expression");
+                return None;
+            }
+            self.position += 1;
+            return Some(value);
+        }
+        let index = self.current()?;
+        if self.lexed.tokens[index].kind == TokenKind::Integer {
+            let value = match self.text(index).parse::<u32>() {
+                Ok(value) => value,
+                Err(_) => {
+                    self.error_current(code, "structural u32 generic argument is out of range");
+                    return None;
+                }
+            };
+            self.position += 1;
+            return Some(HeaderStructuralU32Expr::Literal(value));
+        }
+        if self.lexed.tokens[index].kind == TokenKind::Identifier {
+            let name = self.text(index).to_owned();
+            self.position += 1;
+            return Some(HeaderStructuralU32Expr::Param(name));
+        }
+        self.error_current(code, "expected a structural u32 generic argument");
+        None
     }
 
     fn parse_record(

@@ -26,6 +26,7 @@ pub enum InstanceKeyError {
     OpenEffectRow { slot: usize },
     NonConcreteType { slot: usize },
     NonConcreteLifetime { slot: usize },
+    NonConcreteConst { slot: usize },
 }
 
 /// A stable executable specialization identity. The private canonical bytes
@@ -83,6 +84,9 @@ impl InstanceKey {
                 (GenericKind::Const(ConstKind::U32), InstanceArgument::ConstU32(value)) => {
                     canonical_substitution.push(3);
                     canonical_substitution.extend_from_slice(&value.to_le_bytes());
+                }
+                (GenericKind::Const(ConstKind::U32), InstanceArgument::ConstU32Expr(_)) => {
+                    return Err(InstanceKeyError::NonConcreteConst { slot });
                 }
                 (
                     GenericKind::Const(ConstKind::Quantity),
@@ -682,6 +686,16 @@ mod tests {
         assert!(matches!(
             open_row,
             Err(InstanceKeyError::OpenEffectRow { .. })
+        ));
+
+        let symbolic_const = InstanceKey::new(
+            definition(b"count"),
+            &[GenericKind::Const(ConstKind::U32)],
+            vec![InstanceArgument::ConstU32Expr(StructuralU32Expr::Param(0))],
+        );
+        assert!(matches!(
+            symbolic_const,
+            Err(InstanceKeyError::NonConcreteConst { .. })
         ));
     }
 

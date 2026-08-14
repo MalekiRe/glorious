@@ -1090,19 +1090,42 @@ impl StageZeroCompiler {
                         else {
                             continue;
                         };
-                        InstanceKey::new(*callee, &signature.generic_kinds, arguments.clone())
+                        InstanceKey::new(
+                            *callee,
+                            &signature.generic_kinds,
+                            arguments
+                                .iter()
+                                .map(|argument| {
+                                    specialize_generic_argument(argument, caller.arguments())
+                                })
+                                .collect(),
+                        )
                     }
                     Some(crate::core::CoreKind::TraitMethod {
                         evidence,
                         method,
                         trait_arguments,
                         method_arguments,
-                    }) => trait_method_instance_key(
-                        *evidence,
-                        *method,
-                        trait_arguments,
-                        method_arguments,
-                    ),
+                    }) => {
+                        let trait_arguments = trait_arguments
+                            .iter()
+                            .map(|argument| {
+                                specialize_generic_argument(argument, caller.arguments())
+                            })
+                            .collect::<Vec<_>>();
+                        let method_arguments = method_arguments
+                            .iter()
+                            .map(|argument| {
+                                specialize_generic_argument(argument, caller.arguments())
+                            })
+                            .collect::<Vec<_>>();
+                        trait_method_instance_key(
+                            *evidence,
+                            *method,
+                            &trait_arguments,
+                            &method_arguments,
+                        )
+                    }
                     _ => continue,
                 };
                 let key = match key {
@@ -1111,7 +1134,8 @@ impl StageZeroCompiler {
                         crate::InstanceKeyError::NonConcreteType { .. }
                         | crate::InstanceKeyError::UnresolvedType { .. }
                         | crate::InstanceKeyError::OpenEffectRow { .. }
-                        | crate::InstanceKeyError::NonConcreteLifetime { .. },
+                        | crate::InstanceKeyError::NonConcreteLifetime { .. }
+                        | crate::InstanceKeyError::NonConcreteConst { .. },
                     ) => continue,
                     Err(error) => {
                         return Err(failed(
@@ -1401,7 +1425,8 @@ fn materialize_concrete_instances(
                             crate::InstanceKeyError::NonConcreteType { .. }
                             | crate::InstanceKeyError::UnresolvedType { .. }
                             | crate::InstanceKeyError::OpenEffectRow { .. }
-                            | crate::InstanceKeyError::NonConcreteLifetime { .. },
+                            | crate::InstanceKeyError::NonConcreteLifetime { .. }
+                            | crate::InstanceKeyError::NonConcreteConst { .. },
                         ) => {
                             // Source generic templates are retained for
                             // diagnostics and only their concrete clones are
@@ -1445,7 +1470,8 @@ fn materialize_concrete_instances(
                         crate::InstanceKeyError::NonConcreteType { .. }
                         | crate::InstanceKeyError::UnresolvedType { .. }
                         | crate::InstanceKeyError::OpenEffectRow { .. }
-                        | crate::InstanceKeyError::NonConcreteLifetime { .. },
+                        | crate::InstanceKeyError::NonConcreteLifetime { .. }
+                        | crate::InstanceKeyError::NonConcreteConst { .. },
                     ) => {
                         // Generic templates keep the existing VM-generic
                         // call path until an outer concrete instance fixes
@@ -1513,6 +1539,39 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
         local.ty = specialize_type(&local.ty, arguments);
     }
     function.result = specialize_type(&function.result, arguments);
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            let (generic_arguments, trait_instance) = match instruction {
+                crate::MirInstruction::Call {
+                    generic_arguments,
+                    trait_instance,
+                    ..
+                }
+                | crate::MirInstruction::MakeCallable {
+                    generic_arguments,
+                    trait_instance,
+                    ..
+                } => (generic_arguments, trait_instance),
+                _ => continue,
+            };
+            *generic_arguments = generic_arguments
+                .iter()
+                .map(|argument| specialize_generic_argument(argument, arguments))
+                .collect();
+            if let Some(instance) = trait_instance {
+                instance.trait_arguments = instance
+                    .trait_arguments
+                    .iter()
+                    .map(|argument| specialize_generic_argument(argument, arguments))
+                    .collect();
+                instance.method_arguments = instance
+                    .method_arguments
+                    .iter()
+                    .map(|argument| specialize_generic_argument(argument, arguments))
+                    .collect();
+            }
+        }
+    }
 }
 
 fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
@@ -1699,6 +1758,10 @@ fn specialize_generic_argument(
             })
             .cloned()
             .unwrap_or_else(|| value.clone()),
+        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
+            crate::StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
+            value => GenericArgument::ConstU32Expr(value),
+        },
         value => value.clone(),
     }
 }

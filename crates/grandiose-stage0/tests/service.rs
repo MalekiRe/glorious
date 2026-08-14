@@ -1148,7 +1148,8 @@ fn service_instantiates_non_type_direct_callable_arguments_at_the_contract_bound
     for source in [
         "pub fn region<'a>() -> i64 { 0 } pub fn main() -> i64 { region<'static>() }",
         "pub fn row<e: EffectRow>() -> i64 { 0 } pub fn main() -> i64 { row<{}>() }",
-        "pub fn count<n: u32>() -> i64 { 0 } pub fn main() -> i64 { count<3>() }",
+        "pub fn count<n: u32>() -> i64 { 0 } pub fn main() -> i64 { count<(1 + 2)>() }",
+        "pub fn count<n: u32>() -> i64 { 0 } pub fn forward<n: u32>() -> i64 { count<n + 1>() } pub fn main() -> i64 { forward<2>() }",
         "pub fn amount<q: Quantity>() -> i64 { 0 } pub fn main() -> i64 { amount<[1, 2]>() }",
     ] {
         let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
