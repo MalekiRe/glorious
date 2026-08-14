@@ -45,6 +45,14 @@ impl InstanceKey {
         kinds: &[GenericKind],
         arguments: Vec<InstanceArgument>,
     ) -> Result<Self, InstanceKeyError> {
+        // A closed structural `u32` term has the same executable meaning as
+        // its literal result.  Normalize it before both key construction and
+        // publication so source spelling cannot create two monomorphizations
+        // of the same instance (`f<1 + 2>` versus `f<3>`).
+        let arguments = arguments
+            .into_iter()
+            .map(normalize_instance_argument)
+            .collect::<Vec<_>>();
         if kinds.len() != arguments.len() {
             return Err(InstanceKeyError::Arity {
                 expected: kinds.len(),
@@ -110,6 +118,17 @@ impl InstanceKey {
 
     pub fn fingerprint(&self) -> Digest {
         self.fingerprint
+    }
+}
+
+fn normalize_instance_argument(argument: InstanceArgument) -> InstanceArgument {
+    match argument {
+        InstanceArgument::ConstU32Expr(value) => match value.clone().normalized() {
+            Ok(crate::StructuralU32Expr::Literal(value)) => InstanceArgument::ConstU32(value),
+            Ok(value) => InstanceArgument::ConstU32Expr(value),
+            Err(_) => InstanceArgument::ConstU32Expr(value),
+        },
+        argument => argument,
     }
 }
 
@@ -582,7 +601,7 @@ pub fn solve_call_summaries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Digest, EffectTail, ScalarType};
+    use crate::{Digest, EffectTail, ScalarType, StructuralU32Expr};
 
     fn definition(name: &[u8]) -> DefKey {
         DefKey(Digest::of_bytes(name))
@@ -664,6 +683,29 @@ mod tests {
             open_row,
             Err(InstanceKeyError::OpenEffectRow { .. })
         ));
+    }
+
+    #[test]
+    fn closed_structural_u32_arguments_share_the_literal_instance() {
+        let kinds = [GenericKind::Const(ConstKind::U32)];
+        let structural = InstanceKey::new(
+            definition(b"count"),
+            &kinds,
+            vec![InstanceArgument::ConstU32Expr(StructuralU32Expr::Add(
+                Box::new(StructuralU32Expr::Literal(1)),
+                Box::new(StructuralU32Expr::Literal(2)),
+            ))],
+        )
+        .unwrap();
+        let literal = InstanceKey::new(
+            definition(b"count"),
+            &kinds,
+            vec![InstanceArgument::ConstU32(3)],
+        )
+        .unwrap();
+
+        assert_eq!(structural, literal);
+        assert_eq!(structural.arguments(), &[InstanceArgument::ConstU32(3)]);
     }
 
     #[test]
