@@ -535,6 +535,27 @@ fn manifest_bound_checked_i64_to_isize_preserves_the_frozen_signed_width() {
 }
 
 #[test]
+fn manifest_bound_wrapping_i64_to_isize_preserves_twos_complement_bits() {
+    let mut input = request(
+        "fn __g1_int_convert_wrapping_to_isize<T>(value: T) -> isize { () } pub fn main() -> isize { __g1_int_convert_wrapping_to_isize<i64>(-42) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertWrappingToIsize,
+        "__g1_int_convert_wrapping_to_isize",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_isize()
+            .unwrap(),
+        -42
+    );
+}
+
+#[test]
 fn manifest_bound_wrapping_i64_to_u64_retains_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () } pub fn main() -> u64 { __g1_int_convert_wrapping_to_u64<i64>(-1) }",
