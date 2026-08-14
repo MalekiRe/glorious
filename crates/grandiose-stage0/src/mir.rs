@@ -2044,10 +2044,10 @@ impl Lowerer<'_> {
     ) -> Option<MirFunction> {
         let label = match self.body.expression(root).kind.clone() {
             CoreKind::Label { .. } => root,
-            CoreKind::Block(values) if values.len() == 1 => values[0],
+            CoreKind::Block(values) => *values.last()?,
             _ => return None,
         };
-        let CoreKind::Label { body, .. } = self.body.expression(label).kind.clone() else {
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
             return None;
         };
         let CoreKind::Block(values) = self.body.expression(body).kind.clone() else {
@@ -2056,7 +2056,10 @@ impl Lowerer<'_> {
             return None;
         };
         let transfer = values.iter().position(|value| {
-            matches!(self.body.expression(*value).kind, CoreKind::Transfer { .. })
+            matches!(
+                self.body.expression(*value).kind,
+                CoreKind::Transfer { brand: target, .. } if target == brand
+            )
         })?;
         for value in values.iter().take(transfer) {
             self.statement(*value)?;

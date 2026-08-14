@@ -2715,3 +2715,18 @@ fn transfers_are_scoped_and_lower_to_a_verified_nonlocal_mir_edge() {
     let verified = grandiose_stage0::verify_vm(artifact).expect("verify label edge");
     assert_eq!(verified.run_i64().expect("run label edge"), 42);
 }
+
+#[test]
+fn closures_cannot_capture_an_enclosing_label_transfer_target() {
+    let core = core_for(
+        "core-label-transfer-closure-escape@0.1.0",
+        "pub fn main() -> i64 { label done { let delayed = (value: i64) -> i64 { transfer done value }; 0 } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4179"),
+        "{:#?}",
+        core.diagnostics
+    );
+}

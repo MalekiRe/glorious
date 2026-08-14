@@ -2123,6 +2123,7 @@ impl Elaborator<'_> {
         let parameters = vec![];
         let captures = self.closure_captures(body, &parameters);
         self.check_resumption_captures(&captures, span);
+        self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
         self.alloc(
@@ -2195,6 +2196,7 @@ impl Elaborator<'_> {
         }
         let captures = self.closure_captures(body, &parameters);
         self.check_resumption_captures(&captures, span);
+        self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
         self.alloc(
@@ -2900,6 +2902,30 @@ impl Elaborator<'_> {
                     "nested closure cannot capture handler resumption `{}` before continuations have an escaping representation",
                     capture.name
                 ),
+            );
+            self.recovered = true;
+        }
+    }
+    /// A closure executes after its surrounding label scope may have exited.
+    /// Keep transfers to an outer label out of its environment rather than
+    /// deferring an invalid nonlocal edge to MIR. Labels declared inside the
+    /// closure have fresh brands and are not in `active_labels` here.
+    fn check_label_transfer_escape(&mut self, body: CoreId, span: Span) {
+        let active = self
+            .active_labels
+            .iter()
+            .map(|label| label.brand)
+            .collect::<std::collections::BTreeSet<_>>();
+        if active.is_empty() {
+            return;
+        }
+        let mut transfers = Vec::new();
+        collect_transfer_brands(&self.expressions, body, &mut transfers);
+        if transfers.into_iter().any(|brand| active.contains(&brand)) {
+            self.error(
+                span,
+                "G4179",
+                "closure cannot capture a transfer target from an enclosing label scope",
             );
             self.recovered = true;
         }
@@ -5573,6 +5599,18 @@ fn collect_pattern_bindings(pattern: &CorePattern, bindings: &mut Vec<String>) {
             }
         }
         CorePattern::Any | CorePattern::Literal(_) | CorePattern::Error => {}
+    }
+}
+
+fn collect_transfer_brands(expressions: &[CoreExpr], id: CoreId, brands: &mut Vec<LabelBrand>) {
+    let Some(expression) = expressions.get(id.0 as usize) else {
+        return;
+    };
+    if let CoreKind::Transfer { brand, .. } = expression.kind {
+        brands.push(brand);
+    }
+    for child in core_children(&expression.kind) {
+        collect_transfer_brands(expressions, child, brands);
     }
 }
 
