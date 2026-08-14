@@ -1742,13 +1742,21 @@ impl Elaborator<'_> {
                 expression.span,
             ),
             ExprKind::Path(path) => self
-                .enum_constructor(path.clone(), vec![], expression.span)
+                .enum_constructor(path.clone(), vec![], vec![], expression.span)
                 .unwrap_or_else(|| self.path(path, expression.span)),
             ExprKind::GenericPath {
                 path,
                 effect_arguments,
                 operation_arguments,
             } if operation_arguments.is_empty() => {
+                if let Some(value) = self.enum_constructor(
+                    path.clone(),
+                    effect_arguments.clone(),
+                    vec![],
+                    expression.span,
+                ) {
+                    return value;
+                }
                 self.generic_path(path, effect_arguments, expression.span)
             }
             ExprKind::GenericPath { .. } => self.fail(
@@ -1911,7 +1919,11 @@ impl Elaborator<'_> {
                     expression.span,
                 )
             }
-            ExprKind::Record { path, fields } => self.record(path, fields, expression.span),
+            ExprKind::Record {
+                path,
+                arguments,
+                fields,
+            } => self.record(path, arguments, fields, expression.span),
             ExprKind::Field { base, name } => self.field(base, name, expression.span),
             ExprKind::Is { subject, pattern } => {
                 let subject = self.expression(subject);
@@ -1976,8 +1988,27 @@ impl Elaborator<'_> {
                     return self.call(callee, vec![value], expression.span);
                 }
                 if let ExprKind::Path(path) = &self.body.expression(callee).kind
-                    && let Some(value) =
-                        self.enum_constructor(path.clone(), arguments.clone(), expression.span)
+                    && let Some(value) = self.enum_constructor(
+                        path.clone(),
+                        vec![],
+                        arguments.clone(),
+                        expression.span,
+                    )
+                {
+                    return value;
+                }
+                if let ExprKind::GenericPath {
+                    path,
+                    effect_arguments,
+                    operation_arguments,
+                } = &self.body.expression(callee).kind
+                    && operation_arguments.is_empty()
+                    && let Some(value) = self.enum_constructor(
+                        path.clone(),
+                        effect_arguments.clone(),
+                        arguments.clone(),
+                        expression.span,
+                    )
                 {
                     return value;
                 }
@@ -2035,7 +2066,24 @@ impl Elaborator<'_> {
                 if let ExprKind::Path(path) = &self.body.expression(callee).kind
                     && matches!(arguments.as_slice(), [argument]
                         if matches!(self.body.expression(*argument).kind, ExprKind::ContextualBlock(ref values) if values.is_empty()))
-                    && let Some(value) = self.empty_braced_nominal(path.clone(), expression.span)
+                    && let Some(value) =
+                        self.empty_braced_nominal(path.clone(), vec![], expression.span)
+                {
+                    return value;
+                }
+                if let ExprKind::GenericPath {
+                    path,
+                    effect_arguments,
+                    operation_arguments,
+                } = &self.body.expression(callee).kind
+                    && operation_arguments.is_empty()
+                    && matches!(arguments.as_slice(), [argument]
+                        if matches!(self.body.expression(*argument).kind, ExprKind::ContextualBlock(ref values) if values.is_empty()))
+                    && let Some(value) = self.empty_braced_nominal(
+                        path.clone(),
+                        effect_arguments.clone(),
+                        expression.span,
+                    )
                 {
                     return value;
                 }
@@ -2670,47 +2718,46 @@ impl Elaborator<'_> {
             self.recovered = true;
             return None;
         }
-        Some(
-            arguments
-                .iter()
-                .zip(kinds)
-                .map(|(argument, kind)| match (argument, kind) {
-                    (
-                        crate::header::HeaderGenericArgument::Type(
-                            crate::header::HeaderType::Path(path),
+        let mut elaborated = Vec::with_capacity(arguments.len());
+        for (argument, kind) in arguments.iter().zip(kinds) {
+            let value = match (argument, kind) {
+                (
+                    crate::header::HeaderGenericArgument::Type(crate::header::HeaderType::Path(
+                        path,
+                    )),
+                    crate::GenericKind::Const(expected),
+                ) if path.len() == 1 => {
+                    let parameter = self
+                        .const_parameters
+                        .get(&path[0])
+                        .copied()
+                        .filter(|(_, found)| found == expected);
+                    match parameter {
+                        Some((index, kind)) => GenericArgument::ConstGeneric { index, kind },
+                        None => GenericArgument::Type(
+                            self.header_type(&crate::header::HeaderType::Path(path.clone())),
                         ),
-                        crate::GenericKind::Const(expected),
-                    ) if path.len() == 1 => {
-                        let parameter = self
-                            .const_parameters
-                            .get(&path[0])
-                            .copied()
-                            .filter(|(_, found)| found == expected);
-                        match parameter {
-                            Some((index, kind)) => GenericArgument::ConstGeneric { index, kind },
-                            None => GenericArgument::Type(
-                                self.header_type(&crate::header::HeaderType::Path(path.clone())),
-                            ),
-                        }
                     }
-                    (crate::header::HeaderGenericArgument::Type(value), _) => {
-                        GenericArgument::Type(self.header_type(value))
-                    }
-                    (crate::header::HeaderGenericArgument::Lifetime(value), _) => {
-                        GenericArgument::Lifetime(self.header_lifetime(Some(value)))
-                    }
-                    (crate::header::HeaderGenericArgument::EffectRow(value), _) => {
-                        GenericArgument::EffectRow(self.closure_effects(value, span))
-                    }
-                    (crate::header::HeaderGenericArgument::U32(value), _) => {
-                        GenericArgument::ConstU32(*value)
-                    }
-                    (crate::header::HeaderGenericArgument::Quantity(value), _) => {
-                        GenericArgument::ConstQuantity(*value)
-                    }
-                })
-                .collect(),
-        )
+                }
+                (crate::header::HeaderGenericArgument::Type(value), _) => {
+                    GenericArgument::Type(self.header_type(value))
+                }
+                (crate::header::HeaderGenericArgument::Lifetime(value), _) => {
+                    GenericArgument::Lifetime(self.header_lifetime(Some(value)))
+                }
+                (crate::header::HeaderGenericArgument::EffectRow(value), _) => {
+                    GenericArgument::EffectRow(self.closure_effects(value, span))
+                }
+                (crate::header::HeaderGenericArgument::U32(value), _) => {
+                    GenericArgument::ConstU32(*value)
+                }
+                (crate::header::HeaderGenericArgument::Quantity(value), _) => {
+                    GenericArgument::ConstQuantity(*value)
+                }
+            };
+            elaborated.push(value);
+        }
+        Some(elaborated)
     }
 
     /// Existing callable and effect-operation signature substitution is
@@ -4103,8 +4150,70 @@ impl Elaborator<'_> {
             }
         }
     }
-    fn record(&mut self, path: Vec<String>, fields: Vec<(String, ExprId)>, span: Span) -> CoreId {
-        if let Some(value) = self.enum_record_constructor(path.clone(), fields.clone(), span) {
+    /// Resolve a nominal application's source arguments in declaration-slot
+    /// order. Omitted arguments use inference only for type slots; the other
+    /// kinds retain their own semantic form so a runtime-layout consumer can
+    /// reject them explicitly instead of silently erasing identity.
+    fn nominal_arguments(
+        &mut self,
+        definition: DefKey,
+        source_arguments: &[crate::header::HeaderGenericArgument],
+        span: Span,
+    ) -> Option<Vec<GenericArgument>> {
+        let kinds = self.index.type_generic_kinds(definition)?.to_vec();
+        if !source_arguments.is_empty() {
+            let arguments = self.body_generic_arguments(
+                source_arguments,
+                &kinds,
+                span,
+                "G4185",
+                "nominal generic arguments do not match its declaration",
+            )?;
+            if arguments
+                .iter()
+                .zip(&kinds)
+                .all(|(argument, kind)| generic_argument_matches_kind(argument, *kind))
+            {
+                return Some(arguments);
+            }
+            self.error(
+                span,
+                "G4185",
+                "nominal generic argument has the wrong declared kind",
+            );
+            self.recovered = true;
+            return None;
+        }
+        Some(
+            kinds
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| match kind {
+                    crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
+                    crate::GenericKind::EffectRow => GenericArgument::EffectRow(EffectRow::empty()),
+                    crate::GenericKind::Lifetime => GenericArgument::Lifetime(Lifetime::Elided),
+                    crate::GenericKind::Const(kind) => GenericArgument::ConstGeneric {
+                        index: index as u32,
+                        kind,
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    fn record(
+        &mut self,
+        path: Vec<String>,
+        source_arguments: Vec<crate::header::HeaderGenericArgument>,
+        fields: Vec<(String, ExprId)>,
+        span: Span,
+    ) -> CoreId {
+        if let Some(value) = self.enum_record_constructor(
+            path.clone(),
+            source_arguments.clone(),
+            fields.clone(),
+            span,
+        ) {
             return value;
         }
         let definition =
@@ -4123,18 +4232,23 @@ impl Elaborator<'_> {
                     return self.fail(span, "G4122", "unresolved record constructor type");
                 }
             };
-        let generic_count = match self.signatures.definitions.get(&definition) {
-            Some(ElaboratedHeader::Nominal { generics, .. }) => *generics as usize,
-            _ => return self.fail(span, "G4123", "record constructor is not a struct type"),
+        let Some(arguments) = self.nominal_arguments(definition, &source_arguments, span) else {
+            return self.fail(
+                span,
+                "G4123",
+                "record generic arguments do not match its declaration",
+            );
         };
-        let arguments = (0..generic_count)
-            .map(|_| self.inference.fresh())
-            .collect::<Vec<_>>();
         let Some(layout) = self
             .signatures
-            .instantiate_struct_fields(definition, &arguments)
+            .instantiate_struct_fields_generic(definition, &arguments)
+            .ok()
         else {
-            return self.fail(span, "G4123", "record constructor is not a struct type");
+            return self.fail(
+                span,
+                "G4123",
+                "record constructor requires type-valued generic arguments for its runtime layout",
+            );
         };
         let mut supplied = std::collections::BTreeMap::new();
         for (name, value) in fields {
@@ -4168,7 +4282,7 @@ impl Elaborator<'_> {
         }
         let ty = Type::Nominal {
             definition,
-            arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
+            arguments,
         };
         self.alloc(
             CoreKind::Record {
@@ -4179,13 +4293,23 @@ impl Elaborator<'_> {
             span,
         )
     }
-    fn empty_braced_nominal(&mut self, path: Vec<String>, span: Span) -> Option<CoreId> {
+    fn empty_braced_nominal(
+        &mut self,
+        path: Vec<String>,
+        source_arguments: Vec<crate::header::HeaderGenericArgument>,
+        span: Span,
+    ) -> Option<CoreId> {
         if self.empty_enum_record_constructor(&path) {
-            return self.enum_record_constructor(path, vec![], span);
+            return self.enum_record_constructor(path, source_arguments, vec![], span);
         }
-        self.empty_record_constructor(path, span)
+        self.empty_record_constructor(path, source_arguments, span)
     }
-    fn empty_record_constructor(&mut self, path: Vec<String>, span: Span) -> Option<CoreId> {
+    fn empty_record_constructor(
+        &mut self,
+        path: Vec<String>,
+        source_arguments: Vec<crate::header::HeaderGenericArgument>,
+        span: Span,
+    ) -> Option<CoreId> {
         let ResolutionState::Resolved(definition) =
             self.index
                 .resolve_path(DefinitionNamespace::Type, self.module, &path)
@@ -4199,7 +4323,9 @@ impl Elaborator<'_> {
         else {
             return None;
         };
-        fields.is_empty().then(|| self.record(path, vec![], span))
+        fields
+            .is_empty()
+            .then(|| self.record(path, source_arguments, vec![], span))
     }
     fn empty_enum_record_constructor(&self, path: &[String]) -> bool {
         let Some((variant, enum_path)) = path.split_last() else {
@@ -4229,6 +4355,7 @@ impl Elaborator<'_> {
     fn enum_record_constructor(
         &mut self,
         path: Vec<String>,
+        source_arguments: Vec<crate::header::HeaderGenericArgument>,
         supplied_fields: Vec<(String, ExprId)>,
         span: Span,
     ) -> Option<CoreId> {
@@ -4244,18 +4371,11 @@ impl Elaborator<'_> {
                 ResolutionState::Resolved(definition) => definition,
                 _ => return None,
             };
-        let generic_count = match self.signatures.definitions.get(&definition) {
-            Some(ElaboratedHeader::Nominal { generics, .. }) => *generics as usize,
-            _ => return None,
-        };
-        let arguments = (0..generic_count)
-            .map(|_| self.inference.fresh())
-            .collect::<Vec<_>>();
-        let (variant, layout) = self.signatures.instantiate_enum_record_variant(
-            definition,
-            &arguments,
-            variant_name,
-        )?;
+        let arguments = self.nominal_arguments(definition, &source_arguments, span)?;
+        let (variant, layout) = self
+            .signatures
+            .instantiate_enum_record_variant_generic(definition, &arguments, variant_name)
+            .ok()?;
         let mut supplied = std::collections::BTreeMap::new();
         for (name, value) in supplied_fields {
             if supplied.insert(name, value).is_some() {
@@ -4301,7 +4421,7 @@ impl Elaborator<'_> {
             },
             Type::Nominal {
                 definition,
-                arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
+                arguments,
             },
             span,
         ))
@@ -4344,6 +4464,7 @@ impl Elaborator<'_> {
     fn enum_constructor(
         &mut self,
         path: Vec<String>,
+        source_arguments: Vec<crate::header::HeaderGenericArgument>,
         supplied: Vec<ExprId>,
         span: Span,
     ) -> Option<CoreId> {
@@ -4359,16 +4480,11 @@ impl Elaborator<'_> {
                 ResolutionState::Resolved(definition) => definition,
                 _ => return None,
             };
-        let generic_count = match self.signatures.definitions.get(&definition) {
-            Some(ElaboratedHeader::Nominal { generics, .. }) => *generics as usize,
-            _ => return None,
-        };
-        let arguments = (0..generic_count)
-            .map(|_| self.inference.fresh())
-            .collect::<Vec<_>>();
-        let (variant, fields) =
-            self.signatures
-                .instantiate_enum_variant(definition, &arguments, variant_name)?;
+        let arguments = self.nominal_arguments(definition, &source_arguments, span)?;
+        let (variant, fields) = self
+            .signatures
+            .instantiate_enum_variant_generic(definition, &arguments, variant_name)
+            .ok()?;
         if fields.len() != supplied.len() {
             return Some(self.fail(
                 span,
@@ -4401,7 +4517,7 @@ impl Elaborator<'_> {
             },
             Type::Nominal {
                 definition,
-                arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
+                arguments,
             },
             span,
         ))
@@ -6955,6 +7071,37 @@ fn nominal_parts(subject: &Type) -> Option<(DefKey, Vec<GenericArgument>)> {
         } => Some((*definition, arguments.clone())),
         _ => None,
     }
+}
+
+fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::GenericKind) -> bool {
+    matches!(
+        (argument, kind),
+        (GenericArgument::Type(_), crate::GenericKind::Type)
+            | (GenericArgument::EffectRow(_), crate::GenericKind::EffectRow)
+            | (GenericArgument::Lifetime(_), crate::GenericKind::Lifetime)
+            | (
+                GenericArgument::ConstU32(_),
+                crate::GenericKind::Const(crate::ConstKind::U32)
+            )
+            | (
+                GenericArgument::ConstQuantity(_),
+                crate::GenericKind::Const(crate::ConstKind::Quantity)
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::GenericKind::Const(crate::ConstKind::U32)
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
+                crate::GenericKind::Const(crate::ConstKind::Quantity)
+            )
+    )
 }
 
 fn record_capture(

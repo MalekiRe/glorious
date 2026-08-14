@@ -195,12 +195,16 @@ impl Elaborator<'_> {
                         .collect(),
                 )
             }
-            PatternKind::Record { path, fields } => {
-                self.record(pattern.span, path, fields, subject)
-            }
-            PatternKind::Enum { path, fields } => {
-                self.enum_tuple(pattern.span, path, fields, subject)
-            }
+            PatternKind::Record {
+                path,
+                arguments: _,
+                fields,
+            } => self.record(pattern.span, path, fields, subject),
+            PatternKind::Enum {
+                path,
+                arguments: _,
+                fields,
+            } => self.enum_tuple(pattern.span, path, fields, subject),
             PatternKind::Recovered => {
                 self.recovered = true;
                 PatternDecision::Error

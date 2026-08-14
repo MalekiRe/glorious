@@ -27,10 +27,12 @@ pub enum PatternKind {
     Tuple(Vec<PatternId>),
     Record {
         path: Vec<String>,
+        arguments: Vec<HeaderGenericArgument>,
         fields: Vec<(String, PatternId)>,
     },
     Enum {
         path: Vec<String>,
+        arguments: Vec<HeaderGenericArgument>,
         fields: Vec<PatternId>,
     },
     Recovered,
@@ -96,6 +98,9 @@ pub enum ExprKind {
     /// resolves it in the type namespace against a frozen nominal layout.
     Record {
         path: Vec<String>,
+        /// Explicit nominal arguments retained until Core can resolve the
+        /// path's declared generic-kind contract.
+        arguments: Vec<HeaderGenericArgument>,
         fields: Vec<(String, ExprId)>,
     },
     Block(Vec<ExprId>),
@@ -493,6 +498,15 @@ impl Parser<'_> {
         }
         let mut value = self.parse_atom()?;
         loop {
+            let nominal_record_path = match self.expression(value).kind.clone() {
+                ExprKind::Path(path) => Some((path, vec![])),
+                ExprKind::GenericPath {
+                    path,
+                    effect_arguments,
+                    operation_arguments,
+                } if operation_arguments.is_empty() => Some((path, effect_arguments)),
+                _ => None,
+            };
             if self.at_punctuation('(') {
                 value = self.parse_call(value)?;
             } else if self.at_punctuation('.') {
@@ -504,14 +518,11 @@ impl Parser<'_> {
                     self.lexed.tokens[self.tokens[self.position - 1]].span,
                 );
                 value = self.alloc(ExprKind::Field { base: value, name }, span);
-            } else if self.at_punctuation('{')
-                && matches!(self.expression(value).kind, ExprKind::Path(_))
+            } else if let Some((path, arguments)) = nominal_record_path
+                && self.at_punctuation('{')
                 && self.record_literal_ahead()
             {
-                let ExprKind::Path(path) = self.expression(value).kind.clone() else {
-                    unreachable!("record lookahead follows only a parsed atom")
-                };
-                value = self.parse_record(path, self.expression(value).span)?;
+                value = self.parse_record(path, arguments, self.expression(value).span)?;
             } else if self.at_punctuation('{') && !self.handler_computation {
                 let block = self.parse_block(true)?;
                 let span = join(self.expression(value).span, self.expression(block).span);
@@ -594,6 +605,7 @@ impl Parser<'_> {
             let completion = self.alloc_pattern(
                 PatternKind::Enum {
                     path: path.clone(),
+                    arguments: vec![],
                     fields: patterns.clone(),
                 },
                 join(
@@ -763,7 +775,10 @@ impl Parser<'_> {
                         depth -= 1;
                         if depth == 0 {
                             return self.tokens.get(position + 1).is_some_and(|next| {
-                                self.lexed.tokens[*next].kind == TokenKind::Punctuation('(')
+                                matches!(
+                                    self.lexed.tokens[*next].kind,
+                                    TokenKind::Punctuation('(' | '{')
+                                )
                             }) || matches!(
                                 (self.tokens.get(position + 1), self.tokens.get(position + 2)),
                                 (Some(first), Some(second))
@@ -856,7 +871,12 @@ impl Parser<'_> {
         Some(arguments)
     }
 
-    fn parse_record(&mut self, path: Vec<String>, start: Span) -> Option<ExprId> {
+    fn parse_record(
+        &mut self,
+        path: Vec<String>,
+        arguments: Vec<HeaderGenericArgument>,
+        start: Span,
+    ) -> Option<ExprId> {
         self.expect_punctuation('{')?;
         let mut fields = vec![];
         while self.current().is_some() && !self.at_punctuation('}') {
@@ -876,7 +896,11 @@ impl Parser<'_> {
         }
         let close = self.expect_punctuation('}')?;
         Some(self.alloc(
-            ExprKind::Record { path, fields },
+            ExprKind::Record {
+                path,
+                arguments,
+                fields,
+            },
             join(start, self.lexed.tokens[close].span),
         ))
     }
@@ -1460,9 +1484,18 @@ impl Parser<'_> {
                     return Some(self.alloc_pattern(PatternKind::Literal(first), token.span));
                 }
                 let mut path = vec![first];
+                let mut arguments = if self.generic_path_ahead() {
+                    self.parse_generic_arguments("G4016", "expected `>` in pattern application")?
+                } else {
+                    vec![]
+                };
                 while self.at_punctuation(':') && self.peek_punctuation(1, ':') {
                     self.position += 2;
                     path.push(self.expect_identifier()?);
+                }
+                if arguments.is_empty() && self.generic_path_ahead() {
+                    arguments = self
+                        .parse_generic_arguments("G4016", "expected `>` in pattern application")?;
                 }
                 if self.at_punctuation('{') {
                     self.position += 1;
@@ -1482,7 +1515,11 @@ impl Parser<'_> {
                     }
                     let close = self.expect_punctuation('}')?;
                     return Some(self.alloc_pattern(
-                        PatternKind::Record { path, fields },
+                        PatternKind::Record {
+                            path,
+                            arguments,
+                            fields,
+                        },
                         join(token.span, self.lexed.tokens[close].span),
                     ));
                 }
@@ -1498,7 +1535,11 @@ impl Parser<'_> {
                     }
                     let close = self.expect_punctuation(')')?;
                     return Some(self.alloc_pattern(
-                        PatternKind::Enum { path, fields },
+                        PatternKind::Enum {
+                            path,
+                            arguments,
+                            fields,
+                        },
                         join(token.span, self.lexed.tokens[close].span),
                     ));
                 }
@@ -1506,6 +1547,7 @@ impl Parser<'_> {
                     return Some(self.alloc_pattern(
                         PatternKind::Enum {
                             path,
+                            arguments,
                             fields: vec![],
                         },
                         token.span,

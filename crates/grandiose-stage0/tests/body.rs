@@ -85,7 +85,7 @@ fn body_parser_preserves_structural_is_patterns_and_rejects_duplicate_binders() 
     assert!(matches!(body.expression(subject).kind, ExprKind::Path(_)));
     assert!(matches!(
         body.pattern(pattern).kind,
-        PatternKind::Enum { ref path, ref fields }
+        PatternKind::Enum { ref path, ref fields, .. }
             if path == &vec!["Result".to_owned(), "Ok".to_owned()] && fields.len() == 1
     ));
 
@@ -97,6 +97,30 @@ fn body_parser_preserves_structural_is_patterns_and_rejects_duplicate_binders() 
             .iter()
             .any(|diagnostic| diagnostic.code == "G4017")
     );
+}
+
+#[test]
+fn body_parser_retains_explicit_nominal_arguments_on_construction_and_patterns() {
+    let body = parse("{ Packet<i64> { value: 1 }; subject is Result<i64>::Ok(value) }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block")
+    };
+    assert!(matches!(
+        &body.expression(values[0]).kind,
+        ExprKind::Record { path, arguments, .. }
+            if path == &vec!["Packet".to_owned()]
+                && matches!(arguments.as_slice(), [HeaderGenericArgument::Type(_)])
+    ));
+    let ExprKind::Is { pattern, .. } = body.expression(values[1]).kind else {
+        panic!("expected structural pattern")
+    };
+    assert!(matches!(
+        &body.pattern(pattern).kind,
+        PatternKind::Enum { path, arguments, .. }
+            if path == &vec!["Result".to_owned(), "Ok".to_owned()]
+                && matches!(arguments.as_slice(), [HeaderGenericArgument::Type(_)])
+    ));
 }
 
 #[test]
@@ -188,7 +212,7 @@ fn body_parser_keeps_qualified_nullary_constructor_arms_as_completion_patterns()
     assert!(matches!(
         body.pattern(clauses[0].completion.expect("qualified completion"))
             .kind,
-        PatternKind::Enum { ref path, ref fields }
+        PatternKind::Enum { ref path, ref fields, .. }
             if path == &vec!["Choice".to_owned(), "Left".to_owned()] && fields.is_empty()
     ));
 }

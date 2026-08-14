@@ -88,6 +88,24 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
 }
 
 #[test]
+fn typed_core_retains_explicit_nominal_arguments_on_record_and_enum_construction() {
+    let core = core_for(
+        "core-explicit-nominal-construction@0.1.0",
+        "pub struct Packet<T> { value: T } pub enum Result<T> { Ok(T) } pub fn main() -> i64 { let packet = Packet<i64> { value: 7 }; let result = Result<i64>::Ok(9); let matches = result is Result<i64>::Ok(_); packet.value }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let expected = vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))];
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(&expression.ty, Type::Nominal { arguments, .. } if arguments == &expected)
+            && matches!(expression.kind, CoreKind::Record { .. })
+    }));
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(&expression.ty, Type::Nominal { arguments, .. } if arguments == &expected)
+            && matches!(expression.kind, CoreKind::Enum { .. })
+    }));
+}
+
+#[test]
 fn typed_core_retains_zonked_direct_call_specialization_arguments() {
     let core = core_for(
         "core-direct-instance@0.1.0",
