@@ -795,6 +795,9 @@ pub enum MirInstruction {
         result: Type,
         arguments: Vec<MirLocal>,
     },
+    /// A trusted non-fallthrough terminal selected only through the runtime
+    /// manifest's exact `Abort` declaration identity.
+    Abort,
     /// Materialize a lifted callable together with its ordered environment.
     /// The target's capture parameters occupy the prefix of its parameter
     /// list, before ordinary invocation parameters.
@@ -1537,7 +1540,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
-        MirInstruction::InstallHandler { .. }
+        MirInstruction::Abort
+        | MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
         | MirInstruction::Resume { .. }
         | MirInstruction::ResumeReturn { .. }
@@ -3411,6 +3415,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
                 .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders))?;
             validate_mir_type(result, &mut lifetime_binders)
         }
+        MirInstruction::Abort => Ok(()),
         MirInstruction::TextByteLen { .. } => Ok(()),
         MirInstruction::TextConcat { .. }
         | MirInstruction::TextEq { .. }
@@ -4238,6 +4243,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             payload_destinations,
             ..
         } => payload_destinations.clone(),
+        MirInstruction::Abort => Vec::new(),
         MirInstruction::UninstallHandler => Vec::new(),
         MirInstruction::CaptureResumption { dst } => vec![*dst],
         MirInstruction::Resume { value } => vec![*value],
@@ -13872,6 +13878,19 @@ impl Lowerer<'_> {
                                     trait_instance: None,
                                     arguments,
                                 });
+                            }
+                            Some(PrimitiveRole::Abort) => {
+                                if !generic_arguments.is_empty()
+                                    || !arguments.is_empty()
+                                    || !matches!(self.body.expression(id).ty, Type::Never)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "Abort primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::Abort);
                             }
                             Some(PrimitiveRole::IntConvertWrappingToU32) => {
                                 let [value] = arguments.as_slice() else {

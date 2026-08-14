@@ -5250,6 +5250,7 @@ fn lower_instruction(
                 .map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
+        MirInstruction::Abort => VmInstruction::Trap,
         MirInstruction::MakeCallable {
             dst,
             callee,
@@ -5664,6 +5665,11 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
         vec![0usize]
     };
     let mut returned: Option<VmType> = None;
+    // A verified VM function may be intentionally terminal: `Trap` is the
+    // executable representation of the trusted source `!` abort leaf. Such
+    // a function has no return edge, but it is still a complete control-flow
+    // graph and must not be rejected as a malformed fallthrough.
+    let mut trapped = false;
     while let Some(pc) = worklist.pop() {
         let mut states = incoming[pc].clone().expect("scheduled verifier state");
         let mut advances = true;
@@ -7095,13 +7101,16 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 advances = false;
             }
-            VmInstruction::Trap => advances = false,
+            VmInstruction::Trap => {
+                trapped = true;
+                advances = false;
+            }
         }
         if advances {
             propagate_state(&mut incoming, &mut worklist, (pc + 1) as u32, &states)?;
         }
     }
-    if returned.is_some() {
+    if returned.is_some() || trapped {
         Ok(())
     } else {
         Err(VmArtifactError::NoReturn)

@@ -380,6 +380,7 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
             put(
                 &mut bytes,
                 &[match selector.role {
+                    crate::PrimitiveRole::Abort => 69,
                     crate::PrimitiveRole::BranchBool => 0,
                     crate::PrimitiveRole::TextByteLen => 1,
                     crate::PrimitiveRole::TextConcat => 2,

@@ -1345,6 +1345,23 @@ fn service_emits_an_authorized_direct_host_import_without_an_ordinary_callee_bod
 }
 
 #[test]
+fn service_lowers_only_the_manifest_bound_abort_leaf_to_a_terminal_vm_trap() {
+    let mut input = request("fn __g1_abort() -> ! { () } pub fn main() -> ! { __g1_abort() }");
+    input.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        selectors: vec![PrimitiveSelector {
+            role: PrimitiveRole::Abort,
+            module_path: "crate".into(),
+            name: "__g1_abort".into(),
+        }],
+    });
+    let outcome = StageZeroCompiler::new().compile(input).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{outcome:#?}");
+    let artifact = outcome.artifact.expect("abort program emits an artifact");
+    assert!(matches!(artifact.run_i64(), Err(VmArtifactError::Trap)));
+}
+
+#[test]
 fn service_rejects_host_imports_escaping_as_ordinary_callable_values() {
     let mut input =
         request("host clock fn now() -> i64; pub fn main() -> i64 { let f = now; f() }");

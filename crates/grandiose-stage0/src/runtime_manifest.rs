@@ -15,6 +15,9 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PrimitiveRole {
+    /// The trusted terminal leaf. Only its exact manifest-bound declaration
+    /// identity may lower to the VM's non-fallthrough `Trap` instruction.
+    Abort,
     /// The finite control leaf used by the standard library's conventional
     /// conditional combinator. It is polymorphic in its result and receives
     /// two zero-argument callables, so source spelling alone cannot become a
@@ -149,6 +152,7 @@ pub enum PrimitiveRole {
 impl PrimitiveRole {
     pub const fn selector_name(self) -> &'static str {
         match self {
+            Self::Abort => "abort",
             Self::BranchBool => "branch-bool",
             Self::TextByteLen => "text-byte-len",
             Self::TextConcat => "text-concat",
@@ -223,6 +227,7 @@ impl PrimitiveRole {
 
     pub fn parse_selector_name(value: &str) -> Option<Self> {
         Some(match value {
+            "abort" => Self::Abort,
             "branch-bool" => Self::BranchBool,
             "text-byte-len" => Self::TextByteLen,
             "text-concat" => Self::TextConcat,
@@ -415,6 +420,17 @@ impl RuntimeManifestInput {
 }
 fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
     match role {
+        PrimitiveRole::Abort => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![],
+            result: Type::Never,
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::BranchBool => {
             let result = Type::Generic(0);
             let thunk = Type::Callable {
@@ -990,6 +1006,7 @@ fn manifest_digest(
     bytes.extend_from_slice(standard_library.0.as_bytes());
     for (role, definition) in primitives {
         bytes.push(match role {
+            PrimitiveRole::Abort => 69,
             PrimitiveRole::BranchBool => 0,
             PrimitiveRole::TextByteLen => 1,
             PrimitiveRole::TextConcat => 2,

@@ -1135,6 +1135,7 @@ impl StageZeroCompiler {
                 session.checkpoint(1)?;
                 if runtime_manifest.as_ref().is_some_and(|manifest| {
                     [
+                        crate::PrimitiveRole::Abort,
                         crate::PrimitiveRole::TextByteLen,
                         crate::PrimitiveRole::TextConcat,
                         crate::PrimitiveRole::TextEq,

@@ -87,6 +87,7 @@ runtime_manifest=(
     --capability file_write
     --capability diagnostic
     --runtime-standard-library command@0.1.0
+    --runtime-leaf abort crate __g1_abort
     --runtime-leaf text-byte-len crate __g1_text_byte_len
     --runtime-leaf text-concat crate __g1_text_concat
     --runtime-leaf text-eq crate __g1_text_eq
