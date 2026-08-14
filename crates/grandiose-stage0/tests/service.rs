@@ -939,6 +939,14 @@ fn service_selects_the_first_matching_finite_resumption_clause() {
 }
 
 #[test]
+fn service_replays_a_bounded_interval_resumption_when_the_static_uses_fit() {
+    let source = "effect Ask { [1,2] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); value + 1 } { Ask::ask(k) => k(20) + k(21) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn service_generated_resumption_shadows_a_same_named_parameter() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn identity(value: i64) -> i64 { value } pub fn choose(k: (i64) -> i64) -> i64 { handle Ask::ask() { Ask::ask(k) => k(42) } } pub fn main() -> i64 { choose(identity) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

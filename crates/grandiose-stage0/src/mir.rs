@@ -3381,9 +3381,7 @@ impl Lowerer<'_> {
             let CoreHandlerResumption::Explicit { quantity, .. } = &clause.resumption else {
                 return true;
             };
-            quantity
-                .upper
-                .is_none_or(|upper| quantity.lower != upper || upper < 2)
+            quantity.upper.is_none_or(|upper| upper < 2)
                 || clause.patterns.len() != argument_ids.len()
         }) {
             return None;
