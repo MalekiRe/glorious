@@ -88,6 +88,25 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
         "a bound lifetime outside a callable binder must be rejected"
     );
 
+    let mut gat_item_argument = graph();
+    gat_item_argument.locals[1].ty = Type::Projection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: DefKey(Digest::of_bytes(b"mir-forged-gat-trait")),
+        trait_arguments: vec![],
+        name: "Output".into(),
+        item_arguments: vec![Type::Reference {
+            mutability: grandiose_stage0::Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 0, index: 0 },
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
+        }],
+    };
+    assert!(
+        gat_item_argument
+            .validate()
+            .is_err_and(|error| error.contains("absent higher-ranked binder")),
+        "a forged GAT item argument must not smuggle an unscoped bound lifetime into MIR"
+    );
+
     let mut generic_metadata = graph();
     generic_metadata.blocks[0]
         .instructions

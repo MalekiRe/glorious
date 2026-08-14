@@ -425,6 +425,13 @@ impl TraitSolver {
     }
 
     pub fn solve(&mut self, goal: TraitGoal) -> TraitAnswer {
+        // A solver goal has no ambient callable binder.  A raw `Bound`
+        // lifetime can only be admitted when it is closed by a nested HRTB
+        // in the type tree itself; otherwise tabled evidence would preserve
+        // a region that escapes its source binder.
+        if trait_goal_contains_escaping_hrtb(&goal) {
+            return TraitAnswer::NoSolution;
+        }
         self.solve_at(goal, 0, false).into()
     }
 
@@ -599,6 +606,14 @@ impl TraitSolver {
                 };
             }
         };
+        if trait_goal_contains_escaping_hrtb(&goal) {
+            return TraitSelectionExplanation {
+                goal,
+                answer: TraitAnswer::NoSolution,
+                candidates: vec![],
+                terminal: None,
+            };
+        }
         let key = goal_key(&goal);
         if let Some(reentered) = active.get(&key) {
             let auto = coinductive_edge && self.is_auto_trait(&goal);
@@ -803,6 +818,13 @@ impl TraitSolver {
         name: &str,
         arguments: &[GenericArgument],
     ) -> TraitProjectionAnswer {
+        if trait_goal_contains_escaping_hrtb(&goal)
+            || arguments
+                .iter()
+                .any(generic_argument_contains_escaping_hrtb)
+        {
+            return TraitProjectionAnswer::NoSolution;
+        }
         let goal = match self.find_associated_item_goal(
             &goal,
             name,
@@ -1155,6 +1177,13 @@ impl TraitSolver {
         name: &str,
         arguments: &[GenericArgument],
     ) -> TraitEffectRowProjectionAnswer {
+        if trait_goal_contains_escaping_hrtb(&goal)
+            || arguments
+                .iter()
+                .any(generic_argument_contains_escaping_hrtb)
+        {
+            return TraitEffectRowProjectionAnswer::NoSolution;
+        }
         let goal = match self.find_associated_item_goal(
             &goal,
             name,
@@ -1437,6 +1466,9 @@ impl TraitSolver {
             Ok(goal) => goal,
             Err(answer) => return answer,
         };
+        if trait_goal_contains_escaping_hrtb(&goal) {
+            return TraitAnswerIndex::NoSolution;
+        }
         self.steps += 1;
         let key = goal_key(&goal);
         match self.tables.get(&key).copied() {
@@ -1953,7 +1985,7 @@ fn match_type_at(
                     .iter()
                     .zip(actual_arguments)
                     .try_for_each(|(template, actual)| {
-                        match_generic_argument(template, actual, substitution)
+                        match_generic_argument_at(template, actual, substitution, binder_depth)
                     })
             }
             _ => None,
@@ -2052,9 +2084,32 @@ fn match_type_at(
     }
 }
 
+fn trait_goal_contains_escaping_hrtb(goal: &TraitGoal) -> bool {
+    has_free_hrtb_placeholder(&goal.subject, 0)
+        || goal
+            .relation
+            .arguments
+            .iter()
+            .any(generic_argument_contains_escaping_hrtb)
+}
+
+fn generic_argument_contains_escaping_hrtb(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => has_free_hrtb_placeholder(value, 0),
+        GenericArgument::EffectRow(row) => effect_row_contains_free_hrtb_placeholder(row, 0),
+        GenericArgument::Lifetime(crate::Lifetime::Bound { .. }) => true,
+        GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => false,
+    }
+}
+
 /// A `Bound` lifetime is a fresh universe placeholder unless it is closed by
 /// a callable nested inside the candidate type. This walk distinguishes a
-/// self-contained nested HRTB from a reference to an enclosing binder.
+/// self-contained nested HRTB from a reference to an enclosing binder, and
+/// intentionally reaches every generic-argument and effect-row carrier.
 fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
     match value {
         Type::Reference {
@@ -2065,18 +2120,8 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
         Type::Reference { referent, .. } | Type::Array(referent) => {
             has_free_hrtb_placeholder(referent, callable_nesting)
         }
-        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| match argument {
-            GenericArgument::Type(value) => has_free_hrtb_placeholder(value, callable_nesting),
-            GenericArgument::EffectRow(row) => row.effects.iter().any(|effect| {
-                effect
-                    .arguments
-                    .iter()
-                    .any(|argument| matches!(argument, GenericArgument::Type(value) if has_free_hrtb_placeholder(value, callable_nesting)))
-            }),
-            GenericArgument::Lifetime(crate::Lifetime::Bound { depth, .. }) => {
-                *depth >= callable_nesting
-            }
-            _ => false,
+        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| {
+            generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
         }),
         Type::Projection {
             subject,
@@ -2096,15 +2141,57 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
             .iter()
             .any(|value| has_free_hrtb_placeholder(value, callable_nesting)),
         Type::Callable {
-            parameters, result, ..
+            parameters,
+            result,
+            effects,
+            ..
         } => {
             parameters
                 .iter()
                 .any(|value| has_free_hrtb_placeholder(value, callable_nesting + 1))
                 || has_free_hrtb_placeholder(result, callable_nesting + 1)
+                || effect_row_contains_free_hrtb_placeholder(effects, callable_nesting + 1)
         }
         _ => false,
     }
+}
+
+fn generic_argument_contains_free_hrtb_placeholder(
+    value: &GenericArgument,
+    callable_nesting: u32,
+) -> bool {
+    match value {
+        GenericArgument::Type(value) => has_free_hrtb_placeholder(value, callable_nesting),
+        GenericArgument::EffectRow(row) => {
+            effect_row_contains_free_hrtb_placeholder(row, callable_nesting)
+        }
+        GenericArgument::Lifetime(crate::Lifetime::Bound { depth, .. }) => {
+            *depth >= callable_nesting
+        }
+        GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => false,
+    }
+}
+
+fn effect_row_contains_free_hrtb_placeholder(value: &EffectRow, callable_nesting: u32) -> bool {
+    value.effects.iter().any(|effect| {
+        effect.arguments.iter().any(|argument| {
+            generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
+        })
+    }) || value.projections.iter().any(|projection| {
+        has_free_hrtb_placeholder(&projection.subject, callable_nesting)
+            || projection
+                .trait_arguments
+                .iter()
+                .any(|argument| has_free_hrtb_placeholder(argument, callable_nesting))
+            || projection
+                .item_arguments
+                .iter()
+                .any(|argument| has_free_hrtb_placeholder(argument, callable_nesting))
+    })
 }
 
 fn match_lifetime(

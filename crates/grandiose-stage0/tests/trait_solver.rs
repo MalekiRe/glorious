@@ -240,6 +240,67 @@ fn solver_instantiates_hrtb_heads_without_capturing_fresh_placeholders() {
 }
 
 #[test]
+fn solver_rejects_hrtb_capture_hidden_in_nominal_and_associated_arguments() {
+    let (interface, signatures) = signatures(
+        "trait CallableMarker {} struct Wrap<T> {} impl<T> CallableMarker for for<'a> (&'a Wrap<T>) -> &'a Wrap<T> {} trait Apply { type Output<T>; } impl Apply for i64 { type Output<T> = T; }",
+    );
+    let marker = key(&interface, "CallableMarker");
+    let wrap = key(&interface, "Wrap");
+    let callable = |argument: Type| Type::Callable {
+        lifetime_binders: 1,
+        parameters: vec![Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 0, index: 0 },
+            referent: Box::new(Type::Nominal {
+                definition: wrap,
+                arguments: vec![GenericArgument::Type(argument.clone())],
+            }),
+        }],
+        result: Box::new(Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 0, index: 0 },
+            referent: Box::new(Type::Nominal {
+                definition: wrap,
+                arguments: vec![GenericArgument::Type(argument)],
+            }),
+        }),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+    };
+    let goal = |subject| TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: marker,
+            arguments: vec![],
+        },
+        subject,
+    };
+    let valid = TraitSolver::new(&signatures).solve(goal(callable(Type::Scalar(ScalarType::I64))));
+    assert!(matches!(valid, TraitAnswer::Proven { .. }), "{valid:#?}");
+
+    let captured = Type::Reference {
+        mutability: Mutability::Shared,
+        lifetime: Lifetime::Bound { depth: 0, index: 0 },
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    };
+    let leaked = TraitSolver::new(&signatures).solve(goal(callable(captured.clone())));
+    assert!(matches!(leaked, TraitAnswer::NoSolution), "{leaked:#?}");
+
+    let apply = key(&interface, "Apply");
+    let forged_item_argument = TraitSolver::new(&signatures).normalize_associated_type_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: apply,
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Output",
+        &[GenericArgument::Type(captured)],
+    );
+    assert_eq!(forged_item_argument, TraitProjectionAnswer::NoSolution);
+}
+
+#[test]
 fn tabled_solver_normalizes_associated_projections_in_where_obligations() {
     let (interface, signatures) = signatures(
         "trait Source { type Item; } trait Consume<T> {} trait Ready {} struct Value {} impl Source for Value { type Item = i64; } impl Consume<i64> for Value {} impl Ready for Value where Value: Consume< <Value as Source>::Item > {}",
