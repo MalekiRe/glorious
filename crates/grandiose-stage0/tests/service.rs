@@ -6659,6 +6659,27 @@ fn service_completion_after_a_resumption_may_transfer_to_an_enclosing_label() {
 }
 
 #[test]
+fn service_composes_generic_effects_closures_and_finite_replay_across_a_call() {
+    let source = r#"
+        effect Echo<T> { [2, 2] echo(value: T) -> T; }
+        pub fn relay<T>(value: T, transform: (T) -> T) -> T / Echo<T> {
+            transform(Echo<T>::echo(value))
+        }
+        pub fn main() -> i64 {
+            let increment = (value: i64) -> i64 { value + 1 };
+            handle relay(20, increment) {
+                Echo<i64>::echo(value, k) => k(value) + k(value),
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("generic effect replay through a captured callable must compile");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn manifest_bound_generic_int_bit_and_specializes_u8() {
     let mut input = request(
         "fn __g1_int_bit_and<T>(left: T, right: T) -> T { () } \
