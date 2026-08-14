@@ -1144,6 +1144,14 @@ fn service_executes_explicit_generic_callable_applications() {
 }
 
 #[test]
+fn service_materializes_generic_function_values_through_concrete_callables() {
+    let source = "pub fn identity<T>(value: T) -> T { value } pub fn choose<T>() -> (T) -> T { identity } pub fn main() -> i64 { choose<i64>()(42) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_instantiates_non_type_direct_callable_arguments_at_the_contract_boundary() {
     for source in [
         "pub fn region<'a>() -> i64 { 0 } pub fn main() -> i64 { region<'static>() }",
