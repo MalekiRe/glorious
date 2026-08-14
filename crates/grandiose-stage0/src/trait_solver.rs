@@ -149,6 +149,31 @@ pub enum TraitEffectRowProjectionAnswer {
     ConflictingRowTails,
 }
 
+/// The structural-constant counterpart of associated type normalization.
+/// Keeping this separate from [`TraitProjectionAnswer`] prevents a selected
+/// `u32` or quantity from being treated as a value type by Core or the VM.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraitConstProjectionAnswer {
+    Normalized {
+        evidence: DefKey,
+        value: GenericArgument,
+    },
+    Refuted {
+        evidence: DefKey,
+    },
+    NoSolution,
+    Ambiguous,
+    Overflow,
+    MissingAssociatedConst {
+        evidence: DefKey,
+    },
+    AssociatedConstKind {
+        evidence: DefKey,
+        expected: crate::ConstKind,
+        found: crate::ConstKind,
+    },
+}
+
 /// Selected implementation method evidence with all implementation and method
 /// generic slots substituted for one concrete call site.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -627,6 +652,71 @@ impl TraitSolver {
                 invocation,
             }),
             value => Ok(value),
+        }
+    }
+
+    /// Normalize a structural associated constant through selected trait
+    /// evidence.  The full generic trait relation is passed unchanged to the
+    /// normal solver table, so `Trait<7>::N` and `Trait<8>::N` cannot alias.
+    pub fn normalize_associated_const(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        expected: crate::ConstKind,
+    ) -> TraitConstProjectionAnswer {
+        match self.solve(goal.clone()) {
+            TraitAnswer::Proven { evidence } => {
+                let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
+                    return TraitConstProjectionAnswer::NoSolution;
+                };
+                let Some(substitution) = match_rule(&rule.implementation, &goal) else {
+                    return TraitConstProjectionAnswer::NoSolution;
+                };
+                let value = rule
+                    .implementation
+                    .associated_consts
+                    .get(name)
+                    .map(|item| {
+                        (
+                            item.kind,
+                            substitute_generic_argument(&item.value, &substitution),
+                        )
+                    })
+                    .or_else(|| {
+                        self.traits
+                            .get(&goal.relation.definition)
+                            .and_then(|trait_header| {
+                                trait_header.associated_consts.get(name).and_then(|item| {
+                                    item.default.as_ref().map(|value| {
+                                        let substitution = default_associated_item_substitution(
+                                            &goal,
+                                            trait_header.generics,
+                                            &[],
+                                        );
+                                        (
+                                            item.kind,
+                                            substitute_generic_argument(value, &substitution),
+                                        )
+                                    })
+                                })
+                            })
+                    });
+                match value {
+                    Some((found, value)) if found == expected => {
+                        TraitConstProjectionAnswer::Normalized { evidence, value }
+                    }
+                    Some((found, _)) => TraitConstProjectionAnswer::AssociatedConstKind {
+                        evidence,
+                        expected,
+                        found,
+                    },
+                    None => TraitConstProjectionAnswer::MissingAssociatedConst { evidence },
+                }
+            }
+            TraitAnswer::Refuted { evidence } => TraitConstProjectionAnswer::Refuted { evidence },
+            TraitAnswer::NoSolution => TraitConstProjectionAnswer::NoSolution,
+            TraitAnswer::Ambiguous => TraitConstProjectionAnswer::Ambiguous,
+            TraitAnswer::Overflow => TraitConstProjectionAnswer::Overflow,
         }
     }
 

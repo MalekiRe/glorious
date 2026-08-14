@@ -214,6 +214,39 @@ pub struct AssociatedTypeDefinitionHeader {
     pub span: Span,
 }
 
+/// A structural constant selected from a trait implementation. Associated
+/// constants deliberately carry their closed value kind in the interface:
+/// unlike ordinary constants, they participate in trait evidence and generic
+/// identity without becoming value-level declarations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssociatedConstHeader {
+    pub name: String,
+    pub kind: ConstKind,
+    /// A declaration default is selected only when the chosen implementation
+    /// leaves this item absent. Keeping it source-shaped preserves generic
+    /// occurrences until the trait header's binders have been elaborated.
+    pub default: Option<HeaderStructuralConst>,
+    pub span: Span,
+}
+
+/// The intentionally closed source language for associated structural
+/// constants. A path is accepted only for a declared const binder; interface
+/// elaboration rejects ordinary paths rather than accidentally treating them
+/// as runtime constant references.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HeaderStructuralConst {
+    U32(u32),
+    Quantity(Quantity),
+    Generic(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssociatedConstDefinitionHeader {
+    pub name: String,
+    pub value: HeaderStructuralConst,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImplementationMethodHeader {
     pub name: String,
@@ -231,6 +264,7 @@ pub struct TraitHeader {
     pub generics: GenericParameters,
     pub supertraits: Vec<TraitRefHeader>,
     pub associated_types: Vec<AssociatedTypeHeader>,
+    pub associated_consts: Vec<AssociatedConstHeader>,
     pub methods: Vec<TraitMethodHeader>,
 }
 
@@ -249,6 +283,7 @@ pub struct ImplementationHeader {
     pub self_ty: HeaderType,
     pub where_bounds: Vec<WhereBoundHeader>,
     pub associated_types: Vec<AssociatedTypeDefinitionHeader>,
+    pub associated_consts: Vec<AssociatedConstDefinitionHeader>,
     pub methods: Vec<ImplementationMethodHeader>,
 }
 
@@ -521,6 +556,7 @@ impl Parser<'_> {
         supertraits: Vec<TraitRefHeader>,
     ) -> TraitHeader {
         let mut associated_types = vec![];
+        let mut associated_consts = vec![];
         let mut methods = vec![];
         let mut names = BTreeSet::new();
         if !self.punctuation('{') {
@@ -529,6 +565,7 @@ impl Parser<'_> {
                 generics,
                 supertraits,
                 associated_types,
+                associated_consts,
                 methods,
             };
         }
@@ -585,6 +622,52 @@ impl Parser<'_> {
                 });
                 continue;
             }
+            if self.word() == Some("const") {
+                self.position += 1;
+                let name = self.identifier().unwrap_or_else(|| {
+                    self.error("G3255", "expected associated constant name");
+                    "<error>".into()
+                });
+                if !self.punctuation(':') {
+                    self.error("G3256", "expected `:` after associated constant name");
+                }
+                let kind = match self.word() {
+                    Some("u32") => {
+                        self.position += 1;
+                        ConstKind::U32
+                    }
+                    Some("Quantity") => {
+                        self.position += 1;
+                        ConstKind::Quantity
+                    }
+                    _ => {
+                        self.error(
+                            "G3257",
+                            "associated constants must have structural kind `u32` or `Quantity`",
+                        );
+                        ConstKind::U32
+                    }
+                };
+                let default = self.operator("=").then(|| self.structural_const_value());
+                if !self.punctuation(';') {
+                    self.error(
+                        "G3258",
+                        "expected `;` after associated constant declaration",
+                    );
+                    self.skip_to_item_end();
+                }
+                if !names.insert(name.clone()) {
+                    self.error("G3237", "duplicate trait item name");
+                }
+                let end = self.previous().unwrap_or(start);
+                associated_consts.push(AssociatedConstHeader {
+                    name,
+                    kind,
+                    default,
+                    span: self.span(start, end),
+                });
+                continue;
+            }
             if self.word() == Some("fn") {
                 self.position += 1;
             }
@@ -624,6 +707,7 @@ impl Parser<'_> {
             generics,
             supertraits,
             associated_types,
+            associated_consts,
             methods,
         }
     }
@@ -654,12 +738,44 @@ impl Parser<'_> {
             recovered: false,
         };
         let mut associated_types = vec![];
+        let mut associated_consts = vec![];
         let mut methods = vec![];
         if body_parser.punctuation('{') {
             let mut names = BTreeSet::new();
             while body_parser.current().is_some() && !body_parser.at_punctuation('}') {
-                if body_parser.word() != Some("type") && body_parser.word() != Some("fn") {
+                if body_parser.word() != Some("type")
+                    && body_parser.word() != Some("const")
+                    && body_parser.word() != Some("fn")
+                {
                     body_parser.skip_item_body();
+                    continue;
+                }
+                if body_parser.word() == Some("const") {
+                    let start = body_parser.current().unwrap();
+                    body_parser.position += 1;
+                    let name = body_parser.identifier().unwrap_or_else(|| {
+                        body_parser.error("G3259", "expected associated constant definition name");
+                        "<error>".into()
+                    });
+                    if !body_parser.operator("=") {
+                        body_parser
+                            .error("G3260", "expected `=` in associated constant definition");
+                    }
+                    let value = body_parser.structural_const_value();
+                    if !body_parser.punctuation(';') {
+                        body_parser
+                            .error("G3261", "expected `;` after associated constant definition");
+                        body_parser.skip_to_item_end();
+                    }
+                    if !names.insert(name.clone()) {
+                        body_parser.error("G3245", "duplicate implementation item name");
+                    }
+                    let end = body_parser.previous().unwrap_or(start);
+                    associated_consts.push(AssociatedConstDefinitionHeader {
+                        name,
+                        value,
+                        span: body_parser.span(start, end),
+                    });
                     continue;
                 }
                 if body_parser.word() == Some("type") {
@@ -776,6 +892,7 @@ impl Parser<'_> {
             self_ty,
             where_bounds,
             associated_types,
+            associated_consts,
             methods,
         }
     }
@@ -1570,6 +1687,35 @@ impl Parser<'_> {
                     "structural quantity lower bound exceeds upper bound",
                 );
                 Quantity::ONCE
+            }
+        }
+    }
+
+    fn structural_const_value(&mut self) -> HeaderStructuralConst {
+        if self.at_punctuation('[') {
+            return HeaderStructuralConst::Quantity(self.structural_quantity_argument());
+        }
+        if let Some(index) = self.current()
+            && self.lexed.tokens[index].kind == TokenKind::Integer
+        {
+            return match u32::try_from(self.structural_integer_expression(
+                "G3262",
+                "associated u32 constant is out of range",
+                "G3263",
+                "associated constant arithmetic overflowed or divided by zero",
+            )) {
+                Ok(value) => HeaderStructuralConst::U32(value),
+                Err(_) => {
+                    self.error("G3262", "associated u32 constant is out of range");
+                    HeaderStructuralConst::U32(0)
+                }
+            };
+        }
+        match self.identifier() {
+            Some(name) => HeaderStructuralConst::Generic(name),
+            None => {
+                self.error("G3264", "expected a structural associated constant value");
+                HeaderStructuralConst::U32(0)
             }
         }
     }

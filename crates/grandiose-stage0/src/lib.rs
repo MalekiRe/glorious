@@ -114,7 +114,8 @@ pub use runtime_manifest::{
 pub use scanner::{DeclarationKind, DeclarationScan, DeclarationShell, ScanDiagnostic, TokenRange};
 pub use service::{CompilationOutcome, CompileDiagnostic, ServiceError, StageZeroCompiler};
 pub use signature::{
-    CallableSignature, ElaboratedAssociatedEffectRowDefinition, ElaboratedAssociatedType,
+    CallableSignature, ElaboratedAssociatedConst, ElaboratedAssociatedConstDefinition,
+    ElaboratedAssociatedEffectRowDefinition, ElaboratedAssociatedType,
     ElaboratedAssociatedTypeDefinition, ElaboratedEffect, ElaboratedEffectOperation,
     ElaboratedEnumVariant, ElaboratedEnumVariantPayload, ElaboratedHeader,
     ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout, ElaboratedTrait,
@@ -123,9 +124,9 @@ pub use signature::{
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{
     DEFAULT_MAX_TRAIT_DEPTH, DEFAULT_MAX_TRAIT_STEPS, TraitAnswer, TraitCandidateExplanation,
-    TraitCandidateRejection, TraitEffectRowProjectionAnswer, TraitGoal, TraitGoalQuery,
-    TraitMethodAnswer, TraitProjectionAnswer, TraitSelectionExplanation, TraitSolver,
-    TraitSolverLimits, TraitWhereBoundExplanation,
+    TraitCandidateRejection, TraitConstProjectionAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
+    TraitGoalQuery, TraitMethodAnswer, TraitProjectionAnswer, TraitSelectionExplanation,
+    TraitSolver, TraitSolverLimits, TraitWhereBoundExplanation,
 };
 pub use types::{
     ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar,

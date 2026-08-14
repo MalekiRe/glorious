@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::{
     header::{
         CallableHeader, EffectHeader, EffectRowHeader, EnumVariantPayloadHeader, GenericParameters,
-        HeaderGenericArgument, HeaderType, ImplementationHeader, NominalLayoutHeader, ParsedHeader,
-        TraitHeader, TraitRefHeader,
+        HeaderGenericArgument, HeaderStructuralConst, HeaderType, ImplementationHeader,
+        NominalLayoutHeader, ParsedHeader, TraitHeader, TraitRefHeader,
     },
     identity::{DefKey, ModuleKey},
     interface::{Definition, DefinitionNamespace, PackageInterface},
@@ -57,6 +57,9 @@ pub struct ElaboratedTrait {
     /// frozen interface retains this metadata so projection syntax can keep
     /// trait and associated-item arguments distinct through normalization.
     pub associated_types: BTreeMap<String, ElaboratedAssociatedType>,
+    /// Structural constants selected with the same evidence as associated
+    /// types, but never crossing the value-type interface boundary.
+    pub associated_consts: BTreeMap<String, ElaboratedAssociatedConst>,
     pub methods: BTreeMap<String, CallableSignature>,
 }
 
@@ -77,6 +80,12 @@ pub struct ElaboratedAssociatedType {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElaboratedAssociatedConst {
+    pub kind: ConstKind,
+    pub default: Option<GenericArgument>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedImplementation {
     pub generics: u32,
     /// Kinds of implementation binders in source-slot order.  This is part
@@ -90,6 +99,7 @@ pub struct ElaboratedImplementation {
     pub where_bounds: Vec<(Type, ElaboratedTraitReference)>,
     pub associated_types: BTreeMap<String, ElaboratedAssociatedTypeDefinition>,
     pub associated_effect_rows: BTreeMap<String, ElaboratedAssociatedEffectRowDefinition>,
+    pub associated_consts: BTreeMap<String, ElaboratedAssociatedConstDefinition>,
     pub methods: BTreeMap<String, CallableSignature>,
 }
 
@@ -116,6 +126,12 @@ pub struct ElaboratedAssociatedEffectRowDefinition {
     /// const/region argument elaborator from treating every slot as a type.
     pub generic_kinds: Vec<GenericKind>,
     pub value: EffectRow,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElaboratedAssociatedConstDefinition {
+    pub kind: ConstKind,
+    pub value: GenericArgument,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -256,6 +272,13 @@ fn generic_binder_kinds(kinds: &[GenericKind]) -> String {
     format!("<{}>", values.join(", "))
 }
 
+fn fallback_structural_const(kind: ConstKind) -> GenericArgument {
+    match kind {
+        ConstKind::U32 => GenericArgument::ConstU32(0),
+        ConstKind::Quantity => GenericArgument::ConstQuantity(Quantity::ONCE),
+    }
+}
+
 impl ElaboratedInterface {
     pub fn elaborate(interface: &PackageInterface) -> Self {
         let index = DefinitionIndex::from_interface(interface);
@@ -328,6 +351,12 @@ impl ElaboratedInterface {
                             .associated_effect_rows
                             .keys()
                             .map(|name| format!("associated effect row `{name}`")),
+                    )
+                    .chain(
+                        implementation
+                            .associated_consts
+                            .keys()
+                            .map(|name| format!("associated constant `{name}`")),
                     )
                     .chain(
                         implementation
@@ -418,6 +447,30 @@ impl ElaboratedInterface {
                     diagnostics.push(SignatureDiagnostic {
                         code: "G4116",
                         message: format!("implementation omits associated type `{name}`"),
+                    });
+                }
+            }
+            for (name, item) in &implementation.associated_consts {
+                match trait_header.associated_consts.get(name) {
+                    Some(expected) if expected.kind == item.kind => {}
+                    Some(expected) => diagnostics.push(SignatureDiagnostic {
+                        code: "G4160",
+                        message: format!(
+                            "associated constant `{name}` has kind {:?} but the trait requires {:?}",
+                            item.kind, expected.kind
+                        ),
+                    }),
+                    None => diagnostics.push(SignatureDiagnostic {
+                        code: "G4161",
+                        message: format!("implementation defines unknown associated constant `{name}`"),
+                    }),
+                }
+            }
+            for (name, item) in &trait_header.associated_consts {
+                if !implementation.associated_consts.contains_key(name) && item.default.is_none() {
+                    diagnostics.push(SignatureDiagnostic {
+                        code: "G4162",
+                        message: format!("implementation omits associated constant `{name}`"),
                     });
                 }
             }
@@ -1858,6 +1911,22 @@ impl Elaborator<'_> {
                     )
                 })
                 .collect(),
+            associated_consts: header
+                .associated_consts
+                .iter()
+                .map(|item| {
+                    (
+                        item.name.clone(),
+                        ElaboratedAssociatedConst {
+                            kind: item.kind,
+                            default: item
+                                .default
+                                .as_ref()
+                                .map(|value| self.structural_const(value, item.kind)),
+                        },
+                    )
+                })
+                .collect(),
             methods,
         };
         self.self_type = outer_self_type;
@@ -1938,6 +2007,34 @@ impl Elaborator<'_> {
                 ))
             })
             .collect();
+        let associated_consts = header
+            .associated_consts
+            .iter()
+            .map(|item| {
+                let value = match &item.value {
+                    HeaderStructuralConst::U32(value) => GenericArgument::ConstU32(*value),
+                    HeaderStructuralConst::Quantity(value) => {
+                        GenericArgument::ConstQuantity(*value)
+                    }
+                    HeaderStructuralConst::Generic(name) => self
+                        .const_generics
+                        .get(name)
+                        .copied()
+                        .map(|(index, kind)| GenericArgument::ConstGeneric { index, kind })
+                        .unwrap_or_else(|| {
+                            self.error(
+                                "G4134",
+                                format!(
+                                    "associated constant `{}` refers to undeclared const binder `{name}`",
+                                    item.name
+                                ),
+                            );
+                            GenericArgument::ConstU32(0)
+                        }),
+                };
+                (item.name.clone(), value)
+            })
+            .collect::<BTreeMap<_, _>>();
         let methods = header
             .methods
             .iter()
@@ -1993,6 +2090,18 @@ impl Elaborator<'_> {
             where_bounds,
             associated_types,
             associated_effect_rows,
+            associated_consts: associated_consts
+                .into_iter()
+                .map(|(name, value)| {
+                    let kind = match &value {
+                        GenericArgument::ConstU32(_) => ConstKind::U32,
+                        GenericArgument::ConstQuantity(_) => ConstKind::Quantity,
+                        GenericArgument::ConstGeneric { kind, .. } => *kind,
+                        _ => ConstKind::U32,
+                    };
+                    (name, ElaboratedAssociatedConstDefinition { kind, value })
+                })
+                .collect(),
             methods,
         };
         self.self_type = outer_self_type;
@@ -2053,6 +2162,47 @@ impl Elaborator<'_> {
     }
     fn trait_ref(&mut self, value: &TraitRefHeader) -> ElaboratedTraitReference {
         self.trait_ref_parts(&value.path, &value.arguments)
+    }
+
+    fn structural_const(
+        &mut self,
+        value: &HeaderStructuralConst,
+        expected: ConstKind,
+    ) -> GenericArgument {
+        match value {
+            HeaderStructuralConst::U32(value) if expected == ConstKind::U32 => {
+                GenericArgument::ConstU32(*value)
+            }
+            HeaderStructuralConst::Quantity(value) if expected == ConstKind::Quantity => {
+                GenericArgument::ConstQuantity(*value)
+            }
+            HeaderStructuralConst::Generic(name) => match self.const_generics.get(name).copied() {
+                Some((index, kind)) if kind == expected => {
+                    GenericArgument::ConstGeneric { index, kind }
+                }
+                Some((_, found)) => {
+                    self.error(
+                        "G4134",
+                        format!("structural const binder `{name}` has kind {found:?}, expected {expected:?}"),
+                    );
+                    fallback_structural_const(expected)
+                }
+                None => {
+                    self.error(
+                        "G4134",
+                        format!("structural constant refers to undeclared const binder `{name}`"),
+                    );
+                    fallback_structural_const(expected)
+                }
+            },
+            value => {
+                self.error(
+                    "G4134",
+                    format!("structural associated constant {value:?} has the wrong kind"),
+                );
+                fallback_structural_const(expected)
+            }
+        }
     }
     fn trait_ref_parts(
         &mut self,

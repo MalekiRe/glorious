@@ -11,8 +11,8 @@ use crate::{
     signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface},
     source::Span,
     trait_solver::{
-        TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer,
-        TraitProjectionAnswer, TraitSolver,
+        TraitAnswer, TraitConstProjectionAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
+        TraitMethodAnswer, TraitProjectionAnswer, TraitSolver,
     },
     types::{
         EffectInstance, EffectRow, GenericArgument, InferContext, Lifetime, Mutability, ScalarType,
@@ -2735,6 +2735,27 @@ impl Elaborator<'_> {
         for (argument, kind) in arguments.iter().zip(kinds) {
             let value = match (argument, kind) {
                 (
+                    crate::header::HeaderGenericArgument::Type(
+                        crate::header::HeaderType::Projection {
+                            subject,
+                            trait_path,
+                            trait_arguments,
+                            name,
+                            item_arguments,
+                        },
+                    ),
+                    crate::GenericKind::Const(expected),
+                ) => self.associated_const_argument(
+                    subject,
+                    trait_path,
+                    trait_arguments,
+                    name,
+                    item_arguments,
+                    *expected,
+                    span,
+                    code,
+                ),
+                (
                     crate::header::HeaderGenericArgument::Type(crate::header::HeaderType::Path(
                         path,
                     )),
@@ -2786,6 +2807,142 @@ impl Elaborator<'_> {
             elaborated.push(value);
         }
         Some(elaborated)
+    }
+
+    /// Elaborate `<S as Trait<Args>>::CONST` only in a structural const slot.
+    /// This is intentionally a Core boundary: headers preserve the source
+    /// spelling, while only an executable use is allowed to select concrete
+    /// implementation evidence and insert the normalized structural term.
+    fn associated_const_argument(
+        &mut self,
+        subject: &crate::header::HeaderType,
+        trait_path: &[String],
+        source_arguments: &[crate::header::HeaderGenericArgument],
+        name: &str,
+        item_arguments: &[crate::header::HeaderGenericArgument],
+        expected: crate::ConstKind,
+        span: Span,
+        code: &'static str,
+    ) -> GenericArgument {
+        if !item_arguments.is_empty() {
+            self.error(
+                span,
+                code,
+                "associated constants do not accept item arguments",
+            );
+            self.recovered = true;
+            return structural_const_error(expected);
+        }
+        let ResolutionState::Resolved(trait_definition) =
+            self.index
+                .resolve_path(DefinitionNamespace::Trait, self.module, trait_path)
+        else {
+            self.error(
+                span,
+                code,
+                "associated constant projection has an unresolved trait",
+            );
+            self.recovered = true;
+            return structural_const_error(expected);
+        };
+        let Some(ElaboratedHeader::Trait(trait_header)) =
+            self.signatures.definitions.get(&trait_definition)
+        else {
+            self.error(
+                span,
+                code,
+                "associated constant projection target is not a trait",
+            );
+            self.recovered = true;
+            return structural_const_error(expected);
+        };
+        let Some(item) = trait_header.associated_consts.get(name) else {
+            self.error(
+                span,
+                code,
+                "trait does not declare this associated constant",
+            );
+            self.recovered = true;
+            return structural_const_error(expected);
+        };
+        if item.kind != expected {
+            self.error(
+                span,
+                code,
+                "associated constant has the wrong structural kind",
+            );
+            self.recovered = true;
+            return structural_const_error(expected);
+        }
+        let Some(arguments) = self.body_generic_arguments(
+            source_arguments,
+            &trait_header.generic_kinds,
+            span,
+            code,
+            "associated constant trait arguments do not match its declaration",
+        ) else {
+            return structural_const_error(expected);
+        };
+        match TraitSolver::new(self.signatures).normalize_associated_const(
+            TraitGoal {
+                relation: crate::ElaboratedTraitReference {
+                    definition: trait_definition,
+                    arguments,
+                },
+                subject: self.header_type(subject),
+            },
+            name,
+            expected,
+        ) {
+            TraitConstProjectionAnswer::Normalized { value, .. }
+                if generic_argument_matches_kind(&value, crate::GenericKind::Const(expected)) =>
+            {
+                value
+            }
+            TraitConstProjectionAnswer::Refuted { .. } => {
+                self.error(
+                    span,
+                    code,
+                    "associated constant projection is refuted by a negative implementation",
+                );
+                self.recovered = true;
+                structural_const_error(expected)
+            }
+            TraitConstProjectionAnswer::NoSolution => {
+                self.error(
+                    span,
+                    code,
+                    "no implementation can normalize this associated constant",
+                );
+                self.recovered = true;
+                structural_const_error(expected)
+            }
+            TraitConstProjectionAnswer::Ambiguous => {
+                self.error(span, code, "associated constant projection is ambiguous");
+                self.recovered = true;
+                structural_const_error(expected)
+            }
+            TraitConstProjectionAnswer::Overflow => {
+                self.error(
+                    span,
+                    code,
+                    "associated constant projection exceeded the trait solver limit",
+                );
+                self.recovered = true;
+                structural_const_error(expected)
+            }
+            TraitConstProjectionAnswer::MissingAssociatedConst { .. }
+            | TraitConstProjectionAnswer::AssociatedConstKind { .. }
+            | TraitConstProjectionAnswer::Normalized { .. } => {
+                self.error(
+                    span,
+                    code,
+                    "associated constant projection did not produce the required structural value",
+                );
+                self.recovered = true;
+                structural_const_error(expected)
+            }
+        }
     }
 
     /// Existing callable and effect-operation signature substitution is
@@ -7169,6 +7326,15 @@ fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::Generi
                 crate::GenericKind::Const(crate::ConstKind::Quantity)
             )
     )
+}
+
+fn structural_const_error(kind: crate::ConstKind) -> GenericArgument {
+    match kind {
+        crate::ConstKind::U32 => GenericArgument::ConstU32(0),
+        crate::ConstKind::Quantity => {
+            GenericArgument::ConstQuantity(crate::quantity::Quantity::ONCE)
+        }
+    }
 }
 
 fn record_capture(
