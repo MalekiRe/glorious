@@ -78,7 +78,7 @@ rm -rf -- "$retained_dir"
 # The checked-in corpus is deliberately larger than the original four module
 # fixtures and must retain both successful and failing single-source cases.
 default_list=$("$repo_root/tooling/self-host-native-tests.sh" list)
-[[ $(wc -l <<< "$default_list") -eq 20 ]] || { echo "unexpected native corpus size" >&2; exit 1; }
+[[ $(wc -l <<< "$default_list") -eq 25 ]] || { echo "unexpected native corpus size" >&2; exit 1; }
 [[ $default_list == *$'arithmetic-calls\taccept\t'* ]] || { echo "missing arithmetic accept" >&2; exit 1; }
 [[ $default_list == *$'invalid-return-type\treject\t'* ]] || { echo "missing type rejection" >&2; exit 1; }
 [[ $default_list == *$'ordered-bundle\taccept\t'*$'ordered-bundle/library.glorious'* ]] || { echo "missing ordered source bundle" >&2; exit 1; }

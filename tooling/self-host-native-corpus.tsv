@@ -8,6 +8,7 @@
 contextual-pub-headers	accept	crates/grandiose/tests/fixtures/contextual_pub_headers.glorious
 arithmetic-calls	accept	tooling/self-host-native-fixtures/arithmetic-calls.glorious
 associated-call	accept	tooling/self-host-native-fixtures/associated-call.glorious
+bool-marker-fallback	accept	tooling/self-host-native-fixtures/bool-marker-fallback.glorious
 byte-char-literals	accept	tooling/self-host-native-fixtures/byte-char-literals.glorious
 float-literals-in-conditional	accept	tooling/self-host-native-fixtures/float-literals-in-conditional.glorious
 indirect-call-pure	accept	tooling/self-host-native-fixtures/indirect-call-pure.glorious

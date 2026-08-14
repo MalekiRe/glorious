@@ -1,0 +1,5 @@
+// Focused sources intentionally omit the distributed Bool alias.  They retain
+// the elaborator's private two-variant marker instead of requiring a prelude.
+truth() -> Bool { true }
+falsity() -> Bool { false }
+main() -> { truth(); falsity(); () }
