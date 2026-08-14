@@ -7216,18 +7216,6 @@ impl Lowerer<'_> {
         else {
             return None;
         };
-        // Stage 0 still links one generic body per declaration. Until the
-        // executable-instance linker carries substitutions into a callee's
-        // `Perform` identities, dispatching a generic body through a concrete
-        // caller frame would be unsound. Leave that case to the existing
-        // proven specialization rather than comparing `Ask<T>` with
-        // `Ask<i64>` at runtime.
-        if matches!(
-            self.body.expression(callee).kind,
-            CoreKind::Function { ref arguments, .. } if !arguments.is_empty()
-        ) {
-            return None;
-        }
         let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
             return None;
         };

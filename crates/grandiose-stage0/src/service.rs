@@ -1541,6 +1541,20 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
     function.result = specialize_type(&function.result, arguments);
     for block in &mut function.blocks {
         for instruction in &mut block.instructions {
+            match instruction {
+                crate::MirInstruction::Perform {
+                    effect_arguments, ..
+                }
+                | crate::MirInstruction::InstallHandler {
+                    effect_arguments, ..
+                } => {
+                    *effect_arguments = effect_arguments
+                        .iter()
+                        .map(|argument| specialize_generic_argument(argument, arguments))
+                        .collect();
+                }
+                _ => {}
+            }
             let (generic_arguments, trait_instance) = match instruction {
                 crate::MirInstruction::Call {
                     generic_arguments,

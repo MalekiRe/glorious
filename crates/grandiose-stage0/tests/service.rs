@@ -3,8 +3,8 @@ use grandiose_stage0::{
     BootstrapManifestError, BootstrapStage, Budget, CancellationToken, CompilationMode,
     CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus,
     DiagnosticClass, Digest, InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport,
-    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
-    decode_and_verify_program, decode_program,
+    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits,
+    VmGenericArgument, VmInstruction, VmType, decode_and_verify_program, decode_program,
 };
 use std::collections::BTreeMap;
 
@@ -2811,10 +2811,77 @@ fn service_handles_an_indirect_generic_helper_performance_through_a_vm_frame() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Perform { .. })),
-        "generic effect bodies remain fail-closed until executable instance linking preserves their substitutions"
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+        "generic helper invocation must remain an ordinary VM call"
+    );
+    assert!(
+        program
+            .functions
+            .iter()
+            .filter(|(definition, _)| **definition != program.entry)
+            .any(
+                |(_, function)| function.instructions.iter().any(|instruction| matches!(
+                    instruction,
+                    VmInstruction::Perform { effect_arguments, .. }
+                        if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+                ))
+            ),
+        "the materialized helper performance must use Ask<i64>, never Ask<T>"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_materializes_generic_handler_frame_effect_identities() {
+    let source = "effect Ask<T> { [1,1] ask(value: T) -> T; } pub fn leaf<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) } pub fn helper<T>(value: T) -> T / Ask<T> { handle leaf<T>(value) { Ask<T>::ask(value) with k => k(value) } } pub fn main() -> i64 { handle helper(42) { Ask<i64>::ask(value) with k => k(value) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let concrete_i64 = [VmGenericArgument::Type(VmType::I64)];
+    assert!(
+        program
+            .functions
+            .values()
+            .any(
+                |function| function.instructions.iter().any(|instruction| matches!(
+                    instruction,
+                    VmInstruction::InstallHandler { effect_arguments, .. }
+                        if effect_arguments.as_slice() == concrete_i64
+                ))
+            ),
+        "materialized generic handler frames must use their concrete effect identity"
+    );
+    assert!(
+        program
+            .functions
+            .values()
+            .any(
+                |function| function.instructions.iter().any(|instruction| matches!(
+                    instruction,
+                    VmInstruction::Perform { effect_arguments, .. }
+                        if effect_arguments.as_slice() == concrete_i64
+                ))
+            ),
+        "materialized generic performances must use the same concrete effect identity"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_a_mismatched_generic_effect_instance_at_a_callee_boundary() {
+    let source = "effect State<T> { [1,1] get() -> i64; } pub fn helper<T>() -> i64 / State<T> { State<T>::get() } pub fn main() -> i64 { handle helper<Text>() { State<i64>::get() with k => k(42) } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("a State<i64> handler unexpectedly accepted a State<Text> callee")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4155"),
+        "mismatched generic effect instance must remain in the outward row: {diagnostics:#?}"
+    );
 }
 
 #[test]
