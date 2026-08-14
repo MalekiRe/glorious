@@ -7198,6 +7198,26 @@ fn align_lifetime_types(
                 mode,
                 depth,
             )?;
+            let referent = align_lifetime_types(
+                expected_referent,
+                actual_referent,
+                substitution,
+                mode,
+                depth,
+            )?;
+            // `&mut` is covariant in its loan region but invariant in the
+            // stored referent: accepting a shorter nested reference here
+            // could permit a later write through the unique outer loan to
+            // violate the promised longer inner lifetime.
+            if *expected_mutability == Mutability::Unique {
+                align_lifetime_types(
+                    actual_referent,
+                    expected_referent,
+                    substitution,
+                    mode,
+                    depth,
+                )?;
+            }
             Ok(Type::Reference {
                 mutability: *expected_mutability,
                 // The actual lifetime is intentionally retained here. A
@@ -7205,13 +7225,7 @@ fn align_lifetime_types(
                 // ordinary type unification must not turn that safe coercion
                 // back into an equality failure.
                 lifetime: *actual_lifetime,
-                referent: Box::new(align_lifetime_types(
-                    expected_referent,
-                    actual_referent,
-                    substitution,
-                    mode,
-                    depth,
-                )?),
+                referent: Box::new(referent),
             })
         }
         (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
