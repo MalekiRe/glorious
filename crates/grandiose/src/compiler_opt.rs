@@ -11785,18 +11785,6 @@ fn run_transactional_whole_program_pass(
     inline_policy: &mut InlinePolicyState,
     plan: OptimizationPlan,
 ) -> PassReport {
-    // Whole-program scratch passes commit a full program swap
-    // (``*program = scratch``) and cannot report per-body change sets. Diff
-    // the committed bodies against this pre-pass clone so only functions
-    // whose MIR actually changed are invalidated; untouched bodies keep their
-    // (still-valid) ownership facts and skip the next refresh re-solve
-    // entirely. Only whole-program-scope passes clone (the others invalidate
-    // per body as they commit), so gate the clone on the pass scope.
-    let before = if pass_contract(pass).scope == InvalidationScope::WholeProgram {
-        Some(program.clone())
-    } else {
-        None
-    };
     let (outcome, work_units) = match pass {
         PassId::SpecializeDirectCalls => {
             specialize_forwarding_direct_calls(program, *global_remaining)
@@ -13468,7 +13456,7 @@ pub(crate) fn derive_program_serialization_cleanup_lists_except(
                 refine_enum_switches: false,
             };
             Ok(Some(
-                regions::solve(&context)
+                regions::solve(&context, "serialization_cleanup_lists")
                     .map_err(|error| flow_to_validation(function, error))?
                     .cleanup_lists,
             ))
