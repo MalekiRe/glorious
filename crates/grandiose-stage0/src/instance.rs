@@ -616,9 +616,21 @@ impl InstanceGraph {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallSummary {
     pub effects: EffectRow,
+    /// The quantity with which this callable may be invoked by its owner.
     pub invocation: Quantity,
+    /// Per-parameter quantitative ownership facts.  Slot `i` describes uses
+    /// of parameter `i` in the summarized body; an empty vector means the
+    /// producer has no parameter evidence, rather than that every parameter
+    /// is unused.
+    pub argument_uses: Vec<Quantity>,
     pub may_abort: bool,
     pub may_control: bool,
+    /// At least one path can discard a suspended continuation.  This is kept
+    /// separate from `may_abort`: cancellation is a checked ownership action,
+    /// while an abort need not own a handler continuation.
+    pub may_cancel: bool,
+    /// At least one path resumes or forwards a suspended continuation.
+    pub may_resume: bool,
     pub may_escape: bool,
 }
 
@@ -648,6 +660,16 @@ pub enum SummaryError {
         component: Vec<InstanceKey>,
         limit: usize,
     },
+    IncompatibleArgumentArity {
+        left: usize,
+        right: usize,
+    },
+    InvalidArgumentMapping {
+        callee_slot: usize,
+        caller_slot: usize,
+        caller_arity: usize,
+    },
+    QuantityOverflow,
 }
 
 impl Default for CallSummary {
@@ -655,42 +677,124 @@ impl Default for CallSummary {
         Self {
             effects: EffectRow::empty(),
             invocation: Quantity::ZERO,
+            argument_uses: vec![],
             may_abort: false,
             may_control: false,
+            may_cancel: false,
+            may_resume: false,
             may_escape: false,
         }
     }
 }
 impl CallSummary {
-    pub fn join(&self, other: &Self) -> Result<Self, SummaryError> {
-        let tail = match (self.effects.tail, other.effects.tail) {
+    fn join_effects(left: &EffectRow, right: &EffectRow) -> Result<EffectRow, SummaryError> {
+        let tail = match (left.tail, right.tail) {
             (Some(left), Some(right)) if left != right => {
                 return Err(SummaryError::IncompatibleEffectTails { left, right });
             }
             (Some(tail), _) | (_, Some(tail)) => Some(tail),
             (None, None) => None,
         };
-        let mut effects = self.effects.clone();
-        effects
-            .effects
-            .extend(other.effects.effects.iter().cloned());
+        let mut effects = left.clone();
+        effects.effects.extend(right.effects.iter().cloned());
         effects
             .projections
-            .extend(other.effects.projections.iter().cloned());
+            .extend(right.projections.iter().cloned());
         effects.tail = tail;
         effects.canonicalize();
+        Ok(effects)
+    }
+
+    fn join_argument_uses(&self, other: &Self) -> Result<Vec<Quantity>, SummaryError> {
+        // The default bottom summary intentionally has no arity.  Treat it as
+        // an identity so SCC seeds cannot erase a body's ownership facts.
+        if self.argument_uses.is_empty() {
+            return Ok(other.argument_uses.clone());
+        }
+        if other.argument_uses.is_empty() {
+            return Ok(self.argument_uses.clone());
+        }
+        if self.argument_uses.len() != other.argument_uses.len() {
+            return Err(SummaryError::IncompatibleArgumentArity {
+                left: self.argument_uses.len(),
+                right: other.argument_uses.len(),
+            });
+        }
+        Ok(self
+            .argument_uses
+            .iter()
+            .zip(&other.argument_uses)
+            .map(|(left, right)| left.branch_hull(*right))
+            .collect())
+    }
+
+    /// Join alternative paths while preserving every monotone semantic fact.
+    /// This is the SCC lattice operation used by `solve_call_summaries`.
+    pub fn join(&self, other: &Self) -> Result<Self, SummaryError> {
         Ok(Self {
-            effects,
-            invocation: Quantity {
-                lower: self.invocation.lower.min(other.invocation.lower),
-                upper: match (self.invocation.upper, other.invocation.upper) {
-                    (Some(left), Some(right)) => Some(left.max(right)),
-                    _ => None,
-                },
-            },
+            effects: Self::join_effects(&self.effects, &other.effects)?,
+            invocation: self.invocation.branch_hull(other.invocation),
+            argument_uses: self.join_argument_uses(other)?,
             may_abort: self.may_abort || other.may_abort,
             may_control: self.may_control || other.may_control,
+            may_cancel: self.may_cancel || other.may_cancel,
+            may_resume: self.may_resume || other.may_resume,
             may_escape: self.may_escape || other.may_escape,
+        })
+    }
+
+    /// Compose a direct callee summary into this body using the frozen mapping
+    /// from callee parameter slots to this body's parameter slots.  This is
+    /// deliberately not an unqualified vector zip: a generic call can reorder
+    /// arguments, duplicate an argument, or call with a locally-created value.
+    /// Bad or stale metadata is rejected before it can be published as an
+    /// interprocedural ownership fact.
+    pub fn compose_callee(
+        &self,
+        callee: &Self,
+        callee_to_caller: &[Option<usize>],
+    ) -> Result<Self, SummaryError> {
+        if callee_to_caller.len() != callee.argument_uses.len() {
+            return Err(SummaryError::IncompatibleArgumentArity {
+                left: callee_to_caller.len(),
+                right: callee.argument_uses.len(),
+            });
+        }
+        let mut argument_uses = self.argument_uses.clone();
+        for (callee_slot, (use_quantity, caller_slot)) in callee
+            .argument_uses
+            .iter()
+            .zip(callee_to_caller)
+            .enumerate()
+        {
+            let Some(caller_slot) = caller_slot else {
+                // The argument originated in a local, constant, or capture;
+                // it carries no caller-parameter ownership fact.
+                continue;
+            };
+            let Some(existing) = argument_uses.get_mut(*caller_slot) else {
+                return Err(SummaryError::InvalidArgumentMapping {
+                    callee_slot,
+                    caller_slot: *caller_slot,
+                    caller_arity: argument_uses.len(),
+                });
+            };
+            *existing = existing
+                .sequence(*use_quantity)
+                .map_err(|_| SummaryError::QuantityOverflow)?;
+        }
+        Ok(Self {
+            effects: Self::join_effects(&self.effects, &callee.effects)?,
+            invocation: self
+                .invocation
+                .multiply(callee.invocation)
+                .map_err(|_| SummaryError::QuantityOverflow)?,
+            argument_uses,
+            may_abort: self.may_abort || callee.may_abort,
+            may_control: self.may_control || callee.may_control,
+            may_cancel: self.may_cancel || callee.may_cancel,
+            may_resume: self.may_resume || callee.may_resume,
+            may_escape: self.may_escape || callee.may_escape,
         })
     }
 }
@@ -1020,16 +1124,22 @@ mod tests {
                 CallSummary {
                     effects: EffectRow::closed([first_effect]),
                     invocation: Quantity::ONCE,
+                    argument_uses: vec![Quantity::ONCE],
                     may_abort: true,
                     may_control: false,
+                    may_cancel: true,
+                    may_resume: false,
                     may_escape: false,
                 }
             } else {
                 CallSummary {
                     effects: EffectRow::closed([second_effect]),
                     invocation: Quantity::ONCE,
+                    argument_uses: vec![Quantity::AFFINE],
                     may_abort: false,
                     may_control: true,
+                    may_cancel: false,
+                    may_resume: true,
                     may_escape: true,
                 }
             };
@@ -1047,8 +1157,87 @@ mod tests {
         for key in [&first, &second] {
             let summary = &summaries[key];
             assert_eq!(summary.effects.effects.len(), 2);
-            assert!(summary.may_abort && summary.may_control && summary.may_escape);
+            assert!(
+                summary.may_abort
+                    && summary.may_control
+                    && summary.may_cancel
+                    && summary.may_resume
+                    && summary.may_escape
+            );
+            assert_eq!(summary.argument_uses, vec![Quantity::AFFINE]);
         }
+    }
+
+    #[test]
+    fn summary_composition_preserves_cancellation_and_mapped_parameter_uses() {
+        let caller_effect = definition(b"caller-effect");
+        let callee_effect = definition(b"callee-effect");
+        let caller = CallSummary {
+            effects: EffectRow::closed([caller_effect]),
+            invocation: Quantity::ONCE,
+            argument_uses: vec![Quantity::ONCE, Quantity::ZERO],
+            may_abort: false,
+            may_control: false,
+            may_cancel: false,
+            may_resume: false,
+            may_escape: false,
+        };
+        let callee = CallSummary {
+            effects: EffectRow::closed([callee_effect]),
+            invocation: Quantity::AFFINE,
+            argument_uses: vec![Quantity::ONCE, Quantity::UNRESTRICTED],
+            may_abort: true,
+            may_control: true,
+            may_cancel: true,
+            may_resume: true,
+            may_escape: true,
+        };
+        // The first callee argument is the caller's second parameter.  Its
+        // second argument was created locally, so it cannot alter caller
+        // ownership evidence.
+        let composed = caller.compose_callee(&callee, &[Some(1), None]).unwrap();
+        assert!(
+            composed
+                .effects
+                .effects
+                .iter()
+                .any(|effect| effect.definition == caller_effect)
+        );
+        assert!(
+            composed
+                .effects
+                .effects
+                .iter()
+                .any(|effect| effect.definition == callee_effect)
+        );
+        assert_eq!(composed.invocation, Quantity::AFFINE);
+        assert_eq!(composed.argument_uses, vec![Quantity::ONCE, Quantity::ONCE]);
+        assert!(
+            composed.may_abort
+                && composed.may_control
+                && composed.may_cancel
+                && composed.may_resume
+                && composed.may_escape
+        );
+
+        // Repeated mappings are sequential uses of one caller-owned value,
+        // not alternate control-flow paths.  Their lower bound must add.
+        let repeated = CallSummary {
+            argument_uses: vec![Quantity::ONCE, Quantity::ONCE],
+            ..callee.clone()
+        };
+        let repeated = caller
+            .compose_callee(&repeated, &[Some(1), Some(1)])
+            .unwrap();
+        assert_eq!(
+            repeated.argument_uses,
+            vec![Quantity::ONCE, Quantity::new(2, Some(2)).unwrap()]
+        );
+
+        assert!(matches!(
+            caller.compose_callee(&callee, &[Some(2), None]),
+            Err(SummaryError::InvalidArgumentMapping { .. })
+        ));
     }
 
     #[test]

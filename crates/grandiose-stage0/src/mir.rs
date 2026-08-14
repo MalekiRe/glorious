@@ -2716,6 +2716,17 @@ impl MirProgram {
             if executable != &instance.executable || !self.functions.contains_key(executable) {
                 return Err("MIR instance product has no matching executable body".into());
             }
+            if *executable != DefKey(instance.key.fingerprint()) {
+                return Err(
+                    "MIR instance executable does not match its canonical substitution identity"
+                        .into(),
+                );
+            }
+            if self.functions[executable].definition != *executable {
+                return Err(
+                    "MIR instance body definition does not match its executable identity".into(),
+                );
+            }
         }
         for function in self.functions.values() {
             function.validate()?;

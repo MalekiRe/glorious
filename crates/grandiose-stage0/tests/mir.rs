@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use grandiose_stage0::{
     CoreId, DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument,
-    InferVar, Lifetime, MirBlock, MirBlockId, MirContinuationPolicy, MirEditor, MirFunction,
-    MirInstruction, MirLocal, MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator,
-    Quantity, ScalarType, Type, VmArtifactError, emit_vm, optimize_mir, verify_vm,
+    GenericKind, InferVar, InstanceKey, Lifetime, MirBlock, MirBlockId, MirContinuationPolicy,
+    MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl, MirPattern,
+    MirPatternField, MirProgram, MirTerminator, Quantity, ScalarType, Type, VmArtifactError,
+    emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -301,6 +302,53 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
             .validate()
             .is_err_and(|error| error.contains("unresolved inference")),
         "nested generic call metadata must not bypass MIR program validation"
+    );
+}
+
+#[test]
+fn mir_program_rejects_forged_instance_identity_before_vm_emission() {
+    let key = InstanceKey::new(
+        DefKey(Digest::of_bytes(b"forged-instance-template")),
+        &[GenericKind::Type],
+        vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    )
+    .expect("closed instance key");
+    let executable = DefKey(Digest::of_bytes(b"retargeted-instance-body"));
+    let mut function = graph();
+    function.definition = executable;
+    let forged = MirProgram {
+        entry: executable,
+        functions: BTreeMap::from([(executable, function)]),
+        instances: BTreeMap::from([(executable, MirInstance { key, executable })]),
+    };
+    assert!(
+        forged
+            .validate()
+            .is_err_and(|error| error.contains("canonical substitution identity")),
+        "forged instance metadata must not reach VM emission"
+    );
+}
+
+#[test]
+fn mir_program_accepts_a_canonical_zero_generic_instance_at_vm_boundary() {
+    let key = InstanceKey::new(
+        DefKey(Digest::of_bytes(b"zero-generic-instance-template")),
+        &[],
+        vec![],
+    )
+    .expect("zero-generic instance key is canonical");
+    let executable = DefKey(key.fingerprint());
+    let mut function = graph();
+    function.definition = executable;
+    let program = MirProgram {
+        entry: executable,
+        functions: BTreeMap::from([(executable, function)]),
+        instances: BTreeMap::from([(executable, MirInstance { key, executable })]),
+    };
+    assert!(program.validate().is_ok(), "{:#?}", program.validate());
+    assert!(
+        emit_vm_program(&program).is_ok(),
+        "a canonical zero-generic instance must be able to reach VM emission"
     );
 }
 

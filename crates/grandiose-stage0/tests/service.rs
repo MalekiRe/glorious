@@ -1478,6 +1478,29 @@ fn service_executes_explicit_generic_callable_applications() {
 }
 
 #[test]
+fn service_materializes_a_recursive_generic_scc_once_into_verified_vm_code() {
+    let source = "pub fn descend<T>(value: T) -> T { descend<T>(value) } pub fn main() -> i64 { descend<i64>(42) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert!(
+        outcome.artifact.is_some(),
+        "recursive instance must verify as VM code"
+    );
+    let graph = outcome.instance_graph.expect("instance discovery evidence");
+    let recursive = graph
+        .ordered()
+        .into_iter()
+        .find(|instance| !instance.arguments().is_empty())
+        .expect("concrete generic recursive instance");
+    assert!(
+        graph
+            .callees(&recursive)
+            .is_some_and(|callees| callees.contains(&recursive)),
+        "recursive generic call must retain its concrete SCC edge: {graph:#?}"
+    );
+}
+
+#[test]
 fn service_materializes_generic_function_values_through_concrete_callables() {
     let source = "pub fn identity<T>(value: T) -> T { value } pub fn choose<T>() -> (T) -> T { identity } pub fn main() -> i64 { choose<i64>()(42) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
