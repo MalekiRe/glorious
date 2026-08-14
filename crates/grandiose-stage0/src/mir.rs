@@ -617,6 +617,30 @@ fn fold_block(
             MirInstruction::RemI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_rem)
             }
+            MirInstruction::EqI64 { dst, left, right } => {
+                fold_i64_predicate(dst, &constants, left, right, |left, right| left == right)
+            }
+            MirInstruction::NeI64 { dst, left, right } => {
+                fold_i64_predicate(dst, &constants, left, right, |left, right| left != right)
+            }
+            MirInstruction::LtI64 { dst, left, right } => {
+                fold_i64_predicate(dst, &constants, left, right, |left, right| left < right)
+            }
+            MirInstruction::LeI64 { dst, left, right } => {
+                fold_i64_predicate(dst, &constants, left, right, |left, right| left <= right)
+            }
+            MirInstruction::GtI64 { dst, left, right } => {
+                fold_i64_predicate(dst, &constants, left, right, |left, right| left > right)
+            }
+            MirInstruction::GeI64 { dst, left, right } => {
+                fold_i64_predicate(dst, &constants, left, right, |left, right| left >= right)
+            }
+            MirInstruction::EqBool { dst, left, right } => {
+                fold_bool_predicate(dst, &constants, left, right, |left, right| left == right)
+            }
+            MirInstruction::NeBool { dst, left, right } => {
+                fold_bool_predicate(dst, &constants, left, right, |left, right| left != right)
+            }
             _ => None,
         };
         let did_fold = folded.is_some();
@@ -661,6 +685,40 @@ fn fold_i64(
         return None;
     };
     operation(*left, *right).map(|value| MirInstruction::ConstI64 { dst, value })
+}
+fn fold_i64_predicate(
+    dst: MirLocal,
+    constants: &BTreeMap<MirLocal, Constant>,
+    left: MirLocal,
+    right: MirLocal,
+    predicate: impl FnOnce(i64, i64) -> bool,
+) -> Option<MirInstruction> {
+    let (Some(Constant::I64(left)), Some(Constant::I64(right))) =
+        (constants.get(&left), constants.get(&right))
+    else {
+        return None;
+    };
+    Some(MirInstruction::ConstBool {
+        dst,
+        value: predicate(*left, *right),
+    })
+}
+fn fold_bool_predicate(
+    dst: MirLocal,
+    constants: &BTreeMap<MirLocal, Constant>,
+    left: MirLocal,
+    right: MirLocal,
+    predicate: impl FnOnce(bool, bool) -> bool,
+) -> Option<MirInstruction> {
+    let (Some(Constant::Bool(left)), Some(Constant::Bool(right))) =
+        (constants.get(&left), constants.get(&right))
+    else {
+        return None;
+    };
+    Some(MirInstruction::ConstBool {
+        dst,
+        value: predicate(*left, *right),
+    })
 }
 fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
     match instruction {

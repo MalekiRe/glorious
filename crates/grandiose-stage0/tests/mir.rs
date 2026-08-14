@@ -266,3 +266,90 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
         MirInstruction::AddI64 { .. }
     ));
 }
+
+#[test]
+fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-comparison-constants")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64_ty.clone()),
+            local(i64_ty),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+        ],
+        result: bool_ty,
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(0),
+                        value: 40,
+                    },
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(1),
+                        value: 42,
+                    },
+                    MirInstruction::LtI64 {
+                        dst: MirLocal(2),
+                        left: MirLocal(0),
+                        right: MirLocal(1),
+                    },
+                ],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(2)],
+                },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(3)],
+                instructions: vec![],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(3),
+                    then_target: MirBlockId(2),
+                    then_arguments: vec![],
+                    else_target: MirBlockId(3),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstBool {
+                    dst: MirLocal(4),
+                    value: true,
+                }],
+                terminator: MirTerminator::Return { value: MirLocal(4) },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstBool {
+                    dst: MirLocal(5),
+                    value: false,
+                }],
+                terminator: MirTerminator::Return { value: MirLocal(5) },
+            },
+        ],
+    };
+
+    let (optimized, report) = optimize_mir(function).unwrap();
+    assert_eq!(report.constant_folds, 1);
+    assert_eq!(report.eliminated_branches, 1);
+    assert!(matches!(
+        optimized.blocks[0].instructions[2],
+        MirInstruction::ConstBool { value: true, .. }
+    ));
+    assert!(matches!(
+        optimized.blocks[1].terminator,
+        MirTerminator::Goto {
+            target: MirBlockId(2),
+            ..
+        }
+    ));
+}
