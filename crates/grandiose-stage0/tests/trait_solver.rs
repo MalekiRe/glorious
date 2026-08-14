@@ -572,7 +572,7 @@ fn associated_type_application_normalizes_item_generic_arguments() {
             subject: Type::Scalar(ScalarType::I64),
         },
         "Output",
-        &[Type::Scalar(ScalarType::Text)],
+        &[GenericArgument::Type(Type::Scalar(ScalarType::Text))],
     );
     assert!(matches!(
         answer,
@@ -599,6 +599,73 @@ fn associated_type_application_normalizes_item_generic_arguments() {
             found: 0,
             ..
         }
+    ));
+}
+
+#[test]
+fn associated_item_applications_preserve_mixed_generic_kinds() {
+    let (interface, signatures) = signatures(
+        "trait Borrow { type View<'a, T, n: u32>; } impl Borrow for i64 { type View<'a, T, n: u32> = T; } trait Source { type Effects<'a, n: u32>: EffectRow; } impl Source for i64 { type Effects<'a, n: u32> = {}; }",
+    );
+    let subject = Type::Scalar(ScalarType::I64);
+    let borrow = key(&interface, "Borrow");
+    let view = TraitSolver::new(&signatures).normalize_associated_type_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: borrow,
+                arguments: vec![],
+            },
+            subject: subject.clone(),
+        },
+        "View",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::Type(Type::Scalar(ScalarType::Text)),
+            GenericArgument::ConstU32(7),
+        ],
+    );
+    assert!(matches!(
+        view,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::Text),
+            ..
+        }
+    ));
+    let wrong_kind = TraitSolver::new(&signatures).normalize_associated_type_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: borrow,
+                arguments: vec![],
+            },
+            subject: subject.clone(),
+        },
+        "View",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::Type(Type::Scalar(ScalarType::Text)),
+            GenericArgument::ConstQuantity(Quantity::ONCE),
+        ],
+    );
+    assert_eq!(wrong_kind, TraitProjectionAnswer::NoSolution);
+
+    let source = key(&interface, "Source");
+    let effects = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: source,
+                arguments: vec![],
+            },
+            subject,
+        },
+        "Effects",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::ConstU32(9),
+        ],
+    );
+    assert!(matches!(
+        effects,
+        TraitEffectRowProjectionAnswer::Normalized { row, .. } if row == EffectRow::empty()
     ));
 }
 

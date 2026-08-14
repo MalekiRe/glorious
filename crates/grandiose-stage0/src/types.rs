@@ -1209,13 +1209,6 @@ pub(crate) fn canonical_generic_arguments_encoding(values: &[GenericArgument]) -
     bytes
 }
 
-/// Tagged canonical encoding for ordered type sequences.
-pub(crate) fn canonical_type_sequence_encoding(values: &[Type]) -> Vec<u8> {
-    let mut bytes = vec![];
-    encode_types(values, &mut bytes);
-    bytes
-}
-
 fn canonical_generic_arguments(values: &[GenericArgument]) -> Vec<u8> {
     canonical_generic_arguments_encoding(values)
 }

@@ -2646,7 +2646,11 @@ impl Elaborator<'_> {
                 subject: *subject.clone(),
             },
             name,
-            item_arguments,
+            &item_arguments
+                .iter()
+                .cloned()
+                .map(crate::GenericArgument::Type)
+                .collect::<Vec<_>>(),
         );
         match answer {
             TraitProjectionAnswer::Normalized { ty, .. } => ty,
@@ -3066,7 +3070,11 @@ impl Elaborator<'_> {
                                 subject,
                             },
                             name,
-                            &item_arguments,
+                            &item_arguments
+                                .iter()
+                                .cloned()
+                                .map(crate::GenericArgument::Type)
+                                .collect::<Vec<_>>(),
                         ) {
                         TraitEffectRowProjectionAnswer::Normalized { row, .. }
                             if row.tail.is_none() && row.projections.is_empty() =>
@@ -6070,7 +6078,12 @@ impl Elaborator<'_> {
                     subject: *projection.subject,
                 },
                 &projection.name,
-                &projection.item_arguments,
+                &projection
+                    .item_arguments
+                    .iter()
+                    .cloned()
+                    .map(crate::GenericArgument::Type)
+                    .collect::<Vec<_>>(),
             ) {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
                     effects.effects.extend(row.effects);

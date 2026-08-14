@@ -11,10 +11,7 @@ use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
     ElaboratedImplementation, ElaboratedInterface, ElaboratedTraitReference, GenericArgument, Type,
     implementation_method_key,
-    types::{
-        canonical_generic_arguments_encoding, canonical_type_encoding,
-        canonical_type_sequence_encoding,
-    },
+    types::{canonical_generic_arguments_encoding, canonical_type_encoding},
 };
 
 pub const DEFAULT_MAX_TRAIT_DEPTH: u32 = 128;
@@ -361,7 +358,7 @@ impl TraitSolver {
         &mut self,
         goal: TraitGoal,
         name: &str,
-        arguments: &[Type],
+        arguments: &[GenericArgument],
     ) -> TraitProjectionAnswer {
         let mut active = vec![];
         let subject = match self.normalize_type_projections(goal.subject, &mut active) {
@@ -381,7 +378,7 @@ impl TraitSolver {
         let arguments = match arguments
             .iter()
             .cloned()
-            .map(|argument| self.normalize_type_projections(argument, &mut active))
+            .map(|argument| self.normalize_trait_argument(argument, &mut active))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(arguments) => arguments,
@@ -413,7 +410,7 @@ impl TraitSolver {
         &mut self,
         goal: TraitGoal,
         name: &str,
-        arguments: &[Type],
+        arguments: &[GenericArgument],
     ) -> TraitProjectionAnswer {
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
@@ -431,11 +428,20 @@ impl TraitSolver {
                             found: arguments.len() as u32,
                         }
                     }
+                    Some(item)
+                        if !generic_arguments_match_kinds(arguments, &item.generic_kinds) =>
+                    {
+                        TraitProjectionAnswer::NoSolution
+                    }
                     Some(item) => {
                         let base = rule.implementation.generics;
                         let mut substitution = substitution;
                         for (offset, argument) in arguments.iter().cloned().enumerate() {
-                            substitution.types.insert(base + offset as u32, argument);
+                            install_item_argument(
+                                &mut substitution,
+                                base + offset as u32,
+                                argument,
+                            );
                         }
                         TraitProjectionAnswer::Normalized {
                             evidence,
@@ -523,6 +529,7 @@ impl TraitSolver {
                     },
                     subject: *subject,
                 };
+                let item_arguments = type_only_item_arguments(item_arguments);
                 let key = associated_projection_key(&goal, &name, &item_arguments);
                 if active.contains(&key) {
                     return Err(Box::new(TraitProjectionAnswer::RecursiveProjection));
@@ -583,7 +590,7 @@ impl TraitSolver {
         &mut self,
         goal: TraitGoal,
         name: &str,
-        arguments: &[Type],
+        arguments: &[GenericArgument],
     ) -> TraitEffectRowProjectionAnswer {
         let mut type_active = vec![];
         let subject = match self.normalize_type_projections(goal.subject, &mut type_active) {
@@ -607,7 +614,7 @@ impl TraitSolver {
         let arguments = match arguments
             .iter()
             .cloned()
-            .map(|argument| self.normalize_type_projections(argument, &mut type_active))
+            .map(|argument| self.normalize_trait_argument(argument, &mut type_active))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(arguments) => arguments,
@@ -641,7 +648,7 @@ impl TraitSolver {
         &mut self,
         goal: TraitGoal,
         name: &str,
-        arguments: &[Type],
+        arguments: &[GenericArgument],
     ) -> TraitEffectRowProjectionAnswer {
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
@@ -659,10 +666,19 @@ impl TraitSolver {
                             found: arguments.len() as u32,
                         }
                     }
+                    Some(item)
+                        if !generic_arguments_match_kinds(arguments, &item.generic_kinds) =>
+                    {
+                        TraitEffectRowProjectionAnswer::NoSolution
+                    }
                     Some(item) => {
                         let base = rule.implementation.generics;
                         for (offset, argument) in arguments.iter().cloned().enumerate() {
-                            substitution.types.insert(base + offset as u32, argument);
+                            install_item_argument(
+                                &mut substitution,
+                                base + offset as u32,
+                                argument,
+                            );
                         }
                         TraitEffectRowProjectionAnswer::Normalized {
                             evidence,
@@ -764,11 +780,9 @@ impl TraitSolver {
                 },
                 subject: *projection.subject,
             };
-            let key = associated_effect_row_projection_key(
-                &goal,
-                &projection.name,
-                &projection.item_arguments,
-            );
+            let item_arguments = type_only_item_arguments(projection.item_arguments);
+            let key =
+                associated_effect_row_projection_key(&goal, &projection.name, &item_arguments);
             if active.contains(&key) {
                 return Err(Box::new(
                     TraitEffectRowProjectionAnswer::RecursiveProjection,
@@ -781,7 +795,7 @@ impl TraitSolver {
             let nested = self.select_associated_effect_row_application(
                 goal,
                 &projection.name,
-                &projection.item_arguments,
+                &item_arguments,
             );
             let nested = match nested {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
@@ -1005,6 +1019,76 @@ struct ImplementationSubstitution {
     types: BTreeMap<u32, Type>,
     lifetimes: BTreeMap<u32, crate::Lifetime>,
     generic_arguments: BTreeMap<u32, GenericArgument>,
+}
+
+fn generic_arguments_match_kinds(
+    arguments: &[GenericArgument],
+    kinds: &[crate::GenericKind],
+) -> bool {
+    arguments.len() == kinds.len()
+        && arguments
+            .iter()
+            .zip(kinds)
+            .all(|(argument, kind)| generic_argument_matches_kind(argument, *kind))
+}
+
+fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::GenericKind) -> bool {
+    matches!(
+        (argument, kind),
+        (GenericArgument::Type(_), crate::GenericKind::Type)
+            | (GenericArgument::EffectRow(_), crate::GenericKind::EffectRow)
+            | (GenericArgument::Lifetime(_), crate::GenericKind::Lifetime)
+            | (
+                GenericArgument::ConstU32(_),
+                crate::GenericKind::Const(crate::ConstKind::U32)
+            )
+            | (
+                GenericArgument::ConstQuantity(_),
+                crate::GenericKind::Const(crate::ConstKind::Quantity)
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::GenericKind::Const(crate::ConstKind::U32)
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
+                crate::GenericKind::Const(crate::ConstKind::Quantity)
+            )
+    )
+}
+
+fn install_item_argument(
+    substitution: &mut ImplementationSubstitution,
+    index: u32,
+    argument: GenericArgument,
+) {
+    match &argument {
+        GenericArgument::Type(value) => {
+            substitution.types.insert(index, value.clone());
+        }
+        GenericArgument::Lifetime(value) => {
+            substitution.lifetimes.insert(index, *value);
+        }
+        GenericArgument::EffectRow(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => {
+            substitution.generic_arguments.insert(index, argument);
+        }
+    }
+}
+
+/// `Type::Projection` and `EffectRowProjection` are legacy type-carriers.
+/// Their stored arguments are therefore explicitly lifted at this boundary;
+/// public associated-item application APIs retain every generic kind.
+fn type_only_item_arguments(arguments: Vec<Type>) -> Vec<GenericArgument> {
+    arguments.into_iter().map(GenericArgument::Type).collect()
 }
 
 fn match_rule(
@@ -1312,10 +1396,32 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             .get(index)
             .cloned()
             .unwrap_or_else(|| value.clone()),
-        Type::ConstGeneric { index, .. } => substitution
+        Type::ConstGeneric { index, kind } => substitution
             .types
             .get(index)
             .cloned()
+            .or_else(|| {
+                substitution
+                    .generic_arguments
+                    .get(index)
+                    .and_then(|argument| match (argument, kind) {
+                        (GenericArgument::ConstU32(value), crate::ConstKind::U32) => {
+                            Some(Type::ConstU32(*value))
+                        }
+                        (GenericArgument::ConstQuantity(value), crate::ConstKind::Quantity) => {
+                            Some(Type::ConstQuantity(*value))
+                        }
+                        (GenericArgument::ConstGeneric { index, kind: found }, expected)
+                            if found == expected =>
+                        {
+                            Some(Type::ConstGeneric {
+                                index: *index,
+                                kind: *found,
+                            })
+                        }
+                        _ => None,
+                    })
+            })
             .unwrap_or_else(|| value.clone()),
         Type::Nominal {
             definition,
@@ -1469,10 +1575,14 @@ fn goal_key(goal: &TraitGoal) -> Digest {
     ])
 }
 
-fn associated_projection_key(goal: &TraitGoal, name: &str, arguments: &[Type]) -> Digest {
+fn associated_projection_key(
+    goal: &TraitGoal,
+    name: &str,
+    arguments: &[GenericArgument],
+) -> Digest {
     let relation_arguments = canonical_generic_arguments_encoding(&goal.relation.arguments);
     let subject = canonical_type_encoding(&goal.subject);
-    let arguments = canonical_type_sequence_encoding(arguments);
+    let arguments = canonical_generic_arguments_encoding(arguments);
     Digest::of_parts([
         b"grandiose-stage0-associated-projection-v2".as_slice(),
         goal.relation.definition.0.as_bytes().as_slice(),
@@ -1486,11 +1596,11 @@ fn associated_projection_key(goal: &TraitGoal, name: &str, arguments: &[Type]) -
 fn associated_effect_row_projection_key(
     goal: &TraitGoal,
     name: &str,
-    arguments: &[Type],
+    arguments: &[GenericArgument],
 ) -> Digest {
     let relation_arguments = canonical_generic_arguments_encoding(&goal.relation.arguments);
     let subject = canonical_type_encoding(&goal.subject);
-    let arguments = canonical_type_sequence_encoding(arguments);
+    let arguments = canonical_generic_arguments_encoding(arguments);
     Digest::of_parts([
         b"grandiose-stage0-associated-effect-row-projection-v2".as_slice(),
         goal.relation.definition.0.as_bytes().as_slice(),
