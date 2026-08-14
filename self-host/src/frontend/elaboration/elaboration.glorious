@@ -4450,6 +4450,61 @@ find_bool_type(value: &mut TypedInterfaces, index: usize) -> u32 {
     }
 }
 
+// Complete source bundles declare Bool as `Option<()>`; the focused marker is
+// only for probes which deliberately omit that distributed prelude.  Resolve
+// the unique root alias by spelling so all signature and body paths retain the
+// same source identity.
+root_bool_alias(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    index: usize
+) -> Option<super::headers::AliasHeaderId> {
+    let nominal = super::headers::nominal_index(headers);
+    if(index < super::headers::alias_count(nominal)) {
+        let alias = handle super::headers::alias_at(nominal, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let root = handle super::scanner::shell_at(
+            declarations,
+            super::headers::alias_shell(alias)
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(shell) => Option::is_none(
+                super::scanner::shell_parent(shell)
+            )
+        };
+        let named_bool = handle super::lexer::lexeme(
+            super::headers::parsed_source(headers),
+            super::headers::alias_name(alias)
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(name) => String::eq(name, &"Bool")
+        };
+        if(root and { named_bool }) {
+            Result::Ok(Id::from_usize(index))
+        } else { root_bool_alias(headers, declarations, index + 1) }
+    } else { None }
+}
+
+source_bool_type(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    token: usize
+) -> Result<u32, ElaborationError> {
+    handle root_bool_alias(headers, declarations, 0) {
+        None => Result::Ok(find_bool_type(interfaces, 0)),
+        Option::Some(alias) => resolve_alias_type(
+            headers,
+            declarations,
+            interfaces,
+            Id::to_usize(alias),
+            token
+        )
+    }
+}
+
 named_builtin_type(value: &mut TypedInterfaces, name: &String) -> Option<u32> {
     if(String::eq(name, &"Text")) { Result::Ok(17) } else {
         if(String::eq(name, &"Bytes")) { Result::Ok(18) } else {
@@ -5979,6 +6034,9 @@ resolve_signature_type(
                         )
                     }
                 } else { if(String::eq(name, &"Unit")) { Result::Ok(0) } else {
+                    if(String::eq(name, &"Bool")) {
+                        source_bool_type(headers, declarations, output, token)
+                    } else {
                     // The distributed prelude declares `Bool` as a normal
                     // alias.  Resolve source declarations before falling
                     // back to the focused-probe builtins so that alias has
@@ -6009,6 +6067,7 @@ resolve_signature_type(
                                 )
                             }
                         }
+                    }
                     }
                 } }
             } }
@@ -9220,6 +9279,7 @@ integer_constant_for_token(
 
 elaborate_bool_literal(
     headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
     interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
     value: &mut BodyContext,
@@ -9247,7 +9307,9 @@ elaborate_bool_literal(
                         ElaborationError::UnexpectedExpressionToken(token)
                     )) }
                 };
-                let ty = type_id_from_u32(find_bool_type(interfaces, 0));
+                let ty = type_id_from_u32(try(source_bool_type(
+                    headers, declarations, interfaces, token
+                ), @elaborate_bool_literal));
                 try(check_expected_type(ty, expected, token), @elaborate_bool_literal);
                 Result::Ok(finish_construct(
                     &mut value.core,
@@ -9358,7 +9420,8 @@ elaborate_identifier(
                 Result::Ok(text) => if(String::eq(text, &"true")
                     or { String::eq(text, &"false") }) {
                     elaborate_bool_literal(
-                        headers, interfaces, body, value, expression, expected
+                        headers, declarations, interfaces, body, value,
+                        expression, expected
                     )
                 } else { Result::Err(
                     ElaborationError::UnexpectedExpressionToken(token)
@@ -10683,6 +10746,10 @@ resolve_label_body_type(
             Result::Err(_) => Result::Err(ElaborationError::UnknownTypeName(token)),
             Result::Ok(text) => if(String::eq(text, &"Unit")) {
                 Result::Ok(type_id_from_u32(0))
+            } else { if(String::eq(text, &"Bool")) {
+                Result::map(source_bool_type(
+                    headers, declarations, interfaces, token
+                ), { found => type_id_from_u32(found) })
             } else { handle scalar_kind(text) {
                 Result::Ok(kind) => Result::Ok(type_id_from_u32(
                     signature_scalar_type(interfaces, kind)
@@ -10702,7 +10769,7 @@ resolve_label_body_type(
                         )
                     }
                 }
-            } }
+            } } }
         },
         super::bodies::BodyTypeView::Application(constructor, arguments) => {
             let constructor = try(resolve_label_body_type(
@@ -12912,11 +12979,10 @@ terminal_u32_operation(
     }
 }
 
-terminal_bool_operation(
+terminal_bool_operation_with_type(
     interfaces: &mut TypedInterfaces, body: &super::bodies::ParsedBody,
-    map: &ResolutionMap, subject: u32
+    map: &ResolutionMap, subject: u32, bool_type: TypeId
 ) -> Option<super::resolution::EffectOperationIdentity> {
-    let bool_type = type_id_from_u32(find_bool_type(interfaces, 0));
     handle super::bodies::expression_view(body, subject) {
         super::bodies::BodyExpressionView::Perform(_, _) => handle resolved_target_at(map, subject) {
             Option::Some(ResolvedTarget::EffectOperation(identity)) => {
@@ -12939,6 +13005,25 @@ terminal_bool_operation(
                 }
             }, _ => None
         }, _ => None
+    }
+}
+
+terminal_bool_operation(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces, body: &super::bodies::ParsedBody,
+    map: &ResolutionMap, subject: u32
+) -> Option<super::resolution::EffectOperationIdentity> {
+    handle source_bool_type(
+        headers,
+        declarations,
+        interfaces,
+        super::bodies::expression_token_start_at(body, subject)
+    ) {
+        Result::Err(_) => None,
+        Result::Ok(found) => terminal_bool_operation_with_type(
+            interfaces, body, map, subject, type_id_from_u32(found)
+        )
     }
 }
 
@@ -13021,10 +13106,14 @@ elaborate_handle(
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     let immediate = super::bodies::expression_child_at(body, expression, 0);
-    handle terminal_bool_operation(interfaces, body, map, immediate) {
+    handle terminal_bool_operation(
+        headers, declarations, interfaces, body, map, immediate
+    ) {
         None => (),
         Option::Some(identity) => {
-            let bool_type = type_id_from_u32(find_bool_type(interfaces, 0));
+            let bool_type = type_id_from_u32(try(source_bool_type(
+                headers, declarations, interfaces, token
+            ), @elaborate_handle));
             let payload = try(elaborate_expression(original, headers, declarations, interfaces, body, map, value,
                 super::bodies::expression_child_at(body, immediate, 0), Option::Some(bool_type)), @elaborate_handle);
             let prefix = new_core_prefix();
