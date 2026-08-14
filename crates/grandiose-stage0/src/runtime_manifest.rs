@@ -53,7 +53,6 @@ pub struct TrustedRuntimeManifest {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManifestError {
-    MissingRole(PrimitiveRole),
     DuplicateRole(PrimitiveRole),
     MissingDeclaration {
         module_path: String,
@@ -95,17 +94,12 @@ impl RuntimeManifestInput {
             }
         }
         let mut primitives = BTreeMap::new();
-        for role in [
-            PrimitiveRole::BranchBool,
-            PrimitiveRole::TextByteLen,
-            PrimitiveRole::TextConcat,
-            PrimitiveRole::TextEq,
-            PrimitiveRole::TextFromUtf8Checked,
-            PrimitiveRole::TextAsBytes,
-        ] {
-            let selector = selectors
-                .get(&role)
-                .ok_or(ManifestError::MissingRole(role))?;
+        // A manifest is an exact finite grant set, rather than a statement
+        // that every primitive known to this compiler generation is present.
+        // A bootstrap world can therefore expose only the leaves supplied by
+        // its standard-library revision; calls to an unbound leaf remain
+        // ordinary source calls and its opaque placeholder body is rejected.
+        for (role, selector) in selectors {
             let candidates = interfaces
                 .iter()
                 .filter(|interface| interface.module.path == selector.module_path)

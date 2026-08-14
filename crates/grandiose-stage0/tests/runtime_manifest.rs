@@ -96,6 +96,32 @@ fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
 }
 
 #[test]
+fn manifest_can_grant_a_strict_runtime_leaf_subset() {
+    let standard = PackageKey("std@0.1.0".into());
+    let interface = interface(
+        standard.clone(),
+        "fn __g1_text_byte_len(value: Text) -> usize { () }",
+    );
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let manifest = RuntimeManifestInput {
+        standard_library: standard,
+        selectors: vec![PrimitiveSelector {
+            role: PrimitiveRole::TextByteLen,
+            module_path: "crate".into(),
+            name: "__g1_text_byte_len".into(),
+        }],
+    }
+    .bind(vec![interface], &signatures)
+    .expect("a standard-library revision may expose only the leaves it owns");
+    assert_eq!(manifest.primitives.len(), 1);
+    assert!(
+        manifest
+            .primitives
+            .contains_key(&PrimitiveRole::TextByteLen)
+    );
+}
+
+#[test]
 fn primitive_manifest_rejects_signature_mismatch_before_authority_freezes() {
     let standard = PackageKey("bad-std@0.1.0".into());
     let interface = interface(
