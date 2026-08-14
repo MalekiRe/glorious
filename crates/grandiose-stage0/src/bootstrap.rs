@@ -8,7 +8,7 @@
 
 use crate::{BootstrapLimits, BootstrapStage, Digest, NormalizedInputWorld, VerifiedVmProgram};
 
-pub const BOOTSTRAP_MANIFEST_SCHEMA: u32 = 1;
+pub const BOOTSTRAP_MANIFEST_SCHEMA: u32 = 2;
 pub const BOOTSTRAP_MANIFEST_MAGIC: [u8; 8] = *b"G0BM\r\n\x1a\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +23,11 @@ pub struct BootstrapManifest {
     pub codegen: Digest,
     /// Canonical verified VM program identity.
     pub artifact: Digest,
+    /// Digest of the exact canonical bytes independently verified before the
+    /// program became executable. This is deliberately distinct from the
+    /// semantic program fingerprint: stage-two/stage-three convergence is a
+    /// byte-identity contract, including the released envelope/schema.
+    pub artifact_bytes: Digest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +39,18 @@ pub enum BootstrapConvergenceError {
     SourceWorldMismatch { left: Digest, right: Digest },
     CodegenInputMismatch { left: Digest, right: Digest },
     ArtifactMismatch { left: Digest, right: Digest },
+    ArtifactBytesMismatch { left: Digest, right: Digest },
+}
+
+/// Compatibility evidence for attaching a decoded bootstrap manifest to an
+/// independently decoded and verified compiler artifact.  A manifest carries
+/// commitments, not an ambient handle to executable bytes; the driver must
+/// make this check before treating it as seed or predecessor provenance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BootstrapArtifactCompatibilityError {
+    InvalidManifest(BootstrapManifestError),
+    ArtifactMismatch { expected: Digest, found: Digest },
+    ArtifactBytesMismatch { expected: Digest, found: Digest },
 }
 
 /// A manifest is small fixed-shape evidence, but it may still cross an
@@ -63,6 +80,7 @@ impl BootstrapManifest {
             source_semantics: source_semantics_fingerprint(world),
             codegen: codegen_fingerprint(world),
             artifact: artifact.fingerprint(),
+            artifact_bytes: Digest::of_bytes(&artifact.canonical_bytes()),
         }
     }
 
@@ -123,6 +141,39 @@ impl BootstrapManifest {
                 right: later.artifact,
             });
         }
+        if self.artifact_bytes != later.artifact_bytes {
+            return Err(BootstrapConvergenceError::ArtifactBytesMismatch {
+                left: self.artifact_bytes,
+                right: later.artifact_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Bind this manifest to the actual verified artifact supplied by a seed
+    /// store or predecessor stage.  Comparing manifests alone is insufficient
+    /// after decoding hostile bytes: both commitments must match the exact
+    /// canonical bytes which the VM verifier accepted.
+    pub fn validate_verified_artifact(
+        &self,
+        artifact: &VerifiedVmProgram,
+    ) -> Result<(), BootstrapArtifactCompatibilityError> {
+        self.validate()
+            .map_err(BootstrapArtifactCompatibilityError::InvalidManifest)?;
+        let fingerprint = artifact.fingerprint();
+        if self.artifact != fingerprint {
+            return Err(BootstrapArtifactCompatibilityError::ArtifactMismatch {
+                expected: self.artifact,
+                found: fingerprint,
+            });
+        }
+        let bytes = Digest::of_bytes(&artifact.canonical_bytes());
+        if self.artifact_bytes != bytes {
+            return Err(BootstrapArtifactCompatibilityError::ArtifactBytesMismatch {
+                expected: self.artifact_bytes,
+                found: bytes,
+            });
+        }
         Ok(())
     }
 
@@ -132,7 +183,7 @@ impl BootstrapManifest {
     /// different producer by a later driver.
     pub fn encode(&self) -> Result<Vec<u8>, BootstrapManifestError> {
         self.validate()?;
-        let mut output = Vec::with_capacity(222);
+        let mut output = Vec::with_capacity(254);
         output.extend_from_slice(&BOOTSTRAP_MANIFEST_MAGIC);
         output.extend_from_slice(&self.schema.to_le_bytes());
         output.extend_from_slice(&self.stage.ordinal.to_le_bytes());
@@ -152,6 +203,7 @@ impl BootstrapManifest {
             self.source_semantics,
             self.codegen,
             self.artifact,
+            self.artifact_bytes,
         ] {
             output.extend_from_slice(&digest.as_bytes());
         }
@@ -198,6 +250,7 @@ impl BootstrapManifest {
             source_semantics: Digest::from_bytes(cursor.array()?),
             codegen: Digest::from_bytes(cursor.array()?),
             artifact: Digest::from_bytes(cursor.array()?),
+            artifact_bytes: Digest::from_bytes(cursor.array()?),
         };
         if cursor.offset != bytes.len() {
             return Err(BootstrapManifestError::TrailingBytes);
@@ -258,6 +311,11 @@ fn validate_stage(stage: &BootstrapStage) -> Result<(), BootstrapManifestError> 
     if stage.limits.max_sources == 0 || stage.limits.max_total_source_bytes == 0 {
         return Err(BootstrapManifestError::InvalidStage {
             reason: "stage limits must be positive",
+        });
+    }
+    if stage.ordinal == 1 && stage.expected_artifact.is_some() {
+        return Err(BootstrapManifestError::InvalidStage {
+            reason: "seed stage must not pin a predecessor artifact",
         });
     }
     if stage.ordinal > 1 {

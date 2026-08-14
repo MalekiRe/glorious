@@ -220,6 +220,7 @@ fn bootstrap_worlds_canonically_include_producer_and_enforce_fixed_bounds() {
     );
     let mut first = request(vec![source.clone()]);
     first.root_package = package.clone();
+    first.build.compiler = Digest::of_bytes(b"rust-seed");
     first.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 1,
         producer: Digest::of_bytes(b"rust-seed"),
@@ -229,6 +230,7 @@ fn bootstrap_worlds_canonically_include_producer_and_enforce_fixed_bounds() {
     });
     let mut second = first.clone();
     let stage_one_artifact = Digest::of_bytes(b"stage-one-artifact");
+    second.build.compiler = stage_one_artifact;
     second.mode = CompilationMode::Bootstrap(BootstrapStage {
         producer: stage_one_artifact,
         ordinal: 2,
@@ -268,6 +270,7 @@ fn bootstrap_rejects_a_non_seed_stage_without_its_exact_producer_artifact() {
     );
     let mut missing_predecessor = request(vec![source.clone()]);
     missing_predecessor.root_package = package.clone();
+    missing_predecessor.build.compiler = Digest::of_bytes(b"unbound-stage-one");
     missing_predecessor.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
         producer: Digest::of_bytes(b"unbound-stage-one"),
@@ -284,6 +287,7 @@ fn bootstrap_rejects_a_non_seed_stage_without_its_exact_producer_artifact() {
 
     let mut substituted_producer = request(vec![source]);
     substituted_producer.root_package = package;
+    substituted_producer.build.compiler = Digest::of_bytes(b"substituted-producer");
     substituted_producer.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
         producer: Digest::of_bytes(b"substituted-producer"),
@@ -300,6 +304,57 @@ fn bootstrap_rejects_a_non_seed_stage_without_its_exact_producer_artifact() {
 }
 
 #[test]
+fn bootstrap_rejects_a_stage_producer_that_does_not_name_the_actual_compiler() {
+    let package = PackageKey("compiler@0.1.0".into());
+    let mut request = request(vec![SourceInput::new(
+        package.clone(),
+        LogicalPath::parse("src/main.glorious").unwrap(),
+        b"main() { () }".as_slice(),
+    )]);
+    request.root_package = package;
+    request.build.compiler = Digest::of_bytes(b"actual-stage-zero");
+    request.mode = CompilationMode::Bootstrap(BootstrapStage {
+        ordinal: 1,
+        producer: Digest::of_bytes(b"forged-seed-provenance"),
+        optimization_level: 2,
+        limits: BootstrapLimits::new(1, 128),
+        expected_artifact: None,
+    });
+    assert!(matches!(
+        request.normalize(),
+        Err(InputError::InvalidBootstrapStage {
+            reason: "bootstrap producer must match compiler build identity"
+        })
+    ));
+}
+
+#[test]
+fn bootstrap_rejects_a_seed_stage_with_forged_predecessor_artifact_evidence() {
+    let package = PackageKey("compiler@0.1.0".into());
+    let seed = Digest::of_bytes(b"rust-seed");
+    let mut request = request(vec![SourceInput::new(
+        package.clone(),
+        LogicalPath::parse("src/main.glorious").unwrap(),
+        b"main() { () }".as_slice(),
+    )]);
+    request.root_package = package;
+    request.build.compiler = seed;
+    request.mode = CompilationMode::Bootstrap(BootstrapStage {
+        ordinal: 1,
+        producer: seed,
+        optimization_level: 2,
+        limits: BootstrapLimits::new(1, 128),
+        expected_artifact: Some(Digest::of_bytes(b"forged-stage-zero-artifact")),
+    });
+    assert!(matches!(
+        request.normalize(),
+        Err(InputError::InvalidBootstrapStage {
+            reason: "seed stage must not pin a predecessor artifact"
+        })
+    ));
+}
+
+#[test]
 fn bootstrap_rejects_an_optimization_option_that_disagrees_with_its_stage_contract() {
     let package = PackageKey("compiler@0.1.0".into());
     let mut request = request(vec![SourceInput::new(
@@ -308,6 +363,7 @@ fn bootstrap_rejects_an_optimization_option_that_disagrees_with_its_stage_contra
         b"main() { () }".as_slice(),
     )]);
     request.root_package = package;
+    request.build.compiler = Digest::of_bytes(b"rust-seed");
     request
         .codegen_options
         .insert("optimization-level".into(), "3".into());

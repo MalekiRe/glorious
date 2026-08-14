@@ -43,8 +43,8 @@ pub use body::{
     PatternId, PatternKind,
 };
 pub use bootstrap::{
-    BOOTSTRAP_MANIFEST_MAGIC, BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError,
-    BootstrapManifest, BootstrapManifestError,
+    BOOTSTRAP_MANIFEST_MAGIC, BOOTSTRAP_MANIFEST_SCHEMA, BootstrapArtifactCompatibilityError,
+    BootstrapConvergenceError, BootstrapManifest, BootstrapManifestError,
 };
 pub use coherence::{CoherenceDiagnostic, CoherenceSet, ImplHead};
 pub use core::{

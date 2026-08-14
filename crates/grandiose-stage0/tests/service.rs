@@ -1,11 +1,12 @@
 use grandiose_stage0::{
-    BOOTSTRAP_MANIFEST_MAGIC, BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError,
-    BootstrapLimits, BootstrapManifest, BootstrapManifestError, BootstrapStage, Budget,
-    CancellationToken, CompilationMode, CompilationRequest, CompileDiagnostic,
-    CompilerBuildIdentity, DependencyNode, DependencyStatus, DiagnosticClass, Digest, FileKey,
-    InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport, Severity, SourceInput,
-    StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits, VmGenericArgument,
-    VmInstruction, VmType, decode_and_verify_program, decode_program, encode_program,
+    BOOTSTRAP_MANIFEST_MAGIC, BOOTSTRAP_MANIFEST_SCHEMA, BootstrapArtifactCompatibilityError,
+    BootstrapConvergenceError, BootstrapLimits, BootstrapManifest, BootstrapManifestError,
+    BootstrapStage, Budget, CancellationToken, CompilationMode, CompilationRequest,
+    CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus, DiagnosticClass,
+    Digest, FileKey, InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport, Severity,
+    SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits,
+    VmGenericArgument, VmInstruction, VmType, decode_and_verify_program, decode_program,
+    encode_program,
     query::{Query, QueryCompleteness, QueryContext, QueryEngine, QueryFailure, QueryValue},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -5634,6 +5635,7 @@ fn check_mode_reuses_semantic_validation_without_publishing_a_vm_artifact() {
 fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
     let source = "pub fn main() -> i64 { 40 + 2 }";
     let mut stage_one = request(source);
+    stage_one.build.compiler = Digest::of_bytes(b"rust-seed");
     stage_one.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 1,
         producer: Digest::of_bytes(b"rust-seed"),
@@ -5644,10 +5646,20 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
     let compiler = StageZeroCompiler::new();
     let first = compiler.compile(stage_one).unwrap();
     let first_manifest = first.bootstrap_manifest.unwrap();
-    assert_eq!(first.artifact.unwrap().run_i64().unwrap(), 42);
+    let first_artifact = first.artifact.unwrap();
+    first_manifest
+        .validate_verified_artifact(&first_artifact)
+        .unwrap();
+    let mut forged_byte_commitment = first_manifest.clone();
+    forged_byte_commitment.artifact_bytes = Digest::of_bytes(b"forged-stage-one-bytes");
+    assert!(matches!(
+        forged_byte_commitment.validate_verified_artifact(&first_artifact),
+        Err(BootstrapArtifactCompatibilityError::ArtifactBytesMismatch { .. })
+    ));
+    assert_eq!(first_artifact.run_i64().unwrap(), 42);
 
     let mut stage_two = request(source);
-    stage_two.build.compiler = Digest::of_bytes(b"stage-one-compiler");
+    stage_two.build.compiler = first_manifest.artifact;
     stage_two.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
         producer: first_manifest.artifact,
@@ -5668,7 +5680,7 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
         .unwrap();
 
     let mut stage_three = request(source);
-    stage_three.build.compiler = Digest::of_bytes(b"stage-two-compiler");
+    stage_three.build.compiler = second_manifest.artifact;
     stage_three.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 3,
         producer: second_manifest.artifact,
@@ -5685,11 +5697,16 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
         .compare_convergence(&third_manifest)
         .unwrap();
     assert_eq!(second_manifest.artifact, third_manifest.artifact);
+    assert_eq!(
+        second_manifest.artifact_bytes,
+        third_manifest.artifact_bytes
+    );
 }
 
 #[test]
 fn bootstrap_stage_rejects_a_nonconvergent_expected_artifact() {
     let mut request = request("pub fn main() -> i64 { 42 }");
+    request.build.compiler = Digest::of_bytes(b"not-this-program");
     request.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
         producer: Digest::of_bytes(b"not-this-program"),
@@ -5712,6 +5729,7 @@ fn bootstrap_stage_rejects_a_nonconvergent_expected_artifact() {
 #[test]
 fn bootstrap_manifest_rejects_mismatched_codegen_even_when_artifacts_match() {
     let mut first = request("pub fn main() -> i64 { 42 }");
+    first.build.compiler = Digest::of_bytes(b"seed");
     first.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 1,
         producer: Digest::of_bytes(b"seed"),
@@ -5725,6 +5743,7 @@ fn bootstrap_manifest_rejects_mismatched_codegen_even_when_artifacts_match() {
         .bootstrap_manifest
         .unwrap();
     let mut second = request("pub fn main() -> i64 { 42 }");
+    second.build.compiler = first.artifact;
     second.target = "different-vm".into();
     second.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
@@ -5753,6 +5772,7 @@ fn bootstrap_convergence_rejects_skipped_or_substituted_successors() {
         source_semantics: Digest::of_bytes(b"stage-source"),
         codegen: Digest::of_bytes(b"stage-codegen"),
         artifact,
+        artifact_bytes: Digest::of_bytes(b"stage-artifact-bytes"),
     };
     let stage_one_artifact = Digest::of_bytes(b"stage-one-artifact");
     let first = common(
@@ -5798,6 +5818,16 @@ fn bootstrap_convergence_rejects_skipped_or_substituted_successors() {
             later: 3
         })
     ));
+
+    let mut byte_distinct = substituted;
+    byte_distinct.stage.ordinal = 2;
+    byte_distinct.stage.producer = stage_one_artifact;
+    byte_distinct.stage.expected_artifact = Some(stage_one_artifact);
+    byte_distinct.artifact_bytes = Digest::of_bytes(b"different-canonical-envelope");
+    assert!(matches!(
+        first.compare_convergence(&byte_distinct),
+        Err(BootstrapConvergenceError::ArtifactBytesMismatch { .. })
+    ));
 }
 
 #[test]
@@ -5815,6 +5845,7 @@ fn bootstrap_manifests_round_trip_canonically_and_reject_corruption() {
         source_semantics: Digest::of_bytes(b"source"),
         codegen: Digest::of_bytes(b"codegen"),
         artifact: Digest::of_bytes(b"artifact"),
+        artifact_bytes: Digest::of_bytes(b"artifact-bytes"),
     };
     let bytes = manifest.encode().unwrap();
     assert_eq!(BootstrapManifest::decode(&bytes).unwrap(), manifest);
@@ -5823,6 +5854,18 @@ fn bootstrap_manifests_round_trip_canonically_and_reject_corruption() {
         bytes,
         "manifest encoding is not canonical"
     );
+
+    let mut byte_commitment = manifest.clone();
+    byte_commitment.artifact_bytes = Digest::of_bytes(b"forged-byte-commitment");
+    let verified = StageZeroCompiler::new()
+        .compile(request("pub fn main() -> i64 { 42 }"))
+        .unwrap()
+        .artifact
+        .unwrap();
+    assert!(matches!(
+        byte_commitment.validate_verified_artifact(&verified),
+        Err(BootstrapArtifactCompatibilityError::ArtifactMismatch { .. })
+    ));
 
     let mut wrong_magic = bytes.clone();
     wrong_magic[0] ^= 1;

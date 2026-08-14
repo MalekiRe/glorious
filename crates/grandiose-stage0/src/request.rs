@@ -420,6 +420,20 @@ fn validate_bootstrap_stage(
             reason: "source limits must be positive",
         });
     }
+    // The producer is not merely descriptive manifest text: it names the
+    // exact compiler executable which accepted this request world. Keeping it
+    // equal to the build identity prevents a stage from claiming seed or
+    // predecessor provenance while actually running a different compiler.
+    if stage.producer != request.build.compiler {
+        return Err(InputError::InvalidBootstrapStage {
+            reason: "bootstrap producer must match compiler build identity",
+        });
+    }
+    if stage.ordinal == 1 && stage.expected_artifact.is_some() {
+        return Err(InputError::InvalidBootstrapStage {
+            reason: "seed stage must not pin a predecessor artifact",
+        });
+    }
     if stage.ordinal > 1 {
         let Some(expected) = stage.expected_artifact else {
             return Err(InputError::InvalidBootstrapStage {
