@@ -149,6 +149,38 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    BytesLen {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    BytesConcat {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    BytesGet {
+        dst: MirLocal,
+        bytes: MirLocal,
+        index: MirLocal,
+    },
+    BytesSlice {
+        dst: MirLocal,
+        bytes: MirLocal,
+        start: MirLocal,
+        end: MirLocal,
+    },
+    BytesFromArrayMove {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    BytesToArray {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    BytesUtf8ValidUpTo {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1169,6 +1201,13 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::TextAsBytes { dst, .. }
         | MirInstruction::CharFromU32Checked { dst, .. }
         | MirInstruction::CharToU32 { dst, .. }
+        | MirInstruction::BytesLen { dst, .. }
+        | MirInstruction::BytesConcat { dst, .. }
+        | MirInstruction::BytesGet { dst, .. }
+        | MirInstruction::BytesSlice { dst, .. }
+        | MirInstruction::BytesFromArrayMove { dst, .. }
+        | MirInstruction::BytesToArray { dst, .. }
+        | MirInstruction::BytesUtf8ValidUpTo { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3052,6 +3091,13 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::TextFromUtf8Checked { .. }
         | MirInstruction::TextAsBytes { .. } => Ok(()),
         MirInstruction::CharFromU32Checked { .. } | MirInstruction::CharToU32 { .. } => Ok(()),
+        MirInstruction::BytesLen { .. }
+        | MirInstruction::BytesConcat { .. }
+        | MirInstruction::BytesGet { .. }
+        | MirInstruction::BytesSlice { .. }
+        | MirInstruction::BytesFromArrayMove { .. }
+        | MirInstruction::BytesToArray { .. }
+        | MirInstruction::BytesUtf8ValidUpTo { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -3740,6 +3786,18 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::TextAsBytes { dst, value } => vec![*dst, *value],
         MirInstruction::CharFromU32Checked { dst, value }
         | MirInstruction::CharToU32 { dst, value } => vec![*dst, *value],
+        MirInstruction::BytesLen { dst, value }
+        | MirInstruction::BytesFromArrayMove { dst, value }
+        | MirInstruction::BytesToArray { dst, value }
+        | MirInstruction::BytesUtf8ValidUpTo { dst, value } => vec![*dst, *value],
+        MirInstruction::BytesConcat { dst, left, right } => vec![*dst, *left, *right],
+        MirInstruction::BytesGet { dst, bytes, index } => vec![*dst, *bytes, *index],
+        MirInstruction::BytesSlice {
+            dst,
+            bytes,
+            start,
+            end,
+        } => vec![*dst, *bytes, *start, *end],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -12872,206 +12930,371 @@ impl Lowerer<'_> {
                         definition: callee,
                         arguments: generic_arguments,
                         host_import,
-                    } => match self
-                        .runtime_primitives
-                        .and_then(|primitives| primitives.get(&callee))
-                        .copied()
-                    {
-                        Some(PrimitiveRole::TextByteLen) => {
-                            let [value] = arguments.as_slice() else {
-                                self.error(
-                                    "G6005",
-                                    "TextByteLen primitive must have one Text operand",
-                                );
-                                return None;
-                            };
-                            if !generic_arguments.is_empty()
-                                || self.locals[value.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                                || self.body.expression(id).ty
-                                    != Type::Scalar(crate::types::ScalarType::Usize)
-                            {
-                                self.error(
+                    } => {
+                        match self
+                            .runtime_primitives
+                            .and_then(|primitives| primitives.get(&callee))
+                            .copied()
+                        {
+                            Some(PrimitiveRole::TextByteLen) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "TextByteLen primitive must have one Text operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Usize)
+                                {
+                                    self.error(
                                     "G6005",
                                     "TextByteLen primitive ABI does not match manifest contract",
                                 );
-                                return None;
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::TextByteLen { dst, value: *value });
                             }
-                            self.instructions
-                                .push(MirInstruction::TextByteLen { dst, value: *value });
-                        }
-                        Some(PrimitiveRole::TextConcat) => {
-                            let [left, right] = arguments.as_slice() else {
-                                self.error(
-                                    "G6005",
-                                    "TextConcat primitive must have two Text operands",
-                                );
-                                return None;
-                            };
-                            if !generic_arguments.is_empty()
-                                || self.locals[left.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                                || self.locals[right.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                                || self.body.expression(id).ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                            {
-                                self.error(
-                                    "G6005",
-                                    "TextConcat primitive ABI does not match manifest contract",
-                                );
-                                return None;
+                            Some(PrimitiveRole::TextConcat) => {
+                                let [left, right] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "TextConcat primitive must have two Text operands",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[left.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                    || self.locals[right.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "TextConcat primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::TextConcat {
+                                    dst,
+                                    left: *left,
+                                    right: *right,
+                                });
                             }
-                            self.instructions.push(MirInstruction::TextConcat {
-                                dst,
-                                left: *left,
-                                right: *right,
-                            });
-                        }
-                        Some(PrimitiveRole::TextEq) => {
-                            let [left, right] = arguments.as_slice() else {
-                                self.error("G6005", "TextEq primitive must have two Text operands");
-                                return None;
-                            };
-                            if !generic_arguments.is_empty()
-                                || self.locals[left.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                                || self.locals[right.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                                || self.body.expression(id).ty
-                                    != Type::Scalar(crate::types::ScalarType::U32)
-                            {
-                                self.error(
-                                    "G6005",
-                                    "TextEq primitive ABI does not match manifest contract",
-                                );
-                                return None;
+                            Some(PrimitiveRole::TextEq) => {
+                                let [left, right] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "TextEq primitive must have two Text operands",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[left.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                    || self.locals[right.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "TextEq primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::TextEq {
+                                    dst,
+                                    left: *left,
+                                    right: *right,
+                                });
                             }
-                            self.instructions.push(MirInstruction::TextEq {
-                                dst,
-                                left: *left,
-                                right: *right,
-                            });
-                        }
-                        Some(PrimitiveRole::TextFromUtf8Checked) => {
-                            let [value] = arguments.as_slice() else {
-                                self.error(
-                                    "G6005",
-                                    "TextFromUtf8Checked primitive must have one Bytes operand",
-                                );
-                                return None;
-                            };
-                            if !generic_arguments.is_empty()
-                                || self.locals[value.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Bytes)
-                                || self.body.expression(id).ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                            {
-                                self.error("G6005", "TextFromUtf8Checked primitive ABI does not match manifest contract");
-                                return None;
+                            Some(PrimitiveRole::TextFromUtf8Checked) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "TextFromUtf8Checked primitive must have one Bytes operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                {
+                                    self.error("G6005", "TextFromUtf8Checked primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::TextFromUtf8Checked {
+                                    dst,
+                                    value: *value,
+                                });
                             }
-                            self.instructions
-                                .push(MirInstruction::TextFromUtf8Checked { dst, value: *value });
-                        }
-                        Some(PrimitiveRole::TextAsBytes) => {
-                            let [value] = arguments.as_slice() else {
-                                self.error(
-                                    "G6005",
-                                    "TextAsBytes primitive must have one Text operand",
-                                );
-                                return None;
-                            };
-                            if !generic_arguments.is_empty()
-                                || self.locals[value.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Text)
-                                || self.body.expression(id).ty
-                                    != Type::Scalar(crate::types::ScalarType::Bytes)
-                            {
-                                self.error(
+                            Some(PrimitiveRole::TextAsBytes) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "TextAsBytes primitive must have one Text operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Text)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                {
+                                    self.error(
                                     "G6005",
                                     "TextAsBytes primitive ABI does not match manifest contract",
                                 );
-                                return None;
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::TextAsBytes { dst, value: *value });
                             }
-                            self.instructions
-                                .push(MirInstruction::TextAsBytes { dst, value: *value });
-                        }
-                        Some(PrimitiveRole::CharFromU32Checked) => {
-                            let [value] = arguments.as_slice() else {
-                                self.error(
-                                    "G6005",
-                                    "CharFromU32Checked primitive must have one u32 operand",
-                                );
-                                return None;
-                            };
-                            if !generic_arguments.is_empty()
-                                || self.locals[value.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::U32)
-                                || self.body.expression(id).ty
-                                    != Type::Scalar(crate::types::ScalarType::Char)
-                            {
-                                self.error("G6005", "CharFromU32Checked primitive ABI does not match manifest contract");
-                                return None;
+                            Some(PrimitiveRole::CharFromU32Checked) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "CharFromU32Checked primitive must have one u32 operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Char)
+                                {
+                                    self.error("G6005", "CharFromU32Checked primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::CharFromU32Checked {
+                                    dst,
+                                    value: *value,
+                                });
                             }
-                            self.instructions
-                                .push(MirInstruction::CharFromU32Checked { dst, value: *value });
-                        }
-                        Some(PrimitiveRole::CharToU32) => {
-                            let [value] = arguments.as_slice() else {
-                                self.error(
-                                    "G6005",
-                                    "CharToU32 primitive must have one Char operand",
-                                );
-                                return None;
-                            };
-                            if !generic_arguments.is_empty()
-                                || self.locals[value.0 as usize].ty
-                                    != Type::Scalar(crate::types::ScalarType::Char)
-                                || self.body.expression(id).ty
-                                    != Type::Scalar(crate::types::ScalarType::U32)
-                            {
-                                self.error(
-                                    "G6005",
-                                    "CharToU32 primitive ABI does not match manifest contract",
-                                );
-                                return None;
+                            Some(PrimitiveRole::CharToU32) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "CharToU32 primitive must have one Char operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Char)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "CharToU32 primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::CharToU32 { dst, value: *value });
                             }
-                            self.instructions
-                                .push(MirInstruction::CharToU32 { dst, value: *value });
+                            Some(PrimitiveRole::BytesLen | PrimitiveRole::BytesUtf8ValidUpTo) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "Bytes length primitive must have one Bytes operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Usize)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "Bytes primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(
+                                    if matches!(
+                                        self.runtime_primitives
+                                            .and_then(|primitives| primitives.get(&callee)),
+                                        Some(PrimitiveRole::BytesLen)
+                                    ) {
+                                        MirInstruction::BytesLen { dst, value: *value }
+                                    } else {
+                                        MirInstruction::BytesUtf8ValidUpTo { dst, value: *value }
+                                    },
+                                );
+                            }
+                            Some(PrimitiveRole::BytesConcat) => {
+                                let [left, right] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "BytesConcat primitive must have two Bytes operands",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[left.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.locals[right.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                {
+                                    self.error("G6005", "BytesConcat primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::BytesConcat {
+                                    dst,
+                                    left: *left,
+                                    right: *right,
+                                });
+                            }
+                            Some(PrimitiveRole::BytesGet) => {
+                                let [bytes, index] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "BytesGet primitive must have Bytes and usize operands",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[bytes.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.locals[index.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::U8)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "BytesGet primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::BytesGet {
+                                    dst,
+                                    bytes: *bytes,
+                                    index: *index,
+                                });
+                            }
+                            Some(PrimitiveRole::BytesSlice) => {
+                                let [bytes, start, end] = arguments.as_slice() else {
+                                    self.error("G6005", "BytesSlice primitive must have Bytes and two usize operands");
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[bytes.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.locals[start.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.locals[end.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "BytesSlice primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::BytesSlice {
+                                    dst,
+                                    bytes: *bytes,
+                                    start: *start,
+                                    end: *end,
+                                });
+                            }
+                            Some(PrimitiveRole::BytesFromArrayMove) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error("G6005", "BytesFromArrayMove primitive must have one Array<u8> operand");
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Array(Box::new(Type::Scalar(
+                                            crate::types::ScalarType::U8,
+                                        )))
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                {
+                                    self.error("G6005", "BytesFromArrayMove primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::BytesFromArrayMove {
+                                    dst,
+                                    value: *value,
+                                });
+                            }
+                            Some(PrimitiveRole::BytesToArray) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "BytesToArray primitive must have one Bytes operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.body.expression(id).ty
+                                        != Type::Array(Box::new(Type::Scalar(
+                                            crate::types::ScalarType::U8,
+                                        )))
+                                {
+                                    self.error("G6005", "BytesToArray primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::BytesToArray { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::BranchBool) => {
+                                // BranchBool remains a source-level callable until
+                                // its control-flow lowering is introduced. It must
+                                // not silently select the Text primitive path.
+                                self.instructions.push(MirInstruction::Call {
+                                    dst,
+                                    callee,
+                                    generic_arguments,
+                                    trait_instance: None,
+                                    arguments,
+                                });
+                            }
+                            None => match host_import {
+                                Some(import) => self.instructions.push(MirInstruction::HostCall {
+                                    dst,
+                                    capability: import.capability,
+                                    symbol: import.symbol,
+                                    parameters: arguments
+                                        .iter()
+                                        .map(|argument| self.locals[argument.0 as usize].ty.clone())
+                                        .collect(),
+                                    result: self.body.expression(id).ty.clone(),
+                                    arguments,
+                                }),
+                                None => self.instructions.push(MirInstruction::Call {
+                                    dst,
+                                    callee,
+                                    generic_arguments,
+                                    trait_instance: None,
+                                    arguments,
+                                }),
+                            },
                         }
-                        Some(PrimitiveRole::BranchBool) => {
-                            // BranchBool remains a source-level callable until
-                            // its control-flow lowering is introduced. It must
-                            // not silently select the Text primitive path.
-                            self.instructions.push(MirInstruction::Call {
-                                dst,
-                                callee,
-                                generic_arguments,
-                                trait_instance: None,
-                                arguments,
-                            });
-                        }
-                        None => match host_import {
-                            Some(import) => self.instructions.push(MirInstruction::HostCall {
-                                dst,
-                                capability: import.capability,
-                                symbol: import.symbol,
-                                parameters: arguments
-                                    .iter()
-                                    .map(|argument| self.locals[argument.0 as usize].ty.clone())
-                                    .collect(),
-                                result: self.body.expression(id).ty.clone(),
-                                arguments,
-                            }),
-                            None => self.instructions.push(MirInstruction::Call {
-                                dst,
-                                callee,
-                                generic_arguments,
-                                trait_instance: None,
-                                arguments,
-                            }),
-                        },
-                    },
+                    }
                     CoreKind::TraitMethod {
                         evidence,
                         method: callee,

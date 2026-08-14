@@ -37,6 +37,13 @@ pub enum PrimitiveRole {
     CharFromU32Checked,
     /// Canonical Unicode scalar extraction to the G1 `u32` character ABI.
     CharToU32,
+    BytesLen,
+    BytesConcat,
+    BytesGet,
+    BytesSlice,
+    BytesFromArrayMove,
+    BytesToArray,
+    BytesUtf8ValidUpTo,
 }
 
 impl PrimitiveRole {
@@ -50,6 +57,13 @@ impl PrimitiveRole {
             Self::TextAsBytes => "text-as-bytes",
             Self::CharFromU32Checked => "char-from-u32-checked",
             Self::CharToU32 => "char-to-u32",
+            Self::BytesLen => "bytes-len",
+            Self::BytesConcat => "bytes-concat",
+            Self::BytesGet => "bytes-get",
+            Self::BytesSlice => "bytes-slice",
+            Self::BytesFromArrayMove => "bytes-from-array-move",
+            Self::BytesToArray => "bytes-to-array",
+            Self::BytesUtf8ValidUpTo => "bytes-utf8-valid-up-to",
         }
     }
 
@@ -63,6 +77,13 @@ impl PrimitiveRole {
             "text-as-bytes" => Self::TextAsBytes,
             "char-from-u32-checked" => Self::CharFromU32Checked,
             "char-to-u32" => Self::CharToU32,
+            "bytes-len" => Self::BytesLen,
+            "bytes-concat" => Self::BytesConcat,
+            "bytes-get" => Self::BytesGet,
+            "bytes-slice" => Self::BytesSlice,
+            "bytes-from-array-move" => Self::BytesFromArrayMove,
+            "bytes-to-array" => Self::BytesToArray,
+            "bytes-utf8-valid-up-to" => Self::BytesUtf8ValidUpTo,
             _ => return None,
         })
     }
@@ -290,6 +311,82 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::BytesLen | PrimitiveRole::BytesUtf8ValidUpTo => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Bytes)],
+            result: Type::Scalar(ScalarType::Usize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::BytesConcat => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                Type::Scalar(ScalarType::Bytes),
+                Type::Scalar(ScalarType::Bytes),
+            ],
+            result: Type::Scalar(ScalarType::Bytes),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::BytesGet => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                Type::Scalar(ScalarType::Bytes),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            result: Type::Scalar(ScalarType::U8),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::BytesSlice => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                Type::Scalar(ScalarType::Bytes),
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            result: Type::Scalar(ScalarType::Bytes),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::BytesFromArrayMove => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Array(Box::new(Type::Scalar(ScalarType::U8)))],
+            result: Type::Scalar(ScalarType::Bytes),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::BytesToArray => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Bytes)],
+            result: Type::Array(Box::new(Type::Scalar(ScalarType::U8))),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
     }
 }
 fn manifest_digest(
@@ -309,6 +406,13 @@ fn manifest_digest(
             PrimitiveRole::TextAsBytes => 5,
             PrimitiveRole::CharFromU32Checked => 6,
             PrimitiveRole::CharToU32 => 7,
+            PrimitiveRole::BytesLen => 8,
+            PrimitiveRole::BytesConcat => 9,
+            PrimitiveRole::BytesGet => 10,
+            PrimitiveRole::BytesSlice => 11,
+            PrimitiveRole::BytesFromArrayMove => 12,
+            PrimitiveRole::BytesToArray => 13,
+            PrimitiveRole::BytesUtf8ValidUpTo => 14,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

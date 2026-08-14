@@ -132,6 +132,39 @@ fn manifest_can_grant_a_strict_runtime_leaf_subset() {
 }
 
 #[test]
+fn bytes_runtime_leaves_bind_by_exact_identity_and_abi() {
+    let standard = PackageKey("std@0.1.0".into());
+    let source = "pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u8 { () }";
+    let package_interface = interface(standard.clone(), source);
+    let signatures = ElaboratedInterface::elaborate(&package_interface);
+    let input = RuntimeManifestInput {
+        standard_library: standard.clone(),
+        selectors: vec![PrimitiveSelector {
+            role: PrimitiveRole::BytesGet,
+            module_path: "crate".into(),
+            name: "__g1_bytes_get".into(),
+        }],
+    };
+    let manifest = input
+        .bind(vec![package_interface], &signatures)
+        .expect("the exact Bytes and usize to u8 ABI must bind");
+    assert!(manifest.primitives.contains_key(&PrimitiveRole::BytesGet));
+
+    let invalid_interface = interface(
+        standard.clone(),
+        "pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u32 { () }",
+    );
+    let invalid_signatures = ElaboratedInterface::elaborate(&invalid_interface);
+    assert!(matches!(
+        input.bind(vec![invalid_interface], &invalid_signatures),
+        Err(ManifestError::IncompatibleSignature {
+            role: PrimitiveRole::BytesGet,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn primitive_manifest_rejects_signature_mismatch_before_authority_freezes() {
     let standard = PackageKey("bad-std@0.1.0".into());
     let interface = interface(
