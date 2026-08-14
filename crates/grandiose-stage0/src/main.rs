@@ -282,6 +282,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                             PrimitiveRole::IntBitXor,
                             PrimitiveRole::IntBitNot,
                             PrimitiveRole::IntConvertCheckedToI64,
+                            PrimitiveRole::IntConvertWrappingToI64,
                             PrimitiveRole::IntBitXor,
                         ]
                         .map(PrimitiveRole::selector_name)
