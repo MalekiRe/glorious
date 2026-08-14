@@ -1274,6 +1274,52 @@ impl Elaborator<'_> {
                         }
                     }
                 }
+                crate::header::HeaderType::Application(base, arguments) => {
+                    let crate::header::HeaderType::Path(path) = base.as_ref() else {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure effect application is not a named effect",
+                        );
+                        self.recovered = true;
+                        continue;
+                    };
+                    let ResolutionState::Resolved(definition) =
+                        self.index
+                            .resolve_path(DefinitionNamespace::Effect, self.module, path)
+                    else {
+                        self.error(span, "G4115", "closure effect is unresolved");
+                        self.recovered = true;
+                        continue;
+                    };
+                    let Some(ElaboratedHeader::Effect(declaration)) =
+                        self.signatures.definitions.get(&definition)
+                    else {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure effect target is not an effect declaration",
+                        );
+                        self.recovered = true;
+                        continue;
+                    };
+                    if declaration.generics != arguments.len() as u32 {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure effect application has the wrong number of arguments",
+                        );
+                        self.recovered = true;
+                        continue;
+                    }
+                    resolved.effects.insert(EffectInstance {
+                        definition,
+                        arguments: arguments
+                            .iter()
+                            .map(|argument| self.header_type(argument))
+                            .collect(),
+                    });
+                }
                 crate::header::HeaderType::Projection {
                     subject,
                     trait_path,

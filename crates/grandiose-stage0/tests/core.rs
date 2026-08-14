@@ -395,6 +395,42 @@ fn concrete_associated_effect_rows_normalize_in_typed_closure_contracts() {
 }
 
 #[test]
+fn typed_closure_contracts_preserve_generic_effect_instances() {
+    let package = PackageKey("core-closure-generic-effect@0.1.0".into());
+    let source = "effect Trace<T> { note(value: T); } pub fn main() -> i64 { let worker = () -> i64 / { Trace<Text> } { 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let main = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let trace = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Trace"))
+        .expect("Trace definition")
+        .key;
+    let body = BodySyntax::parse(&lexed, source, main.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        main,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        &expression.ty,
+        grandiose_stage0::Type::Callable { effects, .. }
+            if effects.effects.iter().any(|effect| effect.definition == trace
+                && effect.arguments == [grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::Text)])
+    )));
+}
+
+#[test]
 fn concrete_associated_effect_rows_normalize_at_call_boundaries() {
     let package = PackageKey("core-associated-effect-row-normalization@0.1.0".into());
     let source = "effect Trace { note(); } trait Capability { type Effects: EffectRow; } struct Value {} impl Capability for Value { type Effects = {Trace}; } pub fn worker() -> i64 / { <Value as Capability>::Effects } { 1 } pub fn main() -> i64 / { Trace } { worker() }";
