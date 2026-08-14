@@ -57,7 +57,9 @@ pub use header::{
     NominalFieldHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitMethodHeader,
     TraitRefHeader, WhereBoundHeader,
 };
-pub use identity::{DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId};
+pub use identity::{
+    DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId, implementation_method_key,
+};
 pub use interface::{
     Definition, DefinitionNamespace, InterfaceDiagnostic, InterfaceSet, PackageInterface,
 };

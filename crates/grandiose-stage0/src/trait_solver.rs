@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
     ElaboratedImplementation, ElaboratedInterface, ElaboratedTraitReference, Type,
+    implementation_method_key,
 };
 
 pub const DEFAULT_MAX_TRAIT_DEPTH: u32 = 128;
@@ -62,8 +63,12 @@ pub enum TraitProjectionAnswer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TraitMethodAnswer {
     Selected {
+        /// Stable identity of the selected implementation method. This is
+        /// separate from its implementation evidence because later body/MIR
+        /// products are callable functions, not implementation declarations.
+        method: DefKey,
         evidence: DefKey,
-        signature: CallableSignature,
+        signature: Box<CallableSignature>,
     },
     Refuted {
         evidence: DefKey,
@@ -231,9 +236,9 @@ impl TraitSolver {
     }
 
     /// Select an implementation method and instantiate both the implementation
-    /// binders and method-local generic binders. The returned declaration key
-    /// is the evidence identity that later Core/MIR lowering can carry without
-    /// repeating source-shaped impl lookup.
+    /// binders and method-local generic binders. The returned method identity
+    /// and implementation evidence let later Core/MIR lowering name the
+    /// callable body without repeating source-shaped impl lookup.
     pub fn select_method(
         &mut self,
         goal: TraitGoal,
@@ -262,8 +267,9 @@ impl TraitSolver {
                     substitution.insert(rule.implementation.generics + offset as u32, argument);
                 }
                 TraitMethodAnswer::Selected {
+                    method: implementation_method_key(evidence, name),
                     evidence,
-                    signature: substitute_callable_signature(method, &substitution),
+                    signature: Box::new(substitute_callable_signature(method, &substitution)),
                 }
             }
             TraitAnswer::Refuted { evidence } => TraitMethodAnswer::Refuted { evidence },

@@ -82,6 +82,17 @@ pub struct ModuleKey {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DefKey(pub Digest);
 
+/// Stable identity for one named method owned by an implementation. The
+/// implementation key is itself contract-derived, so executable method-body
+/// edits cannot churn selection evidence or the eventual lowered callable.
+pub fn implementation_method_key(implementation: DefKey, name: &str) -> DefKey {
+    DefKey(Digest::of_parts([
+        b"grandiose-stage0-implementation-method-v1".as_slice(),
+        implementation.0.as_bytes().as_slice(),
+        name.as_bytes(),
+    ]))
+}
+
 /// Database-local revision identity. Unlike a fingerprint it may not cross
 /// process boundaries and is checked against its owning database.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

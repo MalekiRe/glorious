@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey, InterfaceSet,
     LexedFile, PackageKey, ScalarType, TraitAnswer, TraitGoal, TraitMethodAnswer,
-    TraitProjectionAnswer, TraitSolver, Type,
+    TraitProjectionAnswer, TraitSolver, Type, implementation_method_key,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -213,10 +213,16 @@ fn method_selection_substitutes_impl_and_method_generic_arguments() {
         "convert",
         &[Type::Scalar(ScalarType::Text)],
     );
+    let implementation = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.kind == grandiose_stage0::DeclarationKind::Implementation)
+        .expect("implementation definition");
     assert!(matches!(
         answer,
-        TraitMethodAnswer::Selected { ref signature, .. }
-            if signature.parameters == vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)]
+        TraitMethodAnswer::Selected { method, ref signature, .. }
+            if method == implementation_method_key(implementation.key, "convert")
+                && signature.parameters == vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)]
                 && signature.result == Type::Tuple(vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)])
     ));
 }
