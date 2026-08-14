@@ -325,6 +325,10 @@ impl<Q: Query> QueryEngine<Q> {
         cancellation: &CancellationToken,
         budget: &Arc<Budget>,
     ) -> Result<QueryValue<Q::Value>, QueryFailure<Q::Error>> {
+        // A cached result is still a request publication. Obsolete editor
+        // work must not observe it merely because another request populated a
+        // memo first.
+        cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
         if let Some(entry) = self.memo.get(snapshot, &key) {
             self.record_execution(
                 snapshot,
@@ -344,6 +348,7 @@ impl<Q: Query> QueryEngine<Q> {
                         .query
                         .can_reuse(&key, &entry, &parent_snapshot, snapshot) =>
                 {
+                    cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
                     self.memo
                         .publish_reused(snapshot, key.clone(), entry.clone());
                     self.record_execution(

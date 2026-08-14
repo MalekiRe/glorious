@@ -335,6 +335,10 @@ fn cancelled_query_execution_never_publishes_a_memo_entry() {
             .value,
         1
     );
+    assert!(matches!(
+        engine.execute(&snapshot, "one".into(), &cancelled, &budget),
+        Err(QueryFailure::Cancelled)
+    ));
 }
 
 #[test]
