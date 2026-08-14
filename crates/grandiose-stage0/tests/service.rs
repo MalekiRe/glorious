@@ -4171,6 +4171,19 @@ fn service_handles_an_effectful_function_value_through_a_dynamic_frame() {
             .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
         "effectful function value must retain an indirect VM call"
     );
+    let Some(VmInstruction::MakeCallable { dst, .. }) = entry
+        .instructions
+        .iter()
+        .find(|instruction| matches!(instruction, VmInstruction::MakeCallable { .. }))
+    else {
+        panic!("effectful function value must materialize a callable")
+    };
+    let VmType::Callable { effects, .. } = &entry.registers[*dst as usize] else {
+        panic!("callable construction destination must retain callable ABI")
+    };
+    assert_eq!(effects.effects.len(), 1);
+    assert!(effects.projections.is_empty());
+    assert!(effects.tail.is_none());
     assert_eq!(artifact.run_i64().unwrap(), 42);
 }
 

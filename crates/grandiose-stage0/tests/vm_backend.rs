@@ -5,10 +5,10 @@ use grandiose_stage0::{
     MirCleanupPlan, MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram,
     MirTerminator, PackageKey, PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture,
     VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof,
-    VmContinuationPolicy, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
-    VmPattern, VmPatternField, VmType, decode_and_verify_artifact, decode_and_verify_program,
-    decode_artifact, decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program,
-    verify_vm, verify_vm_program,
+    VmContinuationPolicy, VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument,
+    VmInstruction, VmPattern, VmPatternField, VmType, decode_and_verify_artifact,
+    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
+    encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -2377,6 +2377,7 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     let continuation = VmType::Callable {
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
     };
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
@@ -2438,6 +2439,7 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
             registers: vec![VmType::Callable {
                 parameters: vec![VmType::I64],
                 result: Box::new(VmType::I64),
+                effects: Box::<VmEffectRow>::default(),
             }],
             instructions: vec![VmInstruction::CaptureResumption { dst: 0 }],
         },
@@ -2457,6 +2459,7 @@ fn verifier_rejects_snapshot_capture_from_a_terminal_handler_frame() {
     let continuation = VmType::Callable {
         parameters: vec![VmType::Unit],
         result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
     };
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
@@ -2499,6 +2502,7 @@ fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
     let continuation = VmType::Callable {
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
     };
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
@@ -2868,6 +2872,7 @@ fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
     let snapshot = VmType::Callable {
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
     };
     // This is deliberately forged bytecode rather than lowered source.  The
     // first handler captures a replay capability, copies it, and cancels its
@@ -3361,6 +3366,7 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
             VmType::Callable {
                 parameters: vec![],
                 result: Box::new(VmType::I64),
+                effects: Box::<VmEffectRow>::default(),
             },
             VmType::I64,
         ],
@@ -3437,6 +3443,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
             VmType::Callable {
                 parameters: vec![],
                 result: Box::new(VmType::I64),
+                effects: Box::<VmEffectRow>::default(),
             },
             VmType::I64,
         ],
@@ -3548,10 +3555,11 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
 #[test]
 fn callable_type_decoder_limits_recursive_hostile_encodings() {
     let mut ty = VmType::I64;
-    for _ in 0..130 {
+    for _ in 0..98 {
         ty = VmType::Callable {
             parameters: vec![],
             result: Box::new(ty),
+            effects: Box::<VmEffectRow>::default(),
         };
     }
     let candidate = CandidateVmArtifact {
@@ -3570,8 +3578,169 @@ fn callable_type_decoder_limits_recursive_hostile_encodings() {
         decode_artifact(&encode_artifact(&candidate)),
         Err(VmArtifactError::DecodeLimit {
             kind: "callable type nesting",
-            limit: 128,
+            limit: 96,
         })
+    ));
+}
+
+#[test]
+fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
+    let effect_a = DefKey(Digest::of_bytes(b"callable-effect-row-a"));
+    let effect_b = DefKey(Digest::of_bytes(b"callable-effect-row-b"));
+    let callable = |effect| VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::new(VmEffectRow {
+            effects: vec![grandiose_stage0::VmEffectInstance {
+                definition: effect,
+                arguments: vec![],
+            }],
+            projections: vec![],
+            tail: None,
+        }),
+    };
+    let expected = callable(effect_a);
+    let found = callable(effect_b);
+
+    // A standalone artifact cannot pass an effectful callable where a host
+    // ABI requests the same parameter/result shape with another effect row.
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"callable-effect-artifact")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![found.clone(), VmType::I64],
+            instructions: vec![
+                VmInstruction::MakeCallable {
+                    dst: 0,
+                    callee: DefKey(Digest::of_bytes(b"unresolved-standalone-callable")),
+                    captures: vec![],
+                    environment: None,
+                },
+                VmInstruction::HostCall {
+                    dst: 1,
+                    capability: "test".into(),
+                    symbol: "accept".into(),
+                    parameters: vec![expected.clone()],
+                    result: VmType::I64,
+                    arguments: vec![0],
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"callable-effect-artifact-stale"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(artifact),
+        Err(VmArtifactError::TypeMismatch { .. })
+    ));
+
+    // The independent program verifier performs the same exact comparison at
+    // a direct boundary, including rows nested in callable parameter types.
+    let entry = DefKey(Digest::of_bytes(b"callable-effect-entry"));
+    let target = DefKey(Digest::of_bytes(b"callable-effect-target"));
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([
+            (
+                entry,
+                VmFunction {
+                    definition: entry,
+                    captures: 0,
+                    parameters: 1,
+                    registers: vec![found, VmType::Unit],
+                    instructions: vec![
+                        VmInstruction::Call {
+                            dst: 1,
+                            callee: target,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+            (
+                target,
+                VmFunction {
+                    definition: target,
+                    captures: 0,
+                    parameters: 1,
+                    registers: vec![expected, VmType::Unit],
+                    instructions: vec![
+                        VmInstruction::ConstUnit { dst: 1 },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+        ]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"callable-effect-program-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::TypeMismatch { .. })
+    ));
+}
+
+#[test]
+fn verifier_rejects_noncanonical_callable_effect_rows() {
+    let first = DefKey(Digest::of_bytes(b"callable-row-first"));
+    let second = DefKey(Digest::of_bytes(b"callable-row-second"));
+    let (greater, lesser) = if first.0.as_bytes() > second.0.as_bytes() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let malformed = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::new(VmEffectRow {
+            effects: vec![
+                grandiose_stage0::VmEffectInstance {
+                    definition: greater,
+                    arguments: vec![],
+                },
+                grandiose_stage0::VmEffectInstance {
+                    definition: lesser,
+                    arguments: vec![],
+                },
+            ],
+            projections: vec![],
+            tail: None,
+        }),
+    };
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"noncanonical-callable-effect-row")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![malformed, VmType::I64],
+            instructions: vec![
+                VmInstruction::MakeCallable {
+                    dst: 0,
+                    callee: DefKey(Digest::of_bytes(b"malformed-callable-row-target")),
+                    captures: vec![],
+                    environment: None,
+                },
+                VmInstruction::ConstI64 { dst: 1, value: 42 },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"noncanonical-callable-effect-row-stale"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(artifact),
+        Err(VmArtifactError::NonCanonicalEncoding)
     ));
 }
 

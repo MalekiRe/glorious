@@ -59,6 +59,11 @@ pub enum VmType {
     Callable {
         parameters: Vec<VmType>,
         result: Box<VmType>,
+        /// The exact outward effect contract of this callable value.  This is
+        /// part of callable identity: `() -> I64` and `() -> I64 ! {io}` are
+        /// not interchangeable at an indirect-call or frozen-artifact
+        /// boundary.
+        effects: Box<VmEffectRow>,
     },
     Reference {
         unique: bool,
@@ -120,7 +125,7 @@ pub enum VmGenericArgument {
 /// The vector order is canonical: named instances and delayed projections are
 /// both preserved so bytecode fingerprinting and artifact decoding have no
 /// dependency on compiler-side inference state.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VmEffectRow {
     pub effects: Vec<VmEffectInstance>,
     pub projections: Vec<VmEffectRowProjection>,
@@ -847,8 +852,10 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// decoded safely with these independent boundary proofs. Schema 35 seals
 /// structural u32 expressions and all const kinds inside nominal layouts and
 /// effect protocol identities. Schema 36 canonically represents IEEE-754 NaN
-/// immediates, preventing host/payload-dependent artifact identities.
-pub const STAGE0_VM_SCHEMA: u32 = 36;
+/// immediates, preventing host/payload-dependent artifact identities. Schema
+/// 37 makes canonical outward effect rows part of every callable VM type, so
+/// effect-distinct function values cannot collapse across a frozen boundary.
+pub const STAGE0_VM_SCHEMA: u32 = 37;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -858,7 +865,10 @@ const MAX_DECODE_FUNCTIONS: u64 = STAGE0_MAX_DECODE_FUNCTIONS;
 const MAX_DECODE_REGISTERS: u64 = STAGE0_MAX_DECODE_REGISTERS;
 const MAX_DECODE_INSTRUCTIONS: u64 = STAGE0_MAX_DECODE_INSTRUCTIONS;
 const MAX_DECODE_TEXT_BYTES: u64 = STAGE0_MAX_DECODE_TEXT_BYTES;
-const MAX_DECODE_TYPE_DEPTH: u64 = 128;
+// Callable ABI rows make each decoded type frame materially larger. Keep the
+// hostile-artifact bound below the process stack budget while still allowing
+// far deeper type nesting than any Stage 0 source construct needs.
+const MAX_DECODE_TYPE_DEPTH: u64 = 96;
 
 pub fn encode_artifact(artifact: &CandidateVmArtifact) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -1554,13 +1564,17 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         Type::Callable {
-            parameters, result, ..
+            parameters,
+            result,
+            effects,
+            ..
         } => Ok(VmType::Callable {
             parameters: parameters
                 .iter()
                 .map(vm_type)
                 .collect::<Result<Vec<_>, _>>()?,
             result: Box::new(vm_type(result)?),
+            effects: Box::new(vm_effect_row(effects)?),
         }),
         Type::Reference {
             mutability,
@@ -1572,6 +1586,76 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         }),
         value => Err(Box::new(value.clone())),
     }
+}
+
+/// Lower a Core effect row into its source-free, canonical VM identity.  The
+/// same representation is used for protocol arguments and callable ABI rows;
+/// keeping one conversion prevents the two frozen contracts from drifting.
+fn vm_effect_row(value: &crate::types::EffectRow) -> Result<VmEffectRow, Box<Type>> {
+    let value = value.clone().canonicalized();
+    Ok(VmEffectRow {
+        effects: value
+            .effects
+            .iter()
+            .map(|instance| {
+                Ok::<VmEffectInstance, Box<Type>>(VmEffectInstance {
+                    definition: instance.definition,
+                    arguments: instance
+                        .arguments
+                        .iter()
+                        .map(vm_effect_generic_argument)
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        projections: value
+            .projections
+            .iter()
+            .map(|projection| {
+                Ok::<VmEffectRowProjection, Box<Type>>(VmEffectRowProjection {
+                    subject: vm_type(&projection.subject)?,
+                    trait_definition: projection.trait_definition,
+                    trait_arguments: projection
+                        .trait_arguments
+                        .iter()
+                        .map(vm_effect_generic_argument)
+                        .collect::<Result<_, _>>()?,
+                    name: projection.name.clone(),
+                    item_arguments: projection
+                        .item_arguments
+                        .iter()
+                        .map(vm_effect_generic_argument)
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        tail: value.tail,
+    })
+}
+
+fn vm_effect_generic_argument(
+    value: &crate::GenericArgument,
+) -> Result<VmGenericArgument, Box<Type>> {
+    use crate::GenericArgument;
+
+    Ok(match value {
+        GenericArgument::Type(value) => VmGenericArgument::Type(vm_type(value)?),
+        GenericArgument::EffectRow(value) => VmGenericArgument::EffectRow(vm_effect_row(value)?),
+        GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
+        GenericArgument::ConstU32(value) => VmGenericArgument::ConstU32(*value),
+        GenericArgument::ConstU32Expr(value) => VmGenericArgument::ConstU32Expr(value.clone()),
+        GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
+            lower: value.lower,
+            upper: value.upper,
+        },
+        GenericArgument::ConstGeneric { index, kind } => VmGenericArgument::ConstGeneric {
+            index: *index,
+            kind: *kind,
+        },
+        GenericArgument::ConstProjection { .. } | GenericArgument::ConstInfer { .. } => {
+            return Err(Box::new(Type::Error));
+        }
+    })
 }
 
 /// VM nominal layouts remain type-shaped. Mixed-kind nominal identity is
@@ -1693,12 +1777,17 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::ConstGeneric { .. } => 15,
     });
     match value {
-        VmType::Callable { parameters, result } => {
+        VmType::Callable {
+            parameters,
+            result,
+            effects,
+        } => {
             output.extend_from_slice(&(parameters.len() as u64).to_le_bytes());
             for parameter in parameters {
                 encode_type(parameter, output);
             }
             encode_type(result, output);
+            encode_vm_effect_row(effects, output);
         }
         VmType::Tuple(fields) => {
             output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
@@ -1825,31 +1914,7 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
         }
         VmGenericArgument::EffectRow(value) => {
             output.push(1);
-            output.extend_from_slice(&(value.effects.len() as u64).to_le_bytes());
-            for effect in &value.effects {
-                output.extend_from_slice(&effect.definition.0.as_bytes());
-                encode_vm_generic_arguments(&effect.arguments, output);
-            }
-            output.extend_from_slice(&(value.projections.len() as u64).to_le_bytes());
-            for projection in &value.projections {
-                encode_type(&projection.subject, output);
-                output.extend_from_slice(&projection.trait_definition.0.as_bytes());
-                encode_vm_generic_arguments(&projection.trait_arguments, output);
-                output.extend_from_slice(&(projection.name.len() as u64).to_le_bytes());
-                output.extend_from_slice(projection.name.as_bytes());
-                encode_vm_generic_arguments(&projection.item_arguments, output);
-            }
-            match value.tail {
-                Some(EffectTail::Infer(variable)) => {
-                    output.push(0);
-                    output.extend_from_slice(&variable.0.to_le_bytes());
-                }
-                Some(EffectTail::Generic(index)) => {
-                    output.push(1);
-                    output.extend_from_slice(&index.to_le_bytes());
-                }
-                None => output.push(2),
-            }
+            encode_vm_effect_row(value, output);
         }
         VmGenericArgument::Lifetime(value) => {
             output.push(2);
@@ -1891,6 +1956,35 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
             output.extend_from_slice(&index.to_le_bytes());
             output.push(encode_const_kind(*kind));
         }
+    }
+}
+
+#[inline(never)]
+fn encode_vm_effect_row(value: &VmEffectRow, output: &mut Vec<u8>) {
+    output.extend_from_slice(&(value.effects.len() as u64).to_le_bytes());
+    for effect in &value.effects {
+        output.extend_from_slice(&effect.definition.0.as_bytes());
+        encode_vm_generic_arguments(&effect.arguments, output);
+    }
+    output.extend_from_slice(&(value.projections.len() as u64).to_le_bytes());
+    for projection in &value.projections {
+        encode_type(&projection.subject, output);
+        output.extend_from_slice(&projection.trait_definition.0.as_bytes());
+        encode_vm_generic_arguments(&projection.trait_arguments, output);
+        output.extend_from_slice(&(projection.name.len() as u64).to_le_bytes());
+        output.extend_from_slice(projection.name.as_bytes());
+        encode_vm_generic_arguments(&projection.item_arguments, output);
+    }
+    match value.tail {
+        Some(EffectTail::Infer(variable)) => {
+            output.push(0);
+            output.extend_from_slice(&variable.0.to_le_bytes());
+        }
+        Some(EffectTail::Generic(index)) => {
+            output.push(1);
+            output.extend_from_slice(&index.to_le_bytes());
+        }
+        None => output.push(2),
     }
 }
 
@@ -2090,6 +2184,7 @@ impl<'a> Decoder<'a> {
                 Ok(VmType::Callable {
                     parameters,
                     result: Box::new(self.vm_type_at_depth(depth + 1)?),
+                    effects: Box::new(self.vm_effect_row_at_depth(depth + 1)?),
                 })
             }
             7 => {
@@ -2215,58 +2310,9 @@ impl<'a> Decoder<'a> {
         }
         match self.byte()? {
             0 => Ok(VmGenericArgument::Type(self.vm_type_at_depth(depth + 1)?)),
-            1 => {
-                let effect_count = self.count("effect row instances", MAX_DECODE_REGISTERS)?;
-                let mut effects = Vec::with_capacity(effect_count);
-                for _ in 0..effect_count {
-                    effects.push(VmEffectInstance {
-                        definition: self.def_key()?,
-                        arguments: self.vm_generic_arguments_at_depth(depth + 1)?,
-                    });
-                }
-                if effects.windows(2).any(|pair| {
-                    vm_effect_instance_key(&pair[0]) >= vm_effect_instance_key(&pair[1])
-                }) {
-                    return Err(VmArtifactError::NonCanonicalEncoding);
-                }
-                let projection_count =
-                    self.count("effect row projections", MAX_DECODE_REGISTERS)?;
-                let mut projections = Vec::with_capacity(projection_count);
-                for _ in 0..projection_count {
-                    let subject = self.vm_type_at_depth(depth + 1)?;
-                    let trait_definition = self.def_key()?;
-                    let trait_arguments = self.vm_generic_arguments_at_depth(depth + 1)?;
-                    let name = self.text()?;
-                    let item_arguments = self.vm_generic_arguments_at_depth(depth + 1)?;
-                    projections.push(VmEffectRowProjection {
-                        subject,
-                        trait_definition,
-                        trait_arguments,
-                        name,
-                        item_arguments,
-                    });
-                }
-                if projections.windows(2).any(|pair| {
-                    vm_effect_row_projection_key(&pair[0]) >= vm_effect_row_projection_key(&pair[1])
-                }) {
-                    return Err(VmArtifactError::NonCanonicalEncoding);
-                }
-                let tail = match self.byte()? {
-                    0 => Some(EffectTail::Infer(crate::types::EffectVar(self.u32()?))),
-                    1 => Some(EffectTail::Generic(self.u32()?)),
-                    2 => None,
-                    _ => {
-                        return Err(VmArtifactError::MalformedEncoding {
-                            message: "invalid effect row tail tag",
-                        });
-                    }
-                };
-                Ok(VmGenericArgument::EffectRow(VmEffectRow {
-                    effects,
-                    projections,
-                    tail,
-                }))
-            }
+            1 => Ok(VmGenericArgument::EffectRow(
+                self.vm_effect_row_at_depth(depth + 1)?,
+            )),
             2 => Ok(VmGenericArgument::Lifetime(match self.byte()? {
                 0 => Lifetime::Static,
                 1 => Lifetime::Generic(self.u32()?),
@@ -2304,6 +2350,65 @@ impl<'a> Decoder<'a> {
                 message: "unknown VM effect argument tag",
             }),
         }
+    }
+    #[inline(never)]
+    fn vm_effect_row_at_depth(&mut self, depth: u64) -> Result<VmEffectRow, VmArtifactError> {
+        if depth > MAX_DECODE_TYPE_DEPTH {
+            return Err(VmArtifactError::DecodeLimit {
+                kind: "effect row nesting",
+                limit: MAX_DECODE_TYPE_DEPTH,
+            });
+        }
+        let effect_count = self.count("effect row instances", MAX_DECODE_REGISTERS)?;
+        let mut effects = Vec::with_capacity(effect_count);
+        for _ in 0..effect_count {
+            effects.push(VmEffectInstance {
+                definition: self.def_key()?,
+                arguments: self.vm_generic_arguments_at_depth(depth + 1)?,
+            });
+        }
+        let projection_count = self.count("effect row projections", MAX_DECODE_REGISTERS)?;
+        let mut projections = Vec::with_capacity(projection_count);
+        for _ in 0..projection_count {
+            let subject = self.vm_type_at_depth(depth + 1)?;
+            let trait_definition = self.def_key()?;
+            let trait_arguments = self.vm_generic_arguments_at_depth(depth + 1)?;
+            let name = self.text()?;
+            let item_arguments = self.vm_generic_arguments_at_depth(depth + 1)?;
+            projections.push(VmEffectRowProjection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                item_arguments,
+            });
+        }
+        let tail = match self.byte()? {
+            0 => Some(EffectTail::Infer(crate::types::EffectVar(self.u32()?))),
+            1 => Some(EffectTail::Generic(self.u32()?)),
+            2 => None,
+            _ => {
+                return Err(VmArtifactError::MalformedEncoding {
+                    message: "invalid effect row tail tag",
+                });
+            }
+        };
+        let row = VmEffectRow {
+            effects,
+            projections,
+            tail,
+        };
+        if row
+            .effects
+            .windows(2)
+            .any(|pair| vm_effect_instance_key(&pair[0]) >= vm_effect_instance_key(&pair[1]))
+            || row.projections.windows(2).any(|pair| {
+                vm_effect_row_projection_key(&pair[0]) >= vm_effect_row_projection_key(&pair[1])
+            })
+        {
+            return Err(VmArtifactError::NonCanonicalEncoding);
+        }
+        Ok(row)
     }
     fn pattern(&mut self) -> Result<VmPattern, VmArtifactError> {
         self.pattern_at_depth(0)
@@ -3124,7 +3229,10 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                     }
                     None => {}
                 }
-                let VmType::Callable { parameters, result } = register_type(function, *dst)? else {
+                let VmType::Callable {
+                    parameters, result, ..
+                } = register_type(function, *dst)?
+                else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
                 };
                 if target.parameters != target.captures + parameters.len() as u32 {
@@ -3255,16 +3363,19 @@ fn unify_call_type(
         VmType::Callable {
             parameters: expected_parameters,
             result: expected_result,
+            effects: expected_effects,
         } => match found {
             VmType::Callable {
                 parameters: found_parameters,
                 result: found_result,
+                effects: found_effects,
             } if expected_parameters.len() == found_parameters.len() => {
                 expected_parameters
                     .iter()
                     .zip(found_parameters)
                     .all(|(expected, found)| unify_call_type(expected, found, bindings))
                     && unify_call_type(expected_result, found_result, bindings)
+                    && unify_vm_effect_row(expected_effects, found_effects, bindings)
             }
             _ => false,
         },
@@ -3295,17 +3406,140 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
                 .map(|argument| instantiate_vm_type(argument, bindings))
                 .collect(),
         },
-        VmType::Callable { parameters, result } => VmType::Callable {
+        VmType::Callable {
+            parameters,
+            result,
+            effects,
+        } => VmType::Callable {
             parameters: parameters
                 .iter()
                 .map(|parameter| instantiate_vm_type(parameter, bindings))
                 .collect(),
             result: Box::new(instantiate_vm_type(result, bindings)),
+            effects: Box::new(instantiate_vm_effect_row(effects, bindings)),
         },
         VmType::Reference { unique, referent } => VmType::Reference {
             unique: *unique,
             referent: Box::new(instantiate_vm_type(referent, bindings)),
         },
+        value => value.clone(),
+    }
+}
+
+fn unify_vm_effect_row(
+    expected: &VmEffectRow,
+    found: &VmEffectRow,
+    bindings: &mut BTreeMap<u32, VmType>,
+) -> bool {
+    expected.tail == found.tail
+        && expected.effects.len() == found.effects.len()
+        && expected.projections.len() == found.projections.len()
+        && expected
+            .effects
+            .iter()
+            .zip(&found.effects)
+            .all(|(expected, found)| {
+                expected.definition == found.definition
+                    && expected.arguments.len() == found.arguments.len()
+                    && expected
+                        .arguments
+                        .iter()
+                        .zip(&found.arguments)
+                        .all(|(expected, found)| {
+                            unify_vm_generic_argument(expected, found, bindings)
+                        })
+            })
+        && expected
+            .projections
+            .iter()
+            .zip(&found.projections)
+            .all(|(expected, found)| {
+                unify_call_type(&expected.subject, &found.subject, bindings)
+                    && expected.trait_definition == found.trait_definition
+                    && expected.name == found.name
+                    && expected.trait_arguments.len() == found.trait_arguments.len()
+                    && expected.item_arguments.len() == found.item_arguments.len()
+                    && expected
+                        .trait_arguments
+                        .iter()
+                        .zip(&found.trait_arguments)
+                        .all(|(expected, found)| {
+                            unify_vm_generic_argument(expected, found, bindings)
+                        })
+                    && expected
+                        .item_arguments
+                        .iter()
+                        .zip(&found.item_arguments)
+                        .all(|(expected, found)| {
+                            unify_vm_generic_argument(expected, found, bindings)
+                        })
+            })
+}
+
+fn unify_vm_generic_argument(
+    expected: &VmGenericArgument,
+    found: &VmGenericArgument,
+    bindings: &mut BTreeMap<u32, VmType>,
+) -> bool {
+    match (expected, found) {
+        (VmGenericArgument::Type(expected), VmGenericArgument::Type(found)) => {
+            unify_call_type(expected, found, bindings)
+        }
+        (VmGenericArgument::EffectRow(expected), VmGenericArgument::EffectRow(found)) => {
+            unify_vm_effect_row(expected, found, bindings)
+        }
+        _ => expected == found,
+    }
+}
+
+fn instantiate_vm_effect_row(value: &VmEffectRow, bindings: &BTreeMap<u32, VmType>) -> VmEffectRow {
+    VmEffectRow {
+        effects: value
+            .effects
+            .iter()
+            .map(|effect| VmEffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .iter()
+                    .map(|argument| instantiate_vm_generic_argument(argument, bindings))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .iter()
+            .map(|projection| VmEffectRowProjection {
+                subject: instantiate_vm_type(&projection.subject, bindings),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .iter()
+                    .map(|argument| instantiate_vm_generic_argument(argument, bindings))
+                    .collect(),
+                name: projection.name.clone(),
+                item_arguments: projection
+                    .item_arguments
+                    .iter()
+                    .map(|argument| instantiate_vm_generic_argument(argument, bindings))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+}
+
+fn instantiate_vm_generic_argument(
+    value: &VmGenericArgument,
+    bindings: &BTreeMap<u32, VmType>,
+) -> VmGenericArgument {
+    match value {
+        VmGenericArgument::Type(value) => {
+            VmGenericArgument::Type(instantiate_vm_type(value, bindings))
+        }
+        VmGenericArgument::EffectRow(value) => {
+            VmGenericArgument::EffectRow(instantiate_vm_effect_row(value, bindings))
+        }
         value => value.clone(),
     }
 }
@@ -4696,18 +4930,34 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let VmType::Callable { parameters, .. } = register_type(function, *dst)? else {
+                let found = register_type(function, *dst)?;
+                let VmType::Callable {
+                    parameters,
+                    effects,
+                    ..
+                } = &found
+                else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
                 };
                 let frame_id = frame.id;
-                if parameters.as_slice() != [frame.resume_type.clone()] {
+                let expected = VmType::Callable {
+                    parameters: vec![frame.resume_type.clone()],
+                    // A resumption returns to its suspended computation, so
+                    // its result is frame-specific. Keep it in the diagnostic
+                    // template while sealing the effect ABI to empty.
+                    result: Box::new(match &found {
+                        VmType::Callable { result, .. } => (**result).clone(),
+                        _ => unreachable!("callable was checked above"),
+                    }),
+                    effects: Box::<VmEffectRow>::default(),
+                };
+                if parameters.as_slice() != [frame.resume_type.clone()]
+                    || effects.as_ref() != &VmEffectRow::default()
+                {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
-                        expected: VmType::Callable {
-                            parameters: vec![frame.resume_type.clone()],
-                            result: Box::new(VmType::Unit),
-                        },
-                        found: register_type(function, *dst)?,
+                        expected,
+                        found,
                     });
                 }
                 write(&mut states, *dst)?;
@@ -4734,13 +4984,18 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let VmType::Callable { parameters, .. } = register_type(function, *snapshot)?
+                let VmType::Callable {
+                    parameters,
+                    effects,
+                    ..
+                } = register_type(function, *snapshot)?
                 else {
                     return Err(VmArtifactError::NotCallable {
                         register: *snapshot,
                     });
                 };
                 if parameters.as_slice() != [frame.resume_type.clone()]
+                    || effects.as_ref() != &VmEffectRow::default()
                     || register_type(function, *value)? != frame.resume_type
                 {
                     return Err(VmArtifactError::HandlerStateMismatch);
@@ -5124,7 +5379,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 arguments,
             } => {
                 read(&states, *callee)?;
-                let VmType::Callable { parameters, result } = register_type(function, *callee)?
+                let VmType::Callable {
+                    parameters, result, ..
+                } = register_type(function, *callee)?
                 else {
                     return Err(VmArtifactError::NotCallable { register: *callee });
                 };
@@ -5296,9 +5553,14 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
         VmType::Nominal { arguments, .. } => arguments
             .iter()
             .try_for_each(validate_vm_nominal_argument_type),
-        VmType::Callable { parameters, result } => {
+        VmType::Callable {
+            parameters,
+            result,
+            effects,
+        } => {
             parameters.iter().try_for_each(validate_vm_type)?;
-            validate_vm_type(result)
+            validate_vm_type(result)?;
+            validate_vm_effect_row(effects)
         }
         VmType::Reference { referent, .. } => validate_vm_type(referent),
         // Consts are metadata slots inside a nominal identity, not VM value
@@ -6235,8 +6497,12 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         } => {
             matches!(value, VmValue::Record { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } | VmValue::Enum { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } if actual == definition && signature_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
         }
-        VmType::Callable { parameters, result } => {
-            matches!(value, VmValue::Callable { signature: VmType::Callable { parameters: actual_parameters, result: actual_result }, .. } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result))
+        VmType::Callable {
+            parameters,
+            result,
+            effects,
+        } => {
+            matches!(value, VmValue::Callable { signature: VmType::Callable { parameters: actual_parameters, result: actual_result, effects: actual_effects }, .. } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
         }
         VmType::Reference { unique, referent } => {
             matches!(value, VmValue::Reference { unique: actual_unique, referent: actual_referent, .. } if actual_unique == unique && vm_type_matches(actual_referent, referent))
@@ -6259,11 +6525,67 @@ fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
         } => {
             matches!(actual, VmType::Nominal { definition: actual_definition, arguments: actual_arguments } if actual_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
         }
-        VmType::Callable { parameters, result } => {
-            matches!(actual, VmType::Callable { parameters: actual_parameters, result: actual_result } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result))
+        VmType::Callable {
+            parameters,
+            result,
+            effects,
+        } => {
+            matches!(actual, VmType::Callable { parameters: actual_parameters, result: actual_result, effects: actual_effects } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
         }
         VmType::Reference { unique, referent } => {
             matches!(actual, VmType::Reference { unique: actual_unique, referent: actual_referent } if actual_unique == unique && vm_type_matches(actual_referent, referent))
+        }
+        _ => actual == expected,
+    }
+}
+
+fn vm_effect_row_matches(actual: &VmEffectRow, expected: &VmEffectRow) -> bool {
+    actual.tail == expected.tail
+        && actual.effects.len() == expected.effects.len()
+        && actual.projections.len() == expected.projections.len()
+        && actual
+            .effects
+            .iter()
+            .zip(&expected.effects)
+            .all(|(actual, expected)| {
+                actual.definition == expected.definition
+                    && actual.arguments.len() == expected.arguments.len()
+                    && actual
+                        .arguments
+                        .iter()
+                        .zip(&expected.arguments)
+                        .all(|(actual, expected)| vm_generic_argument_matches(actual, expected))
+            })
+        && actual
+            .projections
+            .iter()
+            .zip(&expected.projections)
+            .all(|(actual, expected)| {
+                vm_type_matches(&actual.subject, &expected.subject)
+                    && actual.trait_definition == expected.trait_definition
+                    && actual.name == expected.name
+                    && actual.trait_arguments.len() == expected.trait_arguments.len()
+                    && actual.item_arguments.len() == expected.item_arguments.len()
+                    && actual
+                        .trait_arguments
+                        .iter()
+                        .zip(&expected.trait_arguments)
+                        .all(|(actual, expected)| vm_generic_argument_matches(actual, expected))
+                    && actual
+                        .item_arguments
+                        .iter()
+                        .zip(&expected.item_arguments)
+                        .all(|(actual, expected)| vm_generic_argument_matches(actual, expected))
+            })
+}
+
+fn vm_generic_argument_matches(actual: &VmGenericArgument, expected: &VmGenericArgument) -> bool {
+    match (actual, expected) {
+        (VmGenericArgument::Type(actual), VmGenericArgument::Type(expected)) => {
+            vm_type_matches(actual, expected)
+        }
+        (VmGenericArgument::EffectRow(actual), VmGenericArgument::EffectRow(expected)) => {
+            vm_effect_row_matches(actual, expected)
         }
         _ => actual == expected,
     }
