@@ -625,6 +625,58 @@ fn associated_effect_row_projections_are_preserved_in_frozen_signatures() {
 }
 
 #[test]
+fn frozen_associated_effect_rows_are_canonical_sets() {
+    let package = PackageKey("signature-associated-effect-row-canonical@0.1.0".into());
+    let source = "trait First { type Effects: EffectRow; } trait Second { type Effects: EffectRow; } pub fn consume<T>(value: T) -> i64 / { <T as Second>::Effects, <T as First>::Effects, <T as First>::Effects } { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let consume = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("consume"))
+        .unwrap()
+        .key;
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&consume).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert_eq!(signature.effects.projections.len(), 2);
+    assert!(
+        signature
+            .effects
+            .projections
+            .windows(2)
+            .all(|pair| pair[0] != pair[1])
+    );
+    let mut inference = grandiose_stage0::InferContext::default();
+    let first = inference
+        .type_fingerprint(grandiose_stage0::Type::Callable {
+            parameters: signature.parameters.clone(),
+            result: Box::new(signature.result.clone()),
+            effects: signature.effects.clone(),
+            invocation: signature.invocation,
+        })
+        .unwrap();
+    let second = inference
+        .type_fingerprint(grandiose_stage0::Type::Callable {
+            parameters: signature.parameters.clone(),
+            result: Box::new(signature.result.clone()),
+            effects: signature.effects.clone().canonicalized(),
+            invocation: signature.invocation,
+        })
+        .unwrap();
+    assert_eq!(first, second);
+}
+
+#[test]
 fn kinded_effect_row_binders_preserve_open_row_tails() {
     let package = PackageKey("signature-open-row@0.1.0".into());
     let source = "pub fn relay<e: EffectRow>() -> i64 / { | e } { 0 }";

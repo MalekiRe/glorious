@@ -155,6 +155,59 @@ fn callable_fingerprints_include_associated_effect_row_projections() {
 }
 
 #[test]
+fn symbolic_effect_row_projections_are_sorted_deduplicated_and_fingerprinted_canonically() {
+    let first = DefKey(Digest::of_bytes(b"FirstCapability"));
+    let second = DefKey(Digest::of_bytes(b"SecondCapability"));
+    let projection = |trait_definition, name: &str| EffectRowProjection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition,
+        trait_arguments: vec![],
+        name: name.into(),
+        item_arguments: vec![],
+    };
+    let row = |projections| EffectRow {
+        effects: BTreeSet::new(),
+        projections,
+        tail: None,
+    };
+    let callable = |effects| Type::Callable {
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+
+    let source_order = row(vec![
+        projection(second, "Second"),
+        projection(first, "First"),
+        projection(first, "First"),
+    ]);
+    let canonical_order = row(vec![
+        projection(first, "First"),
+        projection(second, "Second"),
+    ]);
+
+    let mut inference = InferContext::default();
+    let source_fingerprint = inference.type_fingerprint(callable(source_order)).unwrap();
+    let canonical_fingerprint = inference
+        .type_fingerprint(callable(canonical_order.clone()))
+        .unwrap();
+    assert_eq!(source_fingerprint, canonical_fingerprint);
+
+    let zonked = inference
+        .zonk(callable(row(vec![
+            projection(second, "Second"),
+            projection(first, "First"),
+            projection(first, "First"),
+        ])))
+        .unwrap();
+    let Type::Callable { effects, .. } = zonked else {
+        panic!("expected callable");
+    };
+    assert_eq!(effects, canonical_order);
+}
+
+#[test]
 fn matching_associated_effect_row_projections_unify_without_erasure() {
     let capability = DefKey(Digest::of_bytes(b"Capability"));
     let row = EffectRow {

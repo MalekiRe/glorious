@@ -857,6 +857,7 @@ fn substitute_effect_row(value: &EffectRow, substitution: &BTreeMap<u32, Type>) 
             .collect(),
         tail: value.tail,
     }
+    .canonicalized()
 }
 
 fn substitute_callable_signature(

@@ -834,6 +834,7 @@ fn normalize_effect_row(
             .collect(),
         tail: value.tail,
     }
+    .canonicalized()
 }
 
 struct Elaborator<'a> {
@@ -1292,6 +1293,7 @@ impl Elaborator<'_> {
             projections,
             tail,
         }
+        .canonicalized()
     }
     fn nominal_layout(&mut self, layout: &NominalLayoutHeader) -> ElaboratedNominalLayout {
         match layout {
@@ -1850,4 +1852,5 @@ fn substitute_effect_row(value: EffectRow, arguments: &[Type]) -> EffectRow {
             .collect(),
         tail: value.tail,
     }
+    .canonicalized()
 }

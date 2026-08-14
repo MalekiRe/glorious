@@ -132,6 +132,21 @@ impl EffectRow {
     pub fn empty() -> Self {
         Self::closed([])
     }
+
+    /// Put delayed associated effect-row projections into their canonical
+    /// order. Named effects already live in a [`BTreeSet`], but projections
+    /// may contain inference terms and therefore use a structural order key.
+    /// Rows are sets of protocol terms, so exact duplicate projections are
+    /// removed as well.
+    pub fn canonicalize(&mut self) {
+        self.projections.sort_by_key(effect_row_projection_key);
+        self.projections.dedup();
+    }
+
+    pub fn canonicalized(mut self) -> Self {
+        self.canonicalize();
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -467,7 +482,8 @@ impl InferContext {
                 })
                 .collect::<Result<_, _>>()?,
             tail: effects.tail,
-        })
+        }
+        .canonicalized())
     }
 
     fn unify_many(&mut self, left: Vec<Type>, right: Vec<Type>) -> Result<Vec<Type>, TypeError> {
@@ -488,8 +504,8 @@ impl InferContext {
         left: EffectRow,
         right: EffectRow,
     ) -> Result<EffectRow, TypeError> {
-        let left = self.resolve_effects(left);
-        let right = self.resolve_effects(right);
+        let left = self.resolve_effects(left).canonicalized();
+        let right = self.resolve_effects(right).canonicalized();
         if left == right {
             return Ok(left);
         }
@@ -508,7 +524,8 @@ impl InferContext {
                 effects: left.effects.union(&right.effects).cloned().collect(),
                 projections,
                 tail: None,
-            }),
+            }
+            .canonicalized()),
             (None, None) => Err(TypeError::EffectRow {
                 expected: left,
                 found: right,
@@ -528,7 +545,8 @@ impl InferContext {
                     effects: left.effects.union(&right.effects).cloned().collect(),
                     projections,
                     tail: Some(EffectTail::Infer(variable)),
-                })
+                }
+                .canonicalized())
             }
             (Some(EffectTail::Infer(variable)), Some(EffectTail::Infer(other))) => {
                 let remainder = self.fresh_effects();
@@ -555,7 +573,8 @@ impl InferContext {
                     effects: left.effects.union(&right.effects).cloned().collect(),
                     projections,
                     tail: Some(EffectTail::Infer(tail)),
-                })
+                }
+                .canonicalized())
             }
             _ => Err(TypeError::EffectRow {
                 expected: left,
@@ -968,6 +987,17 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
 fn canonical_types(values: &[Type]) -> Vec<u8> {
     let mut bytes = vec![];
     encode_types(values, &mut bytes);
+    bytes
+}
+
+fn effect_row_projection_key(value: &EffectRowProjection) -> Vec<u8> {
+    let mut bytes = vec![];
+    encode_type(&value.subject, &mut bytes);
+    bytes.extend_from_slice(&value.trait_definition.0.as_bytes());
+    encode_types(&value.trait_arguments, &mut bytes);
+    bytes.extend_from_slice(&(value.name.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value.name.as_bytes());
+    encode_types(&value.item_arguments, &mut bytes);
     bytes
 }
 
