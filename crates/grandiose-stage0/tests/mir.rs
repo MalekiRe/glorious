@@ -319,7 +319,7 @@ fn cfg_validation_checks_typed_block_edges_and_returns() {
 }
 
 #[test]
-fn mir_validation_rejects_unresolved_associated_const_projection_identity() {
+fn mir_templates_may_defer_associated_const_projection_but_vm_emission_rejects_it() {
     let nominal = Type::Nominal {
         definition: DefKey(Digest::of_bytes(b"mir-associated-const-carrier")),
         arguments: vec![GenericArgument::ConstProjection {
@@ -344,13 +344,10 @@ fn mir_validation_rejects_unresolved_associated_const_projection_identity() {
             terminator: MirTerminator::Return { value: MirLocal(0) },
         }],
     };
-    assert!(function.validate().is_err_and(|error| {
-        error.contains("unresolved associated structural-constant projection")
-    }));
-    // The VM emitter independently refuses to turn a forged, unresolved
-    // frozen projection into an executable artifact.  Source elaboration
-    // must normalize selected projections, but a hostile pre-VM producer
-    // cannot rely on that path to smuggle one across the backend boundary.
+    // Declaration-owned generic templates retain the projection until their
+    // concrete direct-call instance selects trait evidence. The VM boundary
+    // remains strict: no unresolved projection can become executable.
+    assert!(function.validate().is_ok());
     assert!(emit_vm(&function).is_err());
 }
 

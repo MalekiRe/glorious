@@ -3414,10 +3414,13 @@ fn mir_type_is_duplicable(ty: &Type, descriptors: &[MirNominalCopyDescriptor]) -
 }
 
 /// MIR is still permitted to carry declaration-owned generic parameters until
-/// instance materialization, but it must never carry body-local inference,
-/// recovery poison, or a higher-ranked lifetime whose binder is absent.  The
-/// walk intentionally reaches type and effect arguments embedded in callable,
-/// nominal, aggregate, pattern, and handler metadata as well as local types.
+/// instance materialization, including an associated structural-constant
+/// projection whose subject still depends on such a declaration binder. It
+/// must never carry body-local inference, recovery poison, or a higher-ranked
+/// lifetime whose binder is absent. Concrete instance materialization resolves
+/// every delayed projection before the VM boundary. The walk intentionally
+/// reaches type and effect arguments embedded in callable, nominal, aggregate,
+/// pattern, and handler metadata as well as local types.
 fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), String> {
     if let Type::Projection {
         item_generic_kinds,
@@ -3509,8 +3512,15 @@ fn validate_mir_generic_argument(
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => Ok(()),
-        GenericArgument::ConstProjection { .. } => {
-            Err("MIR cannot contain an unresolved associated structural-constant projection".into())
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            validate_mir_type(subject, lifetime_binders)?;
+            trait_arguments
+                .iter()
+                .try_for_each(|argument| validate_mir_generic_argument(argument, lifetime_binders))
         }
     }
 }

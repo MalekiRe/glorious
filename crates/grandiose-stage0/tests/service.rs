@@ -4366,6 +4366,22 @@ fn service_instantiates_quantity_generic_enum_payloads() {
 }
 
 #[test]
+fn service_materializes_generic_nominal_layouts_with_const_and_quantity_arguments() {
+    let source = "pub struct Carrier<n: u32, q: Quantity, T> { value: T } pub fn unpack<n: u32, q: Quantity, T>(value: Carrier<n, q, T>) -> T { value.value } pub fn main() -> i64 { unpack<7, [1, 1], i64>(Carrier<7, [1, 1], i64> { value: 42 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_materializes_generic_nominal_layouts_with_associated_const_arguments() {
+    let source = "trait First { const Value: u32; } trait Second { const Value: u32; } impl Second for i64 { const Value = 7; } impl First for i64 { const Value = <i64 as Second>::Value; } pub struct Carrier<n: u32, T> { value: T } pub fn unpack<T>(value: Carrier<<T as First>::Value, T>) -> T where T: First { value.value } pub fn main() -> i64 { unpack<i64>(Carrier<7, i64> { value: 42 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
     let enum_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(42) }";
     let outcome = StageZeroCompiler::new()

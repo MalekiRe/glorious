@@ -18,8 +18,8 @@ use crate::{
     InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirInstruction,
     MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, PublicationGuard,
     RequestSession, RetentionReport, RevisionError, RevisionId, Severity, SourceSpan, Span,
-    TrustedRuntimeManifest, Type, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program,
-    implementation_method_key, verify_vm_program,
+    TraitConstProjectionAnswer, TraitGoal, TraitSolver, TrustedRuntimeManifest, Type, TypedBody,
+    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1997,6 +1997,7 @@ fn materialize_concrete_instances(
         specialized.definition = executable;
         let body_arguments = materialization_body_arguments(&key, signatures)?;
         specialize_mir_local_types(&mut specialized, &body_arguments);
+        normalize_materialized_associated_consts(&mut specialized, signatures)?;
         materialize_deferred_scalar_operations(&mut specialized)?;
         register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
         targets.insert(key.clone(), executable);
@@ -2713,7 +2714,365 @@ fn specialize_generic_argument(
             crate::StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
             value => GenericArgument::ConstU32Expr(value),
         },
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(specialize_type(subject, arguments)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| specialize_generic_argument(argument, arguments))
+                .collect(),
+            name: name.clone(),
+            kind: *kind,
+        },
         value => value.clone(),
+    }
+}
+
+/// A generic source body can legitimately retain `<T as Trait>::CONST` until
+/// its direct-call instance fixes `T`. Resolve those delayed const projections
+/// after ordinary binder substitution and before the clone becomes executable
+/// MIR. This is deliberately a separate pass from source elaboration: using
+/// the original template arguments here would select the wrong implementation
+/// for a concrete instance.
+fn normalize_materialized_associated_consts(
+    function: &mut MirFunction,
+    signatures: &ElaboratedInterface,
+) -> Result<(), String> {
+    let mut solver = TraitSolver::new(signatures);
+    function.result = normalize_materialized_type(&function.result, &mut solver)?;
+    for local in &mut function.locals {
+        local.ty = normalize_materialized_type(&local.ty, &mut solver)?;
+    }
+    for descriptor in &mut function.nominal_copy_descriptors {
+        descriptor.arguments = descriptor
+            .arguments
+            .iter()
+            .map(|argument| normalize_materialized_generic_argument(argument, &mut solver))
+            .collect::<Result<_, _>>()?;
+        for variant in &mut descriptor.variants {
+            *variant = variant
+                .iter()
+                .map(|field| normalize_materialized_type(field, &mut solver))
+                .collect::<Result<_, _>>()?;
+        }
+    }
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            match instruction {
+                MirInstruction::MakeArray { element_type, .. }
+                | MirInstruction::ProjectArray { element_type, .. } => {
+                    *element_type = normalize_materialized_type(element_type, &mut solver)?;
+                }
+                MirInstruction::MakeRecord { field_types, .. }
+                | MirInstruction::MakeEnum { field_types, .. } => {
+                    *field_types = field_types
+                        .iter()
+                        .map(|field| normalize_materialized_type(field, &mut solver))
+                        .collect::<Result<_, _>>()?;
+                }
+                MirInstruction::ProjectRecord { field_type, .. }
+                | MirInstruction::ProjectTuple { field_type, .. }
+                | MirInstruction::UpdateRecord { field_type, .. } => {
+                    *field_type = normalize_materialized_type(field_type, &mut solver)?;
+                }
+                MirInstruction::PatternTest { pattern, .. } => {
+                    normalize_materialized_pattern(pattern, &mut solver)?;
+                }
+                MirInstruction::Perform {
+                    effect_arguments, ..
+                } => {
+                    *effect_arguments = effect_arguments
+                        .iter()
+                        .map(|argument| {
+                            normalize_materialized_generic_argument(argument, &mut solver)
+                        })
+                        .collect::<Result<_, _>>()?;
+                }
+                MirInstruction::InstallHandler {
+                    effect_arguments,
+                    resume_type,
+                    ..
+                } => {
+                    *effect_arguments = effect_arguments
+                        .iter()
+                        .map(|argument| {
+                            normalize_materialized_generic_argument(argument, &mut solver)
+                        })
+                        .collect::<Result<_, _>>()?;
+                    *resume_type = normalize_materialized_type(resume_type, &mut solver)?;
+                }
+                MirInstruction::HostCall {
+                    parameters, result, ..
+                } => {
+                    *parameters = parameters
+                        .iter()
+                        .map(|parameter| normalize_materialized_type(parameter, &mut solver))
+                        .collect::<Result<_, _>>()?;
+                    *result = normalize_materialized_type(result, &mut solver)?;
+                }
+                MirInstruction::MakeCallable {
+                    environment: Some(environment),
+                    ..
+                } => {
+                    for capture in &mut environment.captures {
+                        capture.ty = normalize_materialized_type(&capture.ty, &mut solver)?;
+                    }
+                }
+                _ => {}
+            }
+            let (generic_arguments, trait_instance) = match instruction {
+                MirInstruction::Call {
+                    generic_arguments,
+                    trait_instance,
+                    ..
+                }
+                | MirInstruction::MakeCallable {
+                    generic_arguments,
+                    trait_instance,
+                    ..
+                } => (generic_arguments, trait_instance),
+                _ => continue,
+            };
+            *generic_arguments = generic_arguments
+                .iter()
+                .map(|argument| normalize_materialized_generic_argument(argument, &mut solver))
+                .collect::<Result<_, _>>()?;
+            if let Some(instance) = trait_instance {
+                instance.trait_arguments = instance
+                    .trait_arguments
+                    .iter()
+                    .map(|argument| normalize_materialized_generic_argument(argument, &mut solver))
+                    .collect::<Result<_, _>>()?;
+                instance.method_arguments = instance
+                    .method_arguments
+                    .iter()
+                    .map(|argument| normalize_materialized_generic_argument(argument, &mut solver))
+                    .collect::<Result<_, _>>()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result<Type, String> {
+    Ok(match value {
+        Type::Tuple(fields) => Type::Tuple(
+            fields
+                .iter()
+                .map(|field| normalize_materialized_type(field, solver))
+                .collect::<Result<_, _>>()?,
+        ),
+        Type::Array(element) => {
+            Type::Array(Box::new(normalize_materialized_type(element, solver)?))
+        }
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability: *mutability,
+            lifetime: *lifetime,
+            referent: Box::new(normalize_materialized_type(referent, solver)?),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_generic_kinds,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(normalize_materialized_type(subject, solver)?),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| normalize_materialized_generic_argument(argument, solver))
+                .collect::<Result<_, _>>()?,
+            name: name.clone(),
+            item_generic_kinds: item_generic_kinds.clone(),
+            item_arguments: item_arguments
+                .iter()
+                .map(|argument| normalize_materialized_generic_argument(argument, solver))
+                .collect::<Result<_, _>>()?,
+        },
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Type::Nominal {
+            definition: *definition,
+            arguments: arguments
+                .iter()
+                .map(|argument| normalize_materialized_generic_argument(argument, solver))
+                .collect::<Result<_, _>>()?,
+        },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders: *lifetime_binders,
+            parameters: parameters
+                .iter()
+                .map(|parameter| normalize_materialized_type(parameter, solver))
+                .collect::<Result<_, _>>()?,
+            result: Box::new(normalize_materialized_type(result, solver)?),
+            effects: normalize_materialized_effect_row(effects, solver)?,
+            invocation: *invocation,
+        },
+        value => value.clone(),
+    })
+}
+
+fn normalize_materialized_effect_row(
+    value: &crate::EffectRow,
+    solver: &mut TraitSolver,
+) -> Result<crate::EffectRow, String> {
+    Ok(crate::EffectRow {
+        effects: value
+            .effects
+            .iter()
+            .map(|effect| {
+                Ok(crate::EffectInstance {
+                    definition: effect.definition,
+                    arguments: effect
+                        .arguments
+                        .iter()
+                        .map(|argument| normalize_materialized_generic_argument(argument, solver))
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, String>>()?,
+        projections: value
+            .projections
+            .iter()
+            .map(|projection| {
+                Ok(crate::EffectRowProjection {
+                    subject: Box::new(normalize_materialized_type(&projection.subject, solver)?),
+                    trait_definition: projection.trait_definition,
+                    trait_arguments: projection
+                        .trait_arguments
+                        .iter()
+                        .map(|argument| normalize_materialized_generic_argument(argument, solver))
+                        .collect::<Result<_, _>>()?,
+                    name: projection.name.clone(),
+                    item_generic_kinds: projection.item_generic_kinds.clone(),
+                    item_arguments: projection
+                        .item_arguments
+                        .iter()
+                        .map(|argument| normalize_materialized_generic_argument(argument, solver))
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<_, String>>()?,
+        tail: value.tail,
+    }
+    .canonicalized())
+}
+
+fn normalize_materialized_generic_argument(
+    value: &GenericArgument,
+    solver: &mut TraitSolver,
+) -> Result<GenericArgument, String> {
+    match value {
+        GenericArgument::Type(value) => Ok(GenericArgument::Type(normalize_materialized_type(
+            value, solver,
+        )?)),
+        GenericArgument::EffectRow(value) => Ok(GenericArgument::EffectRow(
+            normalize_materialized_effect_row(value, solver)?,
+        )),
+        GenericArgument::ConstProjection { .. } => {
+            normalize_materialized_const_projection(value.clone(), solver)
+        }
+        value => Ok(value.clone()),
+    }
+}
+
+/// Follow an implementation's associated-const value through another
+/// concrete projection (for example `First::Value = Second::Value`) while
+/// preserving a finite, deterministic failure boundary for malformed cycles.
+fn normalize_materialized_const_projection(
+    mut value: GenericArgument,
+    solver: &mut TraitSolver,
+) -> Result<GenericArgument, String> {
+    const MAX_PROJECTION_CHAIN: u32 = 128;
+    for _ in 0..MAX_PROJECTION_CHAIN {
+        let GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } = value
+        else {
+            return normalize_materialized_generic_argument(&value, solver);
+        };
+        let subject = normalize_materialized_type(&subject, solver)?;
+        let trait_arguments = trait_arguments
+            .iter()
+            .map(|argument| normalize_materialized_generic_argument(argument, solver))
+            .collect::<Result<Vec<_>, _>>()?;
+        let goal = TraitGoal {
+            relation: crate::ElaboratedTraitReference {
+                definition: trait_definition,
+                arguments: trait_arguments,
+            },
+            subject,
+        };
+        value = match solver.normalize_associated_const(goal, &name, kind) {
+            TraitConstProjectionAnswer::Normalized { value, .. } => value,
+            answer => {
+                return Err(format!(
+                    "materialized associated const `{name}` could not be normalized: {answer:?}"
+                ));
+            }
+        };
+    }
+    Err("materialized associated-const projection chain exceeded its limit".into())
+}
+
+fn normalize_materialized_pattern(
+    pattern: &mut crate::MirPattern,
+    solver: &mut TraitSolver,
+) -> Result<(), String> {
+    match pattern {
+        crate::MirPattern::Any | crate::MirPattern::Literal(_) => Ok(()),
+        crate::MirPattern::Tuple(elements) => elements
+            .iter_mut()
+            .try_for_each(|element| normalize_materialized_pattern(element, solver)),
+        crate::MirPattern::Array { element, elements } => {
+            *element = normalize_materialized_type(element, solver)?;
+            elements
+                .iter_mut()
+                .try_for_each(|element| normalize_materialized_pattern(element, solver))
+        }
+        crate::MirPattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | crate::MirPattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            *field_types = field_types
+                .iter()
+                .map(|field| normalize_materialized_type(field, solver))
+                .collect::<Result<_, _>>()?;
+            for field in fields {
+                field.ty = normalize_materialized_type(&field.ty, solver)?;
+                normalize_materialized_pattern(&mut field.pattern, solver)?;
+            }
+            Ok(())
+        }
     }
 }
 
