@@ -2860,3 +2860,23 @@ fn service_rejects_closure_and_effect_payload_lifetime_escapes() {
         "{diagnostics:#?}"
     );
 }
+
+#[test]
+fn service_reports_outlives_contract_failures_before_vm_lowering() {
+    let source = r#"
+        pub fn needs_static(value: &'static i64) -> i64 { 0 }
+        pub fn bad_return<'a>() -> &'a i64 { let value = 1; &value }
+        pub fn main() -> i64 { let value = 1; needs_static(&value) }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("outlives-invalid program unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "{diagnostics:#?}"
+    );
+}

@@ -2247,6 +2247,151 @@ fn escapeflow_allows_returning_an_incoming_reference_without_deriving_a_body_loa
 }
 
 #[test]
+fn call_lifetime_instantiation_preserves_a_generic_reference_relationship() {
+    let source = r#"
+        pub fn relay<'a>(value: &'a i64) -> &'a i64 { value }
+        pub fn main() -> i64 {
+            let value = 1;
+            let loan = &value;
+            let forwarded = relay(loan);
+            forwarded;
+            0
+        }
+    "#;
+    let core = core_for("core-call-lifetime-instantiation@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(
+        core.expressions.iter().any(|expression| matches!(
+            expression.ty,
+            Type::Reference {
+                lifetime: Lifetime::Elided,
+                ..
+            }
+        )),
+        "callee lifetime was not instantiated into the caller: {core:#?}"
+    );
+}
+
+#[test]
+fn rigid_lifetime_contracts_reject_short_borrows_at_return_assignment_and_aggregate_boundaries() {
+    let returned = core_for(
+        "core-return-outlives@0.1.0",
+        "pub fn main<'a>() -> &'a i64 { let value = 1; &value }",
+    );
+    assert!(
+        returned
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "{:#?}",
+        returned.diagnostics
+    );
+
+    let assigned = core_for(
+        "core-assignment-outlives@0.1.0",
+        "pub fn main<'a>(slot: &'a i64) -> i64 { let value = 1; slot = &value; 0 }",
+    );
+    assert!(
+        assigned
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "{:#?}",
+        assigned.diagnostics
+    );
+
+    let aggregate = core_for(
+        "core-aggregate-outlives@0.1.0",
+        "pub fn main<'a>() -> (&'a i64, ) { let value = 1; (&value, ) }",
+    );
+    assert!(
+        aggregate
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "{:#?}",
+        aggregate.diagnostics
+    );
+}
+
+#[test]
+fn call_lifetime_contract_rejects_a_short_argument_for_static_reference() {
+    let source = r#"
+        pub fn needs_static(value: &'static i64) -> i64 { 0 }
+        pub fn main() -> i64 { let value = 1; needs_static(&value) }
+    "#;
+    let core = core_for("core-call-static-outlives@0.1.0", source);
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "{:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
+fn higher_ranked_call_opens_its_bound_lifetime_without_leaking_it() {
+    let valid = core_for(
+        "core-hrtb-call@0.1.0",
+        "pub fn main(callback: for<'a> (&'a i64) -> &'a i64) -> i64 { let value = 1; let loan = &value; callback(loan); 0 }",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let escaping = core_for(
+        "core-hrtb-escape@0.1.0",
+        "pub fn main(callback: for<'a> () -> &'a i64) -> i64 { callback(); 0 }",
+    );
+    assert!(
+        escaping
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5019"),
+        "{:#?}",
+        escaping.diagnostics
+    );
+}
+
+#[test]
+fn selected_trait_methods_share_the_call_lifetime_constraint_boundary() {
+    let source = r#"
+        trait Relay {
+            fn relay<'a>(receiver: i64, value: &'a i64) -> &'a i64;
+        }
+        impl Relay for i64 {
+            fn relay<'a>(receiver: i64, value: &'a i64) -> &'a i64 { value }
+        }
+        pub fn main() -> i64 {
+            let value = 1;
+            let loan = &value;
+            Relay::relay(0, loan);
+            0
+        }
+    "#;
+    let core = core_for("core-trait-method-lifetime-call@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+
+    let rejected = core_for(
+        "core-trait-method-static-call@0.1.0",
+        r#"
+            trait StaticRelay { fn relay(receiver: i64, value: &'static i64) -> i64; }
+            impl StaticRelay for i64 {
+                fn relay(receiver: i64, value: &'static i64) -> i64 { 0 }
+            }
+            pub fn main() -> i64 { let value = 1; StaticRelay::relay(0, &value) }
+        "#,
+    );
+    assert!(
+        rejected
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "{:#?}",
+        rejected.diagnostics
+    );
+}
+
+#[test]
 fn generic_effect_handler_frame_retains_its_nominal_instance_arguments() {
     let package = PackageKey("core-handler-runtime-generic@0.1.0".into());
     let source = "effect State<T> { [1,1] get() -> T; } pub fn main() -> i64 { handle State<i64>::get() { State<i64>::get() => 42 } }";

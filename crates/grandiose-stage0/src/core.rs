@@ -148,6 +148,34 @@ struct ResumptionUseTracker {
     identity: ActiveResumption,
     direct_uses: u64,
 }
+
+/// A single callable invocation opens two distinct lifetime namespaces. Source
+/// declaration lifetimes are instantiated by the caller, while `for<'a>`
+/// lifetimes are rigid until the invocation opens their outermost binder.
+/// Keeping these maps separate prevents a de Bruijn bound region from ever
+/// being mistaken for a declaration generic with the same numeric slot.
+#[derive(Default)]
+struct CallLifetimeSubstitution {
+    generics: std::collections::BTreeMap<u32, Lifetime>,
+    bounds: std::collections::BTreeMap<u32, Lifetime>,
+}
+
+#[derive(Clone, Copy)]
+enum LifetimeMode {
+    /// A declared body contract is rigid: assigning or returning a shorter
+    /// body loan through `&'a` cannot manufacture an outlives proof.
+    Rigid,
+    /// A callee's own generic/bound lifetime is opened at the call site and
+    /// may be instantiated from a caller argument.
+    Instantiate,
+}
+
+#[derive(Clone, Copy)]
+enum LifetimeError {
+    UnsatisfiedOutlives,
+    UnresolvedGeneric,
+    EscapingBound,
+}
 /// A write destination frozen by Typed Core.  A place denotes stable storage,
 /// unlike an ordinary value expression which may be copied or moved.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -932,7 +960,10 @@ impl TypedBody {
         let root = elaborator.expression(body.root);
         if let Some(expected) = expected_result {
             let actual = elaborator.expressions[root.0 as usize].ty.clone();
-            if elaborator.inference.unify(expected, actual).is_err() {
+            if elaborator
+                .unify_rigid_lifetimes(expected, actual, definition.span)
+                .is_err()
+            {
                 elaborator.error(
                     definition.span,
                     "G4110",
@@ -1085,8 +1116,11 @@ impl TypedBody {
         let root = elaborator.expression(body.root);
         let actual = elaborator.expressions[root.0 as usize].ty.clone();
         if elaborator
-            .inference
-            .unify(context.signature.result.clone(), actual)
+            .unify_rigid_lifetimes(
+                context.signature.result.clone(),
+                actual,
+                context.method.span,
+            )
             .is_err()
         {
             elaborator.error(
@@ -1169,7 +1203,10 @@ impl TypedBody {
         let root = elaborator.expression(body.root);
         if let Some(expected) = expected {
             let actual = elaborator.expressions[root.0 as usize].ty.clone();
-            if elaborator.inference.unify(expected, actual).is_err() {
+            if elaborator
+                .unify_rigid_lifetimes(expected, actual, definition.span)
+                .is_err()
+            {
                 elaborator.error(
                     definition.span,
                     "G4110",
@@ -1329,7 +1366,9 @@ impl Elaborator<'_> {
                 let value_ty = self.expressions[value.0 as usize].ty.clone();
                 let place = self.assignment_place(place, expression.span);
                 if !matches!(&place, CorePlace::Error)
-                    && self.inference.unify(place.ty(), value_ty).is_err()
+                    && self
+                        .unify_rigid_lifetimes(place.ty(), value_ty, expression.span)
+                        .is_err()
                 {
                     self.error(
                         expression.span,
@@ -1657,7 +1696,10 @@ impl Elaborator<'_> {
             .unwrap_or(Type::Unit);
         let body = self.alloc(CoreKind::Block(values), body_ty.clone(), span);
         self.locals.leave();
-        if self.inference.unify(result.clone(), body_ty).is_err() {
+        if self
+            .unify_rigid_lifetimes(result.clone(), body_ty, span)
+            .is_err()
+        {
             self.error(
                 span,
                 "G4113",
@@ -1727,7 +1769,10 @@ impl Elaborator<'_> {
             .as_ref()
             .map(|ty| self.header_type(ty))
             .unwrap_or_else(|| actual_result.clone());
-        if self.inference.unify(result.clone(), actual_result).is_err() {
+        if self
+            .unify_rigid_lifetimes(result.clone(), actual_result, span)
+            .is_err()
+        {
             self.error(
                 span,
                 "G4113",
@@ -2614,6 +2659,105 @@ impl Elaborator<'_> {
             }
         }
     }
+
+    /// Unify a body contract without allowing its declared regions to be
+    /// solved from a shorter local loan. This is used at returns, assignments,
+    /// and aggregate field construction; call sites use the opening variant
+    /// below instead.
+    fn unify_rigid_lifetimes(
+        &mut self,
+        expected: Type,
+        actual: Type,
+        span: Span,
+    ) -> Result<(), ()> {
+        let mut substitution = CallLifetimeSubstitution::default();
+        let aligned = match align_lifetime_types(
+            &expected,
+            &actual,
+            &mut substitution,
+            LifetimeMode::Rigid,
+            0,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.lifetime_error(span, error);
+                return Err(());
+            }
+        };
+        if self.inference.unify(aligned, actual).is_err() {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Open one callable's lifetime binders, prove each reference argument
+    /// against the parameter it enters, then substitute the resulting region
+    /// evidence into its result/effect contract. This is the sole point where
+    /// declaration generic lifetimes and HRTB depth-zero binders become caller
+    /// lifetimes.
+    fn instantiate_call_lifetimes(
+        &mut self,
+        parameters: Vec<Type>,
+        result: Type,
+        effects: crate::types::EffectRow,
+        arguments: &[CoreId],
+        span: Span,
+    ) -> Result<(Vec<Type>, Type, crate::types::EffectRow), ()> {
+        let mut substitution = CallLifetimeSubstitution::default();
+        let mut aligned_parameters = Vec::with_capacity(parameters.len());
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            let actual = self.expressions[argument.0 as usize].ty.clone();
+            let aligned = match align_lifetime_types(
+                parameter,
+                &actual,
+                &mut substitution,
+                LifetimeMode::Instantiate,
+                0,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.lifetime_error(span, error);
+                    return Err(());
+                }
+            };
+            aligned_parameters.push(aligned);
+        }
+        let result = match substitute_call_lifetimes(result, &substitution, 0) {
+            Ok(value) => value,
+            Err(error) => {
+                self.lifetime_error(span, error);
+                return Err(());
+            }
+        };
+        let effects = match substitute_call_effects(effects, &substitution, 0) {
+            Ok(value) => value,
+            Err(error) => {
+                self.lifetime_error(span, error);
+                return Err(());
+            }
+        };
+        Ok((aligned_parameters, result, effects))
+    }
+
+    fn lifetime_error(&mut self, span: Span, error: LifetimeError) {
+        let (code, message) = match error {
+            LifetimeError::UnsatisfiedOutlives => (
+                "G5017",
+                "reference lifetime does not satisfy the required outlives constraint",
+            ),
+            LifetimeError::UnresolvedGeneric => (
+                "G5018",
+                "call result retains an unsatisfied lifetime substitution",
+            ),
+            LifetimeError::EscapingBound => (
+                "G5019",
+                "higher-ranked bound lifetime escapes its callable invocation",
+            ),
+        };
+        self.error(span, code, message);
+        self.recovered = true;
+    }
     fn core_pattern(
         &mut self,
         decision: PatternDecision,
@@ -3015,7 +3159,7 @@ impl Elaborator<'_> {
             };
             let value = self.expression_expected(value, Some(field.ty.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
-            if self.inference.unify(field.ty, actual).is_err() {
+            if self.unify_rigid_lifetimes(field.ty, actual, span).is_err() {
                 self.error(
                     span,
                     "G4126",
@@ -3140,7 +3284,7 @@ impl Elaborator<'_> {
             };
             let value = self.expression_expected(value, Some(field.ty.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
-            if self.inference.unify(field.ty, actual).is_err() {
+            if self.unify_rigid_lifetimes(field.ty, actual, span).is_err() {
                 return Some(self.fail(
                     span,
                     "G4134",
@@ -3244,7 +3388,7 @@ impl Elaborator<'_> {
             .map(|(value, expected)| {
                 let value = self.expression_expected(value, Some(expected.clone()));
                 let actual = self.expressions[value.0 as usize].ty.clone();
-                if self.inference.unify(expected, actual).is_err() {
+                if self.unify_rigid_lifetimes(expected, actual, span).is_err() {
                     self.error(
                         span,
                         "G4131",
@@ -3294,7 +3438,10 @@ impl Elaborator<'_> {
     fn call(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span) -> CoreId {
         let callable = self.expressions[callee.0 as usize].ty.clone();
         let Type::Callable {
-            parameters, result, ..
+            parameters,
+            result,
+            effects,
+            ..
         } = callable
         else {
             return self.fail(span, "G4105", "called expression is not callable");
@@ -3306,6 +3453,15 @@ impl Elaborator<'_> {
                 "call argument count does not match callable signature",
             );
         }
+        let Ok((parameters, result, effects)) =
+            self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span)
+        else {
+            return self.fail(
+                span,
+                "G5017",
+                "call cannot satisfy its reference lifetime contract",
+            );
+        };
         for (parameter, argument) in parameters.into_iter().zip(&arguments) {
             let actual = self.expressions[argument.0 as usize].ty.clone();
             if self.inference.unify(parameter, actual).is_err() {
@@ -3313,11 +3469,9 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
         }
-        if let Type::Callable { effects, .. } = &self.expressions[callee.0 as usize].ty {
-            self.check_effects(&effects.clone(), span);
-        }
+        self.check_effects(&effects, span);
         self.check_call_where_bounds(callee, span);
-        self.alloc(CoreKind::Call { callee, arguments }, *result, span)
+        self.alloc(CoreKind::Call { callee, arguments }, result, span)
     }
     /// Resolve an explicitly-qualified trait method call. The method's first
     /// declared parameter is the receiver; qualification keeps this initial
@@ -3537,7 +3691,10 @@ impl Elaborator<'_> {
             .map(|(argument, expected)| {
                 let argument = self.expression_expected(argument, Some(expected.clone()));
                 let actual = self.expressions[argument.0 as usize].ty.clone();
-                if self.inference.unify(expected.clone(), actual).is_err() {
+                if self
+                    .unify_rigid_lifetimes(expected.clone(), actual, span)
+                    .is_err()
+                {
                     self.error(
                         span,
                         "G4154",
@@ -3782,7 +3939,7 @@ impl Elaborator<'_> {
                 | CoreHandlerResumption::Discard { .. }
                 | CoreHandlerResumption::Terminal => result.clone(),
             };
-            if self.inference.unify(expected, body_ty).is_err() {
+            if self.unify_rigid_lifetimes(expected, body_ty, span).is_err() {
                 self.error(
                     clause.source.span,
                     "G4161",
@@ -3904,7 +4061,10 @@ impl Elaborator<'_> {
             let body = self.expression(clause.body);
             self.locals.leave();
             let body_ty = self.expressions[body.0 as usize].ty.clone();
-            if self.inference.unify(result.clone(), body_ty).is_err() {
+            if self
+                .unify_rigid_lifetimes(result.clone(), body_ty, span)
+                .is_err()
+            {
                 self.error(
                     clause.span,
                     "G4167",
@@ -4843,6 +5003,390 @@ impl Elaborator<'_> {
             message: message.into(),
         });
     }
+}
+
+/// Align the lifetime leaves of two structurally corresponding types while
+/// leaving ordinary type inference to [`InferContext`]. `depth` counts nested
+/// callable binders below the callable being invoked: a bound region at that
+/// exact depth belongs to the opened callable; shallower bounds are rigid
+/// inner HRTBs and deeper bounds name an outer binder that cannot escape this
+/// instantiation.
+fn align_lifetime_types(
+    expected: &Type,
+    actual: &Type,
+    substitution: &mut CallLifetimeSubstitution,
+    mode: LifetimeMode,
+    depth: u32,
+) -> Result<Type, LifetimeError> {
+    match (expected, actual) {
+        (
+            Type::Reference {
+                mutability: expected_mutability,
+                lifetime: expected_lifetime,
+                referent: expected_referent,
+            },
+            Type::Reference {
+                mutability: actual_mutability,
+                lifetime: actual_lifetime,
+                referent: actual_referent,
+            },
+        ) if expected_mutability == actual_mutability => {
+            bind_lifetime(
+                *expected_lifetime,
+                *actual_lifetime,
+                substitution,
+                mode,
+                depth,
+            )?;
+            Ok(Type::Reference {
+                mutability: *expected_mutability,
+                // The actual lifetime is intentionally retained here. A
+                // longer `'static` argument may satisfy an elided parameter;
+                // ordinary type unification must not turn that safe coercion
+                // back into an equality failure.
+                lifetime: *actual_lifetime,
+                referent: Box::new(align_lifetime_types(
+                    expected_referent,
+                    actual_referent,
+                    substitution,
+                    mode,
+                    depth,
+                )?),
+            })
+        }
+        (Type::Tuple(expected), Type::Tuple(actual)) if expected.len() == actual.len() => {
+            Ok(Type::Tuple(
+                expected
+                    .iter()
+                    .zip(actual)
+                    .map(|(expected, actual)| {
+                        align_lifetime_types(expected, actual, substitution, mode, depth)
+                    })
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (Type::Array(expected), Type::Array(actual)) => Ok(Type::Array(Box::new(
+            align_lifetime_types(expected, actual, substitution, mode, depth)?,
+        ))),
+        (
+            Type::Nominal {
+                definition: expected_definition,
+                arguments: expected_arguments,
+            },
+            Type::Nominal {
+                definition: actual_definition,
+                arguments: actual_arguments,
+            },
+        ) if expected_definition == actual_definition
+            && expected_arguments.len() == actual_arguments.len() =>
+        {
+            Ok(Type::Nominal {
+                definition: *expected_definition,
+                arguments: expected_arguments
+                    .iter()
+                    .zip(actual_arguments)
+                    .map(|(expected, actual)| {
+                        align_lifetime_types(expected, actual, substitution, mode, depth)
+                    })
+                    .collect::<Result<_, _>>()?,
+            })
+        }
+        (
+            Type::Projection {
+                subject: expected_subject,
+                trait_definition: expected_trait,
+                trait_arguments: expected_trait_arguments,
+                name: expected_name,
+                item_arguments: expected_item_arguments,
+            },
+            Type::Projection {
+                subject: actual_subject,
+                trait_definition: actual_trait,
+                trait_arguments: actual_trait_arguments,
+                name: actual_name,
+                item_arguments: actual_item_arguments,
+            },
+        ) if expected_trait == actual_trait
+            && expected_name == actual_name
+            && expected_trait_arguments.len() == actual_trait_arguments.len()
+            && expected_item_arguments.len() == actual_item_arguments.len() =>
+        {
+            Ok(Type::Projection {
+                subject: Box::new(align_lifetime_types(
+                    expected_subject,
+                    actual_subject,
+                    substitution,
+                    mode,
+                    depth,
+                )?),
+                trait_definition: *expected_trait,
+                trait_arguments: expected_trait_arguments
+                    .iter()
+                    .zip(actual_trait_arguments)
+                    .map(|(expected, actual)| {
+                        align_lifetime_types(expected, actual, substitution, mode, depth)
+                    })
+                    .collect::<Result<_, _>>()?,
+                name: expected_name.clone(),
+                item_arguments: expected_item_arguments
+                    .iter()
+                    .zip(actual_item_arguments)
+                    .map(|(expected, actual)| {
+                        align_lifetime_types(expected, actual, substitution, mode, depth)
+                    })
+                    .collect::<Result<_, _>>()?,
+            })
+        }
+        (
+            Type::Callable {
+                lifetime_binders: expected_binders,
+                parameters: expected_parameters,
+                result: expected_result,
+                effects: expected_effects,
+                invocation: expected_invocation,
+            },
+            Type::Callable {
+                lifetime_binders: actual_binders,
+                parameters: actual_parameters,
+                result: actual_result,
+                effects: actual_effects,
+                invocation: actual_invocation,
+            },
+        ) if expected_binders == actual_binders
+            && expected_parameters.len() == actual_parameters.len()
+            && expected_effects == actual_effects
+            && expected_invocation == actual_invocation =>
+        {
+            Ok(Type::Callable {
+                lifetime_binders: *expected_binders,
+                parameters: expected_parameters
+                    .iter()
+                    .zip(actual_parameters)
+                    .map(|(expected, actual)| {
+                        align_lifetime_types(expected, actual, substitution, mode, depth + 1)
+                    })
+                    .collect::<Result<_, _>>()?,
+                result: Box::new(align_lifetime_types(
+                    expected_result,
+                    actual_result,
+                    substitution,
+                    mode,
+                    depth + 1,
+                )?),
+                effects: expected_effects.clone(),
+                invocation: *expected_invocation,
+            })
+        }
+        // Let ordinary type inference diagnose any non-reference structural
+        // mismatch. Returning `expected` here keeps generic type variables
+        // inferable at the same locations as before this lifetime pass.
+        _ => Ok(expected.clone()),
+    }
+}
+
+fn bind_lifetime(
+    expected: Lifetime,
+    actual: Lifetime,
+    substitution: &mut CallLifetimeSubstitution,
+    mode: LifetimeMode,
+    depth: u32,
+) -> Result<(), LifetimeError> {
+    match expected {
+        Lifetime::Static => (actual == Lifetime::Static)
+            .then_some(())
+            .ok_or(LifetimeError::UnsatisfiedOutlives),
+        Lifetime::Elided => matches!(actual, Lifetime::Elided | Lifetime::Static)
+            .then_some(())
+            .ok_or(LifetimeError::UnsatisfiedOutlives),
+        Lifetime::Generic(index) => match mode {
+            LifetimeMode::Rigid => (actual == expected || actual == Lifetime::Static)
+                .then_some(())
+                .ok_or(LifetimeError::UnsatisfiedOutlives),
+            LifetimeMode::Instantiate => match substitution.generics.get(&index) {
+                Some(previous) if *previous != actual => Err(LifetimeError::UnsatisfiedOutlives),
+                Some(_) => Ok(()),
+                None => {
+                    substitution.generics.insert(index, actual);
+                    Ok(())
+                }
+            },
+        },
+        Lifetime::Bound {
+            depth: bound_depth,
+            index,
+        } if matches!(mode, LifetimeMode::Instantiate) && bound_depth == depth => {
+            match substitution.bounds.get(&index) {
+                Some(previous) if *previous != actual => Err(LifetimeError::UnsatisfiedOutlives),
+                Some(_) => Ok(()),
+                None => {
+                    substitution.bounds.insert(index, actual);
+                    Ok(())
+                }
+            }
+        }
+        Lifetime::Bound { .. } => (actual == expected)
+            .then_some(())
+            .ok_or(LifetimeError::UnsatisfiedOutlives),
+    }
+}
+
+fn substitute_call_lifetimes(
+    value: Type,
+    substitution: &CallLifetimeSubstitution,
+    depth: u32,
+) -> Result<Type, LifetimeError> {
+    match value {
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Ok(Type::Nominal {
+            definition,
+            arguments: arguments
+                .into_iter()
+                .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                .collect::<Result<_, _>>()?,
+        }),
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Ok(Type::Projection {
+            subject: Box::new(substitute_call_lifetimes(*subject, substitution, depth)?),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                .collect::<Result<_, _>>()?,
+            name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                .collect::<Result<_, _>>()?,
+        }),
+        Type::Tuple(values) => Ok(Type::Tuple(
+            values
+                .into_iter()
+                .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                .collect::<Result<_, _>>()?,
+        )),
+        Type::Array(value) => Ok(Type::Array(Box::new(substitute_call_lifetimes(
+            *value,
+            substitution,
+            depth,
+        )?))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Ok(Type::Reference {
+            mutability,
+            lifetime: substitute_call_lifetime(lifetime, substitution, depth)?,
+            referent: Box::new(substitute_call_lifetimes(*referent, substitution, depth)?),
+        }),
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Ok(Type::Callable {
+            lifetime_binders,
+            parameters: parameters
+                .into_iter()
+                .map(|value| substitute_call_lifetimes(value, substitution, depth + 1))
+                .collect::<Result<_, _>>()?,
+            result: Box::new(substitute_call_lifetimes(*result, substitution, depth + 1)?),
+            effects: substitute_call_effects(effects, substitution, depth + 1)?,
+            invocation,
+        }),
+        value => Ok(value),
+    }
+}
+
+fn substitute_call_lifetime(
+    lifetime: Lifetime,
+    substitution: &CallLifetimeSubstitution,
+    depth: u32,
+) -> Result<Lifetime, LifetimeError> {
+    match lifetime {
+        Lifetime::Generic(index) => substitution
+            .generics
+            .get(&index)
+            .copied()
+            .ok_or(LifetimeError::UnresolvedGeneric),
+        Lifetime::Bound {
+            depth: bound_depth,
+            index,
+        } if bound_depth == depth => substitution
+            .bounds
+            .get(&index)
+            .copied()
+            .ok_or(LifetimeError::EscapingBound),
+        Lifetime::Bound {
+            depth: bound_depth,
+            index,
+        } if bound_depth > depth => Ok(Lifetime::Bound {
+            depth: bound_depth - 1,
+            index,
+        }),
+        lifetime => Ok(lifetime),
+    }
+}
+
+fn substitute_call_effects(
+    effects: crate::types::EffectRow,
+    substitution: &CallLifetimeSubstitution,
+    depth: u32,
+) -> Result<crate::types::EffectRow, LifetimeError> {
+    let crate::types::EffectRow {
+        effects,
+        projections,
+        tail,
+    } = effects;
+    let effects = effects
+        .into_iter()
+        .map(|effect| {
+            Ok(crate::types::EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                    .collect::<Result<_, _>>()?,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let projections = projections
+        .into_iter()
+        .map(|projection| {
+            Ok(crate::types::EffectRowProjection {
+                subject: Box::new(substitute_call_lifetimes(
+                    *projection.subject,
+                    substitution,
+                    depth,
+                )?),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                    .collect::<Result<_, _>>()?,
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                    .collect::<Result<_, _>>()?,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(crate::types::EffectRow {
+        effects,
+        projections,
+        tail,
+    })
 }
 
 fn projection_is_concrete(value: &Type) -> bool {
