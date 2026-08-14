@@ -89,7 +89,9 @@ fn scanner_reports_g3221_for_an_unterminated_top_level_value_initializer() {
     let lexed = LexedFile::lex(file, source);
     let scan = grandiose_stage0::DeclarationScan::scan(&lexed, source);
     assert!(
-        scan.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3221"),
+        scan.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3221"),
         "{:#?}",
         scan.diagnostics
     );

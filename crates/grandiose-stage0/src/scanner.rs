@@ -374,7 +374,10 @@ impl Scanner<'_> {
                     }
                 },
                 TokenKind::Punctuation(';') => {
-                    let body = if matches!(kind, DeclarationKind::Constant | DeclarationKind::ValueAlias) {
+                    let body = if matches!(
+                        kind,
+                        DeclarationKind::Constant | DeclarationKind::ValueAlias
+                    ) {
                         initializer_start.map(|start| TokenRange {
                             start,
                             end: token_index,
@@ -386,13 +389,16 @@ impl Scanner<'_> {
                 }
                 TokenKind::End => {
                     self.diagnostics.push(ScanDiagnostic {
-                        code: if kind == DeclarationKind::ValueAlias && initializer_start.is_some() {
+                        code: if kind == DeclarationKind::ValueAlias && initializer_start.is_some()
+                        {
                             "G3221"
                         } else {
                             "G2002"
                         },
                         span: self.lexed.tokens[self.significant[declaration_position]].span,
-                        message: if kind == DeclarationKind::ValueAlias && initializer_start.is_some() {
+                        message: if kind == DeclarationKind::ValueAlias
+                            && initializer_start.is_some()
+                        {
                             "expected `;` after top-level value declaration"
                         } else {
                             "declaration has no body or terminator"

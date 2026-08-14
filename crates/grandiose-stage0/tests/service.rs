@@ -5986,7 +5986,8 @@ fn service_executes_frozen_top_level_value_initializer_calls() {
 
 #[test]
 fn service_freezes_constructor_top_level_value_initializers() {
-    let source = "pub enum Result { Err(()) } let None = Result::Err(()); pub fn main() -> i64 { 42 }";
+    let source =
+        "pub enum Result { Err(()) } let None = Result::Err(()); pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -6022,9 +6023,14 @@ fn service_resolves_exported_top_level_value_initializers_from_another_module() 
 #[test]
 fn service_rejects_bad_top_level_value_initializer_call_arguments() {
     let source = "pub fn identity(value: i64) -> i64 { value } let broken = identity(true); pub fn main() -> i64 { 42 }";
-    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
     assert!(
-        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4107"),
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4107"),
         "initializer call argument mismatch was accepted: {:#?}",
         error.diagnostics()
     );
@@ -6032,10 +6038,16 @@ fn service_rejects_bad_top_level_value_initializer_call_arguments() {
 
 #[test]
 fn service_rejects_effectful_top_level_value_initializers() {
-    let source = "effect Ask { ask() -> i64; } let answer = Ask::ask(); pub fn main() -> i64 { 42 }";
-    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    let source =
+        "effect Ask { ask() -> i64; } let answer = Ask::ask(); pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
     assert!(
-        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4155"),
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4155"),
         "effectful top-level initializer was accepted: {:#?}",
         error.diagnostics()
     );

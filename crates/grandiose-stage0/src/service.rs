@@ -847,13 +847,22 @@ impl StageZeroCompiler {
             else {
                 continue;
             };
-            let text = std::str::from_utf8(&source.bytes)
-                .expect("normalized world only contains UTF-8");
+            let text =
+                std::str::from_utf8(&source.bytes).expect("normalized world only contains UTF-8");
             let lexed = crate::LexedFile::lex(source.key, text);
             let fixities = FixityTable::for_module(&node.interface.interface);
-            for declaration in node.interface.interface.definitions.iter().filter(|definition| {
-                matches!(definition.syntax.header, ParsedHeader::ValueInitializer { .. })
-            }) {
+            for declaration in node
+                .interface
+                .interface
+                .definitions
+                .iter()
+                .filter(|definition| {
+                    matches!(
+                        definition.syntax.header,
+                        ParsedHeader::ValueInitializer { .. }
+                    )
+                })
+            {
                 let Some(body_range) = declaration.body else {
                     continue;
                 };

@@ -133,7 +133,9 @@ fn typed_core_rejects_a_forged_unfrozen_top_level_value_initializer() {
         &signatures,
     );
     assert!(
-        core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4102"),
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4102"),
         "unfrozen top-level value metadata reached executable Core: {:#?}",
         core.diagnostics
     );

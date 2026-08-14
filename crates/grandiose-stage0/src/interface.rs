@@ -301,12 +301,12 @@ impl InterfaceSet {
             };
             let constant_value_fingerprint = (shell.kind == DeclarationKind::Constant
                 || (shell.kind == DeclarationKind::ValueAlias && shell.body.is_some()))
-                .then(|| {
-                    shell
-                        .body
-                        .map(|range| header_fingerprint(lexed, source, range))
-                })
-                .flatten();
+            .then(|| {
+                shell
+                    .body
+                    .map(|range| header_fingerprint(lexed, source, range))
+            })
+            .flatten();
             diagnostics.extend(
                 syntax
                     .diagnostics
