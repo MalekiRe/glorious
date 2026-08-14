@@ -221,7 +221,121 @@ fn exported_public_reexports_are_rejected_before_any_body_uses_them() {
     let diagnostics = index.validate_exported_imports();
     assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
     assert_eq!(diagnostics[0].code, "G3317");
-    assert!(diagnostics[0].message.contains("private module path"));
+    assert!(diagnostics[0].message.contains("private target"));
+}
+
+#[test]
+fn exported_reexports_of_missing_targets_are_rejected_at_interface_freezing() {
+    let package = PackageKey("resolution-exported-missing-reexport@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod facade;");
+    let facade = collect("crate::facade", "pub use crate::missing::answer;");
+    let index = DefinitionIndex::from_interfaces([&root, &facade]);
+
+    let diagnostics = index.validate_exported_imports();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    assert_eq!(diagnostics[0].code, "G3317");
+    assert!(diagnostics[0].message.contains("missing target"));
+}
+
+#[test]
+fn competing_module_aliases_remain_ambiguous_instead_of_selecting_source_order() {
+    let package = PackageKey("resolution-module-alias-collision@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod left; pub mod right; mod facade;");
+    let left = collect("crate::left", "pub mod api;");
+    let right = collect("crate::right", "pub mod api;");
+    let left_api = collect("crate::left::api", "pub fn left() { () }");
+    let right_api = collect("crate::right::api", "pub fn right() { () }");
+    let facade = collect(
+        "crate::facade",
+        "use crate::left::api as client; use crate::right::api as client;",
+    );
+    let index =
+        DefinitionIndex::from_interfaces([&root, &left, &right, &left_api, &right_api, &facade]);
+    let owner = ModuleKey {
+        package,
+        path: "crate::facade".into(),
+    };
+
+    let state = index.resolve_path(
+        DefinitionNamespace::Value,
+        &owner,
+        &["client".into(), "left".into()],
+    );
+    assert!(
+        matches!(state, ResolutionState::Unresolved),
+        "a conflicting module alias must not select one branch: {state:?}"
+    );
+}
+
+#[test]
+fn exported_competing_module_aliases_are_rejected_while_freezing_the_interface() {
+    let package = PackageKey("resolution-exported-module-alias-collision@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod left; pub mod right; pub mod facade;");
+    let left = collect("crate::left", "pub mod api;");
+    let right = collect("crate::right", "pub mod api;");
+    let left_api = collect("crate::left::api", "pub fn left() { () }");
+    let right_api = collect("crate::right::api", "pub fn right() { () }");
+    let facade = collect(
+        "crate::facade",
+        "pub use crate::left::api as client; pub use crate::right::api as client;",
+    );
+    let index =
+        DefinitionIndex::from_interfaces([&root, &left, &right, &left_api, &right_api, &facade]);
+
+    assert!(
+        index.validate_exported_imports().iter().any(|diagnostic| {
+            diagnostic.code == "G3318" && diagnostic.message.contains("client")
+        })
+    );
+}
+
+#[test]
+fn cyclic_public_globs_terminate_without_hiding_a_reachable_module_candidate() {
+    let package = PackageKey("resolution-cyclic-public-globs@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod a; pub mod b; pub mod target;");
+    let a = collect("crate::a", "pub use crate::b::*; pub use crate::target::*;");
+    let b = collect("crate::b", "pub use crate::a::*;");
+    let target = collect("crate::target", "pub mod api;");
+    let api = collect("crate::target::api", "pub fn answer() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &a, &b, &target, &api]);
+    let owner = ModuleKey {
+        package,
+        path: "crate".into(),
+    };
+
+    let state = index.resolve_path(
+        DefinitionNamespace::Value,
+        &owner,
+        &["crate".into(), "a".into(), "api".into(), "answer".into()],
+    );
+    assert!(
+        matches!(state, ResolutionState::Resolved(_)),
+        "the cyclic glob must terminate and continue to the target candidate: {state:?}"
+    );
 }
 
 #[test]

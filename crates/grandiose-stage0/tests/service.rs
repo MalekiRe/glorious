@@ -144,6 +144,24 @@ fn service_keeps_private_module_aliases_lexical_to_their_declaring_module() {
 }
 
 #[test]
+fn service_rejects_missing_public_reexports_before_body_elaboration() {
+    let error = StageZeroCompiler::new()
+        .compile(request_with_modules(
+            "pub mod facade; pub fn main() -> i64 { 42 }",
+            &[("facade", "pub use crate::missing::answer;")],
+        ))
+        .unwrap_err();
+
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "G3317" && diagnostic.message.contains("missing target")
+        }),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
 fn service_applies_host_instance_discovery_limits_before_lowering() {
     let compiler = StageZeroCompiler::with_instance_limits(InstanceLimits {
         total: 1,

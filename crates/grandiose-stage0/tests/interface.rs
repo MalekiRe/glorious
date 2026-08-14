@@ -54,6 +54,22 @@ fn public_fingerprint_changes_for_header_but_not_private_definition_changes() {
 }
 
 #[test]
+fn exported_import_edges_participate_in_frozen_interface_identity() {
+    let first = collect("pub use crate::api::answer;");
+    let changed = collect("pub use crate::api::other;");
+    let private_changed = collect("use crate::api::other;");
+
+    assert_ne!(
+        first.interface.public_fingerprint, changed.interface.public_fingerprint,
+        "a dependent must be invalidated when an exported alias changes target"
+    );
+    assert_ne!(
+        first.interface.public_fingerprint, private_changed.interface.public_fingerprint,
+        "removing exported visibility changes the frozen interface"
+    );
+}
+
+#[test]
 fn public_nominal_layout_changes_invalidate_the_exported_interface() {
     let package = PackageKey("interface-nominal-layout@0.1.0".into());
     let first = "pub struct Pair { left: i64, right: i64 }";

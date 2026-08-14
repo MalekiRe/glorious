@@ -540,6 +540,7 @@ impl DefinitionIndex {
                 }
                 let mut any_public_target = false;
                 let mut saw_inaccessible = false;
+                let mut saw_ambiguity = false;
                 for namespace in [
                     DefinitionNamespace::Type,
                     DefinitionNamespace::Value,
@@ -555,22 +556,79 @@ impl DefinitionIndex {
                         &import.path,
                         &mut BTreeSet::new(),
                     ) {
-                        ResolutionState::Resolved(_) | ResolutionState::Ambiguous(_) => {
-                            any_public_target = true;
-                        }
+                        ResolutionState::Resolved(_) => any_public_target = true,
+                        ResolutionState::Ambiguous(_) => saw_ambiguity = true,
                         ResolutionState::Inaccessible(_) => saw_inaccessible = true,
                         ResolutionState::Unresolved | ResolutionState::Recovered => {}
                     }
                 }
-                if !any_public_target && saw_inaccessible {
+                if saw_ambiguity {
+                    diagnostics.push(ResolutionDiagnostic {
+                        code: "G3318",
+                        span: import.span,
+                        message: format!(
+                            "public import `{}` is ambiguous in an exported namespace",
+                            import.path.join("::")
+                        ),
+                    });
+                } else if !any_public_target {
                     diagnostics.push(ResolutionDiagnostic {
                         code: "G3317",
                         span: import.span,
                         message: format!(
-                            "public import `{}` exposes a private module path or definition",
-                            import.path.join("::")
+                            "public import `{}` exposes a {} target",
+                            import.path.join("::"),
+                            if saw_inaccessible {
+                                "private"
+                            } else {
+                                "missing"
+                            },
                         ),
                     });
+                }
+            }
+        }
+        // A public alias is itself an exported name.  Validate the merged
+        // namespace after all public edges have contributed, rather than
+        // checking each edge in isolation: two individually valid `pub use`
+        // declarations must not freeze an interface which is ambiguous to a
+        // dependency.  Local definitions intentionally win here, matching
+        // ordinary resolution and preserving lexical shadowing.
+        for (module, imports) in &self.imports {
+            if !self.module_path_is_public(module) {
+                continue;
+            }
+            let requester = ModuleKey {
+                package: module.package.clone(),
+                path: "<dependency>".into(),
+            };
+            let aliases = imports
+                .iter()
+                .filter(|import| import.public && !import.glob)
+                .map(|import| (import.alias.clone(), import.span))
+                .collect::<BTreeMap<_, _>>();
+            for (alias, span) in aliases {
+                for namespace in all_namespaces() {
+                    if matches!(
+                        self.resolve_member(
+                            namespace,
+                            module,
+                            &alias,
+                            &requester,
+                            true,
+                            &mut BTreeSet::new(),
+                        ),
+                        ResolutionState::Ambiguous(_)
+                    ) {
+                        diagnostics.push(ResolutionDiagnostic {
+                            code: "G3318",
+                            span,
+                            message: format!(
+                                "public import alias `{alias}` is ambiguous in the exported {:?} namespace",
+                                namespace
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -746,7 +804,7 @@ impl DefinitionIndex {
         lexical_owner: &ModuleKey,
         requester: &ModuleKey,
         segments: &[String],
-        visited_aliases: &mut BTreeSet<(ModuleKey, String)>,
+        visited_aliases: &mut BTreeSet<ImportBinding>,
     ) -> ModuleLookup {
         let Some((first, rest)) = segments.split_first() else {
             return ModuleLookup::Absent;
@@ -823,7 +881,7 @@ impl DefinitionIndex {
         start: &ModuleKey,
         requester: &ModuleKey,
         segments: &[String],
-        visited_aliases: &mut BTreeSet<(ModuleKey, String)>,
+        visited_aliases: &mut BTreeSet<ImportBinding>,
     ) -> ModuleLookup {
         if !self.modules.contains_key(start) {
             return ModuleLookup::Absent;
@@ -862,7 +920,7 @@ impl DefinitionIndex {
         owner: &ModuleKey,
         requester: &ModuleKey,
         alias: &str,
-        visited_aliases: &mut BTreeSet<(ModuleKey, String)>,
+        visited_aliases: &mut BTreeSet<ImportBinding>,
     ) -> ModuleLookup {
         let Some(imports) = self.imports.get(owner) else {
             return ModuleLookup::Absent;
@@ -880,16 +938,23 @@ impl DefinitionIndex {
                 continue;
             }
             if !import.glob && import.alias == alias {
-                let cycle = (owner.clone(), alias.to_owned());
-                if !visited_aliases.insert(cycle) {
+                // Guard an active import *edge*, rather than the `(module,
+                // alias)` spelling.  Several independently declared imports
+                // may deliberately have the same alias; collapsing them here
+                // would select the first sorted binding instead of preserving
+                // the required ambiguity.  Removing the edge after exploring
+                // it makes this a recursion stack, not a history cache.
+                if !visited_aliases.insert(import.clone()) {
                     continue;
                 }
-                match self.lexical_module_with_visited(
+                let lookup = self.lexical_module_with_visited(
                     &import.module,
                     requester,
                     &import.path,
                     visited_aliases,
-                ) {
+                );
+                visited_aliases.remove(import);
+                match lookup {
                     ModuleLookup::Found(module) => {
                         candidates.insert(module);
                     }
@@ -899,16 +964,20 @@ impl DefinitionIndex {
                 continue;
             }
             if import.glob {
-                let cycle = (owner.clone(), format!("<glob:{alias}>"));
-                if !visited_aliases.insert(cycle) {
+                // As with explicit aliases, every glob edge contributes an
+                // independent candidate.  This is important for qualified
+                // module paths (`facade::api::Thing`) where two globs expose
+                // the same module spelling.
+                if !visited_aliases.insert(import.clone()) {
                     continue;
                 }
-                match self.lexical_module_with_visited(
+                let target = self.lexical_module_with_visited(
                     &import.module,
                     requester,
                     &import.path,
                     visited_aliases,
-                ) {
+                );
+                match target {
                     ModuleLookup::Found(target) => match self.walk_module_path(
                         &target,
                         requester,
@@ -923,7 +992,8 @@ impl DefinitionIndex {
                     },
                     ModuleLookup::Inaccessible => inaccessible = true,
                     ModuleLookup::Absent => {}
-                }
+                };
+                visited_aliases.remove(import);
             }
         }
         match candidates.len() {
