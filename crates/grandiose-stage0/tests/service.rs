@@ -2849,6 +2849,62 @@ fn service_multiplies_captured_callable_use_by_closure_invocations() {
 }
 
 #[test]
+fn service_preserves_a_move_captured_callable_obligation_in_its_closure() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn through(function: (i64) -> i64) -> i64 { let call = (value: i64) -> i64 { move function(value) }; call(41) } pub fn main() -> i64 { through(add_one) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_multiplies_move_captured_callable_use_through_handler_replay() {
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replay(function: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); let call = (input: i64) -> i64 { move function(input) }; call(value) } { Ask::ask() with k => k(20) + k(21) } } pub fn main() -> i64 { replay(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("replayed move capture unexpectedly satisfied an exact callable obligation");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing replayed move-capture quantity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_move_captures_aggregate_roots_for_partial_closure_moves() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn through(pair: Pair) -> i64 { let call = () -> i64 { let taken = move pair.function; taken(41) }; call() } pub fn main() -> i64 { through(Pair { function: add_one, value: 0 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_joins_partial_aggregate_move_captures_across_handler_arms() {
+    let source = "effect Pick { [1,1] pick(value: Bool) -> i64; } pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn choose(value: Bool, pair: Pair) -> i64 { handle Pick::pick(value) { Pick::pick(true) => { let call = () -> i64 { let taken = move pair.function; taken(41) }; call() }, Pick::pick(false) => { let call = () -> i64 { let taken = move pair.function; taken(42) }; call() } } } pub fn main() -> i64 { choose(true, Pair { function: add_one, value: 0 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_cancellation_keeps_move_captured_callable_obligations_live() {
+    let source = "effect Ask { [0,1] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn cancel(function: (i64) -> i64) -> i64 { handle { let call = (value: i64) -> i64 { move function(value) }; Ask::ask() } { Ask::ask() with _ => 0 } } pub fn main() -> i64 { cancel(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("cancelling a move-captured exact callable unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing cancellation move-capture quantity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_an_unfulfilled_callable_lower_bound_on_normal_exit() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn ignores(function: (i64) -> i64) -> i64 { 42 } pub fn main() -> i64 { ignores(add_one) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

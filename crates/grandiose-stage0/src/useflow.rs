@@ -112,6 +112,7 @@ impl UseFlow {
             contracts: BTreeMap::new(),
             facts: BTreeMap::new(),
             projected_contracts: BTreeMap::new(),
+            closure_values: BTreeMap::new(),
             escapes: BTreeMap::new(),
             escaped_closures: BTreeSet::new(),
             value_obligations: vec![],
@@ -355,6 +356,10 @@ struct Analyzer<'a> {
     /// from the aggregate's source spelling.  One place owns one contract
     /// across direct calls, moves, branches, and closure bodies.
     projected_contracts: BTreeMap<MoveFact, ContractKey>,
+    /// Frozen pre-transfer environments for closure values. A move capture
+    /// removes its outer binding while the closure is evaluated, but the
+    /// resulting closure remains the owner of that capability.
+    closure_values: BTreeMap<CoreId, ClosureValue>,
     escapes: BTreeMap<ContractKey, Vec<Escape>>,
     escaped_closures: BTreeSet<CallableId>,
     value_obligations: Vec<ValueUseFact>,
@@ -463,9 +468,36 @@ impl Analyzer<'_> {
             | CoreKind::Constant(_)
             | CoreKind::Error => Summary::default(),
             CoreKind::Closure {
+                callable,
+                parameters,
                 environment: capture_environment,
-                ..
+                body,
             } => {
+                // Capture post-states are applied below. Preserve the
+                // capability environment first, otherwise `move function`
+                // would erase the function from the closure's own body.
+                self.closure_values
+                    .entry(id)
+                    .or_insert_with(|| ClosureValue {
+                        callable,
+                        body,
+                        captures: capture_environment
+                            .captures
+                            .iter()
+                            .map(|capture| {
+                                (
+                                    capture.name.clone(),
+                                    environment
+                                        .bindings
+                                        .get(&capture.name)
+                                        .cloned()
+                                        .unwrap_or(Binding::Other),
+                                )
+                            })
+                            .collect(),
+                        parameters,
+                        invocation: callable_invocation(&expression.ty).unwrap_or(Quantity::ONCE),
+                    });
                 // PlaceFlow supplies the canonical captured root.  The
                 // environment supplies only the obligation carried by that
                 // root, so this records capture transfer without rebuilding
@@ -893,6 +925,12 @@ impl Analyzer<'_> {
                 environment: closure_environment,
                 body,
             } => {
+                if let Some(closure) = self.closure_values.get(&id).cloned() {
+                    return Binding::Closure(closure);
+                }
+                // This path is for a consumer that asks for a closure before
+                // the normal walker evaluates its captures. Normal closure
+                // evaluation installs the pre-transfer snapshot above.
                 let captures = closure_environment
                     .captures
                     .iter()
@@ -1600,7 +1638,7 @@ mod tests {
     }
 
     #[test]
-    fn widens_captured_uses_for_an_unrestricted_closure_invocation() {
+    fn forged_move_capture_retains_its_obligation_through_unrestricted_replay() {
         let function = callable(Quantity::ONCE);
         let closure = Type::Callable {
             lifetime_binders: 0,
@@ -1644,12 +1682,12 @@ mod tests {
                             },
                             captures: vec![ClosureCapture {
                                 name: "function".into(),
-                                mode: CaptureMode::SharedBorrow,
+                                mode: CaptureMode::Move,
                                 ty: function.clone(),
                             }],
                             post_states: vec![crate::core::CapturePostState {
                                 name: "function".into(),
-                                mode: CaptureMode::SharedBorrow,
+                                mode: CaptureMode::Move,
                             }],
                             sealed: true,
                         },
@@ -1681,7 +1719,7 @@ mod tests {
             uses.diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code == "G5011"),
-            "unrestricted closure replay did not widen its captured exact callable: {uses:#?}"
+            "unrestricted replay lost a forged move-captured exact callable: {uses:#?}"
         );
         assert_eq!(uses.callable_uses[0].actual.upper, None);
     }

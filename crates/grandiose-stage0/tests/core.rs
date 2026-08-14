@@ -4877,6 +4877,58 @@ fn capture_environments_seal_and_validate_mode_derived_post_states() {
 }
 
 #[test]
+fn partial_move_inside_a_closure_moves_the_aggregate_capture_root() {
+    let mut core = core_for(
+        "core-partial-move-capture@0.1.0",
+        "pub struct Pair { value: i64, other: i64 } pub fn main(pair: Pair) -> i64 { let read = () -> i64 { let value = move pair.value; value }; read() }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    {
+        let environment = core
+            .expressions
+            .iter_mut()
+            .find_map(|expression| match &mut expression.kind {
+                CoreKind::Closure { environment, .. } => Some(environment),
+                _ => None,
+            })
+            .expect("closure environment");
+        assert_eq!(environment.captures.len(), 1);
+        assert_eq!(environment.captures[0].name, "pair");
+        assert_eq!(environment.captures[0].mode, CaptureMode::Move);
+        assert_eq!(environment.post_states[0].mode, CaptureMode::Move);
+    }
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+
+    // The capture root and its post-state form one frozen ownership
+    // contract. A forged shared post-state would leave the aggregate usable
+    // after a closure can consume one of its fields.
+    core.expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment),
+            _ => None,
+        })
+        .expect("closure environment")
+        .post_states[0]
+        .mode = CaptureMode::SharedBorrow;
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183"),
+        "forged partial-move capture state passed Typed Core validation"
+    );
+    assert!(
+        PlaceFlow::analyze(&core)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5020"),
+        "PlaceFlow accepted a forged partial-move capture state"
+    );
+}
+
+#[test]
 fn escapeflow_fails_closed_on_a_forged_nested_aggregate_projection_path() {
     let mut core = core_for(
         "core-forged-nested-aggregate-path@0.1.0",

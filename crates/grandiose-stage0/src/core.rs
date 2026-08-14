@@ -4682,13 +4682,8 @@ impl Elaborator<'_> {
                 );
             }
             CoreKind::Move(value) => {
-                if let CoreKind::Local(name) = &self.expressions[value.0 as usize].kind {
-                    record_capture(
-                        captures,
-                        name,
-                        CaptureMode::Move,
-                        self.expressions[value.0 as usize].ty.clone(),
-                    );
+                if let Some((name, ty)) = self.capture_root_local(*value) {
+                    record_capture(captures, &name, CaptureMode::Move, ty);
                 } else {
                     self.collect_captures(*value, locals, captures);
                 }
@@ -4811,6 +4806,21 @@ impl Elaborator<'_> {
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
             CoreKind::Local(_) => {}
+        }
+    }
+
+    /// A closure environment currently carries local roots, not projected
+    /// field slots.  Moving `pair.callback` inside a closure therefore
+    /// transfers the owning `pair` into that environment; retaining a shared
+    /// capture would incorrectly leave the outer aggregate usable while a
+    /// later closure invocation can consume one of its fields.
+    fn capture_root_local(&self, id: CoreId) -> Option<(String, Type)> {
+        match &self.expressions[id.0 as usize].kind {
+            CoreKind::Local(name) => {
+                Some((name.clone(), self.expressions[id.0 as usize].ty.clone()))
+            }
+            CoreKind::Field { base, .. } => self.capture_root_local(*base),
+            _ => None,
         }
     }
     /// Typed Core is a frozen semantic boundary: body-local inference holes
