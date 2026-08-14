@@ -100,9 +100,9 @@ pub struct CallableHeader {
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct EffectRowHeader {
     pub effects: Vec<HeaderType>,
-    /// Row-polymorphic tails require a kinded binder and are retained in
-    /// syntax now; signature elaboration rejects one until the generic-kind
-    /// interface product is available rather than treating it as a type.
+    /// Row-polymorphic tails are resolved only against a binder explicitly
+    /// declared with the `EffectRow` kind; ordinary generic binders never
+    /// enter this namespace.
     pub tail: Option<String>,
 }
 
