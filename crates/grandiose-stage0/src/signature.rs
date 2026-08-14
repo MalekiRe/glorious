@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::{
     header::{
-        CallableHeader, EffectHeader, EffectRowHeader, EnumVariantPayloadHeader, HeaderType,
-        ImplementationHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitRefHeader,
+        CallableHeader, EffectHeader, EffectRowHeader, EnumVariantPayloadHeader, GenericParameters,
+        HeaderType, ImplementationHeader, NominalLayoutHeader, ParsedHeader, TraitHeader,
+        TraitRefHeader,
     },
     identity::{DefKey, ModuleKey},
     interface::{Definition, DefinitionNamespace, PackageInterface},
@@ -168,6 +169,7 @@ impl ElaboratedInterface {
                 index,
                 module: &definition.module,
                 generics: BTreeMap::new(),
+                effect_row_generics: BTreeMap::new(),
                 diagnostics: vec![],
             };
             let header = elaborator.definition(definition);
@@ -771,6 +773,7 @@ struct Elaborator<'a> {
     index: &'a DefinitionIndex,
     module: &'a ModuleKey,
     generics: BTreeMap<String, u32>,
+    effect_row_generics: BTreeMap<String, u32>,
     diagnostics: Vec<SignatureDiagnostic>,
 }
 impl Elaborator<'_> {
@@ -833,19 +836,14 @@ impl Elaborator<'_> {
             .iter()
             .map(|method| {
                 let outer_generics = self.generics.clone();
-                let base = outer_generics.len() as u32;
-                for (offset, name) in method.signature.generics.iter().enumerate() {
-                    if self
-                        .generics
-                        .insert(name.clone(), base + offset as u32)
-                        .is_some()
-                    {
-                        self.diagnostics.push(SignatureDiagnostic {
-                            code: "G4117",
-                            message: "trait method generic shadows an outer generic".into(),
-                        });
-                    }
-                }
+                let outer_effect_row_generics = self.effect_row_generics.clone();
+                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                self.extend_generics(
+                    &method.signature.generics,
+                    base,
+                    "G4117",
+                    "trait method generic shadows an outer generic",
+                );
                 let signature = CallableSignature {
                     generics: method.signature.generics.len() as u32,
                     parameters: method
@@ -870,6 +868,7 @@ impl Elaborator<'_> {
                         .collect(),
                 };
                 self.generics = outer_generics;
+                self.effect_row_generics = outer_effect_row_generics;
                 (method.name.clone(), signature)
             })
             .collect();
@@ -911,21 +910,17 @@ impl Elaborator<'_> {
             .filter(|item| item.effect_row_value.is_none())
             .map(|item| {
                 let outer_generics = self.generics.clone();
-                let base = outer_generics.len() as u32;
-                for (offset, name) in item.generics.iter().enumerate() {
-                    if self
-                        .generics
-                        .insert(name.clone(), base + offset as u32)
-                        .is_some()
-                    {
-                        self.diagnostics.push(SignatureDiagnostic {
-                            code: "G4113",
-                            message: "associated type generic shadows an outer generic".into(),
-                        });
-                    }
-                }
+                let outer_effect_row_generics = self.effect_row_generics.clone();
+                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                self.extend_generics(
+                    &item.generics,
+                    base,
+                    "G4113",
+                    "associated type generic shadows an outer generic",
+                );
                 let value = self.ty(&item.value);
                 self.generics = outer_generics;
+                self.effect_row_generics = outer_effect_row_generics;
                 (
                     item.name.clone(),
                     ElaboratedAssociatedTypeDefinition {
@@ -941,22 +936,17 @@ impl Elaborator<'_> {
             .filter_map(|item| {
                 let row = item.effect_row_value.as_ref()?;
                 let outer_generics = self.generics.clone();
-                let base = outer_generics.len() as u32;
-                for (offset, name) in item.generics.iter().enumerate() {
-                    if self
-                        .generics
-                        .insert(name.clone(), base + offset as u32)
-                        .is_some()
-                    {
-                        self.diagnostics.push(SignatureDiagnostic {
-                            code: "G4113",
-                            message: "associated effect-row generic shadows an outer generic"
-                                .into(),
-                        });
-                    }
-                }
+                let outer_effect_row_generics = self.effect_row_generics.clone();
+                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                self.extend_generics(
+                    &item.generics,
+                    base,
+                    "G4113",
+                    "associated effect-row generic shadows an outer generic",
+                );
                 let value = self.effect_row(row);
                 self.generics = outer_generics;
+                self.effect_row_generics = outer_effect_row_generics;
                 Some((
                     item.name.clone(),
                     ElaboratedAssociatedEffectRowDefinition {
@@ -971,20 +961,14 @@ impl Elaborator<'_> {
             .iter()
             .map(|method| {
                 let outer_generics = self.generics.clone();
-                let base = outer_generics.len() as u32;
-                for (offset, name) in method.signature.generics.iter().enumerate() {
-                    if self
-                        .generics
-                        .insert(name.clone(), base + offset as u32)
-                        .is_some()
-                    {
-                        self.diagnostics.push(SignatureDiagnostic {
-                            code: "G4118",
-                            message: "implementation method generic shadows an outer generic"
-                                .into(),
-                        });
-                    }
-                }
+                let outer_effect_row_generics = self.effect_row_generics.clone();
+                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                self.extend_generics(
+                    &method.signature.generics,
+                    base,
+                    "G4118",
+                    "implementation method generic shadows an outer generic",
+                );
                 let signature = CallableSignature {
                     generics: method.signature.generics.len() as u32,
                     parameters: method
@@ -1009,6 +993,7 @@ impl Elaborator<'_> {
                         .collect(),
                 };
                 self.generics = outer_generics;
+                self.effect_row_generics = outer_effect_row_generics;
                 (method.name.clone(), signature)
             })
             .collect();
@@ -1026,21 +1011,20 @@ impl Elaborator<'_> {
     fn effect_header(&mut self, header: &EffectHeader) -> ElaboratedEffect {
         self.bind_generics(&header.generics);
         let declaration_generics = self.generics.clone();
+        let declaration_effect_row_generics = self.effect_row_generics.clone();
         let operations = header
             .operations
             .iter()
             .map(|operation| {
                 self.generics = declaration_generics.clone();
-                let base = self.generics.len() as u32;
-                for (offset, name) in operation.generics.iter().enumerate() {
-                    if self
-                        .generics
-                        .insert(name.clone(), base + offset as u32)
-                        .is_some()
-                    {
-                        self.error("G3301", format!("duplicate generic parameter `{name}`"));
-                    }
-                }
+                self.effect_row_generics = declaration_effect_row_generics.clone();
+                let base = (self.generics.len() + self.effect_row_generics.len()) as u32;
+                self.extend_generics(
+                    &operation.generics,
+                    base,
+                    "G3301",
+                    "effect operation generic shadows a declaration generic",
+                );
                 ElaboratedEffectOperation {
                     name: operation.name.clone(),
                     generics: base + operation.generics.len() as u32,
@@ -1064,6 +1048,7 @@ impl Elaborator<'_> {
             })
             .collect();
         self.generics = declaration_generics;
+        self.effect_row_generics = declaration_effect_row_generics;
         ElaboratedEffect {
             generics: header.generics.len() as u32,
             operations,
@@ -1127,7 +1112,7 @@ impl Elaborator<'_> {
     }
     fn effect_row(&mut self, value: &EffectRowHeader) -> EffectRow {
         let tail = value.tail.as_ref().and_then(|tail| {
-            self.generics
+            self.effect_row_generics
                 .get(tail)
                 .copied()
                 .map(crate::EffectTail::Generic)
@@ -1258,11 +1243,39 @@ impl Elaborator<'_> {
             NominalLayoutHeader::Opaque => ElaboratedNominalLayout::Opaque,
         }
     }
-    fn bind_generics(&mut self, names: &[String]) {
+    fn bind_generics(&mut self, parameters: &GenericParameters) {
         self.generics.clear();
-        for (index, name) in names.iter().enumerate() {
-            if self.generics.insert(name.clone(), index as u32).is_some() {
+        self.effect_row_generics.clear();
+        for (index, name) in parameters.iter().enumerate() {
+            if self.generics.contains_key(name) || self.effect_row_generics.contains_key(name) {
                 self.error("G3301", format!("duplicate generic parameter `{name}`"));
+            }
+            if parameters.is_effect_row(name) {
+                self.effect_row_generics.insert(name.clone(), index as u32);
+            } else {
+                self.generics.insert(name.clone(), index as u32);
+            }
+        }
+    }
+    fn extend_generics(
+        &mut self,
+        parameters: &GenericParameters,
+        base: u32,
+        code: &'static str,
+        message: &'static str,
+    ) {
+        for (offset, name) in parameters.iter().enumerate() {
+            if self.generics.contains_key(name) || self.effect_row_generics.contains_key(name) {
+                self.diagnostics.push(SignatureDiagnostic {
+                    code,
+                    message: message.into(),
+                });
+            }
+            if parameters.is_effect_row(name) {
+                self.effect_row_generics
+                    .insert(name.clone(), base + offset as u32);
+            } else {
+                self.generics.insert(name.clone(), base + offset as u32);
             }
         }
     }
@@ -1336,6 +1349,13 @@ impl Elaborator<'_> {
                     self.arity(name, 0, arguments.len());
                     Type::Error
                 };
+            }
+            if self.effect_row_generics.contains_key(name) {
+                self.error(
+                    "G3313",
+                    format!("effect-row generic `{name}` cannot be used as a type"),
+                );
+                return Type::Error;
             }
             if let Some(scalar) = scalar(name) {
                 return if arguments.is_empty() {

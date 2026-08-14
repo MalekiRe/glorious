@@ -12,6 +12,40 @@ use crate::{
     source::{LexedFile, Span, TokenKind},
 };
 
+/// A declaration's generic binders, including the small but semantically
+/// important distinction between ordinary type parameters and effect-row
+/// parameters.  Keeping the names in source order preserves the existing
+/// generic-slot ABI while `effect_rows` prevents a row binder from being
+/// silently elaborated as `Type::Generic`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GenericParameters {
+    pub names: Vec<String>,
+    pub effect_rows: BTreeSet<String>,
+}
+
+impl GenericParameters {
+    pub fn is_effect_row(&self, name: &str) -> bool {
+        self.effect_rows.contains(name)
+    }
+}
+
+impl std::ops::Deref for GenericParameters {
+    type Target = [String];
+
+    fn deref(&self) -> &Self::Target {
+        &self.names
+    }
+}
+
+impl<const N: usize> PartialEq<[&str; N]> for GenericParameters {
+    fn eq(&self, other: &[&str; N]) -> bool {
+        self.names
+            .iter()
+            .map(String::as_str)
+            .eq(other.iter().copied())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeaderType {
     Path(Vec<String>),
@@ -53,7 +87,7 @@ pub struct HeaderParameter {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableHeader {
-    pub generics: Vec<String>,
+    pub generics: GenericParameters,
     pub parameters: Vec<HeaderParameter>,
     pub result: Option<HeaderType>,
     /// A callable's declared outward effect row.  Omission is the canonical
@@ -92,7 +126,7 @@ pub struct WhereBoundHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssociatedTypeHeader {
     pub name: String,
-    pub generics: Vec<String>,
+    pub generics: GenericParameters,
     /// `type Output: EffectRow;` declares an associated effect row rather
     /// than an ordinary associated type.
     pub effect_row: bool,
@@ -102,7 +136,7 @@ pub struct AssociatedTypeHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssociatedTypeDefinitionHeader {
     pub name: String,
-    pub generics: Vec<String>,
+    pub generics: GenericParameters,
     pub value: HeaderType,
     /// An implementation-side associated effect row uses a row literal, for
     /// example `type Effects = {Ask, Trace};`, rather than a value type.
@@ -124,7 +158,7 @@ pub struct ImplementationMethodHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitHeader {
-    pub generics: Vec<String>,
+    pub generics: GenericParameters,
     pub supertraits: Vec<TraitRefHeader>,
     pub associated_types: Vec<AssociatedTypeHeader>,
     pub methods: Vec<TraitMethodHeader>,
@@ -139,7 +173,7 @@ pub struct TraitMethodHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImplementationHeader {
-    pub generics: Vec<String>,
+    pub generics: GenericParameters,
     pub negative: bool,
     pub relation: TraitRefHeader,
     pub self_ty: HeaderType,
@@ -151,7 +185,7 @@ pub struct ImplementationHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectOperationHeader {
     pub name: String,
-    pub generics: Vec<String>,
+    pub generics: GenericParameters,
     pub parameters: Vec<HeaderParameter>,
     /// Omitted result syntax is the unit type; terminality is represented
     /// separately so `!` can never be mistaken for a resumptive result.
@@ -163,7 +197,7 @@ pub struct EffectOperationHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectHeader {
-    pub generics: Vec<String>,
+    pub generics: GenericParameters,
     pub operations: Vec<EffectOperationHeader>,
 }
 
@@ -236,7 +270,7 @@ pub struct ImportBindingHeader {
 pub enum ParsedHeader {
     Function(CallableHeader),
     TypeAlias {
-        generics: Vec<String>,
+        generics: GenericParameters,
         target: HeaderType,
     },
     Constant {
@@ -248,7 +282,7 @@ pub enum ParsedHeader {
     Implementation(ImplementationHeader),
     Effect(EffectHeader),
     Nominal {
-        generics: Vec<String>,
+        generics: GenericParameters,
         layout: NominalLayoutHeader,
     },
     Opaque,
@@ -413,7 +447,7 @@ struct Parser<'a> {
 impl Parser<'_> {
     fn trait_header(
         &mut self,
-        generics: Vec<String>,
+        generics: GenericParameters,
         supertraits: Vec<TraitRefHeader>,
     ) -> TraitHeader {
         let mut associated_types = vec![];
@@ -662,7 +696,7 @@ impl Parser<'_> {
             methods,
         }
     }
-    fn effect_header(&mut self, generics: Vec<String>) -> EffectHeader {
+    fn effect_header(&mut self, generics: GenericParameters) -> EffectHeader {
         let mut operations = vec![];
         let mut names = BTreeSet::new();
         if !self.punctuation('{') {
@@ -1204,21 +1238,28 @@ impl Parser<'_> {
         };
         vec![ImportBindingHeader { path, alias }]
     }
-    fn generics(&mut self) -> Vec<String> {
+    fn generics(&mut self) -> GenericParameters {
         if !self.operator("<") {
-            return vec![];
+            return GenericParameters::default();
         }
-        let mut names = vec![];
+        let mut generics = GenericParameters::default();
         while self.current().is_some() && !self.at_operator(">") {
             if let Some(name) = self.identifier() {
-                names.push(name);
-                if self.punctuation(':') {
+                let is_effect_row = if self.punctuation(':') {
                     if self.word() == Some("EffectRow") {
                         self.position += 1;
+                        true
                     } else {
                         self.error("G3205", "expected `EffectRow` after generic kind `:`");
+                        false
                     }
+                } else {
+                    false
+                };
+                if is_effect_row {
+                    generics.effect_rows.insert(name.clone());
                 }
+                generics.names.push(name);
             } else {
                 self.position += 1;
                 self.recovered = true;
@@ -1230,7 +1271,7 @@ impl Parser<'_> {
         if !self.operator(">") {
             self.error("G3205", "expected `>` after generic parameters");
         }
-        names
+        generics
     }
     fn ty(&mut self) -> HeaderType {
         if self.operator("<") {

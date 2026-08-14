@@ -293,6 +293,7 @@ impl TypedBody {
                     .generics
                     .iter()
                     .enumerate()
+                    .filter(|(_, name)| !header.generics.is_effect_row(name))
                     .map(|(index, name)| (name.clone(), index as u32))
                     .collect()
             })
@@ -385,11 +386,15 @@ impl TypedBody {
     ) -> Self {
         let mut generic_parameters = std::collections::BTreeMap::new();
         for (index, name) in context.implementation_header.generics.iter().enumerate() {
-            generic_parameters.insert(name.clone(), index as u32);
+            if !context.implementation_header.generics.is_effect_row(name) {
+                generic_parameters.insert(name.clone(), index as u32);
+            }
         }
         let method_base = context.implementation_header.generics.len() as u32;
         for (offset, name) in context.method.signature.generics.iter().enumerate() {
-            generic_parameters.insert(name.clone(), method_base + offset as u32);
+            if !context.method.signature.generics.is_effect_row(name) {
+                generic_parameters.insert(name.clone(), method_base + offset as u32);
+            }
         }
         let mut elaborator = Elaborator {
             body,

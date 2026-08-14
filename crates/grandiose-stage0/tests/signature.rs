@@ -509,6 +509,24 @@ fn kinded_effect_row_binders_preserve_open_row_tails() {
 }
 
 #[test]
+fn generic_kinds_reject_crossing_type_and_effect_row_positions() {
+    let package = PackageKey("signature-generic-kinds@0.1.0".into());
+    let source = "pub fn invalid_tail<T>() -> i64 / { | T } { 0 } pub fn invalid_type<e: EffectRow>(value: e) -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let codes = signatures
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"G3311"), "{:#?}", signatures.diagnostics);
+    assert!(codes.contains(&"G3313"), "{:#?}", signatures.diagnostics);
+}
+
+#[test]
 fn callable_effect_rows_resolve_effect_declaration_identities() {
     let package = PackageKey("signature-effect-row@0.1.0".into());
     let source = "effect Console { write() } effect Trace { note() } pub fn run() -> i64 / { Trace, Console } { 42 }";
