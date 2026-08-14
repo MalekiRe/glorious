@@ -2010,6 +2010,9 @@ fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), S
             lifetime_binders.pop();
             validation
         }
+        // Bytecode gives `Never` a real zero-sized bottom representation. It
+        // is valid in a callable result and in a recursively carried semantic
+        // contract; recovered error types remain the fail-closed boundary.
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
@@ -8301,7 +8304,15 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let (effect, operation, arguments) = self.direct_operation(computation)?;
+        // A normal direct operation still enters this fast root-handler path
+        // with a resumable continuation.  Only a bottom-typed computation
+        // needs the strict-context walk that finds its terminal child.
+        let (effect, operation, arguments) =
+            if matches!(&self.body.expression(computation).ty, Type::Never) {
+                self.terminal_operation(computation)?
+            } else {
+                self.direct_operation(computation)?
+            };
         let arguments = arguments
             .into_iter()
             .map(|argument| self.value(argument))
@@ -9662,19 +9673,48 @@ impl Lowerer<'_> {
     ) -> Option<(crate::EffectInstance, u32, Vec<CoreId>)> {
         match self.body.expression(computation).kind.clone() {
             CoreKind::Perform { terminal: true, .. } => self.direct_operation(computation),
-            CoreKind::Block(values) => {
-                let Some((last, prefix)) = values.split_last() else {
-                    self.error(
-                        "G6005",
-                        "empty handler computation cannot select a terminal arm",
+            CoreKind::Block(values) | CoreKind::Tuple(values) | CoreKind::Array(values) => self
+                .terminal_in_strict_values(
+                    values,
+                    "terminal computation has no reachable terminal performance",
+                ),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => self
+                .terminal_in_strict_values(
+                    fields,
+                    "terminal aggregate construction has no reachable terminal performance",
+                ),
+            CoreKind::Call { callee, arguments } => {
+                let mut values = vec![callee];
+                values.extend(arguments.clone());
+                if values
+                    .iter()
+                    .any(|value| matches!(&self.body.expression(*value).ty, Type::Never))
+                {
+                    return self.terminal_in_strict_values(
+                        values,
+                        "terminal call has no reachable terminal operand",
                     );
-                    return None;
-                };
-                for value in prefix {
-                    self.statement(*value)?;
                 }
-                self.terminal_operation(*last)
+                let definition = match self.body.expression(callee).kind {
+                    CoreKind::Function { definition, .. }
+                    | CoreKind::TraitMethod {
+                        method: definition, ..
+                    } => definition,
+                    _ => {
+                        self.error("G6005", "terminal call requires handler-stack lowering");
+                        return None;
+                    }
+                };
+                self.direct_known_perform(definition, arguments)
             }
+            CoreKind::Borrow { value, .. }
+            | CoreKind::Deref(value)
+            | CoreKind::Move(value)
+            | CoreKind::Unary { value, .. }
+            | CoreKind::Field { base: value, .. }
+            | CoreKind::PatternTest { subject: value, .. }
+            | CoreKind::Let { value, .. }
+            | CoreKind::Assign { value, .. } => self.terminal_operation(value),
             _ => {
                 self.error(
                     "G6005",
@@ -9683,6 +9723,24 @@ impl Lowerer<'_> {
                 None
             }
         }
+    }
+    /// Find the first non-returning child of a strict expression while still
+    /// lowering every earlier child in source order.  The Core type has
+    /// already established that this child is `Never`; later children are
+    /// unreachable and must not be emitted as ordinary VM work.
+    fn terminal_in_strict_values(
+        &mut self,
+        values: Vec<CoreId>,
+        missing: &'static str,
+    ) -> Option<(crate::EffectInstance, u32, Vec<CoreId>)> {
+        for value in values {
+            if matches!(&self.body.expression(value).ty, Type::Never) {
+                return self.terminal_operation(value);
+            }
+            self.statement(value)?;
+        }
+        self.error("G6005", missing);
+        None
     }
     fn alloc(&mut self, ty: Type, source: CoreId) -> MirLocal {
         let id = MirLocal(self.locals.len() as u32);

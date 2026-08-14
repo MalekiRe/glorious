@@ -2142,7 +2142,20 @@ impl Elaborator<'_> {
                     self.resumption_bindings
                         .insert((name.clone(), generation), identity);
                 }
-                self.alloc(CoreKind::Let { name, value }, Type::Unit, expression.span)
+                // A binding has the unit value only after its initializer has
+                // completed.  Preserve bottom here so an enclosing strict
+                // block does not try to evaluate statements after a terminal
+                // operation hidden in a `let` initializer.
+                let statement_type = if matches!(ty, Type::Never) {
+                    Type::Never
+                } else {
+                    Type::Unit
+                };
+                self.alloc(
+                    CoreKind::Let { name, value },
+                    statement_type,
+                    expression.span,
+                )
             }
             ExprKind::Label { name, body } => {
                 let brand = LabelBrand {
@@ -2229,7 +2242,7 @@ impl Elaborator<'_> {
                 }
                 self.alloc(
                     CoreKind::Assign { place, value },
-                    Type::Unit,
+                    self.strict_result(&[value], Type::Unit),
                     expression.span,
                 )
             }
@@ -2442,6 +2455,13 @@ impl Elaborator<'_> {
             ExprKind::Borrow { unique, value } => {
                 let value = self.expression(value);
                 let ty = self.expressions[value.0 as usize].ty.clone();
+                if matches!(&ty, Type::Never) {
+                    return self.alloc(
+                        CoreKind::Borrow { unique, value },
+                        Type::Never,
+                        expression.span,
+                    );
+                }
                 self.alloc(
                     CoreKind::Borrow { unique, value },
                     Type::Reference {
@@ -2458,6 +2478,9 @@ impl Elaborator<'_> {
             }
             ExprKind::Deref(value) => {
                 let value = self.expression(value);
+                if matches!(&self.expressions[value.0 as usize].ty, Type::Never) {
+                    return self.alloc(CoreKind::Deref(value), Type::Never, expression.span);
+                }
                 let Type::Reference {
                     referent,
                     mutability: _,
@@ -2589,6 +2612,23 @@ impl Elaborator<'_> {
             _ => self.expression(id),
         }
     }
+    /// Strict expression forms evaluate their children from left to right. If
+    /// any child cannot return normally, the enclosing construction cannot
+    /// manufacture its nominal, tuple, array, call, or statement result.
+    /// `Never` is therefore propagated through strict forms; it is coerced to
+    /// an expected type only at a value boundary that is actually reached
+    /// (return, assignment contract, handler arm, or callable result).
+    fn strict_result(&self, values: &[CoreId], normal: Type) -> Type {
+        if values
+            .iter()
+            .any(|value| matches!(&self.expressions[value.0 as usize].ty, Type::Never))
+        {
+            Type::Never
+        } else {
+            normal
+        }
+    }
+
     /// Elaborate a lexical block with the result expectation available only
     /// to its tail expression.  Earlier statements execute for their effects
     /// and must not inherit a value contract intended for the block result.
@@ -2615,6 +2655,7 @@ impl Elaborator<'_> {
             .last()
             .map(|value| self.expressions[value.0 as usize].ty.clone())
             .unwrap_or(Type::Unit);
+        let ty = self.strict_result(&values, ty);
         self.locals.leave();
         self.alloc(CoreKind::Block(values), ty, span)
     }
@@ -2657,6 +2698,7 @@ impl Elaborator<'_> {
                     .collect(),
             )
         };
+        let ty = self.strict_result(&values, ty);
         self.alloc(CoreKind::Tuple(values), ty, span)
     }
 
@@ -2687,12 +2729,9 @@ impl Elaborator<'_> {
                 }
                 value
             })
-            .collect();
-        self.alloc(
-            CoreKind::Array(values),
-            Type::Array(Box::new(element)),
-            span,
-        )
+            .collect::<Vec<_>>();
+        let ty = self.strict_result(&values, Type::Array(Box::new(element)));
+        self.alloc(CoreKind::Array(values), ty, span)
     }
     fn contextual_zero_arg_closure(
         &mut self,
@@ -5131,6 +5170,7 @@ impl Elaborator<'_> {
             definition,
             arguments,
         };
+        let ty = self.strict_result(&values, ty);
         self.alloc(
             CoreKind::Record {
                 definition,
@@ -5260,16 +5300,20 @@ impl Elaborator<'_> {
                 "enum record construction names an unknown field",
             ));
         }
+        let ty = self.strict_result(
+            &fields,
+            Type::Nominal {
+                definition,
+                arguments,
+            },
+        );
         Some(self.alloc(
             CoreKind::Enum {
                 definition,
                 variant,
                 fields,
             },
-            Type::Nominal {
-                definition,
-                arguments,
-            },
+            ty,
             span,
         ))
     }
@@ -5355,17 +5399,21 @@ impl Elaborator<'_> {
                 }
                 value
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let ty = self.strict_result(
+            &values,
+            Type::Nominal {
+                definition,
+                arguments,
+            },
+        );
         Some(self.alloc(
             CoreKind::Enum {
                 definition,
                 variant,
                 fields: values,
             },
-            Type::Nominal {
-                definition,
-                arguments,
-            },
+            ty,
             span,
         ))
     }
@@ -5379,6 +5427,9 @@ impl Elaborator<'_> {
         }
         let value = self.expression(value);
         let value_ty = self.expressions[value.0 as usize].ty.clone();
+        if matches!(value_ty, Type::Never) {
+            return self.alloc(CoreKind::Unary { operator, value }, Type::Never, span);
+        }
         let result = match (operator.as_str(), &value_ty) {
             ("+" | "-", Type::Scalar(ScalarType::I64 | ScalarType::F64)) => value_ty.clone(),
             ("!", Type::Scalar(ScalarType::Bool)) => Type::Scalar(ScalarType::Bool),
@@ -5426,8 +5477,14 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
         }
-        self.check_effects(&effects, span);
-        self.check_call_where_bounds(callee, span);
+        let strict_operands = std::iter::once(callee)
+            .chain(arguments.iter().copied())
+            .collect::<Vec<_>>();
+        let result = self.strict_result(&strict_operands, result);
+        if !matches!(result, Type::Never) {
+            self.check_effects(&effects, span);
+            self.check_call_where_bounds(callee, span);
+        }
         self.alloc(CoreKind::Call { callee, arguments }, result, span)
     }
     /// Resolve a qualified trait method used as a first-class callable.  A

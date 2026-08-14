@@ -1580,6 +1580,14 @@ fn service_executes_a_terminal_handler_without_leaking_an_unhandled_effect() {
 }
 
 #[test]
+fn service_propagates_terminal_operations_through_strict_expression_contexts() {
+    let source = "effect Stop { stop() -> !; } struct Packet { value: i64 } pub fn consume(value: i64) -> i64 { value } pub fn through_block() -> i64 { handle { 0; Stop::stop(); 1 } { Stop::stop() => 40 } } pub fn through_tuple() -> i64 { handle (Stop::stop(), 1) { Stop::stop() => 1 } } pub fn through_array() -> i64 { handle [Stop::stop()] { Stop::stop() => 1 } } pub fn through_record() -> i64 { handle Packet { value: Stop::stop() } { Stop::stop() => 0 } } pub fn through_call() -> i64 { handle consume(Stop::stop()) { Stop::stop() => 0 } } pub fn main() -> i64 { through_block() + through_tuple() + through_array() + through_record() + through_call() }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_binds_terminal_handler_payloads_before_executing_the_clause() {
     let source = "effect Stop { stop(value: i64) -> !; } pub fn main() -> i64 { handle Stop::stop(42) { Stop::stop(value) => value } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

@@ -116,6 +116,29 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
 }
 
 #[test]
+fn mir_validation_preserves_never_and_rejects_nested_recovery_types() {
+    let mut function = graph();
+    function
+        .locals
+        .push(local(Type::Array(Box::new(Type::Never))));
+    assert!(
+        function.validate().is_ok(),
+        "MIR must preserve the VM's zero-sized bottom representation"
+    );
+
+    function.locals.pop();
+    function
+        .locals
+        .push(local(Type::Array(Box::new(Type::Error))));
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("recovered error poison")),
+        "MIR must not provide a VM layout for recovered error poison"
+    );
+}
+
+#[test]
 fn checked_mir_editor_rolls_back_an_invalid_cfg_edit() {
     let function = graph();
     let mut editor = MirEditor::open(function.clone()).unwrap();
