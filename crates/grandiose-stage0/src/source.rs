@@ -262,12 +262,21 @@ impl Lexer<'_> {
                 self.push(TokenKind::Punctuation(byte as char), start);
             }
             byte if is_operator(byte) => {
-                // Nested generic applications naturally place two angle
-                // delimiters together (`Outer<Inner<T>>`).  Preserve those
-                // delimiters as individual tokens instead of inventing an
-                // undocumented shift operator, so every header/body parser
-                // can accept projection arguments without whitespace hacks.
-                if matches!(byte, b'<' | b'>') && self.peek(1) == Some(byte) {
+                // `!/ Effects` is the compact spelling for a terminal
+                // callable with an effect row.  It contains two grammatical
+                // delimiters, not an overloadable `!/` operator: `!` is the
+                // bottom result and `/` starts the row annotation.  Preserve
+                // that boundary even though ordinary operator runs use
+                // maximal munch.
+                if byte == b'!' && self.peek(1) == Some(b'/') {
+                    self.index += 1;
+                    self.push(TokenKind::Operator, start);
+                } else if matches!(byte, b'<' | b'>') && self.peek(1) == Some(byte) {
+                    // Nested generic applications naturally place two angle
+                    // delimiters together (`Outer<Inner<T>>`).  Preserve those
+                    // delimiters as individual tokens instead of inventing an
+                    // undocumented shift operator, so every header/body parser
+                    // can accept projection arguments without whitespace hacks.
                     self.index += 1;
                     self.push(TokenKind::Operator, start);
                 } else {

@@ -762,6 +762,24 @@ fn callable_headers_preserve_closed_effect_row_annotations() {
 }
 
 #[test]
+fn terminal_callable_headers_accept_compact_effect_row_delimiters() {
+    let package = PackageKey("header-terminal-effects@0.1.0".into());
+    let source = "fn stop() -> !/ Stop { Stop::abort() }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let header = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(header.diagnostics.is_empty(), "{header:#?}");
+    let ParsedHeader::Function(value) = header.header else {
+        panic!("expected callable")
+    };
+    assert!(matches!(value.result, Some(HeaderType::Never)));
+    assert!(
+        matches!(value.effects.effects.as_slice(), [HeaderType::Path(effect)] if effect == &["Stop"])
+    );
+}
+
+#[test]
 fn trait_and_implementation_headers_preserve_structural_associated_constants() {
     let package = PackageKey("header-associated-const@0.1.0".into());
     let source = "trait Shape { const Width: u32 = 4; const Demand: Quantity; } impl Shape for i64 { const Width = 8; const Demand = [1, *]; }";
