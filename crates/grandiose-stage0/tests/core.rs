@@ -2953,6 +2953,109 @@ fn escapeflow_rejects_storing_a_body_loan_through_external_reference_storage() {
 }
 
 #[test]
+fn escapeflow_fails_closed_for_a_forged_nested_external_store_place() {
+    let package = PackageKey("core-forged-nested-external-store@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let reference = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Shared,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    };
+    let slot = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Unique,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(Type::Nominal {
+            definition: DefKey(Digest::of_bytes(b"forged-external-holder")),
+            arguments: vec![],
+        }),
+    };
+    let body = TypedBody {
+        parameters: vec![("slot".into(), slot.clone())],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Local("slot".into()),
+                ty: slot,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("1".into()),
+                ty: Type::Scalar(ScalarType::I64),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Let {
+                    name: "value".into(),
+                    value: CoreId(1),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Local("value".into()),
+                ty: Type::Scalar(ScalarType::I64),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Borrow {
+                    unique: false,
+                    value: CoreId(3),
+                },
+                ty: reference.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Assign {
+                    place: CorePlace::Field {
+                        base: Box::new(CorePlace::Deref {
+                            reference: CoreId(0),
+                            ty: Type::Nominal {
+                                definition: DefKey(Digest::of_bytes(b"forged-external-holder")),
+                                arguments: vec![],
+                            },
+                            unique: true,
+                        }),
+                        index: 0,
+                        field_count: 1,
+                        ty: reference,
+                    },
+                    value: CoreId(4),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("0".into()),
+                ty: Type::Scalar(ScalarType::I64),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Block(vec![CoreId(2), CoreId(5), CoreId(6)]),
+                ty: Type::Scalar(ScalarType::I64),
+                span,
+            },
+        ],
+        root: CoreId(7),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(body.validate().is_empty(), "{:#?}", body.validate());
+    let flow = PlaceFlow::analyze(&body);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let escapes = EscapeFlow::analyze(&body, &flow);
+    assert!(
+        escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5022"),
+        "frozen nested external store was not checked before lowering: {escapes:#?}"
+    );
+}
+
+#[test]
 fn call_lifetime_instantiation_preserves_a_generic_reference_relationship() {
     let source = r#"
         pub fn relay<'a>(value: &'a i64) -> &'a i64 { value }

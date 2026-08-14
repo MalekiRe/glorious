@@ -712,6 +712,45 @@ fn body_local_reference_cannot_be_stored_through_a_caller_owned_reference() {
         "missing external-store drop-check diagnostic: {diagnostics:#?}"
     );
 
+    let nested_diagnostics = match StageZeroCompiler::new().compile(request(
+        "pub struct Holder { reference: &i64 } pub fn bad(slot: &mut Holder) -> i64 { let value = 1; (*slot).reference = &value; 0 } pub fn main() -> i64 { 0 }",
+    )) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("body-local reference unexpectedly escaped through caller aggregate storage: {outcome:#?}"),
+    };
+    assert!(
+        nested_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5022"),
+        "missing nested external-store drop-check diagnostic: {nested_diagnostics:#?}"
+    );
+
+    let closure_diagnostics = match StageZeroCompiler::new().compile(request(
+        "pub fn bad(slot: &mut (() -> i64)) -> i64 { let value = 1; let loan = &value; *slot = () -> i64 { *loan }; 0 } pub fn main() -> i64 { 0 }",
+    )) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("body-local closure unexpectedly escaped through caller storage: {outcome:#?}"),
+    };
+    assert!(
+        closure_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5022"),
+        "missing closure external-store drop-check diagnostic: {closure_diagnostics:#?}"
+    );
+
+    let cancelled_handler_diagnostics = match StageZeroCompiler::new().compile(request(
+        "effect Ask { [0, 1] ask() -> i64; } pub fn bad(slot: &mut &i64) -> i64 / {Ask} { let value = 1; handle Ask::ask() { Ask::ask() with _ => { *slot = &value; 0 } } } pub fn main() -> i64 { 0 }",
+    )) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("handler cancellation unexpectedly stored a body-local reference externally: {outcome:#?}"),
+    };
+    assert!(
+        cancelled_handler_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5022"),
+        "missing cancellation external-store drop-check diagnostic: {cancelled_handler_diagnostics:#?}"
+    );
+
     let local_slot = StageZeroCompiler::new()
         .compile(request(
             "pub fn main() -> i64 { let first = 1; let second = 42; let reference = &first; let slot = &mut reference; *slot = &second; *reference }",
