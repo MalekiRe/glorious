@@ -30,6 +30,30 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
     PlaceFlow::analyze(&core)
 }
 
+fn core_for(package_name: &str, source: &str) -> TypedBody {
+    let package = PackageKey(package_name.into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    )
+}
+
 #[test]
 fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
     let package = PackageKey("core@0.1.0".into());
@@ -1412,6 +1436,78 @@ fn handler_coverage_tracks_direct_operations_but_calls_require_total_protocol_co
             .any(|diagnostic| diagnostic.code == "G4160"),
         "terminal handler accepted a resumption: {:#?}",
         terminal_core.diagnostics
+    );
+}
+
+#[test]
+fn nested_partial_handlers_compose_to_discharge_a_callable_effect_contract() {
+    let source = "effect Choice { first() -> i64; second() -> i64; } pub fn worker() -> i64 / Choice { Choice::first() } pub fn main() -> i64 / Choice { handle { handle worker() { Choice::first() => 10 } } { Choice::second() => 20 } }";
+    let core = core_for("core-composed-partial-handler-contract@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+
+    let clauses = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Handle { clauses, .. }
+                if clauses.iter().any(|clause| clause.operation == 0) =>
+            {
+                Some(clauses)
+            }
+            _ => None,
+        })
+        .expect("inner partial handler");
+    let contract = clauses[0]
+        .continuation
+        .as_ref()
+        .expect("nonterminal handler continuation contract");
+    assert_eq!(contract.direct_uses, 1, "tail resume is one use");
+    assert!(
+        contract.effects.effects.is_empty(),
+        "nested partial coverage failed to subtract Choice from the continuation row: {contract:#?}"
+    );
+}
+
+#[test]
+fn handler_contract_rejects_implicit_or_explicit_resume_when_zero_uses_are_required() {
+    let tail = core_for(
+        "core-handler-zero-tail@0.1.0",
+        "effect Stop { [0,0] stop() -> i64; } pub fn main() -> i64 { handle Stop::stop() { Stop::stop() => 0 } }",
+    );
+    assert!(
+        tail.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6005"),
+        "implicit tail resume ignored a zero-use contract: {:#?}",
+        tail.diagnostics
+    );
+
+    let explicit = core_for(
+        "core-handler-zero-explicit@0.1.0",
+        "effect Stop { [0,0] stop() -> i64; } pub fn main() -> i64 { handle Stop::stop() { Stop::stop() with k => k(0) } }",
+    );
+    assert!(
+        explicit
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6005"),
+        "explicit resume ignored a zero-use contract: {:#?}",
+        explicit.diagnostics
+    );
+}
+
+#[test]
+fn handler_contract_rejects_dropping_a_required_explicit_resumption() {
+    let core = core_for(
+        "core-handler-required-explicit@0.1.0",
+        "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => 0 } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4178"),
+        "required explicit resumption was silently discarded: {:#?}",
+        core.diagnostics
     );
 }
 

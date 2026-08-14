@@ -82,9 +82,28 @@ pub struct CoreHandlerClause {
     pub patterns: Vec<CorePattern>,
     pub bindings: Vec<(String, Type)>,
     pub resumption: CoreHandlerResumption,
+    /// The frozen continuation interface for this arm.  It is retained even
+    /// for a discarded continuation: ownership and MIR need the same source
+    /// contract to distinguish cancellation from a terminal operation.
+    pub continuation: Option<CoreHandlerContinuationContract>,
     pub body: CoreId,
     pub terminal: bool,
     pub span: Span,
+}
+/// The source-independent boundary between handler checking and continuation
+/// lowering.  A resumption accepts the operation result, returns the handler
+/// result, and can only perform the residual outward row after all enclosing
+/// deep handlers have subtracted the effects they intercept.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreHandlerContinuationContract {
+    pub parameter: Type,
+    pub result: Type,
+    pub effects: EffectRow,
+    pub invocation: crate::quantity::Quantity,
+    /// Direct syntactic invocation sites observed while elaborating this arm.
+    /// This is deliberately a lower-bound check only: later control-flow and
+    /// ownership passes refine path-sensitive use counts.
+    pub direct_uses: u64,
 }
 /// One normal-completion arm after resolution has established that its source
 /// head was not an operation of the handled effect row.
@@ -123,6 +142,11 @@ pub enum CoreHandlerResumption {
 struct ActiveResumption {
     name: String,
     binding_generation: usize,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResumptionUseTracker {
+    identity: ActiveResumption,
+    direct_uses: u64,
 }
 /// A write destination frozen by Typed Core.  A place denotes stable storage,
 /// unlike an ordinary value expression which may be copied or moved.
@@ -382,6 +406,7 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             direct_resumption_callee: None,
+            resumption_use_tracker: None,
         };
         let expected_result = signatures
             .definitions
@@ -548,6 +573,7 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             direct_resumption_callee: None,
+            resumption_use_tracker: None,
         };
         let mut parameters = vec![];
         for (parameter, ty) in context
@@ -620,6 +646,7 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             direct_resumption_callee: None,
+            resumption_use_tracker: None,
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -766,6 +793,10 @@ struct Elaborator<'a> {
     /// `resume(k, value)`).  Every other value use fails at Typed Core rather
     /// than leaking to a later MIR-only failure.
     direct_resumption_callee: Option<ActiveResumption>,
+    /// Installed only while one explicit handler arm is elaborated. Nested
+    /// handler arms replace and restore it, preserving lexical continuation
+    /// identity rather than counting an accidentally shadowed spelling.
+    resumption_use_tracker: Option<ResumptionUseTracker>,
 }
 impl Elaborator<'_> {
     fn expression(&mut self, id: ExprId) -> CoreId {
@@ -2313,6 +2344,12 @@ impl Elaborator<'_> {
             ExprKind::Path(path) if path.len() == 1 => self.active_resumption(&path[0]),
             _ => None,
         };
+        if let Some(authorization) = &authorization
+            && let Some(tracker) = &mut self.resumption_use_tracker
+            && tracker.identity == *authorization
+        {
+            tracker.direct_uses = tracker.direct_uses.saturating_add(1);
+        }
         let previous = std::mem::replace(&mut self.direct_resumption_callee, authorization);
         let value = self.expression(id);
         self.direct_resumption_callee = previous;
@@ -3089,6 +3126,14 @@ impl Elaborator<'_> {
                     Some(&names),
                 ));
             }
+            // Freeze the same residual row that will be installed when the
+            // continuation resumes.  At this point `handled_effects` already
+            // contains every enclosing total deep handler plus this handler's
+            // own total coverage, while partial coverage remains available
+            // only for direct operations.  This is the semantic subtraction
+            // point: a declined partial arm forwards outward instead of
+            // silently erasing a whole protocol from a callable boundary.
+            let continuation_effects = self.residual_effects();
             let resumption = if clause.operation.terminal {
                 if let Some(name) = &clause.source.resumption {
                     self.error(
@@ -3131,7 +3176,7 @@ impl Elaborator<'_> {
                         // A deep resumption reinstalls this handler, so its
                         // callable contract exposes only the residual outward
                         // row rather than the protocol being intercepted.
-                        effects: self.residual_effects(),
+                        effects: continuation_effects.clone(),
                         invocation: clause.operation.resumption,
                     },
                 );
@@ -3150,12 +3195,17 @@ impl Elaborator<'_> {
                 | CoreHandlerResumption::Discard { .. }
                 | CoreHandlerResumption::Terminal => None,
             };
+            let mut active_identity = None;
             if let Some(name) = &active_resumption {
                 match self.locals.binding_generation(name) {
-                    Some(binding_generation) => self.active_resumptions.push(ActiveResumption {
-                        name: name.clone(),
-                        binding_generation,
-                    }),
+                    Some(binding_generation) => {
+                        let identity = ActiveResumption {
+                            name: name.clone(),
+                            binding_generation,
+                        };
+                        self.active_resumptions.push(identity.clone());
+                        active_identity = Some(identity);
+                    }
                     None => {
                         self.error(
                             clause.source.span,
@@ -3166,8 +3216,25 @@ impl Elaborator<'_> {
                     }
                 }
             }
+            let previous_tracker = active_identity.as_ref().map(|identity| {
+                self.resumption_use_tracker.replace(ResumptionUseTracker {
+                    identity: identity.clone(),
+                    direct_uses: 0,
+                })
+            });
             let body = self.expression(clause.source.body);
-            if active_resumption.is_some() {
+            let direct_uses = if active_identity.is_some() {
+                self.resumption_use_tracker
+                    .take()
+                    .map(|tracker| tracker.direct_uses)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            if let Some(previous) = previous_tracker {
+                self.resumption_use_tracker = previous;
+            }
+            if active_identity.is_some() {
                 self.active_resumptions
                     .pop()
                     .expect("active handler resumption must outlive its clause body");
@@ -3188,6 +3255,28 @@ impl Elaborator<'_> {
                 );
                 self.recovered = true;
             }
+            let continuation =
+                (!clause.operation.terminal).then(|| CoreHandlerContinuationContract {
+                    parameter: clause.operation.result.clone(),
+                    result: result.clone(),
+                    effects: continuation_effects.clone(),
+                    invocation: clause.operation.resumption,
+                    direct_uses: match &resumption {
+                        CoreHandlerResumption::Tail { .. } => 1,
+                        CoreHandlerResumption::Explicit { .. } => direct_uses,
+                        CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
+                            0
+                        }
+                    },
+                });
+            self.validate_handler_continuation_contract(
+                &resumption,
+                continuation.as_ref(),
+                &clause.operation.result,
+                &result,
+                &continuation_effects,
+                clause.source.span,
+            );
             core_clauses.push(CoreHandlerClause {
                 effect: clause.effect,
                 operation: clause.operation_index,
@@ -3195,6 +3284,7 @@ impl Elaborator<'_> {
                 patterns,
                 bindings,
                 resumption,
+                continuation,
                 body,
                 terminal: clause.operation.terminal,
                 span: clause.source.span,
@@ -3382,10 +3472,113 @@ impl Elaborator<'_> {
     }
     fn residual_effects(&self) -> EffectRow {
         let mut effects = self.declared_effects.clone();
+        effects.effects.retain(|effect| {
+            !self.handled_effects.contains(effect)
+                && !self.effect_is_covered_by_active_operations(effect)
+        });
         effects
-            .effects
-            .retain(|effect| !self.handled_effects.contains(effect));
-        effects
+    }
+    /// A nested collection of partial deep handlers can collectively remove a
+    /// protocol from the outward row.  The innermost frame receives the first
+    /// chance to match; a declined operation forwards to the next frame, so
+    /// it is sound to compose exhaustive operation coverage by exact effect
+    /// instance.  This is intentionally stronger than treating every partial
+    /// handler as opaque, while still refusing to discharge a callable whose
+    /// stack lacks an arm for any declared operation.
+    fn effect_is_covered_by_active_operations(&self, effect: &EffectInstance) -> bool {
+        let Some(ElaboratedHeader::Effect(declaration)) =
+            self.signatures.definitions.get(&effect.definition)
+        else {
+            return false;
+        };
+        declaration
+            .operations
+            .iter()
+            .enumerate()
+            .all(|(operation, _)| {
+                self.handled_operations
+                    .contains(&(effect.clone(), operation as u32))
+            })
+    }
+    /// Validate the continuation interface before ownership facts and MIR are
+    /// allowed to consume the handler.  MIR still validates artifacts, but it
+    /// must not be the first phase to discover that a source-level handler
+    /// promised an impossible resume/cancellation contract.
+    fn validate_handler_continuation_contract(
+        &mut self,
+        resumption: &CoreHandlerResumption,
+        continuation: Option<&CoreHandlerContinuationContract>,
+        operation_result: &Type,
+        handler_result: &Type,
+        residual_effects: &EffectRow,
+        span: Span,
+    ) {
+        let Some(continuation) = continuation else {
+            return;
+        };
+        if self
+            .inference
+            .unify(continuation.parameter.clone(), operation_result.clone())
+            .is_err()
+            || self
+                .inference
+                .unify(continuation.result.clone(), handler_result.clone())
+                .is_err()
+            || continuation.effects != *residual_effects
+        {
+            self.error(
+                span,
+                "G4176",
+                "handler continuation contract disagrees with its operation, result, or outward effects",
+            );
+            self.recovered = true;
+        }
+        match resumption {
+            CoreHandlerResumption::Tail { quantity } => {
+                if !quantity.contains(crate::quantity::Quantity::ONCE) {
+                    self.error(
+                        span,
+                        "G6005",
+                        "implicit tail resumption is not permitted by the operation's quantity",
+                    );
+                    self.recovered = true;
+                }
+            }
+            CoreHandlerResumption::Explicit { quantity, .. } => {
+                let actual = crate::quantity::Quantity::new(
+                    continuation.direct_uses,
+                    Some(continuation.direct_uses),
+                )
+                .expect("a direct resumption use count always forms an interval");
+                if continuation.direct_uses > 0 && !quantity.contains(actual) {
+                    self.error(
+                        span,
+                        "G6005",
+                        "direct handler resumptions do not satisfy the operation's quantity",
+                    );
+                    self.recovered = true;
+                }
+                if continuation.direct_uses == 0 && quantity.requires_positive_use() {
+                    self.error(
+                        span,
+                        "G4178",
+                        "handler continuation requires a resume but this arm never invokes it",
+                    );
+                    self.recovered = true;
+                }
+            }
+            CoreHandlerResumption::Discard { quantity } => {
+                if quantity.requires_positive_use() {
+                    self.error(
+                        span,
+                        "G4178",
+                        "handler cancellation violates the continuation's required-use quantity",
+                    );
+                    self.recovered = true;
+                }
+            }
+            CoreHandlerResumption::Terminal => {}
+        }
     }
     /// Parser shape never decides whether `Path::name(...)` is an effect arm:
     /// the same spelling may be a nominal enum completion pattern. Probe the
@@ -3804,6 +3997,7 @@ impl Elaborator<'_> {
         });
         if !self.declared_effects.effects.contains(effect)
             && !self.handled_effects.contains(effect)
+            && !self.effect_is_covered_by_active_operations(effect)
             && !handled_operation
         {
             self.error(
