@@ -1254,27 +1254,130 @@ impl Elaborator<'_> {
         effects: &[crate::header::HeaderType],
         span: Span,
     ) -> crate::types::EffectRow {
-        let mut resolved = std::collections::BTreeSet::new();
+        let mut resolved = crate::types::EffectRow::empty();
         for effect in effects {
-            let crate::header::HeaderType::Path(path) = effect else {
-                self.error(span, "G4115", "closure effect is not a named effect");
-                self.recovered = true;
-                continue;
-            };
-            match self
-                .index
-                .resolve_path(DefinitionNamespace::Effect, self.module, path)
-            {
-                ResolutionState::Resolved(definition) => {
-                    resolved.insert(definition);
+            match effect {
+                crate::header::HeaderType::Path(path) => {
+                    match self
+                        .index
+                        .resolve_path(DefinitionNamespace::Effect, self.module, path)
+                    {
+                        ResolutionState::Resolved(definition) => {
+                            resolved.effects.insert(EffectInstance {
+                                definition,
+                                arguments: vec![],
+                            });
+                        }
+                        _ => {
+                            self.error(span, "G4115", "closure effect is unresolved");
+                            self.recovered = true;
+                        }
+                    }
+                }
+                crate::header::HeaderType::Projection {
+                    subject,
+                    trait_path,
+                    trait_arguments,
+                    name,
+                    item_arguments,
+                } => {
+                    let subject = self.header_type(subject);
+                    let trait_arguments = trait_arguments
+                        .iter()
+                        .map(|argument| self.header_type(argument))
+                        .collect::<Vec<_>>();
+                    let item_arguments = item_arguments
+                        .iter()
+                        .map(|argument| self.header_type(argument))
+                        .collect::<Vec<_>>();
+                    let ResolutionState::Resolved(trait_definition) = self.index.resolve_path(
+                        DefinitionNamespace::Trait,
+                        self.module,
+                        trait_path,
+                    ) else {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure associated effect row has an unresolved trait",
+                        );
+                        self.recovered = true;
+                        continue;
+                    };
+                    let Some(ElaboratedHeader::Trait(trait_header)) =
+                        self.signatures.definitions.get(&trait_definition)
+                    else {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure associated effect row target is not a trait",
+                        );
+                        self.recovered = true;
+                        continue;
+                    };
+                    let Some(item) = trait_header.associated_types.get(name) else {
+                        self.error(
+                            span,
+                            "G4115",
+                            "trait does not declare this associated effect row",
+                        );
+                        self.recovered = true;
+                        continue;
+                    };
+                    if !item.effect_row || item.generics != item_arguments.len() as u32 {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure associated effect-row projection has an invalid item kind or arity",
+                        );
+                        self.recovered = true;
+                        continue;
+                    }
+                    if !projection_is_concrete(&subject)
+                        || !trait_arguments.iter().all(projection_is_concrete)
+                        || !item_arguments.iter().all(projection_is_concrete)
+                    {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure associated effect-row projection must be concrete",
+                        );
+                        self.recovered = true;
+                        continue;
+                    }
+                    match TraitSolver::new(self.signatures)
+                        .normalize_associated_effect_row_application(
+                            TraitGoal {
+                                relation: crate::ElaboratedTraitReference {
+                                    definition: trait_definition,
+                                    arguments: trait_arguments,
+                                },
+                                subject,
+                            },
+                            name,
+                            &item_arguments,
+                        ) {
+                        TraitEffectRowProjectionAnswer::Normalized { row, .. }
+                            if row.tail.is_none() && row.projections.is_empty() =>
+                        {
+                            resolved.effects.extend(row.effects);
+                        }
+                        _ => {
+                            self.error(
+                                span,
+                                "G4115",
+                                "closure associated effect-row projection cannot be normalized",
+                            );
+                            self.recovered = true;
+                        }
+                    }
                 }
                 _ => {
-                    self.error(span, "G4115", "closure effect is unresolved");
+                    self.error(span, "G4115", "closure effect is not a named effect");
                     self.recovered = true;
                 }
             }
         }
-        crate::types::EffectRow::closed(resolved)
+        resolved
     }
     fn closure_captures(&self, body: CoreId, parameters: &[(String, Type)]) -> Vec<ClosureCapture> {
         let mut parameter_names = parameters
