@@ -1249,6 +1249,14 @@ fn service_selects_and_executes_explicit_trait_method_calls() {
 }
 
 #[test]
+fn service_materializes_contextually_typed_trait_method_values() {
+    let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn apply(callable: (i64) -> i64) -> i64 { callable(41) } pub fn main() -> i64 { apply(Increment::increment) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_direct_qualified_trait_calls_without_a_selected_implementation() {
     let source = "trait Increment { fn increment(value: i64) -> i64; } pub fn main() -> i64 { Increment::increment(41) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
