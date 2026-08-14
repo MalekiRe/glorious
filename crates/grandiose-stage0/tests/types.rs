@@ -181,6 +181,32 @@ fn matching_associated_effect_row_projections_unify_without_erasure() {
 }
 
 #[test]
+fn distinct_associated_effect_row_projections_do_not_unify() {
+    let capability = DefKey(Digest::of_bytes(b"Capability"));
+    let row = |name: &str| EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![EffectRowProjection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)),
+            trait_definition: capability,
+            trait_arguments: vec![],
+            name: name.into(),
+            item_arguments: vec![],
+        }],
+        tail: None,
+    };
+    let callable = |effects| Type::Callable {
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+    assert!(matches!(
+        InferContext::default().unify(callable(row("Left")), callable(row("Right"))),
+        Err(TypeError::EffectRow { .. })
+    ));
+}
+
+#[test]
 fn effect_row_unification_solves_protocol_argument_inference() {
     let state = DefKey(Digest::of_bytes(b"State"));
     let mut inference = InferContext::default();
