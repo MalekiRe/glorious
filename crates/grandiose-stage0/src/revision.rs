@@ -14,6 +14,73 @@ use crate::{
     request::{CompilationRequest, InputError, NormalizedInputWorld},
 };
 
+/// A database-owned cache that holds products keyed by a revision.  Cache
+/// owners register weakly with the database so retirement can release stale
+/// products at the same safe point as their immutable input world.  The
+/// callback runs only after the revision record has been removed and no
+/// snapshot can still observe that revision.
+pub trait RevisionCache: Send + Sync {
+    fn discard_revision(&self, revision: RevisionId);
+}
+
+/// Weak registrations intentionally do not keep optional query families
+/// alive.  A host that drops a query engine should not leave a database-owned
+/// retention root behind merely because it once used the engine.
+#[derive(Default)]
+struct RevisionCacheRegistry {
+    caches: Mutex<Vec<Weak<dyn RevisionCache>>>,
+}
+
+impl std::fmt::Debug for RevisionCacheRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let registered = self
+            .caches
+            .lock()
+            .expect("revision cache registry mutex poisoned")
+            .len();
+        formatter
+            .debug_struct("RevisionCacheRegistry")
+            .field("registered", &registered)
+            .finish()
+    }
+}
+
+impl RevisionCacheRegistry {
+    fn register<C: RevisionCache + 'static>(&self, cache: &Arc<C>) {
+        let cache: Arc<dyn RevisionCache> = cache.clone();
+        let weak = Arc::downgrade(&cache);
+        let mut caches = self
+            .caches
+            .lock()
+            .expect("revision cache registry mutex poisoned");
+        caches.retain(|registered| registered.strong_count() != 0);
+        if !caches.iter().any(|registered| registered.ptr_eq(&weak)) {
+            caches.push(weak);
+        }
+    }
+
+    fn discard_revision(&self, revision: RevisionId) {
+        // Do not invoke cache code while holding the registry lock. A query
+        // family may have its own locks and may itself release its final Arc
+        // during eviction.
+        let caches = {
+            let mut registered = self
+                .caches
+                .lock()
+                .expect("revision cache registry mutex poisoned");
+            let live = registered
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            registered.retain(|cache| cache.strong_count() != 0);
+            live
+        };
+        for cache in caches {
+            cache.discard_revision(revision);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RevisionError {
     Input(InputError),
@@ -77,6 +144,7 @@ pub struct CompilerDatabase {
     /// through content/schema-qualified cache keys.
     interface_cache: InterfaceCache,
     dependency_ledger: DependencyLedger,
+    revision_caches: RevisionCacheRegistry,
 }
 
 impl Default for CompilerDatabase {
@@ -97,6 +165,7 @@ impl CompilerDatabase {
             }),
             interface_cache: InterfaceCache::default(),
             dependency_ledger: DependencyLedger::default(),
+            revision_caches: RevisionCacheRegistry::default(),
         }
     }
 
@@ -133,6 +202,14 @@ impl CompilerDatabase {
             .insert(world.fingerprint, Arc::downgrade(&record));
         state.revisions.insert(id, record);
         Ok(id)
+    }
+
+    /// Register a revision-qualified cache for safe-point reclamation. The
+    /// database retains only a weak registration; callers keep normal
+    /// ownership of their cache engine. Re-registering the same allocation is
+    /// idempotent.
+    pub fn register_revision_cache<C: RevisionCache + 'static>(&self, cache: &Arc<C>) {
+        self.revision_caches.register(cache);
     }
 
     pub fn open(&self, revision: RevisionId) -> Result<DatabaseSnapshot, RevisionError> {
@@ -245,6 +322,7 @@ impl CompilerDatabase {
         let mut state = self.state.lock().expect("compiler database mutex poisoned");
         let retired = state.retired.iter().copied().collect::<Vec<_>>();
         let mut report = RetentionReport::default();
+        let mut collected = vec![];
         for revision in retired {
             let Some(record) = state.revisions.get(&revision) else {
                 state.retired.remove(&revision);
@@ -266,9 +344,17 @@ impl CompilerDatabase {
                 state.equivalent_worlds.remove(&fingerprint);
             }
             state.revisions.remove(&revision);
-            self.dependency_ledger.remove_revision(revision);
             state.retired.remove(&revision);
+            collected.push(revision);
             report.collected += 1;
+        }
+        drop(state);
+        // Reclamation crosses component boundaries only after the database
+        // map no longer admits the revision. This preserves the fail-closed
+        // stale-handle boundary even if a cache's eviction code is reentrant.
+        for revision in collected {
+            self.dependency_ledger.remove_revision(revision);
+            self.revision_caches.discard_revision(revision);
         }
         report
     }

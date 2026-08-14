@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use grandiose_stage0::{
     CompilationMode, CompilationRequest, CompilerBuildIdentity, CompilerDatabase, Digest,
@@ -382,6 +382,60 @@ fn cancelled_query_execution_never_publishes_a_memo_entry() {
         engine.execute(&snapshot, "one".into(), &cancelled, &budget),
         Err(QueryFailure::Cancelled)
     ));
+}
+
+#[test]
+fn retirement_reclaims_registered_query_products_and_provenance_at_safe_point() {
+    let database = CompilerDatabase::new();
+    let revision = database
+        .import(request(b"pub fn main() -> i64 { 42 }"), None)
+        .unwrap();
+    let snapshot = database.open(revision).unwrap();
+    let engine = Arc::new(QueryEngine::new(WordCount));
+    // Registration is weak and idempotent: repeated host wiring must not
+    // cause duplicate reclamation callbacks or retain the engine itself.
+    database.register_revision_cache(&engine);
+    database.register_revision_cache(&engine);
+    let cancellation = grandiose_stage0::CancellationToken::new();
+    let budget = grandiose_stage0::Budget::root("retention", 4);
+    assert_eq!(
+        engine
+            .execute(&snapshot, "one two".into(), &cancellation, &budget)
+            .unwrap()
+            .value,
+        2
+    );
+    assert_eq!(engine.memo().retained_entry_count(), 1);
+    assert_eq!(engine.retained_execution_count(), 1);
+
+    database.retire_revision(revision).unwrap();
+    assert_eq!(database.collect_retired().retained_pinned, 1);
+    assert_eq!(engine.memo().retained_entry_count(), 1);
+    assert_eq!(engine.retained_execution_count(), 1);
+
+    drop(snapshot);
+    assert_eq!(database.collect_retired().collected, 1);
+    assert_eq!(engine.memo().retained_entry_count(), 0);
+    assert_eq!(engine.retained_execution_count(), 0);
+
+    // Re-importing equivalent source receives a fresh revision and must
+    // recompute; a collected revision cannot supply a stale cache result.
+    let replacement = database
+        .import(request(b"pub fn main() -> i64 { 42 }"), None)
+        .unwrap();
+    assert_ne!(replacement, revision);
+    let replacement_snapshot = database.open(replacement).unwrap();
+    engine
+        .execute(
+            &replacement_snapshot,
+            "one two".into(),
+            &cancellation,
+            &budget,
+        )
+        .unwrap();
+    assert_eq!(engine.memo().retained_entry_count(), 1);
+    assert_eq!(engine.retained_execution_count(), 1);
+    assert_eq!(budget.spent(), 2, "replacement world was recomputed");
 }
 
 #[test]

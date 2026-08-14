@@ -15,7 +15,7 @@ use std::{
 use crate::{
     identity::{Digest, RevisionId},
     operation::{Budget, BudgetError, CancellationToken},
-    revision::DatabaseSnapshot,
+    revision::{DatabaseSnapshot, RevisionCache},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +140,28 @@ where
             .expect("query memo mutex poisoned")
             .get(&(revision, key.clone()))
             .cloned()
+    }
+
+    /// Forget every product for a collected revision. The compiler database
+    /// invokes this only at its retirement safe point, after no snapshot can
+    /// still observe the removed immutable world.
+    pub fn discard_revision(&self, revision: RevisionId) -> u64 {
+        let mut entries = self.entries.lock().expect("query memo mutex poisoned");
+        let before = entries.len();
+        entries.retain(|(entry_revision, _), _| *entry_revision != revision);
+        u64::try_from(before - entries.len()).expect("query memo entry count exceeds u64")
+    }
+
+    /// Inspection accounting for bounded-retention hosts and tests. It never
+    /// exposes keys or values from a revision that has been retired.
+    pub fn retained_entry_count(&self) -> u64 {
+        u64::try_from(
+            self.entries
+                .lock()
+                .expect("query memo mutex poisoned")
+                .len(),
+        )
+        .expect("query memo entry count exceeds u64")
     }
 
     /// A caller publishes only a complete or explicitly recovered value. A
@@ -396,6 +418,29 @@ impl<Q: Query> QueryEngine<Q> {
     pub fn memo(&self) -> &MemoTable<Q::Key, Q::Value> {
         &self.memo
     }
+    /// Remove both materialized products and their inspection history for a
+    /// collected revision. An executing query always holds a snapshot pin, so
+    /// the database safe point cannot call this while the same revision is in
+    /// `running`.
+    pub fn discard_revision(&self, revision: RevisionId) {
+        self.memo.discard_revision(revision);
+        self.execution
+            .lock()
+            .expect("query execution mutex poisoned")
+            .retain(|(entry_revision, _), _| *entry_revision != revision);
+    }
+    /// Number of revision-qualified execution explanations still retained by
+    /// this engine. This is deliberately separate from memo counts: a host
+    /// can audit that retirement releases both value and provenance state.
+    pub fn retained_execution_count(&self) -> u64 {
+        u64::try_from(
+            self.execution
+                .lock()
+                .expect("query execution mutex poisoned")
+                .len(),
+        )
+        .expect("query execution entry count exceeds u64")
+    }
     /// Explain whether this revision/key was memoized, validated from its
     /// parent, or recomputed. Missing data means no successful publication has
     /// occurred for the requested key, never an implicit cache hit.
@@ -433,5 +478,14 @@ impl<Q: Query> QueryEngine<Q> {
             .lock()
             .expect("query execution mutex poisoned")
             .insert((snapshot.id(), key.clone()), kind);
+    }
+}
+
+impl<Q> RevisionCache for QueryEngine<Q>
+where
+    Q: Query + Send + Sync,
+{
+    fn discard_revision(&self, revision: RevisionId) {
+        Self::discard_revision(self, revision);
     }
 }

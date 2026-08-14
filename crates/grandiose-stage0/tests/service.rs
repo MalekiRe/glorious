@@ -6,8 +6,9 @@ use grandiose_stage0::{
     InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport, Severity, SourceInput,
     StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits, VmGenericArgument,
     VmInstruction, VmType, decode_and_verify_program, decode_program, encode_program,
+    query::{Query, QueryCompleteness, QueryContext, QueryEngine, QueryFailure, QueryValue},
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 fn request(source: &str) -> CompilationRequest {
     CompilationRequest {
@@ -70,6 +71,32 @@ fn request_with_logical_sources(root: &str, sources: &[(&str, &str)]) -> Compila
         ));
     }
     request
+}
+
+#[derive(Debug)]
+struct SourceWorldFingerprint;
+
+impl Query for SourceWorldFingerprint {
+    type Key = ();
+    type Value = Digest;
+    type Error = ();
+
+    const NAME: &'static str = "service_source_world_fingerprint";
+
+    fn execute(
+        &self,
+        context: &mut QueryContext<'_>,
+        (): Self::Key,
+    ) -> Result<QueryValue<Self::Value>, QueryFailure<Self::Error>> {
+        context.check()?;
+        let fingerprint = context.snapshot().world().fingerprint;
+        context.depend("source_world", fingerprint);
+        Ok(QueryValue {
+            value: fingerprint,
+            fingerprint,
+            completeness: QueryCompleteness::Complete,
+        })
+    }
 }
 
 #[test]
@@ -803,6 +830,62 @@ fn service_sessions_pin_retired_revisions_without_mixing_live_worlds() {
     assert_eq!(
         compiler
             .compile_session(&resumed_child_session)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        43
+    );
+}
+
+#[test]
+fn retired_query_cache_reclamation_preserves_new_revision_runtime() {
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(request("pub fn main() -> i64 { 42 }"), None)
+        .unwrap();
+    let child = compiler
+        .import_revision(request("pub fn main() -> i64 { 43 }"), Some(parent))
+        .unwrap();
+    let engine = Arc::new(QueryEngine::new(SourceWorldFingerprint));
+    compiler.register_revision_cache(&engine);
+    let session = compiler.open_session(parent).unwrap();
+    let cancellation = CancellationToken::new();
+    let budget = Budget::root("service-query-retention", 2);
+    let parent_fingerprint = engine
+        .execute(session.snapshot(), (), &cancellation, &budget)
+        .unwrap()
+        .value;
+    assert_eq!(parent_fingerprint, session.metadata().input_fingerprint);
+    assert_eq!(engine.memo().retained_entry_count(), 1);
+
+    // The old world can still compile and execute while its request owns a
+    // snapshot pin, even though no new request may enter it.
+    compiler.retire_revision(parent).unwrap();
+    assert_eq!(
+        compiler
+            .compile_session(&session)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    assert_eq!(compiler.collect_retired().retained_pinned, 1);
+    assert_eq!(engine.memo().retained_entry_count(), 1);
+
+    drop(session);
+    assert_eq!(compiler.collect_retired().collected, 1);
+    assert_eq!(engine.memo().retained_entry_count(), 0);
+    assert_eq!(engine.retained_execution_count(), 0);
+
+    // The child is a distinct source world. Its VM artifact remains correct
+    // after the old query provenance and value state have been reclaimed.
+    assert_eq!(
+        compiler
+            .compile_revision(child)
             .unwrap()
             .artifact
             .unwrap()

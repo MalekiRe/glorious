@@ -578,6 +578,13 @@ impl StageZeroCompiler {
         self.database.interface_cache_stats()
     }
 
+    /// Register a revision-qualified query cache for the same safe-point
+    /// reclamation policy as compiler-owned products. The registration is
+    /// weak: the host continues to own the query engine's lifetime.
+    pub fn register_revision_cache<C: crate::RevisionCache + 'static>(&self, cache: &Arc<C>) {
+        self.database.register_revision_cache(cache);
+    }
+
     /// Return the published red/green explanation for one typed compiler
     /// product. This is inspection only; it never opens a revision or starts
     /// a new compilation request.
