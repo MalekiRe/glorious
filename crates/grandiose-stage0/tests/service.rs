@@ -548,6 +548,16 @@ fn service_lowers_addressable_local_assignment_through_placeflow_and_the_vm() {
 }
 
 #[test]
+fn service_lowers_unique_borrow_deref_and_mutation_without_copying_the_place() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn main() -> i64 { let value = 1; let reference = &mut value; *reference = 42; *reference }",
+        ))
+        .unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn assignment_reinitializes_a_local_after_a_whole_value_move() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
