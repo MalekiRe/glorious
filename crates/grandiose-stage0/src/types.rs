@@ -680,8 +680,7 @@ impl InferContext {
     /// fingerprint.
     pub fn type_fingerprint(&mut self, value: Type) -> Result<Digest, TypeError> {
         let value = self.zonk(value)?;
-        let mut bytes = Vec::new();
-        encode_type(&value, &mut bytes);
+        let bytes = canonical_type_encoding(&value);
         Ok(Digest::of_parts([
             b"grandiose-stage0-type-v1".as_slice(),
             &bytes,
@@ -1598,15 +1597,243 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
 /// their type/lifetime/effect-row/const/quantity kinds.
 pub(crate) fn canonical_type_encoding(value: &Type) -> Vec<u8> {
     let mut bytes = vec![];
-    encode_type(value, &mut bytes);
+    encode_type(&canonicalize_type_identity(value.clone()), &mut bytes);
     bytes
 }
 
 /// Tagged canonical encoding for declaration argument sequences.
 pub(crate) fn canonical_generic_arguments_encoding(values: &[GenericArgument]) -> Vec<u8> {
     let mut bytes = vec![];
-    encode_generic_arguments(values, &mut bytes);
+    let values = values
+        .iter()
+        .cloned()
+        .map(canonicalize_generic_argument_identity)
+        .collect::<Vec<_>>();
+    encode_generic_arguments(&values, &mut bytes);
     bytes
+}
+
+/// Normalize representation-only choices in a semantic type tree before it
+/// participates in a fingerprint or crosses a frozen-product boundary.
+///
+/// This intentionally does not try to resolve aliases, projections, or
+/// inference: those require their owning signature or inference context.
+/// It does erase the choices that have no semantic meaning once such a tree
+/// exists: effect-row projection order/duplicates and normalized structural
+/// const spelling. Keeping this one operation next to the tagged encoder
+/// prevents caches, solver goals, and persisted products from growing
+/// different notions of "the same" type.
+pub(crate) fn canonicalize_type_identity(value: Type) -> Type {
+    match value {
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Type::Nominal {
+            definition,
+            arguments: arguments
+                .into_iter()
+                .map(canonicalize_generic_argument_identity)
+                .collect(),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(canonicalize_type_identity(*subject)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(canonicalize_type_identity)
+                .collect(),
+            name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(canonicalize_type_identity)
+                .collect(),
+        },
+        Type::Tuple(elements) => Type::Tuple(
+            elements
+                .into_iter()
+                .map(canonicalize_type_identity)
+                .collect(),
+        ),
+        Type::Array(element) => Type::Array(Box::new(canonicalize_type_identity(*element))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability,
+            lifetime,
+            referent: Box::new(canonicalize_type_identity(*referent)),
+        },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders,
+            parameters: parameters
+                .into_iter()
+                .map(canonicalize_type_identity)
+                .collect(),
+            result: Box::new(canonicalize_type_identity(*result)),
+            effects: canonicalize_effect_row_identity(effects),
+            invocation,
+        },
+        value => value,
+    }
+}
+
+pub(crate) fn is_canonical_type_identity(value: &Type) -> bool {
+    type_identity_is_well_formed(value) && *value == canonicalize_type_identity(value.clone())
+}
+
+pub(crate) fn is_canonical_generic_argument_identity(value: &GenericArgument) -> bool {
+    generic_argument_identity_is_well_formed(value)
+        && *value == canonicalize_generic_argument_identity(value.clone())
+}
+
+pub(crate) fn is_canonical_effect_row_identity(value: &EffectRow) -> bool {
+    effect_row_identity_is_well_formed(value)
+        && *value == canonicalize_effect_row_identity(value.clone())
+}
+
+fn type_identity_is_well_formed(value: &Type) -> bool {
+    match value {
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .all(generic_argument_identity_is_well_formed),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            type_identity_is_well_formed(subject)
+                && trait_arguments.iter().all(type_identity_is_well_formed)
+                && item_arguments.iter().all(type_identity_is_well_formed)
+        }
+        Type::Tuple(elements) => elements.iter().all(type_identity_is_well_formed),
+        Type::Array(element)
+        | Type::Reference {
+            referent: element, ..
+        } => type_identity_is_well_formed(element),
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            invocation,
+            ..
+        } => {
+            quantity_is_well_formed(*invocation)
+                && parameters.iter().all(type_identity_is_well_formed)
+                && type_identity_is_well_formed(result)
+                && effect_row_identity_is_well_formed(effects)
+        }
+        Type::ConstQuantity(value) => quantity_is_well_formed(*value),
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_)
+        | Type::Infer(_)
+        | Type::Error => true,
+    }
+}
+
+fn generic_argument_identity_is_well_formed(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => type_identity_is_well_formed(value),
+        GenericArgument::EffectRow(value) => effect_row_identity_is_well_formed(value),
+        GenericArgument::ConstU32Expr(value) => value.clone().normalized().is_ok(),
+        GenericArgument::ConstQuantity(value) => quantity_is_well_formed(*value),
+        GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstGeneric { .. } => true,
+    }
+}
+
+fn effect_row_identity_is_well_formed(value: &EffectRow) -> bool {
+    value.effects.iter().all(|effect| {
+        effect
+            .arguments
+            .iter()
+            .all(generic_argument_identity_is_well_formed)
+    }) && value.projections.iter().all(|projection| {
+        type_identity_is_well_formed(&projection.subject)
+            && projection
+                .trait_arguments
+                .iter()
+                .all(type_identity_is_well_formed)
+            && projection
+                .item_arguments
+                .iter()
+                .all(type_identity_is_well_formed)
+    })
+}
+
+fn quantity_is_well_formed(value: Quantity) -> bool {
+    value.upper.is_none_or(|upper| value.lower <= upper)
+}
+
+fn canonicalize_generic_argument_identity(value: GenericArgument) -> GenericArgument {
+    match value {
+        GenericArgument::Type(value) => GenericArgument::Type(canonicalize_type_identity(value)),
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(canonicalize_effect_row_identity(value))
+        }
+        GenericArgument::ConstU32Expr(value) => match value.clone().normalized() {
+            Ok(StructuralU32Expr::Literal(value)) => GenericArgument::ConstU32(value),
+            Ok(value) => GenericArgument::ConstU32Expr(value),
+            Err(_) => GenericArgument::ConstU32Expr(value),
+        },
+        value => value,
+    }
+}
+
+fn canonicalize_effect_row_identity(value: EffectRow) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(canonicalize_generic_argument_identity)
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(canonicalize_type_identity(*projection.subject)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(canonicalize_type_identity)
+                    .collect(),
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(canonicalize_type_identity)
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+    .canonicalized()
 }
 
 fn canonical_generic_arguments(values: &[GenericArgument]) -> Vec<u8> {

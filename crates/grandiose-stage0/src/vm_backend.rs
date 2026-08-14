@@ -3273,6 +3273,21 @@ impl DerefMut for VerifierState {
 }
 
 fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
+    // `decode_artifact` checks these invariants while reading bytes, but a
+    // candidate can also be assembled directly by an embedding host. Keep
+    // the verifier boundary equally strict so two spellings of one effect
+    // identity cannot receive distinct executable fingerprints.
+    for instruction in &function.instructions {
+        match instruction {
+            VmInstruction::Perform {
+                effect_arguments, ..
+            }
+            | VmInstruction::InstallHandler {
+                effect_arguments, ..
+            } => validate_vm_generic_arguments(effect_arguments)?,
+            _ => {}
+        }
+    }
     verify_handler_entry_boundaries(function)?;
     let mut initial = vec![None; function.registers.len()];
     if function.captures > function.parameters {
@@ -4264,6 +4279,42 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     } else {
         Err(VmArtifactError::NoReturn)
     }
+}
+
+fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmArtifactError> {
+    for value in values {
+        match value {
+            VmGenericArgument::Type(_)
+            | VmGenericArgument::Lifetime(_)
+            | VmGenericArgument::ConstU32(_) => {}
+            VmGenericArgument::ConstQuantity { lower, upper } => {
+                if upper.is_some_and(|upper| *lower > upper) {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid quantity interval",
+                    });
+                }
+            }
+            VmGenericArgument::ConstGeneric { .. } => {}
+            VmGenericArgument::EffectRow(row) => {
+                if matches!(row.tail, Some(EffectTail::Infer(_))) {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "VM effect row retains inference tail",
+                    });
+                }
+                if row.effects.windows(2).any(|pair| {
+                    vm_effect_instance_key(&pair[0]) >= vm_effect_instance_key(&pair[1])
+                }) || row.projections.windows(2).any(|pair| {
+                    vm_effect_row_projection_key(&pair[0]) >= vm_effect_row_projection_key(&pair[1])
+                }) {
+                    return Err(VmArtifactError::NonCanonicalEncoding);
+                }
+                for effect in &row.effects {
+                    validate_vm_generic_arguments(&effect.arguments)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Handler clause entry points are private control-flow boundaries.  Reaching

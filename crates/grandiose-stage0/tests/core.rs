@@ -1,11 +1,13 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
     ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePlace, DeclarationScan,
-    DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow, ElaboratedInterface,
-    EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet,
-    LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey,
-    PlaceFlow, Quantity, ScalarType, Span, Type, TypedBody, implementation_method_key,
+    DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow, EffectRowProjection,
+    ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, GenericArgument,
+    InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering,
+    MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span, StructuralU32Expr, Type,
+    TypedBody, implementation_method_key,
 };
+use std::collections::BTreeSet;
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
     let package = PackageKey(package_name.into());
@@ -551,6 +553,90 @@ fn typed_core_semantic_fingerprint_ignores_arena_allocation_order_and_spans() {
         first.semantic_fingerprint(),
         second.semantic_fingerprint(),
         "equivalent Core must not inherit transient arena IDs or spans"
+    );
+}
+
+#[test]
+fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
+    let projection = |name: &str| EffectRowProjection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: DefKey(Digest::of_bytes(b"core-canonical-row-trait")),
+        trait_arguments: vec![],
+        name: name.into(),
+        item_arguments: vec![],
+    };
+    let callable = |projections| Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects: EffectRow {
+            effects: BTreeSet::new(),
+            projections,
+            tail: None,
+        },
+        invocation: Quantity::ONCE,
+    };
+    let package = PackageKey("core-canonical-identity@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let body = |ty| TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Literal("0".into()),
+            ty,
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    let forged = body(callable(vec![
+        projection("Z"),
+        projection("A"),
+        projection("A"),
+    ]));
+    let canonical = body(callable(vec![projection("A"), projection("Z")]));
+
+    assert_eq!(
+        forged.semantic_fingerprint(),
+        canonical.semantic_fingerprint(),
+        "representation-only effect-row order must not split Core cache identities"
+    );
+    assert!(
+        forged
+            .validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4186"),
+        "forged noncanonical type metadata must not enter MIR"
+    );
+    assert!(canonical.validate().is_empty());
+
+    let malformed_const = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Function {
+                definition: DefKey(Digest::of_bytes(b"core-forged-structural-const")),
+                arguments: vec![GenericArgument::ConstU32Expr(StructuralU32Expr::Div(
+                    Box::new(StructuralU32Expr::Literal(1)),
+                    Box::new(StructuralU32Expr::Literal(0)),
+                ))],
+            },
+            ty: Type::Unit,
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(
+        malformed_const
+            .validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4186"),
+        "forged invalid structural arithmetic must not enter a frozen Core product"
     );
 }
 

@@ -498,6 +498,10 @@ fn vm_decoder_rejects_noncanonical_effect_row_instances() {
     };
     artifact.fingerprint = artifact.computed_fingerprint();
     assert!(matches!(
+        verify_vm(artifact.clone()),
+        Err(VmArtifactError::NonCanonicalEncoding)
+    ));
+    assert!(matches!(
         decode_artifact(&encode_artifact(&artifact)),
         Err(VmArtifactError::NonCanonicalEncoding)
     ));

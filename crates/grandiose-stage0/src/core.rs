@@ -16,7 +16,9 @@ use crate::{
     },
     types::{
         EffectInstance, EffectRow, GenericArgument, InferContext, Lifetime, Mutability, ScalarType,
-        Type,
+        Type, canonical_generic_arguments_encoding, canonical_type_encoding,
+        is_canonical_effect_row_identity, is_canonical_generic_argument_identity,
+        is_canonical_type_identity,
     },
 };
 
@@ -527,6 +529,14 @@ impl TypedBody {
             .get(self.root.0 as usize)
             .map(|expression| expression.span);
         for (_, parameter) in &self.parameters {
+            if !is_canonical_type_identity(parameter) {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4186",
+                    span: parameter_span.unwrap_or_else(invalid_typed_core_span),
+                    message: "Typed Core parameter has a non-canonical semantic type identity"
+                        .into(),
+                });
+            }
             if type_contains_out_of_scope_bound_lifetime(parameter) {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4184",
@@ -559,6 +569,15 @@ impl TypedBody {
                     code: "G4181",
                     span: expression.span,
                     message: "Typed Core expression or embedded metadata retains an unresolved inference variable".into(),
+                });
+            }
+            if !is_canonical_type_identity(&expression.ty)
+                || core_metadata_contains_noncanonical_type_identity(&expression.kind)
+            {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4186",
+                    span: expression.span,
+                    message: "Typed Core expression or embedded metadata has a non-canonical semantic type identity".into(),
                 });
             }
             if type_contains_out_of_scope_bound_lifetime(&expression.ty)
@@ -610,6 +629,140 @@ impl CoreFingerprintEncoder<'_> {
         self.bytes(format!("{value:?}").as_bytes());
     }
 
+    fn ty(&mut self, value: &Type) {
+        self.bytes(&canonical_type_encoding(value));
+    }
+
+    fn types(&mut self, values: &[Type]) {
+        self.bytes(&(values.len() as u64).to_le_bytes());
+        for value in values {
+            self.ty(value);
+        }
+    }
+
+    fn generic_arguments(&mut self, values: &[GenericArgument]) {
+        self.bytes(&canonical_generic_arguments_encoding(values));
+    }
+
+    fn effect(&mut self, value: &EffectInstance) {
+        self.debug(value.definition);
+        self.generic_arguments(&value.arguments);
+    }
+
+    fn pattern(&mut self, value: &CorePattern) {
+        match value {
+            CorePattern::Any => self.bytes(b"any"),
+            CorePattern::Bind { name } => {
+                self.bytes(b"bind");
+                self.bytes(name.as_bytes());
+            }
+            CorePattern::Literal(value) => {
+                self.bytes(b"literal");
+                self.bytes(value.as_bytes());
+            }
+            CorePattern::Tuple(values) => {
+                self.bytes(b"tuple");
+                self.bytes(&(values.len() as u64).to_le_bytes());
+                for value in values {
+                    self.pattern(value);
+                }
+            }
+            CorePattern::Record {
+                definition,
+                field_count,
+                fields,
+            }
+            | CorePattern::Enum {
+                definition,
+                field_count,
+                fields,
+                ..
+            } => {
+                self.bytes(if matches!(value, CorePattern::Record { .. }) {
+                    b"record"
+                } else {
+                    b"enum"
+                });
+                self.debug(definition);
+                if let CorePattern::Enum { variant, .. } = value {
+                    self.bytes(&variant.to_le_bytes());
+                }
+                self.bytes(&field_count.to_le_bytes());
+                self.bytes(&(fields.len() as u64).to_le_bytes());
+                for field in fields {
+                    self.bytes(&field.index.to_le_bytes());
+                    self.ty(&field.ty);
+                    self.pattern(&field.pattern);
+                }
+            }
+            CorePattern::Error => self.bytes(b"error"),
+        }
+    }
+
+    fn bindings(&mut self, values: &[(String, Type)]) {
+        self.bytes(&(values.len() as u64).to_le_bytes());
+        for (name, ty) in values {
+            self.bytes(name.as_bytes());
+            self.ty(ty);
+        }
+    }
+
+    fn refinement(&mut self, value: &RefinementEnvironment) {
+        self.debug(value.brand);
+        self.debug(&value.subject);
+        self.bytes(&(value.bindings.len() as u64).to_le_bytes());
+        for binding in &value.bindings {
+            self.bytes(binding.as_bytes());
+        }
+        self.bindings(&value.binding_types);
+        self.bytes(&[value.sealed as u8]);
+    }
+
+    fn capture_environment(&mut self, value: &CaptureEnvironment) {
+        self.debug(value.brand);
+        self.bytes(&(value.captures.len() as u64).to_le_bytes());
+        for capture in &value.captures {
+            self.bytes(capture.name.as_bytes());
+            self.debug(capture.mode);
+            self.ty(&capture.ty);
+        }
+        self.debug(&value.post_states);
+        self.bytes(&[value.sealed as u8]);
+    }
+
+    fn place(&mut self, value: &CorePlace) {
+        match value {
+            CorePlace::Local { name, ty } => {
+                self.bytes(b"local");
+                self.bytes(name.as_bytes());
+                self.ty(ty);
+            }
+            CorePlace::Field {
+                base,
+                index,
+                field_count,
+                ty,
+            } => {
+                self.bytes(b"field");
+                self.place(base);
+                self.bytes(&index.to_le_bytes());
+                self.bytes(&field_count.to_le_bytes());
+                self.ty(ty);
+            }
+            CorePlace::Deref {
+                reference,
+                ty,
+                unique,
+            } => {
+                self.bytes(b"deref");
+                self.id(*reference);
+                self.ty(ty);
+                self.bytes(&[*unique as u8]);
+            }
+            CorePlace::Error => self.bytes(b"error"),
+        }
+    }
+
     fn id(&mut self, id: CoreId) {
         if let Some(number) = self.numbers.get(&id).copied() {
             self.bytes(b"ref");
@@ -627,7 +780,7 @@ impl CoreFingerprintEncoder<'_> {
             self.bytes(&id.0.to_le_bytes());
             return;
         };
-        self.debug(&expression.ty);
+        self.ty(&expression.ty);
         self.kind(&expression.kind);
     }
 
@@ -659,7 +812,7 @@ impl CoreFingerprintEncoder<'_> {
             } => {
                 self.bytes(b"function");
                 self.debug(definition);
-                self.debug(arguments);
+                self.generic_arguments(arguments);
             }
             CoreKind::TraitMethod {
                 evidence,
@@ -670,8 +823,8 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(b"trait-method");
                 self.debug(evidence);
                 self.debug(method);
-                self.debug(trait_arguments);
-                self.debug(method_arguments);
+                self.generic_arguments(trait_arguments);
+                self.generic_arguments(method_arguments);
             }
             CoreKind::Constant(definition) => {
                 self.bytes(b"constant");
@@ -716,8 +869,8 @@ impl CoreFingerprintEncoder<'_> {
                 refinement,
             } => {
                 self.bytes(b"pattern-test");
-                self.debug(pattern);
-                self.debug(refinement);
+                self.pattern(pattern);
+                self.refinement(refinement);
                 self.id(*subject);
             }
             CoreKind::Closure {
@@ -728,8 +881,8 @@ impl CoreFingerprintEncoder<'_> {
             } => {
                 self.bytes(b"closure");
                 self.debug(callable);
-                self.debug(parameters);
-                self.debug(environment);
+                self.bindings(parameters);
+                self.capture_environment(environment);
                 self.id(*body);
             }
             CoreKind::Let { name, value } => {
@@ -749,7 +902,7 @@ impl CoreFingerprintEncoder<'_> {
             }
             CoreKind::Assign { place, value } => {
                 self.bytes(b"assign");
-                self.debug(place);
+                self.place(place);
                 self.id(*value);
             }
             CoreKind::Call { callee, arguments } => {
@@ -764,7 +917,7 @@ impl CoreFingerprintEncoder<'_> {
                 terminal,
             } => {
                 self.bytes(b"perform");
-                self.debug(effect);
+                self.effect(effect);
                 self.bytes(&operation.to_le_bytes());
                 self.bytes(&[*terminal as u8]);
                 self.ids(arguments);
@@ -777,13 +930,33 @@ impl CoreFingerprintEncoder<'_> {
                 self.id(*computation);
                 self.bytes(&(clauses.len() as u64).to_le_bytes());
                 for clause in clauses {
-                    self.debug(&clause.effect);
+                    self.debug(clause.brand);
+                    self.effect(&clause.effect);
                     self.bytes(&clause.operation.to_le_bytes());
-                    self.debug(&clause.payload_types);
-                    self.debug(&clause.patterns);
-                    self.debug(&clause.bindings);
+                    self.types(&clause.payload_types);
+                    self.bytes(&(clause.patterns.len() as u64).to_le_bytes());
+                    for pattern in &clause.patterns {
+                        self.pattern(pattern);
+                    }
+                    self.bindings(&clause.bindings);
                     self.debug(&clause.resumption);
-                    self.debug(&clause.continuation);
+                    match &clause.continuation {
+                        Some(continuation) => {
+                            self.bytes(b"continuation");
+                            self.debug(continuation.brand);
+                            self.ty(&continuation.parameter);
+                            self.ty(&continuation.result);
+                            self.ty(&Type::Callable {
+                                lifetime_binders: 0,
+                                parameters: vec![],
+                                result: Box::new(Type::Unit),
+                                effects: continuation.effects.clone(),
+                                invocation: continuation.invocation,
+                            });
+                            self.bytes(&continuation.direct_uses.to_le_bytes());
+                        }
+                        None => self.bytes(b"no-continuation"),
+                    }
                     self.bytes(&[clause.terminal as u8]);
                     self.id(clause.body);
                 }
@@ -796,8 +969,17 @@ impl CoreFingerprintEncoder<'_> {
                 self.id(*computation);
                 self.bytes(&(clauses.len() as u64).to_le_bytes());
                 for clause in clauses {
-                    self.debug(&clause.pattern);
-                    self.debug(&clause.bindings);
+                    self.pattern(&clause.pattern);
+                    self.bindings(&clause.bindings);
+                    match &clause.refinement {
+                        Some(refinement) => {
+                            self.bytes(b"refinement");
+                            self.refinement(&refinement.environment);
+                            self.id(refinement.subject);
+                            self.pattern(&refinement.pattern);
+                        }
+                        None => self.bytes(b"no-refinement"),
+                    }
                     self.id(clause.body);
                 }
             }
@@ -1356,6 +1538,145 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         | CoreKind::Move(_)
         | CoreKind::Unary { .. }
         | CoreKind::Error => false,
+    }
+}
+
+/// A frozen Core product must not retain a merely representational variant of
+/// a semantic type (for example, duplicate or out-of-order associated effect
+/// row projections).  Elaboration normally canonicalizes these, but imported
+/// and forged Core have to be checked independently before MIR, instance
+/// caches, or fingerprints consume them.
+fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
+    match kind {
+        CoreKind::Closure {
+            parameters,
+            environment,
+            ..
+        } => {
+            parameters
+                .iter()
+                .any(|(_, ty)| !is_canonical_type_identity(ty))
+                || environment
+                    .captures
+                    .iter()
+                    .any(|capture| !is_canonical_type_identity(&capture.ty))
+        }
+        CoreKind::Assign { place, .. } => place_contains_noncanonical_type_identity(place),
+        CoreKind::Function { arguments, .. } => arguments
+            .iter()
+            .any(|argument| !is_canonical_generic_argument_identity(argument)),
+        CoreKind::TraitMethod {
+            trait_arguments,
+            method_arguments,
+            ..
+        } => trait_arguments
+            .iter()
+            .chain(method_arguments)
+            .any(|argument| !is_canonical_generic_argument_identity(argument)),
+        CoreKind::Perform { effect, .. } => effect
+            .arguments
+            .iter()
+            .any(|argument| !is_canonical_generic_argument_identity(argument)),
+        CoreKind::PatternTest {
+            pattern,
+            refinement,
+            ..
+        } => {
+            pattern_contains_noncanonical_type_identity(pattern)
+                || refinement
+                    .binding_types
+                    .iter()
+                    .any(|(_, ty)| !is_canonical_type_identity(ty))
+        }
+        CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause| {
+            clause
+                .effect
+                .arguments
+                .iter()
+                .any(|argument| !is_canonical_generic_argument_identity(argument))
+                || clause
+                    .payload_types
+                    .iter()
+                    .any(|ty| !is_canonical_type_identity(ty))
+                || clause
+                    .patterns
+                    .iter()
+                    .any(pattern_contains_noncanonical_type_identity)
+                || clause
+                    .bindings
+                    .iter()
+                    .any(|(_, ty)| !is_canonical_type_identity(ty))
+                || clause.continuation.as_ref().is_some_and(|continuation| {
+                    !is_canonical_type_identity(&continuation.parameter)
+                        || !is_canonical_type_identity(&continuation.result)
+                        || !is_canonical_effect_row_identity(&continuation.effects)
+                })
+        }),
+        CoreKind::Completion { clauses, .. } => clauses.iter().any(|clause| {
+            pattern_contains_noncanonical_type_identity(&clause.pattern)
+                || clause
+                    .bindings
+                    .iter()
+                    .any(|(_, ty)| !is_canonical_type_identity(ty))
+                || clause.refinement.as_ref().is_some_and(|refinement| {
+                    pattern_contains_noncanonical_type_identity(&refinement.pattern)
+                        || refinement
+                            .environment
+                            .binding_types
+                            .iter()
+                            .any(|(_, ty)| !is_canonical_type_identity(ty))
+                })
+        }),
+        CoreKind::Literal(_)
+        | CoreKind::Local(_)
+        | CoreKind::Resumption { .. }
+        | CoreKind::Constant(_)
+        | CoreKind::Tuple(_)
+        | CoreKind::Array(_)
+        | CoreKind::Record { .. }
+        | CoreKind::Field { .. }
+        | CoreKind::Enum { .. }
+        | CoreKind::Let { .. }
+        | CoreKind::Label { .. }
+        | CoreKind::Transfer { .. }
+        | CoreKind::Call { .. }
+        | CoreKind::Binary { .. }
+        | CoreKind::Block(_)
+        | CoreKind::Borrow { .. }
+        | CoreKind::Deref(_)
+        | CoreKind::Move(_)
+        | CoreKind::Unary { .. }
+        | CoreKind::Error => false,
+    }
+}
+
+fn place_contains_noncanonical_type_identity(place: &CorePlace) -> bool {
+    match place {
+        CorePlace::Local { ty, .. } | CorePlace::Deref { ty, .. } => {
+            !is_canonical_type_identity(ty)
+        }
+        CorePlace::Field { base, ty, .. } => {
+            place_contains_noncanonical_type_identity(base) || !is_canonical_type_identity(ty)
+        }
+        CorePlace::Error => false,
+    }
+}
+
+fn pattern_contains_noncanonical_type_identity(pattern: &CorePattern) -> bool {
+    match pattern {
+        CorePattern::Tuple(values) => values
+            .iter()
+            .any(pattern_contains_noncanonical_type_identity),
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+            fields.iter().any(|field| {
+                !is_canonical_type_identity(&field.ty)
+                    || pattern_contains_noncanonical_type_identity(&field.pattern)
+            })
+        }
+        CorePattern::Any
+        | CorePattern::Bind { .. }
+        | CorePattern::Literal(_)
+        | CorePattern::Error => false,
     }
 }
 

@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use grandiose_stage0::{
-    CoreId, DefKey, Digest, EffectInstance, EffectRow, GenericArgument, InferVar, Lifetime,
-    MirBlock, MirBlockId, MirEditor, MirFunction, MirInstruction, MirLocal, MirLocalDecl,
-    MirPattern, MirProgram, MirTerminator, Quantity, ScalarType, Type, optimize_mir,
+    CoreId, DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument,
+    InferVar, Lifetime, MirBlock, MirBlockId, MirEditor, MirFunction, MirInstruction, MirLocal,
+    MirLocalDecl, MirPattern, MirProgram, MirTerminator, Quantity, ScalarType, Type, optimize_mir,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -112,6 +112,35 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
             .validate()
             .is_err_and(|error| error.contains("unresolved inference")),
         "nested generic call metadata must not bypass MIR program validation"
+    );
+}
+
+#[test]
+fn mir_validation_rejects_noncanonical_nested_effect_row_identity() {
+    let projection = |name: &str| EffectRowProjection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: DefKey(Digest::of_bytes(b"mir-canonical-row-trait")),
+        trait_arguments: vec![],
+        name: name.into(),
+        item_arguments: vec![],
+    };
+    let mut function = graph();
+    function.locals[1].ty = Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects: EffectRow {
+            effects: BTreeSet::new(),
+            projections: vec![projection("Z"), projection("A")],
+            tail: None,
+        },
+        invocation: Quantity::ONCE,
+    };
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("non-canonical identity")),
+        "forged MIR must not bypass the canonical type-identity boundary"
     );
 }
 

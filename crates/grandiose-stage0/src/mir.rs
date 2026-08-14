@@ -9,7 +9,9 @@ use crate::{
     identity::{DefKey, Digest},
     instance::InstanceKey,
     placeflow::PlaceFlow,
-    types::{GenericArgument, Type},
+    types::{
+        GenericArgument, Type, is_canonical_generic_argument_identity, is_canonical_type_identity,
+    },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -2019,6 +2021,9 @@ impl MirFunction {
 /// walk intentionally reaches type and effect arguments embedded in callable,
 /// nominal, aggregate, pattern, and handler metadata as well as local types.
 fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), String> {
+    if !is_canonical_type_identity(ty) {
+        return Err("MIR semantic type has a non-canonical identity representation".into());
+    }
     match ty {
         Type::Infer(_) => Err("MIR semantic type retains an unresolved inference variable".into()),
         Type::Error => Err("MIR semantic type retains recovered error poison".into()),
@@ -2082,6 +2087,9 @@ fn validate_mir_generic_argument(
     argument: &GenericArgument,
     lifetime_binders: &mut Vec<u32>,
 ) -> Result<(), String> {
+    if !is_canonical_generic_argument_identity(argument) {
+        return Err("MIR generic argument has a non-canonical identity representation".into());
+    }
     match argument {
         GenericArgument::Type(ty) => validate_mir_type(ty, lifetime_binders),
         GenericArgument::EffectRow(effects) => validate_mir_effect_row(effects, lifetime_binders),
