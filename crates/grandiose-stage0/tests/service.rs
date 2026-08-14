@@ -3,8 +3,9 @@ use grandiose_stage0::{
     BootstrapManifestError, BootstrapStage, Budget, CancellationToken, CompilationMode,
     CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus,
     DiagnosticClass, Digest, InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport,
-    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits,
-    VmGenericArgument, VmInstruction, VmType, decode_and_verify_program, decode_program,
+    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy,
+    VmExecutionLimits, VmGenericArgument, VmInstruction, VmType, decode_and_verify_program,
+    decode_program,
 };
 use std::collections::BTreeMap;
 
@@ -3070,6 +3071,101 @@ fn service_forwards_a_partial_refutable_interprocedural_handler_to_an_outer_fram
         "the partial callee matrix must preserve its call, frame, test, and forwarding edge together"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_replays_a_cross_call_continuation_with_resume_return() {
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { handle { let value = helper(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+        "the replayed protected computation must retain its helper call"
+    );
+    assert!(
+        entry.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler {
+                continuation: VmContinuationPolicy::Replay,
+                ..
+            }
+        )),
+        "the cross-call continuation must be retained by a replayable VM frame"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .count(),
+        2,
+        "each statically required replay must return to the handler clause"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 43);
+}
+
+#[test]
+fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "the replayed protected computation must retain its function-value call"
+    );
+    assert!(
+        entry.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler {
+                continuation: VmContinuationPolicy::Replay,
+                ..
+            }
+        )),
+        "the function-value call must retain the same replayable frame contract"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 43);
+}
+
+#[test]
+fn service_rejects_an_underused_cross_call_replay_contract() {
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { handle { let value = helper(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("one resume unexpectedly satisfied an exact two-shot cross-call contract")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6005"),
+        "missing cross-call replay quantity diagnostic: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5012"),
+        "missing structured cross-call continuation-use diagnostic: {diagnostics:#?}"
+    );
 }
 
 #[test]

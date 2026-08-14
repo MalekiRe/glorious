@@ -1179,6 +1179,32 @@ impl MirLowering {
         // request to inline or re-derive the callee's body.  Install the
         // caller's lexical frames around the ordinary call so the VM can
         // dispatch a later callee `Perform` through its real call stack.
+        if let Some(function) =
+            lowerer.lower_root_interprocedural_replay_resumption(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer
             .lower_root_interprocedural_ordered_one_shot_handler(body.root, parameters.clone())
         {
@@ -7216,6 +7242,217 @@ impl Lowerer<'_> {
     /// used here. It authorizes only exact, closed protocol instances; open
     /// tails and delayed projections deliberately remain unsupported rather
     /// than being guessed from a callee body. This keeps calls, functions,
+    /// Lower an exact replayable continuation whose suspended performance is
+    /// reached through a normal callee call.
+    ///
+    /// The protected source computation must bind the result of one ordinary
+    /// call and then continue with a nonempty residual block.  The VM stores
+    /// that call's cross-frame continuation in a replayable handler frame;
+    /// every syntactic continuation invocation becomes `ResumeReturn`, which
+    /// resumes the callee, executes the residual, and returns to the clause
+    /// without consuming the snapshot.  This is intentionally narrower than
+    /// the general source matrix: aliases, partial/refutable dispatch, open
+    /// rows, and quantities that allow a one-shot use are left fail-closed.
+    fn lower_root_interprocedural_replay_resumption(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Block(computation_values) = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let first_call = computation_values.iter().position(|candidate| {
+            matches!(
+                self.body.expression(*candidate).kind,
+                CoreKind::Let {
+                    value,
+                    ..
+                } if matches!(self.body.expression(value).kind, CoreKind::Call { .. })
+            )
+        })?;
+        let (prefix, call_and_residual) = computation_values.split_at(first_call);
+        let (binding, residual) = call_and_residual.split_first()?;
+        let CoreKind::Let { name, value: call } = self.body.expression(*binding).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Call { callee, arguments } = self.body.expression(call).kind.clone() else {
+            return None;
+        };
+        if residual.is_empty() {
+            return None;
+        }
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.len() != 1 || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let effect = effects
+            .effects
+            .iter()
+            .next()
+            .expect("single-element effect row has one effect");
+        let [clause] = clauses.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit { quantity, .. } = &clause.resumption else {
+            return None;
+        };
+        // Replay must be semantically required. Quantities such as [1, 2]
+        // allow a one-shot use and therefore belong to the one-shot lowering
+        // until that mixed contract has a dedicated frame proof.
+        if clause.terminal
+            || clause.effect != *effect
+            || quantity.upper.is_none_or(|upper| upper < 2)
+            || quantity.contains(crate::quantity::Quantity::ONCE)
+            || clause.patterns.len() != clause.payload_types.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+            || self.handler_body_uses_snapshot_alias(clause.body)
+        {
+            return None;
+        }
+        let continuation = clause.continuation.as_ref()?;
+        if continuation.parameter != self.body.expression(call).ty {
+            // The continuation input is the performed operation's result, not
+            // merely an arbitrary helper return type. Do not guess a runtime
+            // frame type when the frozen source contract disagrees.
+            return None;
+        }
+        for expression in root_prefix.iter().chain(prefix.iter()) {
+            self.statement(*expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let performed = self.alloc(self.body.expression(call).ty.clone(), call);
+        let payload_destinations = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), call))
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation: clause.operation,
+            payload_destinations: payload_destinations.clone(),
+            resume_type: continuation.parameter.clone(),
+            continuation: MirContinuationPolicy::Replay,
+            target: MirBlockId(2),
+        });
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: performed,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: performed,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: performed,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        entry.push(MirInstruction::UninstallHandler);
+
+        let continuation_named = self.named.clone();
+        self.named.insert(name, performed);
+        self.instructions = Vec::new();
+        let (last, continuation_prefix) = residual.split_last()?;
+        for expression in continuation_prefix {
+            self.statement(*expression)?;
+        }
+        let continuation_result = self.value(*last)?;
+        let continuation_instructions = std::mem::take(&mut self.instructions);
+        self.named = continuation_named;
+
+        self.instructions = Vec::new();
+        let handler_named = self.named.clone();
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let handler_result = self.direct_handler_clause_value(clause)?;
+        self.instructions.push(MirInstruction::Cancel);
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.named = handler_named;
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: continuation_instructions,
+                    terminator: MirTerminator::Return {
+                        value: continuation_result,
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Return {
+                        value: handler_result,
+                    },
+                },
+            ],
+        })
+    }
+
     /// Lower an ordered, possibly partial, one-shot handler around an
     /// ordinary call with a closed single-operation effect summary.
     ///
