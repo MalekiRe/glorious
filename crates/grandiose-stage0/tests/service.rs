@@ -3005,6 +3005,29 @@ fn service_allows_an_explicit_unused_affine_direct_resumption() {
 }
 
 #[test]
+fn service_allows_a_once_callback_transfer_through_a_once_resumed_handler_suffix() {
+    let source = "effect Ask { [1,1] ask() -> i64; } pub fn apply(callback: (i64) -> i64, value: i64) -> i64 { callback(value) } pub fn worker(callback: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); apply(callback, value) } { Ask::ask(k) => k(41) } } pub fn main() -> i64 { 0 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+}
+
+#[test]
+fn service_rejects_replaying_a_once_callback_transfer_through_a_handler_suffix() {
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn apply(callback: (i64) -> i64, value: i64) -> i64 { callback(value) } pub fn worker(callback: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); apply(callback, value) } { Ask::ask(k) => k(40) + k(41) } } pub fn main() -> i64 { 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("replayed once-only callback transfer unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "missing replayed callback-transfer quantity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_intercepts_a_direct_effectful_helper_call_with_the_enclosing_handler() {
     let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { handle helper(41) { Ask::ask(value) => value + 1 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
