@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::{
+    dependency::DependencyLedger,
     identity::{Digest, RevisionId, fresh_database_id},
     interface::{InterfaceCache, InterfaceCacheStats},
     operation::{Budget, BudgetError, BudgetLease, CancellationToken},
@@ -72,6 +73,7 @@ pub struct CompilerDatabase {
     /// Validated immutable interface products may span revisions, but only
     /// through content/schema-qualified cache keys.
     interface_cache: InterfaceCache,
+    dependency_ledger: DependencyLedger,
 }
 
 impl Default for CompilerDatabase {
@@ -91,6 +93,7 @@ impl CompilerDatabase {
                 retired: BTreeSet::new(),
             }),
             interface_cache: InterfaceCache::default(),
+            dependency_ledger: DependencyLedger::default(),
         }
     }
 
@@ -189,6 +192,24 @@ impl CompilerDatabase {
         &self.interface_cache
     }
 
+    pub(crate) fn dependency_ledger(&self) -> &DependencyLedger {
+        &self.dependency_ledger
+    }
+
+    /// Explain whether a typed compiler product stayed green or which input
+    /// first invalidated it in a published revision.
+    pub fn dependency_trace(
+        &self,
+        revision: RevisionId,
+        node: &crate::DependencyNode,
+    ) -> Option<crate::DependencyTrace> {
+        self.dependency_ledger.trace(revision, node)
+    }
+
+    pub fn dependency_traces(&self, revision: RevisionId) -> Vec<crate::DependencyTrace> {
+        self.dependency_ledger.traces(revision)
+    }
+
     /// Inspection-only accounting for validated frozen interface reuse.  A
     /// hit never means a whole revision was reused; it records exactly one
     /// source/module interface whose bytes and schema identity matched.
@@ -242,6 +263,7 @@ impl CompilerDatabase {
                 state.equivalent_worlds.remove(&fingerprint);
             }
             state.revisions.remove(&revision);
+            self.dependency_ledger.remove_revision(revision);
             state.retired.remove(&revision);
             report.collected += 1;
         }

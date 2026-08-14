@@ -10,6 +10,7 @@ pub mod body;
 pub mod bootstrap;
 pub mod coherence;
 pub mod core;
+pub mod dependency;
 pub mod diagnostic;
 pub mod escape;
 pub mod fixity;
@@ -50,6 +51,7 @@ pub use core::{
     CoreHandlerContinuationContract, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
     CorePatternField, CorePlace, TypedBody,
 };
+pub use dependency::{DependencyLedger, DependencyNode, DependencyStatus, DependencyTrace};
 pub use diagnostic::{Diagnostic, DiagnosticClass, DiagnosticCode, Severity, SourceSpan};
 pub use escape::{EscapeDiagnostic, EscapeFlow};
 pub use fixity::{Fixity, FixityPosition, FixityTable};
