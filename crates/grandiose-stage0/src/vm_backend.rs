@@ -339,6 +339,18 @@ pub enum VmInstruction {
         callee: u32,
         arguments: Vec<u32>,
     },
+    /// A branded nonlocal control edge.  Unlike `Jump`, a leave retains the
+    /// exact cleanup proof and its parallel block-argument transfer in the
+    /// executable artifact.  The VM may erase the lexical brand only after
+    /// the verifier has checked it and the cleanup evidence.
+    Leave {
+        brand_owner: DefKey,
+        brand_label: u32,
+        target: u32,
+        arguments: Vec<u32>,
+        destinations: Vec<u32>,
+        cleanup: VmCleanupProof,
+    },
     Jump {
         target: u32,
     },
@@ -362,6 +374,20 @@ pub enum VmInstruction {
 pub struct VmCleanupProof {
     pub moved_places: Vec<VmCleanupPlace>,
     pub active_loans: Vec<VmCleanupLoan>,
+}
+/// The runtime control payload for a verified `Leave`.  It is deliberately
+/// separate from a program counter: a perform can capture a continuation
+/// while a nonlocal exit is unwinding handler frames, and deep forwarding or
+/// resumption must restore the same transfer rather than reconstructing one
+/// from ambient register state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingLeave {
+    brand_owner: DefKey,
+    brand_label: u32,
+    target: u32,
+    arguments: Vec<u32>,
+    destinations: Vec<u32>,
+    cleanup: VmCleanupProof,
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct VmCleanupPlace {
@@ -558,10 +584,10 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 23 adds verifier-checked deep one-shot handler frames.
+/// Schema 26 adds canonical cleanup-carrying `Leave` edges.
 /// Older layouts cannot be decoded safely because the operation field now
 /// follows a sequence of canonical VM types.
-pub const STAGE0_VM_SCHEMA: u32 = 25;
+pub const STAGE0_VM_SCHEMA: u32 = 26;
 const MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 const MAX_DECODE_REGISTERS: u64 = 1 << 20;
 const MAX_DECODE_INSTRUCTIONS: u64 = 1 << 22;
@@ -927,10 +953,10 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
         starts.push(next);
         let control_len = match &block.terminator {
             MirTerminator::Return { .. } => 1,
-            MirTerminator::Goto { target, arguments }
-            | MirTerminator::Leave {
-                target, arguments, ..
-            } => edge_length(arguments, &function.blocks[target.0 as usize]),
+            MirTerminator::Goto { target, arguments } => {
+                edge_length(arguments, &function.blocks[target.0 as usize])
+            }
+            MirTerminator::Leave { .. } => 1,
             MirTerminator::SwitchBool {
                 then_target,
                 then_arguments,
@@ -959,10 +985,7 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
             MirTerminator::Return { value } => {
                 instructions.push(VmInstruction::Return { value: value.0 });
             }
-            MirTerminator::Goto { target, arguments }
-            | MirTerminator::Leave {
-                target, arguments, ..
-            } => {
+            MirTerminator::Goto { target, arguments } => {
                 let target = *starts
                     .get(target.0 as usize)
                     .ok_or(VmArtifactError::UnsupportedControlFlow)?;
@@ -973,6 +996,28 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
                     &mut registers,
                     &mut instructions,
                 );
+            }
+            MirTerminator::Leave {
+                brand,
+                target,
+                arguments,
+                cleanup,
+            } => {
+                let target = *starts
+                    .get(target.0 as usize)
+                    .ok_or(VmArtifactError::UnsupportedControlFlow)?;
+                instructions.push(VmInstruction::Leave {
+                    brand_owner: brand.owner,
+                    brand_label: brand.label,
+                    target,
+                    arguments: arguments.iter().map(|argument| argument.0).collect(),
+                    destinations: function.blocks[target_index(target, &starts)?]
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.0)
+                        .collect(),
+                    cleanup: VmCleanupProof::from_mir(cleanup),
+                });
             }
             MirTerminator::SwitchBool {
                 condition,
@@ -1218,7 +1263,7 @@ fn encode_optional_digest(value: Option<Digest>, output: &mut Vec<u8>) {
     }
 }
 fn artifact_fingerprint(runtime_manifest: Option<Digest>, function: &VmFunction) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-v20".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-v21".to_vec();
     encode_optional_digest(runtime_manifest, &mut bytes);
     encode_function(function, &mut bytes);
     Digest::of_bytes(&bytes)
@@ -1228,7 +1273,7 @@ fn program_fingerprint(
     runtime_manifest: Option<Digest>,
     functions: &BTreeMap<DefKey, VmFunction>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-program-v20".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-program-v21".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
     encode_optional_digest(runtime_manifest, &mut bytes);
     for function in functions.values() {
@@ -1458,6 +1503,57 @@ impl<'a> Decoder<'a> {
             }
         })
     }
+    fn cleanup_proof(&mut self) -> Result<VmCleanupProof, VmArtifactError> {
+        let moved_count = self.count("cleanup moved places", MAX_DECODE_REGISTERS)?;
+        let mut moved_places = Vec::with_capacity(moved_count);
+        for _ in 0..moved_count {
+            let root = self.text()?;
+            let field_count = self.count("cleanup moved place fields", MAX_DECODE_REGISTERS)?;
+            let mut fields = Vec::with_capacity(field_count);
+            for _ in 0..field_count {
+                fields.push(self.u32()?);
+            }
+            moved_places.push(VmCleanupPlace { root, fields });
+        }
+        let loan_count = self.count("cleanup active loans", MAX_DECODE_REGISTERS)?;
+        let mut active_loans = Vec::with_capacity(loan_count);
+        for _ in 0..loan_count {
+            let owner = match self.byte()? {
+                0 => None,
+                1 => Some(self.text()?),
+                _ => {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid cleanup loan owner tag",
+                    });
+                }
+            };
+            let root = self.text()?;
+            let field_count = self.count("cleanup loan fields", MAX_DECODE_REGISTERS)?;
+            let mut fields = Vec::with_capacity(field_count);
+            for _ in 0..field_count {
+                fields.push(self.u32()?);
+            }
+            let unique = match self.byte()? {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid cleanup loan mutability",
+                    });
+                }
+            };
+            active_loans.push(VmCleanupLoan {
+                owner,
+                root,
+                fields,
+                unique,
+            });
+        }
+        Ok(VmCleanupProof {
+            moved_places,
+            active_loans,
+        })
+    }
     fn function(&mut self) -> Result<VmFunction, VmArtifactError> {
         let definition = self.def_key()?;
         let captures = self.u32()?;
@@ -1607,6 +1703,34 @@ impl<'a> Decoder<'a> {
                 snapshot: self.u32()?,
                 value: self.u32()?,
             }),
+            55 => {
+                let brand_owner = self.def_key()?;
+                let brand_label = self.u32()?;
+                let target = self.u32()?;
+                let count = self.count("leave arguments", MAX_DECODE_REGISTERS)?;
+                let mut arguments = Vec::with_capacity(count);
+                for _ in 0..count {
+                    arguments.push(self.u32()?);
+                }
+                let destination_count = self.count("leave destinations", MAX_DECODE_REGISTERS)?;
+                if destination_count != count {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "leave arguments and destinations differ in length",
+                    });
+                }
+                let mut destinations = Vec::with_capacity(destination_count);
+                for _ in 0..destination_count {
+                    destinations.push(self.u32()?);
+                }
+                Ok(VmInstruction::Leave {
+                    brand_owner,
+                    brand_label,
+                    target,
+                    arguments,
+                    destinations,
+                    cleanup: self.cleanup_proof()?,
+                })
+            }
             3 => self.i64_arithmetic(|dst, left, right| VmInstruction::AddI64 { dst, left, right }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
@@ -2610,6 +2734,7 @@ struct VerifierContinuation {
     /// absent while its clause runs and are restored when the continuation
     /// resumes, which is the operational form of deep forwarding.
     above: Vec<VerifierHandlerFrame>,
+    pending_leave: Option<PendingLeave>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2629,6 +2754,7 @@ struct VerifierState {
     /// is what prevents capability forgery through an equally typed callable.
     snapshots: Vec<Option<u32>>,
     handlers: Vec<VerifierHandlerFrame>,
+    pending_leave: Option<PendingLeave>,
 }
 
 impl Deref for VerifierState {
@@ -2668,6 +2794,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             registers: initial,
             snapshots: vec![None; function.registers.len()],
             handlers: Vec::new(),
+            pending_leave: None,
         });
     }
     let mut worklist = if function.instructions.is_empty() {
@@ -3009,6 +3136,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             arguments: arguments.clone(),
                         },
                         above,
+                        pending_leave: states.pending_leave.clone(),
                     }];
                     propagate_state(&mut incoming, &mut worklist, frame.target, &states)?;
                     advances = false;
@@ -3084,6 +3212,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         registers: continuation.registers,
                         snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
+                        pending_leave: continuation.pending_leave,
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -3157,6 +3286,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         registers: continuation.registers,
                         snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
+                        pending_leave: continuation.pending_leave,
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -3213,6 +3343,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         snapshots: continuation.snapshots,
                         performed: continuation.performed,
                         above: crossed,
+                        pending_leave: continuation.pending_leave,
                     }];
                     propagate_state(&mut incoming, &mut worklist, outer.target, &forwarded)?;
                 }
@@ -3444,6 +3575,45 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 propagate_state(&mut incoming, &mut worklist, *target, &states)?;
                 advances = false;
             }
+            VmInstruction::Leave {
+                target,
+                arguments,
+                destinations,
+                cleanup,
+                ..
+            } => {
+                if !cleanup.validate() {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "leave cleanup proof is not canonical",
+                    });
+                }
+                if arguments.len() != destinations.len() {
+                    return Err(VmArtifactError::CallArity {
+                        expected: destinations.len() as u32,
+                        found: arguments.len() as u32,
+                    });
+                }
+                let mut written = BTreeSet::new();
+                for (&argument, &destination) in arguments.iter().zip(destinations) {
+                    read(&states, argument)?;
+                    same_type(function, argument, destination)?;
+                    if !written.insert(destination) {
+                        return Err(VmArtifactError::InvalidRegister {
+                            register: destination,
+                        });
+                    }
+                }
+                // A leave is a nonlocal exit: suspended continuations and all
+                // frame-branded snapshot capabilities are invalidated before
+                // control reaches its lexical destination.
+                states.handlers.clear();
+                states.snapshots.fill(None);
+                for &destination in destinations {
+                    write(&mut states, destination)?;
+                }
+                propagate_state(&mut incoming, &mut worklist, *target, &states)?;
+                advances = false;
+            }
             VmInstruction::BranchBool {
                 condition,
                 then_target,
@@ -3510,7 +3680,9 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
 
     for (pc, instruction) in function.instructions.iter().enumerate() {
         let enters_handler = match instruction {
-            VmInstruction::Jump { target } => targets.contains(target),
+            VmInstruction::Jump { target } | VmInstruction::Leave { target, .. } => {
+                targets.contains(target)
+            }
             VmInstruction::BranchBool {
                 then_target,
                 else_target,
@@ -3525,7 +3697,7 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
         };
         if enters_handler {
             let target = match instruction {
-                VmInstruction::Jump { target } => *target,
+                VmInstruction::Jump { target } | VmInstruction::Leave { target, .. } => *target,
                 VmInstruction::BranchBool {
                     then_target,
                     else_target,
@@ -3579,9 +3751,19 @@ fn propagate_state(
                 .zip(&state.snapshots)
                 .map(|(left, right)| if left == right { *left } else { None })
                 .collect::<Vec<_>>();
-            if existing.registers != joined || existing.snapshots != snapshots || handler_changed {
+            let pending_leave = if existing.pending_leave == state.pending_leave {
+                existing.pending_leave.clone()
+            } else {
+                None
+            };
+            if existing.registers != joined
+                || existing.snapshots != snapshots
+                || existing.pending_leave != pending_leave
+                || handler_changed
+            {
                 existing.registers = joined;
                 existing.snapshots = snapshots;
+                existing.pending_leave = pending_leave;
                 worklist.push(target as usize);
             }
             Ok(())
@@ -3749,6 +3931,7 @@ struct RuntimeContinuation {
     registers: Vec<Option<VmValue>>,
     performed: RuntimePerformed,
     above: Vec<RuntimeHandlerFrame>,
+    pending_leave: Option<PendingLeave>,
 }
 
 #[derive(Clone)]
@@ -4469,6 +4652,7 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                         payloads: values,
                     },
                     above,
+                    pending_leave: None,
                 });
                 pc = frame.target as usize;
                 continue;
@@ -4511,6 +4695,12 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                if let Some(leave) = continuation.pending_leave.clone() {
+                    registers = continuation.registers;
+                    handlers.extend(continuation.above);
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    continue;
+                }
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
@@ -4556,6 +4746,12 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 // only the deep frames recorded at the original `Perform`
                 // are reinstated with the continuation.
                 handlers.truncate(index + 1);
+                if let Some(leave) = continuation.pending_leave.clone() {
+                    registers = continuation.registers;
+                    handlers.extend(continuation.above);
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    continue;
+                }
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
@@ -4605,6 +4801,7 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                     registers: continuation.registers,
                     performed: continuation.performed,
                     above: crossed,
+                    pending_leave: continuation.pending_leave,
                 });
                 pc = frame.target as usize;
                 continue;
@@ -4972,6 +5169,28 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 pc = target as usize;
                 continue;
             }
+            VmInstruction::Leave {
+                brand_owner,
+                brand_label,
+                target,
+                arguments,
+                destinations,
+                cleanup,
+            } => {
+                pc = complete_pending_leave(
+                    &mut registers,
+                    &mut handlers,
+                    PendingLeave {
+                        brand_owner,
+                        brand_label,
+                        target,
+                        arguments,
+                        destinations,
+                        cleanup,
+                    },
+                )?;
+                continue;
+            }
             VmInstruction::BranchBool {
                 condition,
                 then_target,
@@ -5002,6 +5221,44 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
         pc += 1;
     }
     Err(VmArtifactError::NoReturn)
+}
+/// Apply a verifier-checked pending nonlocal exit.  Parallel materialization
+/// is essential: a label edge may swap block parameters, so writing one
+/// destination before reading all arguments would corrupt a legal transfer.
+fn complete_pending_leave(
+    registers: &mut [Option<VmValue>],
+    handlers: &mut Vec<RuntimeHandlerFrame>,
+    leave: PendingLeave,
+) -> Result<usize, VmArtifactError> {
+    if !leave.cleanup.validate() || leave.arguments.len() != leave.destinations.len() {
+        return Err(VmArtifactError::HandlerStateMismatch);
+    }
+    let values = leave
+        .arguments
+        .iter()
+        .map(|argument| {
+            registers
+                .get(*argument as usize)
+                .and_then(Clone::clone)
+                .ok_or(VmArtifactError::ReadBeforeWrite {
+                    register: *argument,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (&destination, value) in leave.destinations.iter().zip(values) {
+        let slot =
+            registers
+                .get_mut(destination as usize)
+                .ok_or(VmArtifactError::InvalidRegister {
+                    register: destination,
+                })?;
+        *slot = Some(value);
+    }
+    // A leave has crossed every active lexical handler. Any captured one-shot
+    // continuation was abandoned by the source control transfer, so no frame
+    // survives that could later re-authorize a stale snapshot.
+    handlers.clear();
+    Ok(leave.target as usize)
 }
 fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
     match value {
@@ -5182,6 +5439,28 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(50);
             output.extend_from_slice(&snapshot.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::Leave {
+            brand_owner,
+            brand_label,
+            target,
+            arguments,
+            destinations,
+            cleanup,
+        } => {
+            output.push(55);
+            output.extend_from_slice(&brand_owner.0.as_bytes());
+            output.extend_from_slice(&brand_label.to_le_bytes());
+            output.extend_from_slice(&target.to_le_bytes());
+            output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+            for argument in arguments {
+                output.extend_from_slice(&argument.to_le_bytes());
+            }
+            output.extend_from_slice(&(destinations.len() as u64).to_le_bytes());
+            for destination in destinations {
+                output.extend_from_slice(&destination.to_le_bytes());
+            }
+            encode_cleanup_proof(cleanup, output);
         }
         VmInstruction::MakeEnum {
             dst,
@@ -5421,6 +5700,35 @@ fn encode_pattern(value: &VmPattern, output: &mut Vec<u8>) {
             output.extend_from_slice(&variant.to_le_bytes());
             encode_pattern_fields(fields, output);
         }
+    }
+}
+fn encode_cleanup_proof(value: &VmCleanupProof, output: &mut Vec<u8>) {
+    output.extend_from_slice(&(value.moved_places.len() as u64).to_le_bytes());
+    for place in &value.moved_places {
+        output.extend_from_slice(&(place.root.len() as u64).to_le_bytes());
+        output.extend_from_slice(place.root.as_bytes());
+        output.extend_from_slice(&(place.fields.len() as u64).to_le_bytes());
+        for field in &place.fields {
+            output.extend_from_slice(&field.to_le_bytes());
+        }
+    }
+    output.extend_from_slice(&(value.active_loans.len() as u64).to_le_bytes());
+    for loan in &value.active_loans {
+        match &loan.owner {
+            None => output.push(0),
+            Some(owner) => {
+                output.push(1);
+                output.extend_from_slice(&(owner.len() as u64).to_le_bytes());
+                output.extend_from_slice(owner.as_bytes());
+            }
+        }
+        output.extend_from_slice(&(loan.root.len() as u64).to_le_bytes());
+        output.extend_from_slice(loan.root.as_bytes());
+        output.extend_from_slice(&(loan.fields.len() as u64).to_le_bytes());
+        for field in &loan.fields {
+            output.extend_from_slice(&field.to_le_bytes());
+        }
+        output.push(u8::from(loan.unique));
     }
 }
 fn encode_pattern_fields(fields: &[VmPatternField], output: &mut Vec<u8>) {
@@ -5713,6 +6021,7 @@ fn execute_with_arguments(
                         payloads: values,
                     },
                     above,
+                    pending_leave: None,
                 });
                 pc = frame.target as usize;
                 continue;
@@ -5762,6 +6071,12 @@ fn execute_with_arguments(
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                if let Some(leave) = continuation.pending_leave.clone() {
+                    registers = continuation.registers;
+                    handlers.extend(continuation.above);
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    continue;
+                }
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
@@ -5809,6 +6124,12 @@ fn execute_with_arguments(
                 // snapshot abandons dynamically newer frames before restoring
                 // the continuation's original deep-frame suffix.
                 handlers.truncate(index + 1);
+                if let Some(leave) = continuation.pending_leave.clone() {
+                    registers = continuation.registers;
+                    handlers.extend(continuation.above);
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    continue;
+                }
                 registers = continuation.registers;
                 registers[continuation.dst as usize] = Some(resumed);
                 handlers.extend(continuation.above);
@@ -5858,6 +6179,7 @@ fn execute_with_arguments(
                     registers: continuation.registers,
                     performed: continuation.performed,
                     above: crossed,
+                    pending_leave: continuation.pending_leave,
                 });
                 pc = frame.target as usize;
                 continue;
@@ -6292,6 +6614,28 @@ fn execute_with_arguments(
             }
             VmInstruction::Jump { target } => {
                 pc = *target as usize;
+                continue;
+            }
+            VmInstruction::Leave {
+                brand_owner,
+                brand_label,
+                target,
+                arguments,
+                destinations,
+                cleanup,
+            } => {
+                pc = complete_pending_leave(
+                    &mut registers,
+                    &mut handlers,
+                    PendingLeave {
+                        brand_owner: *brand_owner,
+                        brand_label: *brand_label,
+                        target: *target,
+                        arguments: arguments.clone(),
+                        destinations: destinations.clone(),
+                        cleanup: cleanup.clone(),
+                    },
+                )?;
                 continue;
             }
             VmInstruction::BranchBool {

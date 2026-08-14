@@ -1,11 +1,12 @@
 use grandiose_stage0::{
     BodySyntax, CandidateVmArtifact, CandidateVmProgram, CoreId, DeclarationScan, DefKey,
-    DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath,
-    MirBlock, MirBlockId, MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirLowering,
-    MirProgram, MirTerminator, PackageKey, PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError,
-    VmFunction, VmInstruction, VmPattern, VmType, decode_and_verify_artifact,
-    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
-    encode_artifact, encode_program, verify_vm, verify_vm_program,
+    DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LabelBrand, LexedFile,
+    LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction, MirInstruction, MirLocal,
+    MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey, PlaceFlow, ScalarType, Type,
+    TypedBody, VmArtifactError, VmCleanupPlace, VmCleanupProof, VmFunction, VmInstruction,
+    VmPattern, VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact,
+    decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm,
+    verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -1265,6 +1266,72 @@ fn vm_omits_identity_cfg_edge_transfers() {
 }
 
 #[test]
+fn vm_preserves_mir_leave_cleanup_and_label_identity() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let owner = DefKey(Digest::of_bytes(b"mir-leave-owner"));
+    let mir = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-cleanup-leave")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            MirLocalDecl {
+                ty: i64_ty.clone(),
+                source: CoreId(u32::MAX),
+            },
+            MirLocalDecl {
+                ty: i64_ty.clone(),
+                source: CoreId(u32::MAX),
+            },
+        ],
+        result: i64_ty,
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 42,
+                }],
+                terminator: MirTerminator::Leave {
+                    brand: LabelBrand { owner, label: 9 },
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(0)],
+                    cleanup: MirCleanupPlan {
+                        moved_places: vec![],
+                        active_loans: vec![],
+                    },
+                },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(1)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(1) },
+            },
+        ],
+    };
+    let candidate = emit_vm(&mir).unwrap();
+    assert!(matches!(
+        candidate.function.instructions.as_slice(),
+        [
+            VmInstruction::ConstI64 { .. },
+            VmInstruction::Leave {
+                brand_owner,
+                brand_label: 9,
+                arguments,
+                destinations,
+                cleanup,
+                ..
+            },
+            VmInstruction::Return { .. },
+        ] if *brand_owner == owner
+            && arguments == &vec![0]
+            && destinations == &vec![1]
+            && cleanup.validate()
+    ));
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn verifier_rejects_branch_targets_outside_the_instruction_stream() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
@@ -1561,4 +1628,153 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
             .unwrap(),
         42
     );
+}
+
+#[test]
+fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
+    let handler_effect = DefKey(Digest::of_bytes(b"leave-handler"));
+    let label_owner = DefKey(Digest::of_bytes(b"leave-label-owner"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"cleanup-carrying-leave")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::InstallHandler {
+                    effect: handler_effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    target: 4,
+                },
+                VmInstruction::Leave {
+                    brand_owner: label_owner,
+                    brand_label: 7,
+                    target: 3,
+                    arguments: vec![0],
+                    destinations: vec![1],
+                    cleanup: VmCleanupProof {
+                        moved_places: vec![VmCleanupPlace {
+                            root: "value".into(),
+                            fields: vec![0],
+                        }],
+                        active_loans: vec![],
+                    },
+                },
+                VmInstruction::Return { value: 1 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"cleanup-carrying-leave-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert_eq!(
+        decode_and_verify_artifact(&bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: candidate.function.definition,
+        functions: BTreeMap::from([(candidate.function.definition, candidate.function.clone())]),
+        fingerprint: Digest::of_bytes(b"cleanup-carrying-leave-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
+    let effect = DefKey(Digest::of_bytes(b"leave-reject-effect"));
+    let owner = DefKey(Digest::of_bytes(b"leave-reject-owner"));
+    let mut malformed = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"leave-reject-canonical")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::Leave {
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 2,
+                    arguments: vec![0],
+                    destinations: vec![1],
+                    cleanup: VmCleanupProof {
+                        moved_places: vec![
+                            VmCleanupPlace {
+                                root: "x".into(),
+                                fields: vec![],
+                            },
+                            VmCleanupPlace {
+                                root: "x".into(),
+                                fields: vec![],
+                            },
+                        ],
+                        active_loans: vec![],
+                    },
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"leave-reject-canonical-fingerprint"),
+    };
+    malformed.fingerprint = malformed.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(malformed),
+        Err(VmArtifactError::MalformedEncoding { .. })
+    ));
+
+    let mut enters_clause = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"leave-reject-clause")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    target: 3,
+                },
+                VmInstruction::Leave {
+                    brand_owner: owner,
+                    brand_label: 1,
+                    target: 3,
+                    arguments: vec![0],
+                    destinations: vec![1],
+                    cleanup: VmCleanupProof {
+                        moved_places: vec![],
+                        active_loans: vec![],
+                    },
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"leave-reject-clause-fingerprint"),
+    };
+    enters_clause.fingerprint = enters_clause.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(enters_clause),
+        Err(VmArtifactError::HandlerTargetReachedByControlFlow { target: 3 })
+    ));
 }
