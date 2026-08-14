@@ -5587,6 +5587,46 @@ fn service_propagates_a_direct_call_result_into_nested_fn_bound_blocks() {
 }
 
 #[test]
+fn service_reborrows_a_refined_enum_payload_by_position() {
+    let source = r#"
+        pub enum Result<T, E> { Ok(T), Err(E) }
+        pub type Option<T> = Result<T, ()>;
+        pub fn result_as_ref<'a, A, E>(value: &'a Result<A, E>) -> Result<&'a A, &'a E> {
+            handle *value is Result::Ok(_) {
+                true => Result::Ok(&value.0),
+                false => Result::Err(&value.0),
+            }
+        }
+        pub fn result_as_mut<'a, A, E>(value: &'a mut Result<A, E>) -> Result<&'a mut A, &'a mut E> {
+            handle *value is Result::Ok(_) {
+                true => Result::Ok(&mut value.0),
+                false => Result::Err(&mut value.0),
+            }
+        }
+        pub fn option_as_ref<'a, A>(value: &'a Option<A>) -> Option<&'a A> {
+            handle *value is Result::Ok(_) {
+                true => Result::Ok(&value.0),
+                false => Result::Err(()),
+            }
+        }
+        pub fn option_as_mut<'a, A>(value: &'a mut Option<A>) -> Option<&'a mut A> {
+            handle *value is Result::Ok(_) {
+                true => Result::Ok(&mut value.0),
+                false => Result::Err(()),
+            }
+        }
+        pub fn main() -> i64 {
+            let value = Result::Ok(42);
+            let borrowed = result_as_ref(&value);
+            handle borrowed { Result::Ok(reference) => *reference, Result::Err(_) => 0 }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_a_top_level_value_alias_to_its_callable_target() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } let increment = add_one; pub fn main() -> i64 { increment(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

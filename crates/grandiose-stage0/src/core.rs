@@ -1973,6 +1973,35 @@ fn place_structural_error(place: &CorePlace) -> Option<String> {
     }
 }
 
+/// Compare only stable source-place shape. Refinement facts are scoped to a
+/// syntactic storage path, not a particular Core allocation ordinal: the
+/// handler test and a later `value.0` each elaborate their own `Local` and
+/// `Deref` nodes while referring to the same place.
+fn same_core_place_shape(expressions: &[CoreExpr], left: CoreId, right: CoreId) -> bool {
+    match (
+        &expressions[left.0 as usize].kind,
+        &expressions[right.0 as usize].kind,
+    ) {
+        (CoreKind::Local(left), CoreKind::Local(right)) => left == right,
+        (CoreKind::Deref(left), CoreKind::Deref(right)) => {
+            same_core_place_shape(expressions, *left, *right)
+        }
+        (
+            CoreKind::Field {
+                base: left,
+                index: left_index,
+                ..
+            },
+            CoreKind::Field {
+                base: right,
+                index: right_index,
+                ..
+            },
+        ) => left_index == right_index && same_core_place_shape(expressions, *left, *right),
+        _ => false,
+    }
+}
+
 fn pattern_structural_error(pattern: &CorePattern) -> Option<String> {
     match pattern {
         CorePattern::Tuple(values) => values.iter().find_map(pattern_structural_error),
@@ -2793,6 +2822,7 @@ impl TypedBody {
             next_refinement: 0,
             next_label: 0,
             active_refinement_bindings: std::collections::BTreeSet::new(),
+            active_refinement_patterns: vec![],
             generic_parameters,
             effect_row_parameters: definition
                 .callable_header()
@@ -2986,6 +3016,7 @@ impl TypedBody {
             next_refinement: 0,
             next_label: 0,
             active_refinement_bindings: std::collections::BTreeSet::new(),
+            active_refinement_patterns: vec![],
             generic_parameters,
             effect_row_parameters: {
                 let mut parameters = std::collections::BTreeMap::new();
@@ -3135,6 +3166,7 @@ impl TypedBody {
             next_refinement: 0,
             next_label: 0,
             active_refinement_bindings: std::collections::BTreeSet::new(),
+            active_refinement_patterns: vec![],
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
             lifetime_parameters: std::collections::BTreeMap::new(),
@@ -3230,6 +3262,7 @@ impl TypedBody {
             next_refinement: 0,
             next_label: 0,
             active_refinement_bindings: std::collections::BTreeSet::new(),
+            active_refinement_patterns: vec![],
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
             lifetime_parameters: std::collections::BTreeMap::new(),
@@ -3350,6 +3383,11 @@ struct Elaborator<'a> {
     /// positive refinement branch. A nested closure must not capture one: it
     /// could outlive the structural test and thereby forge a refinement fact.
     active_refinement_bindings: std::collections::BTreeSet<String>,
+    /// Structural facts currently proven by the positive arm of a completion
+    /// handler.  Unlike the exposed pattern binders, this retains the exact
+    /// tested place so `value.0` can select an enum payload only where the
+    /// corresponding variant has been proven.
+    active_refinement_patterns: Vec<(CoreId, CorePattern)>,
     /// Callable-declaration generic binders are lexically visible in its
     /// body, including effect applications such as `State<T>::get()`. They
     /// remain stable `Type::Generic` slots; inference variables are reserved
@@ -7029,6 +7067,17 @@ impl Elaborator<'_> {
     }
     fn field(&mut self, base: ExprId, name: String, span: Span) -> CoreId {
         let base = self.expression(base);
+        // Field syntax automatically projects through a reference, but keep
+        // the explicit Core dereference so MIR can reborrow the selected
+        // payload rather than materializing or moving the whole enum.
+        let base = match self.expressions[base.0 as usize].ty.clone() {
+            Type::Reference { referent, .. } => self.alloc(
+                CoreKind::Deref(base),
+                *referent,
+                span,
+            ),
+            _ => base,
+        };
         let base_ty = self.expressions[base.0 as usize].ty.clone();
         let Type::Nominal {
             definition,
@@ -7037,20 +7086,33 @@ impl Elaborator<'_> {
         else {
             return self.fail(span, "G4128", "field projection requires a struct value");
         };
-        let Some(fields) = self
+        let fields = self
             .signatures
             .instantiate_struct_fields_generic(definition, &arguments)
             .ok()
-        else {
-            return self.fail(span, "G4128", "field projection requires a struct value");
+            .or_else(|| self.refined_enum_projection_fields(base, definition));
+        let Some(fields) = fields else {
+            return self.fail(
+                span,
+                "G4128",
+                "field projection requires a struct value or a proven enum variant",
+            );
         };
         let field_count = fields.len() as u32;
-        let Some((index, field)) = fields
-            .into_iter()
-            .enumerate()
-            .find(|(_, field)| field.name == name)
-        else {
-            return self.fail(span, "G4129", "struct does not declare the requested field");
+        let field = if let Ok(index) = name.parse::<usize>() {
+            fields.get(index).cloned().map(|field| (index, field))
+        } else {
+            fields
+                .into_iter()
+                .enumerate()
+                .find(|(_, field)| field.name == name)
+        };
+        let Some((index, field)) = field else {
+            return self.fail(
+                span,
+                "G4129",
+                "aggregate does not declare the requested field or payload index",
+            );
         };
         // Layout instantiation can turn an interface-owned projection into a
         // concrete goal. Normalize at the same field boundary as record
@@ -7066,6 +7128,42 @@ impl Elaborator<'_> {
             field_ty,
             span,
         )
+    }
+    /// Return the payload layout of a selected enum variant only while the
+    /// enclosing positive refinement proves that this exact Core place has
+    /// that variant.  Generic enum alternatives can have incompatible field
+    /// types, so a bare enum projection is never guessed from field ordinal.
+    fn refined_enum_projection_fields(
+        &self,
+        base: CoreId,
+        definition: DefKey,
+    ) -> Option<Vec<crate::signature::NominalField>> {
+        self.active_refinement_patterns
+            .iter()
+            .rev()
+            .find_map(|(subject, pattern)| {
+                if !same_core_place_shape(&self.expressions, *subject, base) {
+                    return None;
+                }
+                let CorePattern::Enum {
+                    definition: selected,
+                    field_types,
+                    ..
+                } = pattern
+                else {
+                    return None;
+                };
+                (*selected == definition).then(|| {
+                    field_types
+                        .iter()
+                        .enumerate()
+                        .map(|(index, ty)| crate::signature::NominalField {
+                            name: index.to_string(),
+                            ty: ty.clone(),
+                        })
+                        .collect()
+                })
+            })
     }
     fn enum_constructor(
         &mut self,
@@ -8416,6 +8514,7 @@ impl Elaborator<'_> {
                 self.locals.define(name.clone(), ty.clone());
             }
             let previous_refinement_bindings = self.active_refinement_bindings.clone();
+            let previous_refinement_patterns = self.active_refinement_patterns.clone();
             if let Some(refinement) = &refinement {
                 self.active_refinement_bindings.extend(
                     refinement
@@ -8424,9 +8523,12 @@ impl Elaborator<'_> {
                         .iter()
                         .map(|(name, _)| name.clone()),
                 );
+                self.active_refinement_patterns
+                    .push((refinement.subject, refinement.pattern.clone()));
             }
             let body = self.expression_expected(clause.body, Some(result.clone()));
             self.active_refinement_bindings = previous_refinement_bindings;
+            self.active_refinement_patterns = previous_refinement_patterns;
             self.locals.leave();
             let body_ty = self.expressions[body.0 as usize].ty.clone();
             if self

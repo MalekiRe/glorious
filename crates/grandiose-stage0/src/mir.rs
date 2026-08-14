@@ -13194,19 +13194,7 @@ impl Lowerer<'_> {
                 clauses,
             } => self.lower_terminal_handle(dst, computation, clauses)?,
             CoreKind::Borrow { unique, value } => {
-                if let CoreKind::Deref(reference) = self.body.expression(value).kind.clone() {
-                    let src = self.capability_value(reference)?;
-                    self.instructions.push(MirInstruction::Borrow {
-                        dst,
-                        src,
-                        fields: vec![],
-                        unique,
-                        reborrow: true,
-                    });
-                    self.values.insert(id, dst);
-                    return Some(dst);
-                }
-                let Some((src, fields)) = self.reference_place(value) else {
+                let Some((src, fields, reborrow)) = self.reference_place(value) else {
                     self.error("G6010", "borrow requires a stable local place");
                     return None;
                 };
@@ -13215,7 +13203,7 @@ impl Lowerer<'_> {
                     src,
                     fields,
                     unique,
-                    reborrow: false,
+                    reborrow,
                 });
             }
             CoreKind::Deref(value) => {
@@ -15776,13 +15764,24 @@ impl Lowerer<'_> {
     /// Resolve a Typed Core value place to its stable runtime root and field
     /// path.  This refuses computed values: a borrow may never be lowered as
     /// a hidden copy of a temporary.
-    fn reference_place(&mut self, id: CoreId) -> Option<(MirLocal, Vec<u32>)> {
+    fn reference_place(&mut self, id: CoreId) -> Option<(MirLocal, Vec<u32>, bool)> {
         match self.body.expression(id).kind.clone() {
-            CoreKind::Local(name) => self.named.get(&name).copied().map(|local| (local, vec![])),
+            CoreKind::Local(name) => self
+                .named
+                .get(&name)
+                .copied()
+                .map(|local| (local, vec![], false)),
+            // Preserve the reference root for a projected reborrow.  Lowering
+            // a dereference as a value first would copy (or move) the entire
+            // aggregate before selecting a field, which is both unsound for a
+            // non-Copy enum payload and loses the loan's field path.
+            CoreKind::Deref(reference) => self
+                .capability_value(reference)
+                .map(|local| (local, vec![], true)),
             CoreKind::Field { base, index, .. } => {
-                let (root, mut fields) = self.reference_place(base)?;
+                let (root, mut fields, reborrow) = self.reference_place(base)?;
                 fields.push(index);
-                Some((root, fields))
+                Some((root, fields, reborrow))
             }
             _ => None,
         }

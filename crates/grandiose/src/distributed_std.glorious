@@ -597,27 +597,31 @@ __g1_option_unwrap_or<A>(value: Option<A>, fallback: A) -> A where A: Use<[0, 0]
 }
 
 __g1_result_as_ref<'a, A, E>(value: &'a Result<A, E>) -> Result<& 'a A, &'a E> {
-    if(*value is Result::Ok(_)) {
-        Result::Ok(&value.0)
-    } else { Result::Err(&value.0) }
+    handle *value is Result::Ok(_) {
+        true => Result::Ok(&value.0),
+        false => Result::Err(&value.0),
+    }
 }
 
 __g1_result_as_mut<'a, A, E>(value: &'a mut Result<A, E>) -> Result<& 'a mut A, &'a mut E> {
-    if(*value is Result::Ok(_)) {
-        Result::Ok(&mut value.0)
-    } else { Result::Err(&mut value.0) }
+    handle *value is Result::Ok(_) {
+        true => Result::Ok(&mut value.0),
+        false => Result::Err(&mut value.0),
+    }
 }
 
 __g1_option_as_ref<'a, A>(value: &'a Option<A>) -> Option<& 'a A> {
-    if(*value is Result::Ok(_)) {
-        Result::Ok(&value.0)
-    } else { Result::Err(()) }
+    handle *value is Result::Ok(_) {
+        true => Result::Ok(&value.0),
+        false => Result::Err(()),
+    }
 }
 
 __g1_option_as_mut<'a, A>(value: &'a mut Option<A>) -> Option<& 'a mut A> {
-    if(*value is Result::Ok(_)) {
-        Result::Ok(&mut value.0)
-    } else { Result::Err(()) }
+    handle *value is Result::Ok(_) {
+        true => Result::Ok(&mut value.0),
+        false => Result::Err(()),
+    }
 }
 
 let Result::is_ok = __g1_result_is_ok;
