@@ -4,8 +4,8 @@ use grandiose_stage0::{
     LabelBrand, LexedFile, LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction,
     MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey,
     PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace,
-    VmCleanupProof, VmExecutionLimits, VmFunction, VmInstruction, VmPattern, VmType,
-    decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
+    VmCleanupProof, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction, VmPattern,
+    VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
     emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
@@ -21,7 +21,7 @@ struct LeaveFixtureOffsets {
 }
 
 #[test]
-fn vm_rejects_non_type_effect_arguments_before_bytecode_lowering() {
+fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
     let effect = DefKey(Digest::of_bytes(b"vm-non-type-effect"));
     let function = MirFunction {
         definition: DefKey(Digest::of_bytes(b"vm-non-type-effect-caller")),
@@ -45,12 +45,139 @@ fn vm_rejects_non_type_effect_arguments_before_bytecode_lowering() {
             terminator: MirTerminator::Return { value: MirLocal(0) },
         }],
     };
+    let artifact = emit_vm(&function).expect("const protocol argument has a VM identity");
     assert!(matches!(
-        emit_vm(&function),
-        Err(VmArtifactError::UnsupportedEffectArgument {
-            effect: found,
-            argument,
-        }) if found == effect && *argument == GenericArgument::ConstU32(1)
+        artifact.function.instructions.as_slice(),
+        [VmInstruction::Perform { effect: found, effect_arguments, .. }, ..]
+            if *found == effect && effect_arguments == &[VmGenericArgument::ConstU32(1)]
+    ));
+    let encoded = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
+}
+
+#[test]
+fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
+    use grandiose_stage0::{
+        ConstKind, EffectTail, Lifetime, VmEffectInstance, VmEffectRow, VmEffectRowProjection,
+    };
+
+    let nested_effect = DefKey(Digest::of_bytes(b"vm-effect-argument-nested"));
+    let trait_definition = DefKey(Digest::of_bytes(b"vm-effect-argument-trait"));
+    let effect = DefKey(Digest::of_bytes(b"vm-effect-argument-outer"));
+    let arguments = vec![
+        VmGenericArgument::Type(VmType::I64),
+        VmGenericArgument::EffectRow(VmEffectRow {
+            effects: vec![VmEffectInstance {
+                definition: nested_effect,
+                arguments: vec![VmGenericArgument::ConstU32(7)],
+            }],
+            projections: vec![VmEffectRowProjection {
+                subject: VmType::Generic(1),
+                trait_definition,
+                trait_arguments: vec![VmType::Text],
+                name: "Associated".into(),
+                item_arguments: vec![VmType::I64],
+            }],
+            tail: Some(EffectTail::Generic(2)),
+        }),
+        VmGenericArgument::Lifetime(Lifetime::Bound { depth: 1, index: 3 }),
+        VmGenericArgument::ConstU32(11),
+        VmGenericArgument::ConstQuantity {
+            lower: 4,
+            upper: Some(9),
+        },
+        VmGenericArgument::ConstGeneric {
+            index: 5,
+            kind: ConstKind::Quantity,
+        },
+    ];
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"vm-effect-argument-round-trip")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64],
+            instructions: vec![
+                VmInstruction::Perform {
+                    dst: 0,
+                    effect,
+                    effect_arguments: arguments.clone(),
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"vm-effect-argument-round-trip-stale"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let encoded = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
+
+    // This fixture has one I64 register and a leading `Perform`; its first
+    // argument tag is therefore fixed. An unknown tag must fail decoding
+    // before the candidate reaches artifact verification.
+    let generic_argument_tag = 53 + 32 + 8 + 8 + 1 + 8 + 1 + 4 + 32 + 8;
+    assert_eq!(encoded[generic_argument_tag], 0);
+    let mut hostile = encoded;
+    hostile[generic_argument_tag] = u8::MAX;
+    assert!(matches!(
+        decode_artifact(&hostile),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "unknown VM effect argument tag"
+        })
+    ));
+}
+
+#[test]
+fn vm_decoder_rejects_noncanonical_effect_row_instances() {
+    use grandiose_stage0::{VmEffectInstance, VmEffectRow};
+
+    let mut definitions = [
+        DefKey(Digest::of_bytes(b"effect-row-order-a")),
+        DefKey(Digest::of_bytes(b"effect-row-order-b")),
+    ];
+    definitions.sort();
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"effect-row-order-caller")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64],
+            instructions: vec![
+                VmInstruction::Perform {
+                    dst: 0,
+                    effect: DefKey(Digest::of_bytes(b"effect-row-order-outer")),
+                    effect_arguments: vec![VmGenericArgument::EffectRow(VmEffectRow {
+                        effects: vec![
+                            VmEffectInstance {
+                                definition: definitions[1],
+                                arguments: vec![],
+                            },
+                            VmEffectInstance {
+                                definition: definitions[0],
+                                arguments: vec![],
+                            },
+                        ],
+                        projections: vec![],
+                        tail: None,
+                    })],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"effect-row-order-stale"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    assert!(matches!(
+        decode_artifact(&encode_artifact(&artifact)),
+        Err(VmArtifactError::NonCanonicalEncoding)
     ));
 }
 
@@ -93,7 +220,7 @@ fn rebind_artifact_fingerprint(bytes: &mut Vec<u8>) {
     *bytes = encode_artifact(&artifact);
 }
 
-/// One small schema-26 artifact whose payload contains every fixed `Leave`
+/// One small schema-27 artifact whose payload contains every fixed `Leave`
 /// header field plus both parallel register vectors and a cleanup proof. Tests
 /// mutate this canonical byte image rather than relying on Debug formatting.
 fn encoded_leave_fixture() -> Vec<u8> {
@@ -838,7 +965,9 @@ fn vm_artifact_preserves_generic_effect_instance_identity() {
                 operation: 0,
                 arguments,
                 ..
-            } if *effect == expected_effect && effect_arguments == &[VmType::I64] && arguments.is_empty()
+            } if *effect == expected_effect
+                && effect_arguments == &[VmGenericArgument::Type(VmType::I64)]
+                && arguments.is_empty()
         )
     }));
     let encoded = encode_artifact(&candidate);
@@ -931,7 +1060,7 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
                 VmInstruction::Perform {
                     dst: 0,
                     effect,
-                    effect_arguments: vec![VmType::I64],
+                    effect_arguments: vec![VmGenericArgument::Type(VmType::I64)],
                     operation: 0,
                     arguments: vec![],
                 },
@@ -949,7 +1078,7 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
             effect: actual,
             effect_arguments,
             operation: 0,
-        }) if actual == effect && effect_arguments == vec![VmType::I64]
+        }) if actual == effect && effect_arguments == vec![VmGenericArgument::Type(VmType::I64)]
     ));
 }
 
@@ -1000,6 +1129,77 @@ fn verified_vm_executes_a_deep_one_shot_handler_frame() {
     // The eighth step is the continuation's return, after direct `Resume`.
     assert_continuation_budget_parity(candidate.function.clone(), 7);
     assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn handlers_match_the_exact_non_type_effect_instance() {
+    use grandiose_stage0::{EffectTail, Lifetime, VmEffectInstance, VmEffectRow};
+
+    let effect = DefKey(Digest::of_bytes(b"exact-non-type-handler"));
+    let nested = DefKey(Digest::of_bytes(b"exact-non-type-handler-nested"));
+    let protocol = vec![
+        VmGenericArgument::ConstU32(1),
+        VmGenericArgument::Lifetime(Lifetime::Generic(4)),
+        VmGenericArgument::EffectRow(VmEffectRow {
+            effects: vec![VmEffectInstance {
+                definition: nested,
+                arguments: vec![VmGenericArgument::ConstQuantity {
+                    lower: 2,
+                    upper: None,
+                }],
+            }],
+            projections: vec![],
+            tail: Some(EffectTail::Generic(3)),
+        }),
+    ];
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"exact-non-type-handler-caller")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64; 3],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: protocol.clone(),
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    target: 4,
+                },
+                VmInstruction::Perform {
+                    dst: 0,
+                    effect,
+                    effect_arguments: protocol,
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 0 },
+                VmInstruction::ConstI64 { dst: 1, value: 42 },
+                VmInstruction::Resume { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"exact-non-type-handler-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert_eq!(verify_vm(candidate.clone()).unwrap().run_i64().unwrap(), 42);
+
+    let VmInstruction::Perform {
+        effect_arguments, ..
+    } = &mut candidate.function.instructions[1]
+    else {
+        panic!("fixture changed")
+    };
+    effect_arguments[0] = VmGenericArgument::ConstU32(2);
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate).unwrap().run_i64(),
+        Err(VmArtifactError::UnhandledEffect { effect: found, effect_arguments, .. })
+            if found == effect && effect_arguments[0] == VmGenericArgument::ConstU32(2)
+    ));
 }
 
 #[test]

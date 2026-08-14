@@ -18,7 +18,7 @@ use crate::{
         MirFunction, MirInstruction, MirLocal, MirPattern, MirPatternField, MirProgram,
         MirTerminator,
     },
-    types::{ScalarType, Type},
+    types::{ConstKind, EffectTail, Lifetime, ScalarType, Type},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -46,6 +46,48 @@ pub enum VmType {
         unique: bool,
         referent: Box<VmType>,
     },
+}
+
+/// A generic argument in a VM effect protocol identity.
+///
+/// Effect arguments never become VM values, but they are still observable by
+/// handler selection.  Keeping their source kind here prevents a `const`,
+/// lifetime, or effect-row argument from being silently conflated with a type
+/// argument at the bytecode boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VmGenericArgument {
+    Type(VmType),
+    EffectRow(VmEffectRow),
+    Lifetime(Lifetime),
+    ConstU32(u32),
+    ConstQuantity { lower: u64, upper: Option<u64> },
+    ConstGeneric { index: u32, kind: ConstKind },
+}
+
+/// VM-owned structural representation of an effect-row generic argument.
+/// The vector order is canonical: named instances and delayed projections are
+/// both preserved so bytecode fingerprinting and artifact decoding have no
+/// dependency on compiler-side inference state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmEffectRow {
+    pub effects: Vec<VmEffectInstance>,
+    pub projections: Vec<VmEffectRowProjection>,
+    pub tail: Option<EffectTail>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmEffectInstance {
+    pub definition: DefKey,
+    pub arguments: Vec<VmGenericArgument>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmEffectRowProjection {
+    pub subject: VmType,
+    pub trait_definition: DefKey,
+    pub trait_arguments: Vec<VmType>,
+    pub name: String,
+    pub item_arguments: Vec<VmType>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmCompare {
@@ -157,7 +199,7 @@ pub enum VmInstruction {
     Perform {
         dst: u32,
         effect: DefKey,
-        effect_arguments: Vec<VmType>,
+        effect_arguments: Vec<VmGenericArgument>,
         operation: u32,
         arguments: Vec<u32>,
     },
@@ -167,7 +209,7 @@ pub enum VmInstruction {
     /// single continuation available to `Resume`.
     InstallHandler {
         effect: DefKey,
-        effect_arguments: Vec<VmType>,
+        effect_arguments: Vec<VmGenericArgument>,
         operation: u32,
         payload_destinations: Vec<u32>,
         resume_type: VmType,
@@ -473,12 +515,11 @@ pub enum VmArtifactError {
         local: u32,
         ty: Type,
     },
-    /// Effect identity retains all generic kinds in Core and MIR. The current
-    /// bytecode encodes only VM value types, so non-type protocol arguments
-    /// must be rejected before lowering rather than reinterpreted.
-    UnsupportedEffectArgument {
+    /// A type nested in an effect identity has no representable VM form. This
+    /// is distinct from non-type generic arguments, which the VM preserves.
+    UnsupportedEffectArgumentType {
         effect: DefKey,
-        argument: Box<crate::GenericArgument>,
+        ty: Box<Type>,
     },
     UnsupportedControlFlow,
     InvalidRegister {
@@ -564,7 +605,7 @@ pub enum VmArtifactError {
         /// The exact nominal protocol instance that escaped the handler
         /// stack. This is required to distinguish e.g. `State<i64>` from
         /// `State<Text>` at the VM boundary.
-        effect_arguments: Vec<VmType>,
+        effect_arguments: Vec<VmGenericArgument>,
         operation: u32,
     },
     HandlerStackUnderflow,
@@ -616,10 +657,10 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 26 adds canonical cleanup-carrying `Leave` edges.
-/// Older layouts cannot be decoded safely because the operation field now
-/// follows a sequence of canonical VM types.
-pub const STAGE0_VM_SCHEMA: u32 = 26;
+/// Schema 27 represents effect protocol identities as canonical tagged
+/// generic arguments rather than VM value types. Older layouts cannot be
+/// decoded safely because `Perform` and `InstallHandler` changed in place.
+pub const STAGE0_VM_SCHEMA: u32 = 27;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -995,30 +1036,6 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
     {
         return Err(VmArtifactError::UnsupportedControlFlow);
     }
-    for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
-        let (effect, arguments) = match instruction {
-            MirInstruction::Perform {
-                effect,
-                effect_arguments,
-                ..
-            }
-            | MirInstruction::InstallHandler {
-                effect,
-                effect_arguments,
-                ..
-            } => (effect, effect_arguments),
-            _ => continue,
-        };
-        if let Some(argument) = arguments
-            .iter()
-            .find(|argument| !matches!(argument, crate::GenericArgument::Type(_)))
-        {
-            return Err(VmArtifactError::UnsupportedEffectArgument {
-                effect: *effect,
-                argument: Box::new(argument.clone()),
-            });
-        }
-    }
     let mut registers = function
         .locals
         .iter()
@@ -1062,7 +1079,8 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
             block
                 .instructions
                 .iter()
-                .map(|instruction| lower_instruction(instruction, &starts)),
+                .map(|instruction| lower_instruction(instruction, &starts))
+                .collect::<Result<Vec<_>, _>>()?,
         );
         match &block.terminator {
             MirTerminator::Return { value } => {
@@ -1289,11 +1307,90 @@ fn vm_type(value: &Type) -> Result<VmType, Type> {
     }
 }
 
-fn vm_effect_argument(value: &crate::GenericArgument) -> VmType {
-    let crate::GenericArgument::Type(value) = value else {
-        unreachable!("effect arguments were validated before VM lowering")
-    };
-    vm_type(value).expect("validated MIR has VM-representable effect arguments")
+fn vm_effect_argument(
+    effect: DefKey,
+    value: &crate::GenericArgument,
+) -> Result<VmGenericArgument, VmArtifactError> {
+    use crate::GenericArgument;
+
+    Ok(match value {
+        GenericArgument::Type(value) => VmGenericArgument::Type(vm_type(value).map_err(|ty| {
+            VmArtifactError::UnsupportedEffectArgumentType {
+                effect,
+                ty: Box::new(ty),
+            }
+        })?),
+        GenericArgument::EffectRow(value) => {
+            let value = value.clone().canonicalized();
+            VmGenericArgument::EffectRow(VmEffectRow {
+                effects: value
+                    .effects
+                    .iter()
+                    .map(|instance| {
+                        Ok(VmEffectInstance {
+                            definition: instance.definition,
+                            arguments: instance
+                                .arguments
+                                .iter()
+                                .map(|argument| vm_effect_argument(instance.definition, argument))
+                                .collect::<Result<_, _>>()?,
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+                projections: value
+                    .projections
+                    .iter()
+                    .map(|projection| {
+                        Ok(VmEffectRowProjection {
+                            subject: vm_type(&projection.subject).map_err(|ty| {
+                                VmArtifactError::UnsupportedEffectArgumentType {
+                                    effect,
+                                    ty: Box::new(ty),
+                                }
+                            })?,
+                            trait_definition: projection.trait_definition,
+                            trait_arguments: projection
+                                .trait_arguments
+                                .iter()
+                                .map(|argument| {
+                                    vm_type(argument).map_err(|ty| {
+                                        VmArtifactError::UnsupportedEffectArgumentType {
+                                            effect,
+                                            ty: Box::new(ty),
+                                        }
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?,
+                            name: projection.name.clone(),
+                            item_arguments: projection
+                                .item_arguments
+                                .iter()
+                                .map(|argument| {
+                                    vm_type(argument).map_err(|ty| {
+                                        VmArtifactError::UnsupportedEffectArgumentType {
+                                            effect,
+                                            ty: Box::new(ty),
+                                        }
+                                    })
+                                })
+                                .collect::<Result<_, _>>()?,
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+                tail: value.tail,
+            })
+        }
+        GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
+        GenericArgument::ConstU32(value) => VmGenericArgument::ConstU32(*value),
+        GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
+            lower: value.lower,
+            upper: value.upper,
+        },
+        GenericArgument::ConstGeneric { index, kind } => VmGenericArgument::ConstGeneric {
+            index: *index,
+            kind: *kind,
+        },
+    })
 }
 fn encode_type(value: &VmType, output: &mut Vec<u8>) {
     output.push(match value {
@@ -1343,6 +1440,114 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         _ => {}
     }
 }
+
+fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
+    match value {
+        VmGenericArgument::Type(value) => {
+            output.push(0);
+            encode_type(value, output);
+        }
+        VmGenericArgument::EffectRow(value) => {
+            output.push(1);
+            output.extend_from_slice(&(value.effects.len() as u64).to_le_bytes());
+            for effect in &value.effects {
+                output.extend_from_slice(&effect.definition.0.as_bytes());
+                encode_vm_generic_arguments(&effect.arguments, output);
+            }
+            output.extend_from_slice(&(value.projections.len() as u64).to_le_bytes());
+            for projection in &value.projections {
+                encode_type(&projection.subject, output);
+                output.extend_from_slice(&projection.trait_definition.0.as_bytes());
+                encode_vm_types(&projection.trait_arguments, output);
+                output.extend_from_slice(&(projection.name.len() as u64).to_le_bytes());
+                output.extend_from_slice(projection.name.as_bytes());
+                encode_vm_types(&projection.item_arguments, output);
+            }
+            match value.tail {
+                Some(EffectTail::Infer(variable)) => {
+                    output.push(0);
+                    output.extend_from_slice(&variable.0.to_le_bytes());
+                }
+                Some(EffectTail::Generic(index)) => {
+                    output.push(1);
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                None => output.push(2),
+            }
+        }
+        VmGenericArgument::Lifetime(value) => {
+            output.push(2);
+            match value {
+                Lifetime::Static => output.push(0),
+                Lifetime::Generic(index) => {
+                    output.push(1);
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                Lifetime::Bound { depth, index } => {
+                    output.push(2);
+                    output.extend_from_slice(&depth.to_le_bytes());
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                Lifetime::Elided => output.push(3),
+            }
+        }
+        VmGenericArgument::ConstU32(value) => {
+            output.push(3);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmGenericArgument::ConstQuantity { lower, upper } => {
+            output.push(4);
+            output.extend_from_slice(&lower.to_le_bytes());
+            match upper {
+                Some(upper) => {
+                    output.push(0);
+                    output.extend_from_slice(&upper.to_le_bytes());
+                }
+                None => output.push(1),
+            }
+        }
+        VmGenericArgument::ConstGeneric { index, kind } => {
+            output.push(5);
+            output.extend_from_slice(&index.to_le_bytes());
+            output.push(match kind {
+                ConstKind::U32 => 0,
+                ConstKind::Quantity => 1,
+            });
+        }
+    }
+}
+
+fn encode_vm_generic_arguments(values: &[VmGenericArgument], output: &mut Vec<u8>) {
+    output.extend_from_slice(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        encode_vm_generic_argument(value, output);
+    }
+}
+
+fn encode_vm_types(values: &[VmType], output: &mut Vec<u8>) {
+    output.extend_from_slice(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        encode_type(value, output);
+    }
+}
+
+fn vm_effect_instance_key(value: &VmEffectInstance) -> Vec<u8> {
+    let mut output = value.definition.0.as_bytes().to_vec();
+    encode_vm_generic_arguments(&value.arguments, &mut output);
+    output
+}
+
+fn vm_effect_row_projection_key(value: &VmEffectRowProjection) -> Vec<u8> {
+    let mut output = Vec::new();
+    encode_type(&value.subject, &mut output);
+    output.extend_from_slice(&value.trait_definition.0.as_bytes());
+    encode_vm_types(&value.trait_arguments, &mut output);
+    output.extend_from_slice(&(value.name.len() as u64).to_le_bytes());
+    output.extend_from_slice(value.name.as_bytes());
+    encode_vm_types(&value.item_arguments, &mut output);
+    output
+}
+
 fn encode_optional_digest(value: Option<Digest>, output: &mut Vec<u8>) {
     match value {
         None => output.push(0),
@@ -1507,6 +1712,145 @@ impl<'a> Decoder<'a> {
             }),
             _ => Err(VmArtifactError::MalformedEncoding {
                 message: "unknown VM register type",
+            }),
+        }
+    }
+    fn vm_generic_arguments(&mut self) -> Result<Vec<VmGenericArgument>, VmArtifactError> {
+        self.vm_generic_arguments_at_depth(0)
+    }
+    fn vm_generic_arguments_at_depth(
+        &mut self,
+        depth: u64,
+    ) -> Result<Vec<VmGenericArgument>, VmArtifactError> {
+        let count = self.count("effect protocol arguments", MAX_DECODE_REGISTERS)?;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            values.push(self.vm_generic_argument_at_depth(depth + 1)?);
+        }
+        Ok(values)
+    }
+    fn vm_generic_argument_at_depth(
+        &mut self,
+        depth: u64,
+    ) -> Result<VmGenericArgument, VmArtifactError> {
+        if depth > MAX_DECODE_TYPE_DEPTH {
+            return Err(VmArtifactError::DecodeLimit {
+                kind: "effect argument nesting",
+                limit: MAX_DECODE_TYPE_DEPTH,
+            });
+        }
+        match self.byte()? {
+            0 => Ok(VmGenericArgument::Type(self.vm_type_at_depth(depth + 1)?)),
+            1 => {
+                let effect_count = self.count("effect row instances", MAX_DECODE_REGISTERS)?;
+                let mut effects = Vec::with_capacity(effect_count);
+                for _ in 0..effect_count {
+                    effects.push(VmEffectInstance {
+                        definition: self.def_key()?,
+                        arguments: self.vm_generic_arguments_at_depth(depth + 1)?,
+                    });
+                }
+                if effects.windows(2).any(|pair| {
+                    vm_effect_instance_key(&pair[0]) >= vm_effect_instance_key(&pair[1])
+                }) {
+                    return Err(VmArtifactError::NonCanonicalEncoding);
+                }
+                let projection_count =
+                    self.count("effect row projections", MAX_DECODE_REGISTERS)?;
+                let mut projections = Vec::with_capacity(projection_count);
+                for _ in 0..projection_count {
+                    let subject = self.vm_type_at_depth(depth + 1)?;
+                    let trait_definition = self.def_key()?;
+                    let trait_argument_count =
+                        self.count("effect projection trait arguments", MAX_DECODE_REGISTERS)?;
+                    let mut trait_arguments = Vec::with_capacity(trait_argument_count);
+                    for _ in 0..trait_argument_count {
+                        trait_arguments.push(self.vm_type_at_depth(depth + 1)?);
+                    }
+                    let name = self.text()?;
+                    let item_argument_count =
+                        self.count("effect projection item arguments", MAX_DECODE_REGISTERS)?;
+                    let mut item_arguments = Vec::with_capacity(item_argument_count);
+                    for _ in 0..item_argument_count {
+                        item_arguments.push(self.vm_type_at_depth(depth + 1)?);
+                    }
+                    projections.push(VmEffectRowProjection {
+                        subject,
+                        trait_definition,
+                        trait_arguments,
+                        name,
+                        item_arguments,
+                    });
+                }
+                if projections.windows(2).any(|pair| {
+                    vm_effect_row_projection_key(&pair[0]) >= vm_effect_row_projection_key(&pair[1])
+                }) {
+                    return Err(VmArtifactError::NonCanonicalEncoding);
+                }
+                let tail = match self.byte()? {
+                    0 => Some(EffectTail::Infer(crate::types::EffectVar(self.u32()?))),
+                    1 => Some(EffectTail::Generic(self.u32()?)),
+                    2 => None,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid effect row tail tag",
+                        });
+                    }
+                };
+                Ok(VmGenericArgument::EffectRow(VmEffectRow {
+                    effects,
+                    projections,
+                    tail,
+                }))
+            }
+            2 => Ok(VmGenericArgument::Lifetime(match self.byte()? {
+                0 => Lifetime::Static,
+                1 => Lifetime::Generic(self.u32()?),
+                2 => Lifetime::Bound {
+                    depth: self.u32()?,
+                    index: self.u32()?,
+                },
+                3 => Lifetime::Elided,
+                _ => {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid lifetime argument tag",
+                    });
+                }
+            })),
+            3 => Ok(VmGenericArgument::ConstU32(self.u32()?)),
+            4 => {
+                let lower = self.u64()?;
+                let upper = match self.byte()? {
+                    0 => Some(self.u64()?),
+                    1 => None,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid quantity upper-bound tag",
+                        });
+                    }
+                };
+                if upper.is_some_and(|upper| lower > upper) {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid quantity interval",
+                    });
+                }
+                Ok(VmGenericArgument::ConstQuantity { lower, upper })
+            }
+            5 => {
+                let index = self.u32()?;
+                let kind = match self.byte()? {
+                    0 => ConstKind::U32,
+                    1 => ConstKind::Quantity,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid const generic kind",
+                        });
+                    }
+                };
+                Ok(VmGenericArgument::ConstGeneric { index, kind })
+            }
+            _ => Err(VmArtifactError::MalformedEncoding {
+                message: "unknown VM effect argument tag",
             }),
         }
     }
@@ -1732,12 +2076,7 @@ impl<'a> Decoder<'a> {
             41 => {
                 let dst = self.u32()?;
                 let effect = self.def_key()?;
-                let effect_argument_count =
-                    self.count("effect protocol arguments", MAX_DECODE_TYPE_DEPTH)?;
-                let mut effect_arguments = Vec::with_capacity(effect_argument_count);
-                for _ in 0..effect_argument_count {
-                    effect_arguments.push(self.vm_type()?);
-                }
+                let effect_arguments = self.vm_generic_arguments()?;
                 let operation = self.u32()?;
                 let count = self.count("effect operation arguments", MAX_DECODE_REGISTERS)?;
                 let mut arguments = Vec::with_capacity(count);
@@ -1762,12 +2101,7 @@ impl<'a> Decoder<'a> {
             43 => Ok(VmInstruction::Trap),
             44 => {
                 let effect = self.def_key()?;
-                let effect_argument_count =
-                    self.count("handler protocol arguments", MAX_DECODE_TYPE_DEPTH)?;
-                let mut effect_arguments = Vec::with_capacity(effect_argument_count);
-                for _ in 0..effect_argument_count {
-                    effect_arguments.push(self.vm_type()?);
-                }
+                let effect_arguments = self.vm_generic_arguments()?;
                 let operation = self.u32()?;
                 let payload_count =
                     self.count("handler payload destinations", MAX_DECODE_REGISTERS)?;
@@ -2300,8 +2634,11 @@ fn return_type(function: &VmFunction) -> Result<VmType, VmArtifactError> {
     result.ok_or(VmArtifactError::NoReturn)
 }
 
-fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
-    match value {
+fn lower_instruction(
+    value: &MirInstruction,
+    starts: &[u32],
+) -> Result<VmInstruction, VmArtifactError> {
+    Ok(match value {
         MirInstruction::ConstUnit { dst } => VmInstruction::ConstUnit { dst: dst.0 },
         MirInstruction::ConstI64 { dst, value } => VmInstruction::ConstI64 {
             dst: dst.0,
@@ -2433,7 +2770,10 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
         } => VmInstruction::Perform {
             dst: dst.0,
             effect: *effect,
-            effect_arguments: effect_arguments.iter().map(vm_effect_argument).collect(),
+            effect_arguments: effect_arguments
+                .iter()
+                .map(|argument| vm_effect_argument(*effect, argument))
+                .collect::<Result<_, _>>()?,
             operation: *operation,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
@@ -2446,7 +2786,10 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
             target,
         } => VmInstruction::InstallHandler {
             effect: *effect,
-            effect_arguments: effect_arguments.iter().map(vm_effect_argument).collect(),
+            effect_arguments: effect_arguments
+                .iter()
+                .map(|argument| vm_effect_argument(*effect, argument))
+                .collect::<Result<_, _>>()?,
             operation: *operation,
             payload_destinations: payload_destinations
                 .iter()
@@ -2661,7 +3004,7 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
             callee: callee.0,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
-    }
+    })
 }
 fn lower_pattern(value: &MirPattern) -> VmPattern {
     match value {
@@ -2793,7 +3136,7 @@ struct VerifierHandlerFrame {
     /// continuation.
     id: u32,
     effect: DefKey,
-    effect_arguments: Vec<VmType>,
+    effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
     payload_destinations: Vec<u32>,
     resume_type: VmType,
@@ -2820,7 +3163,7 @@ struct VerifierContinuation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierPerformed {
     effect: DefKey,
-    effect_arguments: Vec<VmType>,
+    effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
     arguments: Vec<u32>,
 }
@@ -3997,7 +4340,7 @@ enum VmValue {
 struct RuntimeHandlerFrame {
     id: u64,
     effect: DefKey,
-    effect_arguments: Vec<VmType>,
+    effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
     payload_destinations: Vec<u32>,
     target: u32,
@@ -4017,7 +4360,7 @@ struct RuntimeContinuation {
 #[derive(Clone)]
 struct RuntimePerformed {
     effect: DefKey,
-    effect_arguments: Vec<VmType>,
+    effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
     payloads: Vec<VmValue>,
 }
@@ -5532,10 +5875,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(41);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&effect.0.as_bytes());
-            output.extend_from_slice(&(effect_arguments.len() as u64).to_le_bytes());
-            for argument in effect_arguments {
-                encode_type(argument, output);
-            }
+            encode_vm_generic_arguments(effect_arguments, output);
             output.extend_from_slice(&operation.to_le_bytes());
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
             for argument in arguments {
@@ -5552,10 +5892,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         } => {
             output.push(44);
             output.extend_from_slice(&effect.0.as_bytes());
-            output.extend_from_slice(&(effect_arguments.len() as u64).to_le_bytes());
-            for argument in effect_arguments {
-                encode_type(argument, output);
-            }
+            encode_vm_generic_arguments(effect_arguments, output);
             output.extend_from_slice(&operation.to_le_bytes());
             output.extend_from_slice(&(payload_destinations.len() as u64).to_le_bytes());
             for destination in payload_destinations {
