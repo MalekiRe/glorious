@@ -2023,6 +2023,85 @@ fn cancelled_handler_continuation_abandons_its_snapshot_and_returns_clause_value
 }
 
 #[test]
+fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
+    let cancelled = DefKey(Digest::of_bytes(b"cancelled-snapshot-effect"));
+    let later = DefKey(Digest::of_bytes(b"later-snapshot-effect"));
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+    };
+    // This is deliberately forged bytecode rather than lowered source.  The
+    // first handler captures a replay capability, copies it, and cancels its
+    // suspended continuation.  It then installs a distinct, live handler and
+    // attempts to resume the stale alias there.  A callable type alone must
+    // not regain authority after its branded activation has exited.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"cancelled-snapshot-alias")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![snapshot.clone(), snapshot, VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 2, value: 1 },
+                VmInstruction::InstallHandler {
+                    effect: cancelled,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Replay,
+                    target: 6,
+                },
+                VmInstruction::Perform {
+                    dst: 3,
+                    effect: cancelled,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 3 },
+                VmInstruction::Trap,
+                VmInstruction::CaptureResumption { dst: 0 },
+                VmInstruction::Copy { dst: 1, src: 0 },
+                VmInstruction::Cancel,
+                VmInstruction::InstallHandler {
+                    effect: later,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 13,
+                },
+                VmInstruction::Perform {
+                    dst: 3,
+                    effect: later,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 3 },
+                VmInstruction::ResumeSnapshot {
+                    snapshot: 1,
+                    value: 2,
+                },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"cancelled-snapshot-alias-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let error = verify_vm(candidate).unwrap_err();
+    assert!(
+        matches!(error, VmArtifactError::HandlerResumeUnavailable),
+        "cancellation must invalidate all snapshot aliases before a later handler activates: {error:?}"
+    );
+}
+
+#[test]
 fn verifier_allows_checked_store_reinitialization_but_rejects_type_confusion() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
