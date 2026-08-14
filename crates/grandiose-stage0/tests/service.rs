@@ -73,6 +73,16 @@ fn request_with_logical_sources(root: &str, sources: &[(&str, &str)]) -> Compila
     request
 }
 
+fn request_with_dependency(root: &str, package: &str, source: &str) -> CompilationRequest {
+    let mut request = request(root);
+    request.sources.push(SourceInput::new(
+        PackageKey(package.into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        source.as_bytes(),
+    ));
+    request
+}
+
 #[derive(Debug)]
 struct SourceWorldFingerprint;
 
@@ -988,6 +998,29 @@ fn failed_and_resource_limited_sessions_do_not_publish_staged_interfaces() {
     assert_eq!(compiler.interface_cache_stats().hits, 0);
     assert_eq!(compiler.interface_cache_stats().misses, 0);
     assert!(compiler.dependency_traces(limited_revision).is_empty());
+}
+
+#[test]
+fn failed_dependency_package_resolution_discards_all_staged_package_interfaces() {
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler
+        .import_revision(
+            request_with_dependency(
+                "use math::secret; pub fn main() -> i64 { secret() }",
+                "math@0.1.0",
+                "fn secret() -> i64 { 42 }",
+            ),
+            None,
+        )
+        .unwrap();
+    let session = compiler.open_session(revision).unwrap();
+    assert!(compiler.compile_session(&session).is_err());
+    assert_eq!(compiler.interface_cache_stats().hits, 0);
+    assert_eq!(compiler.interface_cache_stats().misses, 0);
+    assert!(
+        compiler.dependency_traces(revision).is_empty(),
+        "a failed dependency interface must not partially publish root or dependency facts"
+    );
 }
 
 #[test]
@@ -6534,6 +6567,101 @@ fn service_compiles_explicit_external_modules_from_the_request_source_world() {
         .compile(request_with_module(root, child))
         .unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_links_public_dependency_package_interfaces_and_bodies() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::answer; pub fn main() -> i64 { answer() }",
+            "math@0.1.0",
+            "pub fn answer() -> i64 { 42 }",
+        ))
+        .expect("a supplied dependency package must participate in root import resolution");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_follows_dependency_module_declarations_within_their_own_package_world() {
+    let mut request = request("use math::api::answer; pub fn main() -> i64 { answer() }");
+    let package = PackageKey("math@0.1.0".into());
+    request.sources.push(SourceInput::new(
+        package.clone(),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub mod api;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        package,
+        LogicalPath::parse("src/api/api.glorious").unwrap(),
+        b"pub fn answer() -> i64 { 42 }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("dependency module declarations must claim same-package logical sources");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_keeps_dependency_private_items_outside_the_root_package() {
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::secret; pub fn main() -> i64 { secret() }",
+            "math@0.1.0",
+            "fn secret() -> i64 { 42 }",
+        ))
+    else {
+        panic!("root package unexpectedly resolved a dependency private item");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.code, "G3326" | "G4104")),
+        "missing cross-package privacy diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_unrooted_dependency_source_packages_instead_of_ignoring_them() {
+    let mut request = request("pub fn main() -> i64 { 42 }");
+    request.sources.push(SourceInput::new(
+        PackageKey("orphan@0.1.0".into()),
+        LogicalPath::parse("src/extra/extra.glorious").unwrap(),
+        b"pub fn ignored() -> i64 { 0 }".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("unrooted dependency package source was silently ignored");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3101"),
+        "missing dependency package root diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_preserves_package_name_ambiguity_between_multiple_dependency_interfaces() {
+    let mut request = request("use math::answer; pub fn main() -> i64 { answer() }");
+    for (package, value) in [("math@0.1.0", "1"), ("math@0.2.0", "2")] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            format!("pub fn answer() -> i64 {{ {value} }}").into_bytes(),
+        ));
+    }
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("same-name dependency packages unexpectedly selected by source order");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3328"),
+        "missing deterministic dependency package ambiguity diagnostic: {diagnostics:#?}"
+    );
 }
 
 #[test]

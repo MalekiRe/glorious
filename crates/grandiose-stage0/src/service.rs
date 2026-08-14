@@ -524,6 +524,9 @@ impl CompileDiagnostic {
             InputError::EmptySources => ("G7015", DiagnosticClass::Request),
             InputError::DuplicateFileKey(_) => ("G7016", DiagnosticClass::Request),
             InputError::DigestMismatch { .. } => ("G7017", DiagnosticClass::InputCorruption),
+            InputError::SourceIdentityMismatch { .. } => {
+                ("G7017", DiagnosticClass::InputCorruption)
+            }
             InputError::InvalidUtf8(_) => ("G7018", DiagnosticClass::InputCorruption),
             InputError::InvalidLogicalPath(_) => ("G7019", DiagnosticClass::Request),
             InputError::DuplicateCapability(_) => ("G7020", DiagnosticClass::Request),
@@ -732,20 +735,41 @@ impl StageZeroCompiler {
             session.checkpoint(1)?;
             dependencies.record(DependencyNode::Input(source.key), source.digest, vec![]);
         }
-        let mut graph = ModuleGraph::build_with_interface_transaction(
-            snapshot.world(),
-            &snapshot.world().root_package,
-            interfaces,
-        );
+        // Every supplied package contributes a separately rooted frozen
+        // interface graph.  The root package alone supplies the executable
+        // entrypoint, but dependency package interfaces must be present while
+        // resolving imports, coherence, and cross-package callable bodies.
+        // Building only the root graph silently turned supplied dependency
+        // sources into ambient ignored bytes.
+        let mut packages = snapshot
+            .world()
+            .sources
+            .iter()
+            .map(|source| source.package.clone())
+            .collect::<BTreeSet<_>>();
+        packages.insert(snapshot.world().root_package.clone());
+        let mut graphs = BTreeMap::new();
+        for package in packages {
+            let graph = ModuleGraph::build_with_interface_transaction(
+                snapshot.world(),
+                &package,
+                interfaces,
+            );
+            graphs.insert(package, graph);
+        }
         session.checkpoint(1)?;
-        let mut diagnostics = graph
-            .diagnostics
-            .into_iter()
+        let mut diagnostics = graphs
+            .values()
+            .flat_map(|graph| graph.diagnostics.iter())
             .map(|diagnostic| {
-                CompileDiagnostic::source(diagnostic.code, diagnostic.message, diagnostic.span)
+                CompileDiagnostic::source(
+                    diagnostic.code,
+                    diagnostic.message.clone(),
+                    diagnostic.span,
+                )
             })
             .collect::<Vec<_>>();
-        for node in graph.modules.values() {
+        for node in graphs.values().flat_map(|graph| graph.modules.values()) {
             session.checkpoint(1)?;
             diagnostics.extend(node.interface.diagnostics.iter().map(|diagnostic| {
                 CompileDiagnostic::source(
@@ -756,21 +780,29 @@ impl StageZeroCompiler {
             }));
         }
         let index = DefinitionIndex::from_interfaces(
-            graph.modules.values().map(|node| &node.interface.interface),
+            graphs
+                .values()
+                .flat_map(|graph| graph.modules.values())
+                .map(|node| &node.interface.interface),
         );
         // Local collection cannot know the transitive public surface of a
         // module alias or glob until every interface in the module graph has
         // been frozen. Seal that surface before publishing dependency facts:
         // a public member added behind `pub use api::*` must invalidate the
         // facade/root interface even though the facade source did not change.
-        for node in graph.modules.values_mut() {
-            node.interface.interface.public_fingerprint =
-                index.sealed_public_fingerprint(&node.interface.interface);
+        for graph in graphs.values_mut() {
+            for node in graph.modules.values_mut() {
+                node.interface.interface.public_fingerprint =
+                    index.sealed_public_fingerprint(&node.interface.interface);
+            }
         }
-        let Some(root) = graph.modules.get(&graph.root) else {
+        let Some(root) = graphs
+            .get(&snapshot.world().root_package)
+            .and_then(|graph| graph.modules.get(&graph.root))
+        else {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
-        for node in graph.modules.values() {
+        for node in graphs.values().flat_map(|graph| graph.modules.values()) {
             let mut interface_dependencies = vec![DependencyNode::Input(node.file)];
             interface_dependencies.extend(
                 index
@@ -800,7 +832,10 @@ impl StageZeroCompiler {
                 }),
         );
         let coherence = CoherenceSet::collect(
-            graph.modules.values().map(|node| &node.interface.interface),
+            graphs
+                .values()
+                .flat_map(|graph| graph.modules.values())
+                .map(|node| &node.interface.interface),
             &index,
         );
         diagnostics.extend(coherence.diagnostics.iter().map(|coherence_diagnostic| {
@@ -827,9 +862,14 @@ impl StageZeroCompiler {
                 None => diagnostic,
             }
         }));
-        let mut signatures = ElaboratedInterface::merge(graph.modules.values().map(|node| {
-            ElaboratedInterface::elaborate_with_index(&node.interface.interface, &index)
-        }));
+        let mut signatures = ElaboratedInterface::merge(
+            graphs
+                .values()
+                .flat_map(|graph| graph.modules.values())
+                .map(|node| {
+                    ElaboratedInterface::elaborate_with_index(&node.interface.interface, &index)
+                }),
+        );
         diagnostics.extend(signatures.diagnostics.iter().map(|diagnostic| {
             CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), None)
         }));
@@ -838,7 +878,7 @@ impl StageZeroCompiler {
         // all later value paths have a deterministic, interface-owned type.
         // Path-only `let target = callable;` declarations are intentionally
         // excluded: those retain the forwarding-alias contract frozen above.
-        for node in graph.modules.values() {
+        for node in graphs.values().flat_map(|graph| graph.modules.values()) {
             let Some(source) = snapshot
                 .world()
                 .sources
@@ -894,9 +934,9 @@ impl StageZeroCompiler {
                 .iter()
                 .any(|grant| grant == &import.capability)
             {
-                let span = graph
-                    .modules
+                let span = graphs
                     .values()
+                    .flat_map(|graph| graph.modules.values())
                     .flat_map(|node| node.interface.interface.definitions.iter())
                     .find(|candidate| candidate.key == *definition)
                     .map(|candidate| candidate.span);
@@ -922,9 +962,9 @@ impl StageZeroCompiler {
             .as_ref()
             .and_then(|input| {
                 match input.bind(
-                    graph
-                        .modules
+                    graphs
                         .values()
+                        .flat_map(|graph| graph.modules.values())
                         .map(|node| node.interface.interface.clone()),
                     &signatures,
                 ) {
@@ -1033,7 +1073,7 @@ impl StageZeroCompiler {
         // static handler specialization read-only access to direct callee
         // Core products without reopening source or consulting host state.
         let mut body_products = Vec::<(DefKey, bool, bool, TypedBody, PlaceFlow)>::new();
-        for node in graph.modules.values() {
+        for node in graphs.values().flat_map(|graph| graph.modules.values()) {
             session.checkpoint(1)?;
             let Some(source) = snapshot
                 .world()
@@ -1210,9 +1250,9 @@ impl StageZeroCompiler {
                     && core_validation.is_empty()
                     && core.diagnostics.is_empty()
                     && body.diagnostics.is_empty();
-                let mut core_dependencies = graph
-                    .modules
+                let mut core_dependencies = graphs
                     .values()
+                    .flat_map(|graph| graph.modules.values())
                     .map(|module| DependencyNode::Interface(module.key.clone()))
                     .collect::<Vec<_>>();
                 core_dependencies.push(DependencyNode::Body(declaration.key));
@@ -1361,9 +1401,9 @@ impl StageZeroCompiler {
                         && core_validation.is_empty()
                         && core.diagnostics.is_empty()
                         && body.diagnostics.is_empty();
-                    let mut core_dependencies = graph
-                        .modules
+                    let mut core_dependencies = graphs
                         .values()
+                        .flat_map(|graph| graph.modules.values())
                         .map(|module| DependencyNode::Interface(module.key.clone()))
                         .collect::<Vec<_>>();
                     core_dependencies.push(DependencyNode::Body(method_key));

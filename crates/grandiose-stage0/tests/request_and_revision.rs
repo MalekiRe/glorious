@@ -52,6 +52,22 @@ fn normalization_is_independent_of_host_input_enumeration_order() {
 }
 
 #[test]
+fn normalization_rejects_forged_file_identity_for_a_logical_source() {
+    let package = PackageKey("app@0.1.0".into());
+    let other = PackageKey("other@0.1.0".into());
+    let mut source = SourceInput::new(
+        package,
+        LogicalPath::parse("src/main.glorious").unwrap(),
+        b"main() { 42 }".as_slice(),
+    );
+    source.key = grandiose_stage0::FileKey::new(&other, "src/forged.glorious");
+    assert!(matches!(
+        request(vec![source]).normalize(),
+        Err(InputError::SourceIdentityMismatch { .. })
+    ));
+}
+
+#[test]
 fn stage_zero_build_identity_advances_the_vm_artifact_boundary() {
     let identity = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-vm"));
     assert_eq!(identity.bytecode_generation, STAGE0_BYTECODE_GENERATION);

@@ -189,6 +189,10 @@ pub enum InputError {
         expected: Digest,
         actual: Digest,
     },
+    SourceIdentityMismatch {
+        supplied: FileKey,
+        expected: FileKey,
+    },
     InvalidUtf8(FileKey),
     InvalidLogicalPath(String),
     DuplicateCapability(String),
@@ -215,6 +219,10 @@ impl fmt::Display for InputError {
             } => write!(
                 formatter,
                 "source digest mismatch for {file:?}: expected {expected}, got {actual}"
+            ),
+            Self::SourceIdentityMismatch { supplied, expected } => write!(
+                formatter,
+                "source identity mismatch: supplied {supplied:?}, expected {expected:?} from its package and logical path"
             ),
             Self::InvalidUtf8(file) => write!(formatter, "source {file:?} is not UTF-8"),
             Self::InvalidLogicalPath(path) => write!(formatter, "invalid logical path: {path}"),
@@ -252,6 +260,13 @@ impl CompilationRequest {
             ))
         });
         for source in &self.sources {
+            let expected = FileKey::new(&source.package, source.logical_path.as_str());
+            if source.key != expected {
+                return Err(InputError::SourceIdentityMismatch {
+                    supplied: source.key,
+                    expected,
+                });
+            }
             let actual = Digest::of_bytes(&source.bytes);
             if actual != source.digest {
                 return Err(InputError::DigestMismatch {
