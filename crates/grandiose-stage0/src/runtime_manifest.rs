@@ -1025,6 +1025,10 @@ impl RuntimeManifestInput {
                 .values()
                 .any(|primitive| primitive == &definition.key)
                 || host_imports.contains_key(&definition.key)
+                // A source `host CAP fn` is already an exact frozen boundary;
+                // a runtime manifest may not replace its capability or ABI
+                // symbol by selecting the same declaration a second way.
+                || signatures.host_imports.contains_key(&definition.key)
             {
                 return Err(ManifestError::ConflictingRuntimeBinding {
                     definition: definition.key,

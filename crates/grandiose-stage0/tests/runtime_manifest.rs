@@ -1,6 +1,6 @@
 use grandiose_stage0::{
-    DeclarationScan, ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath,
-    ManifestError, PackageKey, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,
+    DeclarationScan, ElaboratedInterface, FileKey, HostImportSelector, InterfaceSet, LexedFile,
+    LogicalPath, ManifestError, PackageKey, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,
 };
 
 fn interface(package: PackageKey, source: &str) -> grandiose_stage0::PackageInterface {
@@ -131,6 +131,28 @@ fn manifest_can_grant_a_strict_runtime_leaf_subset() {
             .primitives
             .contains_key(&PrimitiveRole::TextByteLen)
     );
+}
+
+#[test]
+fn manifest_host_selector_cannot_replace_a_source_host_boundary() {
+    let standard = PackageKey("std@0.1.0".into());
+    let package_interface = interface(standard.clone(), "host clock fn now() -> i64;");
+    let signatures = ElaboratedInterface::elaborate(&package_interface);
+    let input = RuntimeManifestInput {
+        standard_library: standard,
+        selectors: vec![],
+        host_imports: vec![HostImportSelector {
+            module_path: "crate".into(),
+            name: "now".into(),
+            capability: "other_clock".into(),
+            symbol: "replaced".into(),
+        }],
+    };
+
+    assert!(matches!(
+        input.bind(vec![package_interface], &signatures),
+        Err(ManifestError::ConflictingRuntimeBinding { .. })
+    ));
 }
 
 #[test]
