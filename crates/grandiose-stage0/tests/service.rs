@@ -1398,6 +1398,30 @@ fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
 }
 
 #[test]
+fn service_executes_positive_is_refinements_through_completion_dispatch() {
+    let enum_source = "pub enum Result { Ok(i64), Err } pub fn main() -> i64 { handle Result::Ok(42) is Result::Ok(found) { true => found; false => 0 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(enum_source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let negative_source = "pub enum Result { Ok(i64), Err } pub fn main() -> i64 { handle Result::Err is Result::Ok(found) { true => found; false => 42 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(negative_source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let record_source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { handle Pair { left: 1, right: 42 } is Pair { right: selected, left: _ } { true => selected; false => 0 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(record_source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_checks_effect_operation_identity_and_declared_rows() {
     let accepted = "effect Console { read() -> i64; } pub fn helper() -> i64 / Console { Console::read() } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();

@@ -2509,7 +2509,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(std::slice::from_ref(&clause.pattern), &[*subject])?;
+            self.bind_completion_clause(clause, *subject)?;
             let instructions;
             let value;
             if self.contains_label_transfer(clause.body, brand) {
@@ -2531,10 +2531,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(
-            std::slice::from_ref(&fallback_clause.pattern),
-            &[completion_subjects[completion_count - 1]],
-        )?;
+        self.bind_completion_clause(fallback_clause, completion_subjects[completion_count - 1])?;
         let fallback = if self.contains_label_transfer(fallback_clause.body, brand) {
             let value = self.lower_label_transfer_path(fallback_clause.body, brand)?;
             CompletionChainArm::Leave {
@@ -2807,10 +2804,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(
-                std::slice::from_ref(&fallback_clause.pattern),
-                &[completion_subject],
-            )?;
+            self.bind_completion_clause(fallback_clause, completion_subject)?;
             let value = self.value(fallback_clause.body)?;
             let instructions = std::mem::take(&mut self.instructions);
             let pattern = lower_pattern(completion_clause.pattern.clone())?;
@@ -7059,10 +7053,7 @@ impl Lowerer<'_> {
             self.instructions = vec![];
             self.values = entry_values.clone();
             let previous_named = self.named.clone();
-            if self
-                .bind_handler_patterns(std::slice::from_ref(&clause.pattern), &[subject])
-                .is_none()
-            {
+            if self.bind_completion_clause(clause, subject).is_none() {
                 self.named = previous_named;
                 return Some(self.invalid_function(parameters));
             }
@@ -7240,7 +7231,7 @@ impl Lowerer<'_> {
             self.instructions = vec![];
             self.values = entry_values.clone();
             let previous_named = self.named.clone();
-            self.bind_handler_patterns(std::slice::from_ref(&clause.pattern), &[completed])?;
+            self.bind_completion_clause(clause, completed)?;
             let result = self.value(clause.body)?;
             let instructions = std::mem::take(&mut self.instructions);
             self.named = previous_named;
@@ -7672,6 +7663,27 @@ impl Lowerer<'_> {
     /// Core retains bind nodes inside the structural pattern, so nested nominal
     /// fields are projected from their actual payload instead of being paired
     /// positionally with unrelated operation arguments.
+    fn bind_completion_clause(
+        &mut self,
+        clause: &CoreCompletionClause,
+        subject: MirLocal,
+    ) -> Option<()> {
+        self.bind_handler_patterns(std::slice::from_ref(&clause.pattern), &[subject])?;
+        if let Some(refinement) = &clause.refinement {
+            // The completion pattern proved the boolean result true. Recover
+            // the cached structural subject that produced that bit and bind
+            // only the positive branch's projections. This is both the
+            // once-evaluation guarantee and the boundary that keeps positive
+            // binders out of false/wildcard completion arms.
+            let refinement_subject = self.value(refinement.subject)?;
+            self.bind_handler_patterns(
+                std::slice::from_ref(&refinement.pattern),
+                &[refinement_subject],
+            )?;
+        }
+        Some(())
+    }
+
     fn bind_handler_patterns(
         &mut self,
         patterns: &[CorePattern],

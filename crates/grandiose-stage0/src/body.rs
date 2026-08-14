@@ -550,7 +550,12 @@ impl Parser<'_> {
         } else {
             let previous = self.handler_computation;
             self.handler_computation = true;
-            let computation = self.parse_prefix();
+            // A handler computation is an ordinary expression, including a
+            // source-level structural `is` test.  Keeping the computation in
+            // the normal expression grammar lets the completion arms open
+            // the test's refinement environment without inventing a second
+            // branching syntax.
+            let computation = self.parse_expression();
             self.handler_computation = previous;
             computation?
         };

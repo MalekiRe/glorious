@@ -97,6 +97,10 @@ pub struct RefinementEnvironment {
     pub brand: RefinementBrand,
     pub subject: Option<String>,
     pub bindings: Vec<String>,
+    /// The source-level types behind `bindings`.  Names alone are retained
+    /// for inspection, while completion dispatch needs the frozen types to
+    /// open the positive branch as an ordinary lexical scope.
+    pub binding_types: Vec<(String, Type)>,
     pub sealed: bool,
 }
 impl CaptureEnvironment {
@@ -185,8 +189,22 @@ pub struct CoreHandlerContinuationContract {
 pub struct CoreCompletionClause {
     pub pattern: CorePattern,
     pub bindings: Vec<(String, Type)>,
+    /// A positive `is` environment opened only when this completion pattern
+    /// proves the test result is `true`.  It deliberately references the
+    /// once-evaluated structural subject rather than reconstructing it from
+    /// source spelling during MIR lowering.
+    pub refinement: Option<CoreRefinementBranch>,
     pub body: CoreId,
     pub span: Span,
+}
+/// One branch-local view of a source `is` test.  The boolean result selects
+/// the completion arm; this record supplies the corresponding structural
+/// subject and frozen projection plan only to a proven-positive arm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreRefinementBranch {
+    pub environment: RefinementEnvironment,
+    pub subject: CoreId,
+    pub pattern: CorePattern,
 }
 /// A payload-only resumptive arm tail-resumes with its body value.  An explicit
 /// continuation name is a normal callable in the clause scope; its quantity is
@@ -875,9 +893,14 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
                 .flat_map(|clause| clause.patterns.iter())
                 .find_map(pattern_structural_error)
         }),
-        CoreKind::Completion { clauses, .. } => clauses
-            .iter()
-            .find_map(|clause| pattern_structural_error(&clause.pattern)),
+        CoreKind::Completion { clauses, .. } => clauses.iter().find_map(|clause| {
+            pattern_structural_error(&clause.pattern).or_else(|| {
+                clause.refinement.as_ref().and_then(|refinement| {
+                    refinement_environment_error(&refinement.environment)
+                        .or_else(|| pattern_structural_error(&refinement.pattern))
+                })
+            })
+        }),
         _ => None,
     }
 }
@@ -893,6 +916,15 @@ fn refinement_environment_error(environment: &RefinementEnvironment) -> Option<S
                 "Typed Core refinement environment repeats binding `{binding}`"
             ));
         }
+    }
+    if environment.bindings.len() != environment.binding_types.len()
+        || environment
+            .bindings
+            .iter()
+            .zip(&environment.binding_types)
+            .any(|(name, (typed_name, _))| name != typed_name)
+    {
+        return Some("Typed Core refinement environment has inconsistent binding types".into());
     }
     None
 }
@@ -1124,6 +1156,14 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
                     .bindings
                     .iter()
                     .any(|(_, ty)| type_contains_inference(ty))
+                || clause.refinement.as_ref().is_some_and(|refinement| {
+                    pattern_contains_inference(&refinement.pattern)
+                        || refinement
+                            .environment
+                            .binding_types
+                            .iter()
+                            .any(|(_, ty)| type_contains_inference(ty))
+                })
         }),
         CoreKind::Literal(_)
         | CoreKind::Local(_)
@@ -1256,6 +1296,7 @@ impl TypedBody {
             next_resumption: 0,
             next_refinement: 0,
             next_label: 0,
+            active_refinement_bindings: std::collections::BTreeSet::new(),
             generic_parameters,
             effect_row_parameters: definition
                 .callable_header()
@@ -1428,6 +1469,7 @@ impl TypedBody {
             next_resumption: 0,
             next_refinement: 0,
             next_label: 0,
+            active_refinement_bindings: std::collections::BTreeSet::new(),
             generic_parameters,
             effect_row_parameters: {
                 let mut parameters = std::collections::BTreeMap::new();
@@ -1563,6 +1605,7 @@ impl TypedBody {
             next_resumption: 0,
             next_refinement: 0,
             next_label: 0,
+            active_refinement_bindings: std::collections::BTreeSet::new(),
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
             lifetime_parameters: std::collections::BTreeMap::new(),
@@ -1683,6 +1726,10 @@ struct Elaborator<'a> {
     next_resumption: u32,
     next_refinement: u32,
     next_label: u32,
+    /// Names whose evidence is valid only in the currently elaborated
+    /// positive refinement branch. A nested closure must not capture one: it
+    /// could outlive the structural test and thereby forge a refinement fact.
+    active_refinement_bindings: std::collections::BTreeSet<String>,
     /// Callable-declaration generic binders are lexically visible in its
     /// body, including effect applications such as `State<T>::get()`. They
     /// remain stable `Type::Generic` slots; inference variables are reserved
@@ -1967,7 +2014,13 @@ impl Elaborator<'_> {
                     expression.span,
                     Some(&names),
                 );
-                let refinement = self.refinement_environment(subject, &pattern);
+                let binding_types = elaboration
+                    .plan
+                    .bindings
+                    .iter()
+                    .map(|binding| (binding.name.clone(), binding.ty.clone()))
+                    .collect();
+                let refinement = self.refinement_environment(subject, &pattern, binding_types);
                 self.alloc(
                     CoreKind::PatternTest {
                         subject,
@@ -2298,6 +2351,7 @@ impl Elaborator<'_> {
         let parameters = vec![];
         let captures = self.closure_captures(body, &parameters);
         self.check_resumption_captures(&captures, span);
+        self.check_refinement_captures(&captures, span);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -2371,6 +2425,7 @@ impl Elaborator<'_> {
         }
         let captures = self.closure_captures(body, &parameters);
         self.check_resumption_captures(&captures, span);
+        self.check_refinement_captures(&captures, span);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -3409,6 +3464,7 @@ impl Elaborator<'_> {
         &mut self,
         subject: CoreId,
         pattern: &CorePattern,
+        binding_types: Vec<(String, Type)>,
     ) -> RefinementEnvironment {
         let brand = RefinementBrand {
             owner: self.definition,
@@ -3425,6 +3481,7 @@ impl Elaborator<'_> {
             brand,
             subject,
             bindings,
+            binding_types,
             sealed: true,
         }
     }
@@ -3455,6 +3512,26 @@ impl Elaborator<'_> {
                 "G4174",
                 &format!(
                     "nested closure cannot capture handler resumption `{}` before continuations have an escaping representation",
+                    capture.name
+                ),
+            );
+            self.recovered = true;
+        }
+    }
+    /// A refinement binder is a branch-local proof-backed projection. A
+    /// closure could be invoked after the selected branch (or its protecting
+    /// borrow) ends, so it must not retain that projection as an ordinary
+    /// capture until refinement packs have an escaping representation.
+    fn check_refinement_captures(&mut self, captures: &[ClosureCapture], span: Span) {
+        if let Some(capture) = captures
+            .iter()
+            .find(|capture| self.active_refinement_bindings.contains(&capture.name))
+        {
+            self.error(
+                span,
+                "G4171",
+                &format!(
+                    "nested closure cannot capture refinement binder `{}` outside its proven branch",
                     capture.name
                 ),
             );
@@ -3722,7 +3799,16 @@ impl Elaborator<'_> {
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
             }
-            CoreKind::PatternTest { pattern, .. } => self.zonk_pattern(pattern, span),
+            CoreKind::PatternTest {
+                pattern,
+                refinement,
+                ..
+            } => {
+                self.zonk_pattern(pattern, span);
+                for (_, ty) in &mut refinement.binding_types {
+                    *ty = self.zonk_type(ty.clone(), span);
+                }
+            }
             CoreKind::Handle { clauses, .. } => {
                 for clause in clauses {
                     clause.effect.arguments = clause
@@ -3758,6 +3844,12 @@ impl Elaborator<'_> {
                     self.zonk_pattern(&mut clause.pattern, span);
                     for (_, ty) in &mut clause.bindings {
                         *ty = self.zonk_type(ty.clone(), span);
+                    }
+                    if let Some(refinement) = &mut clause.refinement {
+                        self.zonk_pattern(&mut refinement.pattern, span);
+                        for (_, ty) in &mut refinement.environment.binding_types {
+                            *ty = self.zonk_type(ty.clone(), span);
+                        }
                     }
                 }
             }
@@ -5705,6 +5797,14 @@ impl Elaborator<'_> {
         // would otherwise reject a valid refutable arm against an unresolved
         // inference variable.
         let subject_ty = self.zonk_type(self.expressions[subject.0 as usize].ty.clone(), span);
+        let refinement = match self.expressions[subject.0 as usize].kind.clone() {
+            CoreKind::PatternTest {
+                subject,
+                pattern,
+                refinement,
+            } => Some((subject, pattern, refinement)),
+            _ => None,
+        };
         let result = self.inference.fresh();
         let mut core_clauses = Vec::with_capacity(clauses.len());
         for clause in clauses {
@@ -5737,17 +5837,69 @@ impl Elaborator<'_> {
                 .iter()
                 .map(|binding| (binding.key, binding.name.clone()))
                 .collect::<std::collections::BTreeMap<_, _>>();
-            let bindings = elaboration
+            let mut bindings = elaboration
                 .plan
                 .bindings
                 .iter()
                 .map(|binding| (binding.name.clone(), binding.ty.clone()))
                 .collect::<Vec<_>>();
+            let core_pattern = self.core_pattern(
+                elaboration.plan.decision,
+                elaboration.plan.subject,
+                clause.span,
+                Some(&names),
+            );
+            let refinement = refinement
+                .as_ref()
+                .and_then(|(subject, pattern, environment)| {
+                    core_pattern_is_true(&core_pattern).then(|| CoreRefinementBranch {
+                        environment: environment.clone(),
+                        subject: *subject,
+                        pattern: pattern.clone(),
+                    })
+                });
+            if let Some(refinement) = &refinement {
+                for (name, ty) in &refinement.environment.binding_types {
+                    if bindings.iter().any(|(existing, _)| existing == name) {
+                        self.error(
+                            clause.span,
+                            "G4169",
+                            "refinement binder conflicts with a completion-pattern binder",
+                        );
+                        self.recovered = true;
+                    } else if self.locals.lookup(name).is_some() {
+                        // Core local references retain a compact spelling in
+                        // this stage. Allowing a branch-only refinement to
+                        // shadow an incoming spelling would make PlaceFlow's
+                        // post-state join conflate two owners. Reject it
+                        // until Core locals carry their lexical generation.
+                        self.error(
+                            clause.span,
+                            "G4170",
+                            "refinement binder cannot shadow an incoming local across a branch join",
+                        );
+                        self.recovered = true;
+                    } else {
+                        bindings.push((name.clone(), ty.clone()));
+                    }
+                }
+            }
             self.locals.enter();
             for (name, ty) in &bindings {
                 self.locals.define(name.clone(), ty.clone());
             }
+            let previous_refinement_bindings = self.active_refinement_bindings.clone();
+            if let Some(refinement) = &refinement {
+                self.active_refinement_bindings.extend(
+                    refinement
+                        .environment
+                        .binding_types
+                        .iter()
+                        .map(|(name, _)| name.clone()),
+                );
+            }
             let body = self.expression(clause.body);
+            self.active_refinement_bindings = previous_refinement_bindings;
             self.locals.leave();
             let body_ty = self.expressions[body.0 as usize].ty.clone();
             if self
@@ -5762,13 +5914,9 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
             core_clauses.push(CoreCompletionClause {
-                pattern: self.core_pattern(
-                    elaboration.plan.decision,
-                    elaboration.plan.subject,
-                    clause.span,
-                    Some(&names),
-                ),
+                pattern: core_pattern,
                 bindings,
+                refinement,
                 body,
                 span: clause.span,
             });
@@ -7444,6 +7592,14 @@ fn literal_type(text: &str) -> Type {
     } else {
         Type::Scalar(ScalarType::I64)
     }
+}
+
+/// A refinement pack is available only to a completion arm whose own pattern
+/// establishes the positive test result.  Wildcards and later ordered arms
+/// intentionally do not inherit the proof: that would let a negative path
+/// manufacture a positive binder.
+fn core_pattern_is_true(pattern: &CorePattern) -> bool {
+    matches!(pattern, CorePattern::Literal(value) if value == "true")
 }
 
 fn core_pattern_irrefutable(pattern: &CorePattern) -> bool {

@@ -3166,6 +3166,80 @@ fn is_pattern_tests_publish_sealed_scoped_refinement_facts() {
 }
 
 #[test]
+fn positive_is_completion_arm_opens_nominal_refinement_bindings() {
+    let core = core_for(
+        "core-is-nominal-refinement-branch@0.1.0",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let clauses = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Completion { clauses, .. } => Some(clauses),
+            _ => None,
+        })
+        .expect("completion branch over the is test");
+    assert!(clauses[0].refinement.is_some());
+    assert_eq!(
+        clauses[0].bindings,
+        [("found".into(), Type::Scalar(ScalarType::I64))]
+    );
+    assert!(clauses[1].refinement.is_none());
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(
+        !flow.final_states.contains_key("found"),
+        "branch-local refinement binder escaped its post-state join: {flow:#?}"
+    );
+}
+
+#[test]
+fn negative_is_completion_arm_cannot_observe_positive_refinement_bindings() {
+    let core = core_for(
+        "core-is-refinement-negative-scope@0.1.0",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => found } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4104"),
+        "negative refinement branch unexpectedly resolved a positive-only binder: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
+fn is_refinement_binders_cannot_shadow_incoming_post_state_names() {
+    let core = core_for(
+        "core-is-refinement-post-state-shadow@0.1.0",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { let found = 7; handle value is Result::Ok(found) { true => found; false => 0 } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4170"),
+        "ambiguous refinement post-state shadowing was accepted: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
+fn is_refinement_binders_cannot_escape_in_nested_closures() {
+    let core = core_for(
+        "core-is-refinement-closure-escape@0.1.0",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => { let delayed = (ignored: i64) -> i64 { found }; 0 }; false => 0 } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4171"),
+        "refinement binder unexpectedly escaped in a closure: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn labels_mint_owner_scoped_brands_and_erase_when_no_transfer_is_taken() {
     let core = core_for(
         "core-label-brand@0.1.0",

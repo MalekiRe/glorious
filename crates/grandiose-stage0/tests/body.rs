@@ -171,6 +171,30 @@ fn body_parser_preserves_structural_handler_arms_and_legacy_perform_spelling() {
 }
 
 #[test]
+fn body_parser_allows_is_tests_as_handler_completion_subjects() {
+    let body = parse("{ handle value is Result::Ok(found) { true => found, false => 0 } }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block");
+    };
+    let ExprKind::Handle {
+        computation,
+        clauses,
+    } = &body.expression(values[0]).kind
+    else {
+        panic!("expected handler expression");
+    };
+    assert!(matches!(
+        body.expression(*computation).kind,
+        ExprKind::Is { .. }
+    ));
+    assert!(matches!(
+        body.pattern(clauses[0].completion.expect("positive completion")).kind,
+        PatternKind::Literal(ref value) if value == "true"
+    ));
+}
+
+#[test]
 fn body_parser_treats_with_wildcard_as_an_explicit_continuation_discard() {
     let body = parse("{ handle perform Console::read() { Console::read() with _ => 0 } }");
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
