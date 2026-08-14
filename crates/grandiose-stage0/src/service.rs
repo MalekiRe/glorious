@@ -1069,13 +1069,17 @@ impl StageZeroCompiler {
                 continue;
             };
             for expression in &body.expressions {
-                let crate::core::CoreKind::Call { callee, .. } = expression.kind else {
-                    continue;
+                let function = match &expression.kind {
+                    crate::core::CoreKind::Function { .. } => Some(&expression.kind),
+                    crate::core::CoreKind::Call { callee, .. } => {
+                        Some(&body.expression(*callee).kind)
+                    }
+                    _ => None,
                 };
-                let crate::core::CoreKind::Function {
+                let Some(crate::core::CoreKind::Function {
                     definition: callee,
                     arguments,
-                } = &body.expression(callee).kind
+                }) = function
                 else {
                     continue;
                 };
@@ -1339,13 +1343,18 @@ fn materialize_concrete_instances(
     for function in functions.values_mut() {
         for block in &mut function.blocks {
             for instruction in &mut block.instructions {
-                let crate::MirInstruction::Call {
-                    callee,
-                    generic_arguments,
-                    ..
-                } = instruction
-                else {
-                    continue;
+                let (callee, generic_arguments) = match instruction {
+                    crate::MirInstruction::Call {
+                        callee,
+                        generic_arguments,
+                        ..
+                    }
+                    | crate::MirInstruction::MakeCallable {
+                        callee,
+                        generic_arguments,
+                        ..
+                    } => (callee, generic_arguments),
+                    _ => continue,
                 };
                 if generic_arguments.is_empty() {
                     continue;

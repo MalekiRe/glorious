@@ -2331,6 +2331,14 @@ fn service_materializes_a_concretely_instantiated_generic_function_value() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert!(
+        outcome
+            .instance_graph
+            .expect("closed function value must discover an executable instance")
+            .ordered()
+            .iter()
+            .any(|instance| !instance.arguments().is_empty())
+    );
 }
 
 #[test]

@@ -403,6 +403,10 @@ pub enum MirInstruction {
         dst: MirLocal,
         callee: DefKey,
         captures: Vec<MirLocal>,
+        /// Closed named-function substitutions are retained until the
+        /// instance materializer selects their executable body. Lifted
+        /// closures always carry an empty list.
+        generic_arguments: Vec<GenericArgument>,
         /// Sealed source-level environment evidence. It is intentionally
         /// proof-only at Stage 0: VM closure layout checks capture types and
         /// count independently, while this prevents a Core environment from
@@ -2146,12 +2150,14 @@ impl MirProgram {
                 for instruction in &block.instructions {
                     if let MirInstruction::Call {
                         generic_arguments, ..
+                    }
+                    | MirInstruction::MakeCallable {
+                        generic_arguments, ..
                     } = instruction
                         && !generic_arguments.is_empty()
                     {
                         return Err(
-                            "MIR direct call retained an unmaterialized generic substitution"
-                                .into(),
+                            "MIR callable retained an unmaterialized generic substitution".into(),
                         );
                     }
                     if let MirInstruction::Call { callee, .. }
@@ -7807,13 +7813,21 @@ impl Lowerer<'_> {
             // closures. Their environment is statically empty, while the
             // function identity selects the verified code target.
             CoreKind::Function {
-                definition: callee, ..
-            }
-            | CoreKind::TraitMethod { method: callee, .. } => {
+                definition: callee,
+                arguments: generic_arguments,
+            } => self.instructions.push(MirInstruction::MakeCallable {
+                dst,
+                callee,
+                captures: vec![],
+                generic_arguments,
+                environment: None,
+            }),
+            CoreKind::TraitMethod { method: callee, .. } => {
                 self.instructions.push(MirInstruction::MakeCallable {
                     dst,
                     callee,
                     captures: vec![],
+                    generic_arguments: vec![],
                     environment: None,
                 })
             }
@@ -8278,6 +8292,7 @@ impl Lowerer<'_> {
                     dst,
                     callee,
                     captures,
+                    generic_arguments: vec![],
                     environment: Some(environment.brand),
                 });
             }
