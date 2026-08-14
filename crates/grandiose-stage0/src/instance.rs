@@ -372,6 +372,131 @@ impl InstanceGraph {
         }
         ordered
     }
+
+    pub fn strongly_connected_components(&self) -> Vec<Vec<InstanceKey>> {
+        let mut index = 0;
+        let mut stack = vec![];
+        let mut on = BTreeSet::new();
+        let mut ids = BTreeMap::new();
+        let mut low = BTreeMap::new();
+        let mut out = vec![];
+        fn visit(
+            g: &InstanceGraph,
+            k: InstanceKey,
+            i: &mut usize,
+            s: &mut Vec<InstanceKey>,
+            on: &mut BTreeSet<InstanceKey>,
+            ids: &mut BTreeMap<InstanceKey, usize>,
+            low: &mut BTreeMap<InstanceKey, usize>,
+            out: &mut Vec<Vec<InstanceKey>>,
+        ) {
+            ids.insert(k.clone(), *i);
+            low.insert(k.clone(), *i);
+            *i += 1;
+            s.push(k.clone());
+            on.insert(k.clone());
+            for n in g.callees(&k).into_iter().flatten().cloned() {
+                if !ids.contains_key(&n) {
+                    visit(g, n.clone(), i, s, on, ids, low, out);
+                    *low.get_mut(&k).unwrap() = low[&k].min(low[&n]);
+                } else if on.contains(&n) {
+                    *low.get_mut(&k).unwrap() = low[&k].min(ids[&n]);
+                }
+            }
+            if low[&k] == ids[&k] {
+                let mut c = vec![];
+                loop {
+                    let n = s.pop().unwrap();
+                    on.remove(&n);
+                    let done = n == k;
+                    c.push(n);
+                    if done {
+                        break;
+                    }
+                }
+                c.sort();
+                out.push(c);
+            }
+        }
+        for k in self.ordered() {
+            if !ids.contains_key(&k) {
+                visit(
+                    self, k, &mut index, &mut stack, &mut on, &mut ids, &mut low, &mut out,
+                );
+            }
+        }
+        out.sort_by(|a, b| a[0].cmp(&b[0]));
+        out
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallSummary {
+    pub effects: EffectRow,
+    pub invocation: Quantity,
+    pub may_abort: bool,
+    pub may_control: bool,
+    pub may_escape: bool,
+}
+impl Default for CallSummary {
+    fn default() -> Self {
+        Self {
+            effects: EffectRow::empty(),
+            invocation: Quantity::ZERO,
+            may_abort: false,
+            may_control: false,
+            may_escape: false,
+        }
+    }
+}
+impl CallSummary {
+    pub fn join(&self, other: &Self) -> Self {
+        let mut effects = self.effects.clone();
+        effects
+            .effects
+            .extend(other.effects.effects.iter().cloned());
+        Self {
+            effects,
+            invocation: Quantity {
+                lower: self.invocation.lower.min(other.invocation.lower),
+                upper: match (self.invocation.upper, other.invocation.upper) {
+                    (Some(left), Some(right)) => Some(left.max(right)),
+                    _ => None,
+                },
+            },
+            may_abort: self.may_abort || other.may_abort,
+            may_control: self.may_control || other.may_control,
+            may_escape: self.may_escape || other.may_escape,
+        }
+    }
+}
+
+pub fn solve_call_summaries(
+    graph: &InstanceGraph,
+    mut transfer: impl FnMut(&InstanceKey, &BTreeMap<InstanceKey, CallSummary>) -> CallSummary,
+) -> BTreeMap<InstanceKey, CallSummary> {
+    let mut summaries = BTreeMap::new();
+    for scc in graph.strongly_connected_components() {
+        for key in &scc {
+            summaries
+                .entry(key.clone())
+                .or_insert_with(CallSummary::default);
+        }
+        for _ in 0..=scc.len() * 4 {
+            let mut changed = false;
+            for key in &scc {
+                let next = summaries[key].join(&transfer(key, &summaries));
+                if next != summaries[key] {
+                    summaries.insert(key.clone(), next);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    summaries
 }
 
 #[cfg(test)]
