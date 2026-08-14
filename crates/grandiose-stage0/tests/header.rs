@@ -90,6 +90,28 @@ fn trait_references_retain_explicit_lifetime_arguments() {
 }
 
 #[test]
+fn trait_references_retain_explicit_effect_row_arguments() {
+    let package = PackageKey("header-effect-row-generic-argument@0.1.0".into());
+    let source = "pub trait Capability<e: EffectRow> {} pub fn require<e: EffectRow, T>() where T: Capability<{ | e }> { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        header.where_bounds.as_slice(),
+        [bound]
+            if matches!(
+                bound.relation.arguments.as_slice(),
+                [HeaderGenericArgument::EffectRow(row)] if row.effects.is_empty() && row.tail.as_deref() == Some("e")
+            )
+    ));
+}
+
+#[test]
 fn nominal_headers_retain_structural_quantity_arguments() {
     let package = PackageKey("header-structural-quantity-argument@0.1.0".into());
     let source =

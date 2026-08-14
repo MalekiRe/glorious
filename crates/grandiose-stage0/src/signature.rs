@@ -1546,7 +1546,6 @@ impl Elaborator<'_> {
         }
     }
     fn trait_header(&mut self, header: &TraitHeader) -> ElaboratedTrait {
-        self.require_type_generics(&header.generics, "trait declarations");
         self.bind_generics(&header.generics);
         let outer_self_type = self.self_type.replace(Type::Generic(TRAIT_SELF_GENERIC));
         let methods = header
@@ -1759,7 +1758,6 @@ impl Elaborator<'_> {
         result
     }
     fn effect_header(&mut self, header: &EffectHeader) -> ElaboratedEffect {
-        self.require_type_generics(&header.generics, "effect declarations");
         self.bind_generics(&header.generics);
         let declaration_generics = self.generics.clone();
         let declaration_effect_row_generics = self.effect_row_generics.clone();
@@ -1884,6 +1882,9 @@ impl Elaborator<'_> {
                 HeaderGenericArgument::Type(value) => GenericArgument::Type(self.ty(value)),
                 HeaderGenericArgument::Lifetime(value) => {
                     GenericArgument::Lifetime(self.lifetime(Some(value)))
+                }
+                HeaderGenericArgument::EffectRow(value) => {
+                    GenericArgument::EffectRow(self.effect_row(value))
                 }
                 HeaderGenericArgument::U32(value) => GenericArgument::ConstU32(*value),
                 HeaderGenericArgument::Quantity(value) => GenericArgument::ConstQuantity(*value),
@@ -2364,7 +2365,7 @@ impl Elaborator<'_> {
                 (HeaderGenericArgument::U32(_), GenericKind::Type) => {
                     self.error(
                         "G3318",
-                        format!("type slot of `{name}` cannot receive a structural constant"),
+                        format!("type slot of `{name}` cannot receive a non-type generic argument"),
                     );
                     Type::Error
                 }
@@ -2379,6 +2380,13 @@ impl Elaborator<'_> {
                     self.error(
                         "G3318",
                         format!("type slot of `{name}` cannot receive a lifetime"),
+                    );
+                    Type::Error
+                }
+                (HeaderGenericArgument::EffectRow(_), GenericKind::Type) => {
+                    self.error(
+                        "G3318",
+                        format!("type slot of `{name}` cannot receive an effect row"),
                     );
                     Type::Error
                 }
@@ -2421,6 +2429,9 @@ impl Elaborator<'_> {
                 (HeaderGenericArgument::Lifetime(value), GenericKind::Lifetime) => {
                     GenericArgument::Lifetime(self.lifetime(Some(value)))
                 }
+                (HeaderGenericArgument::EffectRow(value), GenericKind::EffectRow) => {
+                    GenericArgument::EffectRow(self.effect_row(value))
+                }
                 (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
                     GenericArgument::ConstU32(*value)
                 }
@@ -2450,7 +2461,8 @@ impl Elaborator<'_> {
                     },
                 (HeaderGenericArgument::U32(_), GenericKind::Type)
                 | (HeaderGenericArgument::Quantity(_), GenericKind::Type)
-                | (HeaderGenericArgument::Lifetime(_), GenericKind::Type) => {
+                | (HeaderGenericArgument::Lifetime(_), GenericKind::Type)
+                | (HeaderGenericArgument::EffectRow(_), GenericKind::Type) => {
                     self.error(
                         "G3318",
                         format!("type slot of `{name}` cannot receive a structural constant"),

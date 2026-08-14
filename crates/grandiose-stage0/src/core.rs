@@ -2799,6 +2799,9 @@ impl Elaborator<'_> {
                                     crate::header::HeaderGenericArgument::Lifetime(_) => {
                                         Type::Error
                                     }
+                                    crate::header::HeaderGenericArgument::EffectRow(_) => {
+                                        Type::Error
+                                    }
                                 })
                             })
                             .collect(),

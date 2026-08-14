@@ -179,9 +179,22 @@ impl Scanner<'_> {
     ) -> (usize, Option<TokenRange>, usize) {
         let mut cursor = self.position;
         let mut initializer_start = None;
+        // Header applications may contain braced effect-row arguments, e.g.
+        // `Capability<{Trace, | e}>`. Track only header-level angle nesting
+        // so those braces are skipped as syntax while the declaration body
+        // remains the first brace at depth zero.
+        let mut generic_depth = 0u32;
         while let Some(token_index) = self.significant.get(cursor).copied() {
             let token = &self.lexed.tokens[token_index];
             match token.kind {
+                TokenKind::Operator if self.lexed.text(self.source, token) == "<" => {
+                    generic_depth = generic_depth.saturating_add(1);
+                    cursor += 1;
+                }
+                TokenKind::Operator if self.lexed.text(self.source, token) == ">" => {
+                    generic_depth = generic_depth.saturating_sub(1);
+                    cursor += 1;
+                }
                 TokenKind::Operator
                     if kind == DeclarationKind::Constant
                         && self.lexed.text(self.source, token) == "=" =>
@@ -192,6 +205,25 @@ impl Scanner<'_> {
                 // An import tree may contain `{...}` selectors.  Those braces
                 // are part of the header, never a declaration body.
                 TokenKind::Punctuation('{') if kind == DeclarationKind::Import => cursor += 1,
+                // An explicit effect-row generic argument is also header
+                // syntax. Unlike a callable's `/ { ... }` row, this form is
+                // identified structurally by an enclosing `<...>` application
+                // and is valid on trait, effect, and implementation headers.
+                TokenKind::Punctuation('{') if generic_depth > 0 => {
+                    let Some(close) = self.lexed.delimiters.matching(token_index) else {
+                        self.diagnostics.push(ScanDiagnostic {
+                            code: "G2001",
+                            span: token.span,
+                            message: "effect-row generic argument has an unclosed delimiter",
+                        });
+                        return (token_index + 1, None, cursor + 1);
+                    };
+                    cursor = self
+                        .significant
+                        .binary_search(&close)
+                        .expect("matched delimiter is significant")
+                        + 1;
+                }
                 // A braced callable effect row is part of a function header,
                 // not its body.  The scanner need not understand effect-row
                 // members: a preceding `/` is the unambiguous structural

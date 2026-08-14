@@ -1,7 +1,7 @@
 use grandiose_stage0::{
-    ConstKind, DeclarationScan, DefinitionIndex, EffectTail, ElaboratedHeader, ElaboratedInterface,
-    ElaboratedNominalLayout, FileKey, GenericArgument, GenericKind, InterfaceSet, LexedFile,
-    Lifetime, LogicalPath, PackageKey, Quantity, ScalarType, Type,
+    ConstKind, DeclarationScan, DefinitionIndex, EffectRow, EffectTail, ElaboratedHeader,
+    ElaboratedInterface, ElaboratedNominalLayout, FileKey, GenericArgument, GenericKind,
+    InterfaceSet, LexedFile, Lifetime, LogicalPath, PackageKey, Quantity, ScalarType, Type,
 };
 
 #[test]
@@ -569,6 +569,63 @@ fn trait_and_effect_references_elaborate_explicit_lifetime_arguments() {
         effect.arguments,
         vec![GenericArgument::Lifetime(Lifetime::Generic(0))]
     );
+}
+
+#[test]
+fn trait_and_effect_references_elaborate_explicit_effect_row_arguments() {
+    let package = PackageKey("signature-effect-row-generic-arguments@0.1.0".into());
+    let source = r#"
+        trait Capability<e: EffectRow> {}
+        effect Trace { note() }
+        effect Relay<e: EffectRow> { emit() -> i64 }
+        pub fn dispatch<e: EffectRow, T>() -> i64 / Relay<{ Trace, | e }>
+            where T: Capability<{ Trace, | e }> { 0 }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let dispatch = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("dispatch"))
+        .expect("dispatch definition");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&dispatch.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    let expected = EffectRow {
+        effects: [grandiose_stage0::EffectInstance {
+            definition: interface
+                .definitions
+                .iter()
+                .find(|definition| definition.name.as_deref() == Some("Trace"))
+                .expect("Trace definition")
+                .key,
+            arguments: vec![],
+        }]
+        .into_iter()
+        .collect(),
+        projections: vec![],
+        tail: Some(EffectTail::Generic(0)),
+    };
+    assert_eq!(
+        signature.where_bounds[0].1.arguments,
+        vec![GenericArgument::EffectRow(expected.clone())]
+    );
+    let effect = signature
+        .effects
+        .effects
+        .iter()
+        .next()
+        .expect("Relay effect");
+    assert_eq!(effect.arguments, vec![GenericArgument::EffectRow(expected)]);
 }
 
 #[test]
@@ -1389,7 +1446,7 @@ fn generic_kinds_reject_crossing_type_and_effect_row_positions() {
 }
 
 #[test]
-fn effect_row_binders_are_rejected_outside_callable_declarations() {
+fn effect_row_binders_are_rejected_for_nominal_and_alias_declarations() {
     let package = PackageKey("signature-effect-row-binder-context@0.1.0".into());
     let source = "struct Invalid<e: EffectRow> {} trait AlsoInvalid<e: EffectRow> {} type Alias<e: EffectRow> = i64;";
     let file = FileKey::new(&package, "src/lib.glorious");
@@ -1403,7 +1460,7 @@ fn effect_row_binders_are_rejected_outside_callable_declarations() {
             .iter()
             .filter(|diagnostic| diagnostic.code == "G3314")
             .count(),
-        3,
+        2,
         "{:#?}",
         signatures.diagnostics
     );
