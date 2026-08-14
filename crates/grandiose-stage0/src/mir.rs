@@ -3087,9 +3087,12 @@ impl Lowerer<'_> {
     /// real VM frame: a refutable arm runs its structural tests and explicitly
     /// forwards the suspended operation to the next outer frame. This covers
     /// deeper forwarding graphs without pretending that the continuation is a
-    /// direct value substitution. Setup expressions, multiple sibling arms,
-    /// completion clauses, and non-linear resumptions deliberately remain on
-    /// the more general lowering paths below.
+    /// direct value substitution. Lexical setup expressions are retained at
+    /// every layer and run immediately after their owning frame installs, so
+    /// values they bind remain available to the enclosed frame and direct
+    /// performance. Multiple sibling arms, completion clauses, and non-linear
+    /// resumptions deliberately remain on the more general lowering paths
+    /// below.
     fn lower_root_runtime_deep_one_shot_handler(
         &mut self,
         root: CoreId,
@@ -3105,6 +3108,7 @@ impl Lowerer<'_> {
             _ => return None,
         };
         let mut layers = Vec::<CoreHandlerClause>::new();
+        let mut layer_setups = Vec::<Vec<CoreId>>::new();
         while let CoreKind::Handle {
             computation,
             clauses,
@@ -3118,9 +3122,19 @@ impl Lowerer<'_> {
             }
             layers.push(clauses[0].clone());
             current = match self.body.expression(computation).kind.clone() {
-                CoreKind::Handle { .. } => computation,
-                CoreKind::Block(values) if values.len() == 1 => values[0],
-                _ => computation,
+                CoreKind::Handle { .. } => {
+                    layer_setups.push(Vec::new());
+                    computation
+                }
+                CoreKind::Block(values) => {
+                    let (next, setup) = values.split_last()?;
+                    layer_setups.push(setup.to_vec());
+                    *next
+                }
+                _ => {
+                    layer_setups.push(Vec::new());
+                    computation
+                }
             };
         }
         if layers.len() < 3 {
@@ -3153,10 +3167,6 @@ impl Lowerer<'_> {
         for expression in root_prefix {
             self.statement(expression)?;
         }
-        let arguments = argument_ids
-            .iter()
-            .map(|argument| self.value(*argument))
-            .collect::<Option<Vec<_>>>()?;
         let resume_type = self.body.expression(current).ty.clone();
         let payloads = layers
             .iter()
@@ -3219,11 +3229,12 @@ impl Lowerer<'_> {
             .collect::<Vec<_>>();
 
         let mut entry = std::mem::take(&mut self.instructions);
-        for (((clause, payloads), tests), body) in layers
+        for ((((clause, payloads), tests), body), setup) in layers
             .iter()
             .zip(&payloads)
             .zip(&test_blocks)
             .zip(&body_blocks)
+            .zip(&layer_setups)
         {
             entry.push(MirInstruction::InstallHandler {
                 effect: clause.effect.definition,
@@ -3233,7 +3244,17 @@ impl Lowerer<'_> {
                 resume_type: resume_type.clone(),
                 target: tests.first().copied().unwrap_or(*body),
             });
+            self.instructions = Vec::new();
+            for expression in setup {
+                self.statement(*expression)?;
+            }
+            entry.extend(std::mem::take(&mut self.instructions));
         }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        entry.extend(std::mem::take(&mut self.instructions));
         let result = self.alloc(resume_type, current);
         entry.push(MirInstruction::Perform {
             dst: result,
