@@ -2836,7 +2836,7 @@ fn service_enforces_trait_method_value_associated_bindings() {
 
 #[test]
 fn service_instantiates_nominal_field_associated_type_projections() {
-    let source = "trait Has { type Item; } impl Has for i64 { type Item = i64; } pub struct Box { item: <i64 as Has>::Item } pub fn main() -> i64 { let value = Box { item: 41 }; value.item + 1 }";
+    let source = "trait Has { type Item; } impl Has for i64 { type Item = i64; } pub struct Box { item: <i64 as Has>::Item } type Alias = Box; pub fn unwrap(value: Alias) -> i64 { value.item + 1 } pub fn main() -> i64 { unwrap(Box { item: 41 }) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);

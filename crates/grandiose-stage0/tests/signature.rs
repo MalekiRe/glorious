@@ -2707,6 +2707,25 @@ fn source_nominal_layouts_reject_owned_recursion_after_alias_normalization() {
 }
 
 #[test]
+fn source_nominal_layouts_reject_recursion_hidden_by_associated_type_projections() {
+    let package = PackageKey("signature-owned-layout-associated-cycle@0.1.0".into());
+    let source = "trait Link { type Next; } pub struct Node { next: <Node as Link>::Next } impl Link for Node { type Next = Node; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3320"),
+        "an associated type projection hid an infinitely-sized nominal layout: {:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn source_nominal_layouts_accept_distinct_finite_generic_instantiations() {
     let package = PackageKey("signature-owned-layout-instantiations@0.1.0".into());
     // The outer Result carries EffectRow, but EffectRow's Option alias expands

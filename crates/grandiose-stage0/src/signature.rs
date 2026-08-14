@@ -523,7 +523,7 @@ fn nominal_identity_arguments(kinds: &[GenericKind]) -> Vec<GenericArgument> {
 
 fn owned_nominal_layout_cycle(
     value: &Type,
-    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    signatures: &ElaboratedInterface,
     active: &mut Vec<(DefKey, Vec<GenericArgument>)>,
 ) -> Option<Vec<DefKey>> {
     match value {
@@ -531,7 +531,9 @@ fn owned_nominal_layout_cycle(
             definition,
             arguments,
         } => {
-            let ElaboratedHeader::Nominal { layout, .. } = definitions.get(definition)? else {
+            let ElaboratedHeader::Nominal { layout, .. } =
+                signatures.definitions.get(definition)?
+            else {
                 return None;
             };
             if let Some(index) = active.iter().position(|(seen, seen_arguments)| {
@@ -573,7 +575,7 @@ fn owned_nominal_layout_cycle(
             let cycle = match layout {
                 ElaboratedNominalLayout::Struct(fields) => fields.iter().find_map(|field| {
                     let field = substitute_alias_generic_identity(field.ty.clone(), arguments);
-                    owned_nominal_layout_cycle(&field, definitions, active)
+                    owned_nominal_layout_cycle(&field, signatures, active)
                 }),
                 ElaboratedNominalLayout::Enum(variants) => variants.iter().find_map(|variant| {
                     let fields = match &variant.payload {
@@ -585,7 +587,7 @@ fn owned_nominal_layout_cycle(
                     };
                     fields.into_iter().find_map(|field| {
                         let field = substitute_alias_generic_identity(field, arguments);
-                        owned_nominal_layout_cycle(&field, definitions, active)
+                        owned_nominal_layout_cycle(&field, signatures, active)
                     })
                 }),
                 ElaboratedNominalLayout::Opaque => None,
@@ -595,7 +597,7 @@ fn owned_nominal_layout_cycle(
         }
         Type::Tuple(elements) => elements
             .iter()
-            .find_map(|element| owned_nominal_layout_cycle(element, definitions, active)),
+            .find_map(|element| owned_nominal_layout_cycle(element, signatures, active)),
         // Arrays are heap-backed in the Stage 0 VM. The remaining forms are
         // references or executable contracts, never inline nominal storage.
         Type::Array(_) | Type::Reference { .. } | Type::Callable { .. } => None,
@@ -606,9 +608,23 @@ fn owned_nominal_layout_cycle(
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Generic(_)
-        | Type::Projection { .. }
         | Type::Infer(_)
         | Type::Error => None,
+        Type::Projection { .. } => {
+            // Alias normalization runs before layout validation, but a
+            // concrete associated type can become an inline nominal only
+            // after its implementation is selected. Treating it as a leaf
+            // would let an implementation hide an infinitely-sized Node
+            // behind `<Node as Link>::Next`.
+            let normalized = crate::TraitSolver::new(signatures)
+                .normalize_type(value.clone())
+                .ok()?;
+            if &normalized == value {
+                None
+            } else {
+                owned_nominal_layout_cycle(&normalized, signatures, active)
+            }
+        }
     }
 }
 
@@ -897,10 +913,14 @@ impl ElaboratedInterface {
     /// and Stage 0 arrays are runtime handles and therefore terminate an
     /// owned-layout path; tuples and nominal fields remain inline.
     fn validate_owned_nominal_layout_recursion(&mut self) {
-        let definitions = self.definitions.clone();
+        let signatures = ElaboratedInterface {
+            definitions: self.definitions.clone(),
+            host_imports: self.host_imports.clone(),
+            diagnostics: vec![],
+        };
         let mut reported = BTreeSet::<Vec<DefKey>>::new();
         let mut diagnostics = vec![];
-        for (definition, header) in &definitions {
+        for (definition, header) in &signatures.definitions {
             let ElaboratedHeader::Nominal { generic_kinds, .. } = header else {
                 continue;
             };
@@ -909,7 +929,7 @@ impl ElaboratedInterface {
                 arguments: nominal_identity_arguments(generic_kinds),
             };
             let mut active = vec![];
-            if let Some(cycle) = owned_nominal_layout_cycle(&root, &definitions, &mut active) {
+            if let Some(cycle) = owned_nominal_layout_cycle(&root, &signatures, &mut active) {
                 let mut members = cycle;
                 members.sort();
                 members.dedup();
