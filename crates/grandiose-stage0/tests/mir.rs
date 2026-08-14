@@ -4,8 +4,8 @@ use grandiose_stage0::{
     CoreId, DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument,
     GenericKind, InferVar, InstanceKey, Lifetime, MirBlock, MirBlockId, MirContinuationPolicy,
     MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl, MirPattern,
-    MirPatternField, MirProgram, MirTerminator, Quantity, ScalarType, Type, VmArtifactError,
-    emit_vm, emit_vm_program, optimize_mir, verify_vm,
+    MirPatternField, MirProgram, MirTerminator, Mutability, Quantity, ScalarType, Type,
+    VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -148,6 +148,95 @@ fn mir_validation_rejects_nominal_pattern_field_type_forgery() {
             .as_ref()
             .is_err_and(|error| error.contains("disagrees with its frozen layout")),
         "validation result: {validation:?}; MIR must reject an in-range field with forged type metadata"
+    );
+}
+
+#[test]
+fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
+    let i64 = Type::Scalar(ScalarType::I64);
+    let shared_i64 = Type::Reference {
+        mutability: Mutability::Shared,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(i64.clone()),
+    };
+    let unique_i64 = Type::Reference {
+        mutability: Mutability::Unique,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(i64.clone()),
+    };
+    let forged_capability = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-shared-to-unique-reborrow")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(i64.clone()), local(shared_i64), local(unique_i64)],
+        result: i64.clone(),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                },
+                MirInstruction::Borrow {
+                    dst: MirLocal(1),
+                    src: MirLocal(0),
+                    fields: vec![],
+                    unique: false,
+                },
+                MirInstruction::Borrow {
+                    dst: MirLocal(2),
+                    src: MirLocal(1),
+                    fields: vec![],
+                    unique: true,
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+    assert!(
+        forged_capability
+            .validate()
+            .is_err_and(|error| error.contains("shared parent")),
+        "forged shared-to-unique reborrow reached executable MIR"
+    );
+
+    let forged_referent = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-whole-borrow-referent")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64.clone()),
+            local(Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(Type::Scalar(ScalarType::Text)),
+            }),
+        ],
+        result: i64.clone(),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                },
+                MirInstruction::Borrow {
+                    dst: MirLocal(1),
+                    src: MirLocal(0),
+                    fields: vec![],
+                    unique: false,
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+    assert!(
+        forged_referent
+            .validate()
+            .is_err_and(|error| error.contains("referent does not match")),
+        "forged whole-place borrow changed its referent type"
     );
 }
 

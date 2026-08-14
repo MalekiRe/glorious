@@ -1826,6 +1826,31 @@ impl Analyzer<'_> {
     }
 
     fn assign_place(&mut self, place: &CorePlace, span: Span) {
+        // A reborrow suspends the *reference carrier* as well as access to
+        // the backing referent.  It is not enough to reject `*parent = ...`:
+        // replacing `holder.loan` (or the aggregate containing it) while
+        // `child = &mut *holder.loan` remains live would discard the parent
+        // capability from which the child was derived.  The VM happens to
+        // retain the copied target today, but that implementation detail must
+        // not weaken the source ownership contract.
+        //
+        // Reference origins are canonical static paths, so this catches both
+        // the exact slot and any enclosing aggregate replacement while
+        // preserving disjoint sibling updates.  Only a live projection loan
+        // may trigger the error: NLL release of the child before this store
+        // deliberately reopens the carrier for a new reference.
+        if let Some(carrier) = self.place_origin_key(place)
+            && self.live_reborrow_descends_from(&carrier)
+        {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot replace reference carrier `{carrier}` while a child reborrow is live"
+                ),
+            );
+            return;
+        }
         let Some(projection) = self.place_projection(place) else {
             return;
         };
@@ -1907,6 +1932,33 @@ impl Analyzer<'_> {
                 format!("unknown local `{}` in PlaceFlow", projection.root),
             ),
         }
+    }
+
+    /// Whether a currently-live child loan is descended from a reference
+    /// carried by `carrier`. `reborrow_parents` intentionally retains the
+    /// stable ancestry graph beyond NLL release for joins and diagnostics;
+    /// therefore the projection-loan owner is the liveness authority here.
+    fn live_reborrow_descends_from(&self, carrier: &str) -> bool {
+        self.projection_loans.iter().any(|loan| {
+            let Some(mut ancestor) = loan.owner.clone() else {
+                return false;
+            };
+            let mut seen = BTreeSet::new();
+            while seen.insert(ancestor.clone()) {
+                if ancestor == carrier
+                    || ancestor
+                        .strip_prefix(carrier)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+                {
+                    return true;
+                }
+                let Some(parent) = self.reborrow_parents.get(&ancestor) else {
+                    return false;
+                };
+                ancestor = parent.clone();
+            }
+            false
+        })
     }
 
     fn root_name(&self, id: CoreId) -> String {
