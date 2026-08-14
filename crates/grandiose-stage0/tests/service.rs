@@ -115,6 +115,7 @@ fn service_applies_host_instance_discovery_limits_before_lowering() {
     let compiler = StageZeroCompiler::with_instance_limits(InstanceLimits {
         total: 1,
         per_definition: 1,
+        ..InstanceLimits::default()
     });
     let error = compiler
         .compile(request(
@@ -147,6 +148,27 @@ fn service_discovers_concrete_generic_direct_call_instances() {
             .iter()
             .any(|instance| !instance.arguments().is_empty())
     );
+}
+
+#[test]
+fn service_rejects_deep_concrete_instance_substitutions_before_lowering() {
+    let compiler = StageZeroCompiler::with_instance_limits(InstanceLimits {
+        substitution_depth: 1,
+        ..InstanceLimits::default()
+    });
+    let error = compiler
+        .compile(request(
+            "pub struct Box<T> { value: T } pub fn identity<T>(value: T) -> T { value } pub fn main() -> Box<i64> { identity(Box { value: 42 }) }",
+        ))
+        .unwrap_err();
+
+    assert!(error.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code == "G7031"
+            && diagnostic.class == DiagnosticClass::Resource
+            && diagnostic
+                .message
+                .contains("SubstitutionDepth { depth: 2, limit: 1")
+    }));
 }
 
 #[test]

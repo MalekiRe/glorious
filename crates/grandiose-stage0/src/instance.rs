@@ -37,6 +37,10 @@ pub struct InstanceKey {
     pub callable: DefKey,
     arguments: Vec<InstanceArgument>,
     canonical_substitution: Vec<u8>,
+    /// The greatest structural depth of any substituted generic argument.
+    /// This is derived from the canonical argument tree, never source spans
+    /// or inference state, so resource policy cannot perturb identity.
+    substitution_depth: usize,
     fingerprint: Digest,
 }
 
@@ -110,6 +114,11 @@ impl InstanceKey {
         ]);
         Ok(Self {
             callable,
+            substitution_depth: arguments
+                .iter()
+                .map(instance_argument_depth)
+                .max()
+                .unwrap_or(0),
             arguments,
             canonical_substitution,
             fingerprint,
@@ -122,6 +131,109 @@ impl InstanceKey {
 
     pub fn fingerprint(&self) -> Digest {
         self.fingerprint
+    }
+
+    /// The maximum nesting depth in this executable substitution.
+    ///
+    /// This covers every generic kind, including type arguments nested inside
+    /// effect instances and effect rows nested in nominal applications. It is
+    /// intentionally separate from the key fingerprint: changing a host
+    /// resource limit must not change a program's canonical instance identity.
+    pub fn substitution_depth(&self) -> usize {
+        self.substitution_depth
+    }
+}
+
+fn nested_depth(values: impl IntoIterator<Item = usize>) -> usize {
+    1 + values.into_iter().max().unwrap_or(0)
+}
+
+fn instance_argument_depth(value: &InstanceArgument) -> usize {
+    match value {
+        InstanceArgument::Type(value) => type_depth(value),
+        InstanceArgument::EffectRow(value) => effect_row_depth(value),
+        InstanceArgument::Lifetime(_)
+        | InstanceArgument::ConstU32(_)
+        | InstanceArgument::ConstQuantity(_)
+        | InstanceArgument::ConstGeneric { .. } => 1,
+        InstanceArgument::ConstU32Expr(value) => structural_u32_depth(value),
+    }
+}
+
+fn structural_u32_depth(value: &crate::StructuralU32Expr) -> usize {
+    match value {
+        crate::StructuralU32Expr::Literal(_) | crate::StructuralU32Expr::Param(_) => 1,
+        crate::StructuralU32Expr::Add(left, right)
+        | crate::StructuralU32Expr::Sub(left, right)
+        | crate::StructuralU32Expr::Mul(left, right)
+        | crate::StructuralU32Expr::Div(left, right)
+        | crate::StructuralU32Expr::Rem(left, right) => {
+            nested_depth([structural_u32_depth(left), structural_u32_depth(right)])
+        }
+    }
+}
+
+fn effect_instance_depth(value: &crate::EffectInstance) -> usize {
+    nested_depth(value.arguments.iter().map(instance_argument_depth))
+}
+
+fn effect_projection_depth(value: &crate::EffectRowProjection) -> usize {
+    nested_depth(
+        std::iter::once(type_depth(&value.subject))
+            .chain(value.trait_arguments.iter().map(type_depth))
+            .chain(value.item_arguments.iter().map(instance_argument_depth)),
+    )
+}
+
+fn effect_row_depth(value: &EffectRow) -> usize {
+    nested_depth(
+        value
+            .effects
+            .iter()
+            .map(effect_instance_depth)
+            .chain(value.projections.iter().map(effect_projection_depth)),
+    )
+}
+
+fn type_depth(value: &Type) -> usize {
+    match value {
+        Type::Nominal { arguments, .. } => {
+            nested_depth(arguments.iter().map(instance_argument_depth))
+        }
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => nested_depth(
+            std::iter::once(type_depth(subject))
+                .chain(trait_arguments.iter().map(type_depth))
+                .chain(item_arguments.iter().map(instance_argument_depth)),
+        ),
+        Type::Tuple(values) => nested_depth(values.iter().map(type_depth)),
+        Type::Array(value) => nested_depth([type_depth(value)]),
+        Type::Reference { referent, .. } => nested_depth([type_depth(referent)]),
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } => nested_depth(
+            parameters
+                .iter()
+                .map(type_depth)
+                .chain(std::iter::once(type_depth(result)))
+                .chain(std::iter::once(effect_row_depth(effects))),
+        ),
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_)
+        | Type::Infer(_)
+        | Type::Error => 1,
     }
 }
 
@@ -274,6 +386,11 @@ fn encode_quantity(value: Quantity, output: &mut Vec<u8>) {
 pub struct InstanceLimits {
     pub total: usize,
     pub per_definition: usize,
+    /// Maximum structural nesting of one fully closed generic substitution.
+    /// This prevents a single instance key such as `Wrap<Wrap<...>>` from
+    /// consuming unbounded solver, fingerprinting, and materialization work
+    /// while staying below the cardinality limits.
+    pub substitution_depth: usize,
 }
 
 impl Default for InstanceLimits {
@@ -281,6 +398,7 @@ impl Default for InstanceLimits {
         Self {
             total: 10_000,
             per_definition: 1_000,
+            substitution_depth: 128,
         }
     }
 }
@@ -302,6 +420,11 @@ pub enum InstanceGraphError {
     },
     PerDefinitionLimit {
         callable: DefKey,
+        limit: usize,
+        root: Box<InstanceKey>,
+    },
+    SubstitutionDepth {
+        depth: usize,
         limit: usize,
         root: Box<InstanceKey>,
     },
@@ -359,6 +482,13 @@ impl InstanceGraph {
                 self.roots.entry(key).or_insert(reason);
             }
             return Ok(false);
+        }
+        if key.substitution_depth() > limits.substitution_depth {
+            return Err(InstanceGraphError::SubstitutionDepth {
+                depth: key.substitution_depth(),
+                limit: limits.substitution_depth,
+                root: Box::new(key),
+            });
         }
         if self.edges.len() >= limits.total {
             return Err(InstanceGraphError::TotalLimit {
@@ -788,6 +918,7 @@ mod tests {
                 InstanceLimits {
                     total: 1,
                     per_definition: 1,
+                    ..InstanceLimits::default()
                 },
             )
             .unwrap();
@@ -798,6 +929,7 @@ mod tests {
                 InstanceLimits {
                     total: 1,
                     per_definition: 1,
+                    ..InstanceLimits::default()
                 },
             ),
             Err(InstanceGraphError::TotalLimit { .. })
@@ -983,5 +1115,50 @@ mod tests {
                 right: EffectTail::Generic(1),
             })
         ));
+    }
+
+    #[test]
+    fn depth_limit_counts_nested_mixed_kind_substitutions_before_admission() {
+        let nested = InstanceKey::new(
+            definition(b"mixed"),
+            &[GenericKind::Type],
+            vec![InstanceArgument::Type(Type::Nominal {
+                definition: definition(b"outer"),
+                arguments: vec![InstanceArgument::EffectRow(EffectRow::closed_instances([
+                    crate::EffectInstance {
+                        definition: definition(b"effect"),
+                        arguments: vec![InstanceArgument::Type(Type::Nominal {
+                            definition: definition(b"inner"),
+                            arguments: vec![InstanceArgument::ConstQuantity(Quantity::AFFINE)],
+                        })],
+                    },
+                ]))],
+            })],
+        )
+        .unwrap();
+        assert_eq!(nested.substitution_depth(), 5);
+
+        let mut graph = InstanceGraph::default();
+        let error = graph
+            .discover_root(
+                InstanceRoot {
+                    key: nested,
+                    reason: "adversarial nested substitution".into(),
+                },
+                InstanceLimits {
+                    substitution_depth: 4,
+                    ..InstanceLimits::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            InstanceGraphError::SubstitutionDepth {
+                depth: 5,
+                limit: 4,
+                ..
+            }
+        ));
+        assert!(graph.ordered().is_empty());
     }
 }
