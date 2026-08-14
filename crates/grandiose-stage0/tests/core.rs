@@ -2363,6 +2363,36 @@ fn typed_core_and_placeflow_lower_to_validated_mir() {
 }
 
 #[test]
+fn enum_reference_results_preserve_variant_invariant_caller_paths() {
+    let core = core_for(
+        "core-result-reference-origin@0.1.0",
+        "pub enum Result<T, E> { Ok(T), Err(E) } pub fn as_ref<'a, A, E>(value: &'a Result<A, E>) -> Result<&'a A, &'a E> { () } pub fn main<'a>(value: &'a Result<i64, i64>) -> Result<&'a i64, &'a i64> { as_ref(value) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let Some(CoreKind::Call {
+        reference_contract,
+        reference_origin,
+        ..
+    }) = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Call { .. }))
+        .map(|expression| &expression.kind)
+    else {
+        panic!("reference helper call must retain its direct-call provenance");
+    };
+    for origin in [reference_contract, reference_origin] {
+        let grandiose_stage0::CallReferenceOrigin::Paths(paths) = origin else {
+            panic!("reference result must not become opaque: {origin:#?}");
+        };
+        assert_eq!(paths.len(), 1, "{paths:#?}");
+        assert_eq!(paths[0].result_fields, vec![0]);
+        assert_eq!(paths[0].argument, 0);
+        assert!(paths[0].argument_fields.is_empty());
+    }
+}
+
+#[test]
 fn contextual_u32_comparisons_lower_to_typed_vm_primitives() {
     let package = PackageKey("core-u32-comparison-mir@0.1.0".into());
     let source = "infixl 20 <=; pub fn main(value: u32) -> bool { value <= 1114111 }";

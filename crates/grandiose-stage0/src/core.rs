@@ -11753,35 +11753,52 @@ fn reference_leaf_paths(
                 layout: ElaboratedNominalLayout::Enum(variants),
                 ..
             }) => {
-                // A runtime variant has no stable Core projection path, but
-                // its generic payloads must still be instantiated before we
-                // decide whether it could contain a reference.  Otherwise a
-                // concrete `Enum<i64>` inherits the declaration's `T`
-                // opacity and spuriously blocks VM materialization.
+                // An enum's active variant is not known at the call boundary,
+                // but a payload position can still have stable caller-region
+                // provenance when every variant that exposes that position
+                // gives it the same lifetime.  `Result<&'a A, &'a E>` is the
+                // canonical example: either variant may be returned, yet a
+                // later refinement can soundly reborrow field zero from the
+                // one `&'a Result<A, E>` input.  Preserve such field paths;
+                // fail closed if a single position would name different
+                // regions in different variants.
+                let mut variant_leaves = std::collections::BTreeMap::new();
                 for variant in variants {
                     let fields = match &variant.payload {
                         crate::signature::ElaboratedEnumVariantPayload::Unit => continue,
-                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields,
+                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => {
+                            fields.iter().collect::<Vec<_>>()
+                        }
                         crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => {
-                            let fields = fields.iter().map(|field| &field.ty).collect::<Vec<_>>();
-                            if fields.into_iter().try_fold(false, |contains, field| {
-                                let field = instantiate_nominal_field_type(field, arguments)?;
-                                Ok::<_, ()>(
-                                    contains || type_may_contain_reference(signatures, &field),
-                                )
-                            })? {
-                                return Err(());
-                            }
-                            continue;
+                            fields.iter().map(|field| &field.ty).collect::<Vec<_>>()
                         }
                     };
-                    if fields.iter().try_fold(false, |contains, field| {
+                    for (index, field) in fields.into_iter().enumerate() {
                         let field = instantiate_nominal_field_type(field, arguments)?;
-                        Ok::<_, ()>(contains || type_may_contain_reference(signatures, &field))
-                    })? {
-                        return Err(());
+                        path.push(index as u32);
+                        let mut field_leaves = vec![];
+                        let traversed =
+                            reference_leaf_paths(signatures, &field, path, &mut field_leaves);
+                        path.pop();
+                        traversed?;
+                        for (field_path, leaf) in field_leaves {
+                            let Some(existing) = variant_leaves.get(&field_path) else {
+                                variant_leaves.insert(field_path, leaf);
+                                continue;
+                            };
+                            if !matches!(
+                                (existing, &leaf),
+                                (
+                                    Type::Reference { lifetime: left, .. },
+                                    Type::Reference { lifetime: right, .. },
+                                ) if left == right
+                            ) {
+                                return Err(());
+                            }
+                        }
                     }
                 }
+                leaves.extend(variant_leaves);
             }
             Some(ElaboratedHeader::Nominal {
                 layout: ElaboratedNominalLayout::Opaque,
