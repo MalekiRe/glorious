@@ -4004,6 +4004,23 @@ impl Elaborator<'_> {
                 }
                 call
             }
+            ExprKind::OperatorChain {
+                operands,
+                operators,
+            } if expected.is_some() => {
+                if let ([left, right], [operator]) = (operands.as_slice(), operators.as_slice())
+                    && let Some(value) = self.direct_infix_callable(
+                        operator,
+                        *left,
+                        *right,
+                        expected,
+                        expression.span,
+                    )
+                {
+                    return value;
+                }
+                self.expression(id)
+            }
             ExprKind::Closure { parameters, body } => self.closure(
                 parameters
                     .into_iter()
@@ -9943,6 +9960,17 @@ impl Elaborator<'_> {
         if operands.len() != operators.len().saturating_add(1) {
             return self.fail(span, "G4108", "malformed operator chain");
         }
+        // Some infix spellings are ordinary source callables rather than
+        // trait methods.  In particular, the canonical `else` combinator
+        // takes a lazy `Fn` fallback.  Resolve its frozen callable contract
+        // before elaborating either operand so a trailing contextual block
+        // receives the callable result/effect expectation instead of being
+        // prematurely treated as an untyped eager block.
+        if let ([left, right], [operator]) = (operands.as_slice(), operators.as_slice())
+            && let Some(value) = self.direct_infix_callable(operator, *left, *right, None, span)
+        {
+            return value;
+        }
         let values = operands
             .into_iter()
             .map(|value| self.expression(value))
@@ -9999,6 +10027,61 @@ impl Elaborator<'_> {
         output
             .pop()
             .expect("valid operator chain retains one result")
+    }
+
+    /// Elaborate a binary source-level infix callable.  Trait methods remain
+    /// the fallback for ordinary operator syntax; this path is intentionally
+    /// restricted to a real value declaration with a two-argument frozen
+    /// callable signature.  It is the same contextual argument protocol as
+    /// direct calls, including intrinsic `Fn` bounds for compact blocks.
+    fn direct_infix_callable(
+        &mut self,
+        operator: &str,
+        left: ExprId,
+        right: ExprId,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Option<CoreId> {
+        let ResolutionState::Resolved(definition) = self.index.resolve_path(
+            DefinitionNamespace::Value,
+            self.module,
+            &[operator.to_owned()],
+        ) else {
+            return None;
+        };
+        let definition = self
+            .signatures
+            .value_alias_target(definition)
+            .unwrap_or(definition);
+        let signature = self
+            .signatures
+            .definitions
+            .get(&definition)
+            .and_then(callable)?;
+        if signature.parameters.len() != 2 {
+            return None;
+        }
+        let callee = self.path(vec![operator.to_owned()], span);
+        let Type::Callable {
+            parameters, result, ..
+        } = self.expressions[callee.0 as usize].ty.clone()
+        else {
+            return None;
+        };
+        if let Some(expected) = expected {
+            // This contributes generic inference evidence only.  The normal
+            // call boundary opens declaration-owned lifetimes after it has
+            // seen the actual arguments.
+            let _ = self.inference.unify(*result, expected);
+        }
+        let left_expected = parameters.first().cloned();
+        let right_expected = parameters
+            .get(1)
+            .and_then(|parameter| self.direct_bound_callable_contract(callee, parameter))
+            .or_else(|| parameters.get(1).cloned());
+        let left = self.expression_expected(left, left_expected);
+        let right = self.expression_expected(right, right_expected);
+        Some(self.call(callee, vec![left, right], span))
     }
     fn reduce_operator(
         &mut self,

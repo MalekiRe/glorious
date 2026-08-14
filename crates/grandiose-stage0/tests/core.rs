@@ -3541,6 +3541,27 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
 }
 
 #[test]
+fn source_infix_callable_contextualizes_a_higher_order_fallback_closure() {
+    let core = core_for(
+        "core-infix-lazy-fallback@0.1.0",
+        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; infixr 1 else; if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E> where F: Fn<(), Output = B> { condition } else<A, E, F>(value: Result<A, E>, fallback: F) -> A where F: Fn<(), Output = A> { fallback() } pub fn main<'a, A, E>(condition: Bool, value: &'a Result<A, E>) -> Result<&'a A, &'a E> { if(condition) { Result::Ok(&value.0) } else { Result::Err(&value.0) } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert_eq!(
+        core.expressions
+            .iter()
+            .filter(|expression| matches!(expression.kind, CoreKind::Closure { .. }))
+            .count(),
+        2,
+        "both lazy branches must receive the direct Fn contract"
+    );
+    assert!(matches!(
+        core.expression(core.root).ty,
+        Type::Nominal { .. },
+    ));
+}
+
+#[test]
 fn handler_pattern_matrix_rejects_duplicate_unbounded_literal_rows() {
     let core = core_for(
         "core-handler-pattern-unbounded-literal@0.1.0",
