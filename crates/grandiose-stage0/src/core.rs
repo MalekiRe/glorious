@@ -337,6 +337,8 @@ impl TypedBody {
             .get(&definition.key)
             .and_then(callable)
             .map(|signature| signature.result.clone());
+        let expected_result =
+            expected_result.map(|result| elaborator.normalize_concrete_type_projections(result));
         let mut parameters = vec![];
         if let Some(signature) = signatures
             .definitions
@@ -1119,6 +1121,66 @@ impl Elaborator<'_> {
             }
         }
     }
+    /// Callable signatures retain symbolic projections so generic interfaces
+    /// do not guess evidence. At a concrete body boundary, however, every
+    /// selected associated definition must reduce recursively before ordinary
+    /// type unification compares the declared result with the body value.
+    fn normalize_concrete_type_projections(&mut self, value: Type) -> Type {
+        match TraitSolver::new(self.signatures).normalize_type(value) {
+            Ok(value) => value,
+            Err(answer) => self.projection_normalization_error(*answer),
+        }
+    }
+    fn projection_normalization_error(&mut self, answer: TraitProjectionAnswer) -> Type {
+        match answer {
+            TraitProjectionAnswer::Refuted { .. } => {
+                self.projection_error(
+                    "G4151",
+                    "associated type projection is refuted by a negative implementation",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::NoSolution => {
+                self.projection_error(
+                    "G4152",
+                    "no implementation can normalize this associated type projection",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::Ambiguous => {
+                self.projection_error("G4153", "associated type projection is ambiguous");
+                Type::Error
+            }
+            TraitProjectionAnswer::Overflow => {
+                self.projection_error(
+                    "G4154",
+                    "associated type projection exceeded the trait solver limit",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::MissingAssociatedType { .. } => {
+                self.projection_error(
+                    "G4155",
+                    "selected implementation does not define this associated type",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::AssociatedTypeArity { .. } => {
+                self.projection_error("G4156", "associated type projection has the wrong arity");
+                Type::Error
+            }
+            TraitProjectionAnswer::RecursiveProjection => {
+                self.projection_error(
+                    "G4157",
+                    "associated type projection has no finite normal form",
+                );
+                Type::Error
+            }
+            TraitProjectionAnswer::Normalized { .. } => {
+                unreachable!("normalized projections are returned through Ok")
+            }
+        }
+    }
     fn header_projection(
         &mut self,
         subject: &crate::header::HeaderType,
@@ -1219,42 +1281,7 @@ impl Elaborator<'_> {
         );
         match answer {
             TraitProjectionAnswer::Normalized { ty, .. } => ty,
-            TraitProjectionAnswer::Refuted { .. } => {
-                self.projection_error(
-                    "G4151",
-                    "associated type projection is refuted by a negative implementation",
-                );
-                Type::Error
-            }
-            TraitProjectionAnswer::NoSolution => {
-                self.projection_error(
-                    "G4152",
-                    "no implementation can normalize this associated type projection",
-                );
-                Type::Error
-            }
-            TraitProjectionAnswer::Ambiguous => {
-                self.projection_error("G4153", "associated type projection is ambiguous");
-                Type::Error
-            }
-            TraitProjectionAnswer::Overflow => {
-                self.projection_error(
-                    "G4154",
-                    "associated type projection exceeded the trait solver limit",
-                );
-                Type::Error
-            }
-            TraitProjectionAnswer::MissingAssociatedType { .. } => {
-                self.projection_error(
-                    "G4155",
-                    "selected implementation does not define this associated type",
-                );
-                Type::Error
-            }
-            TraitProjectionAnswer::AssociatedTypeArity { .. } => {
-                self.projection_error("G4156", "associated type projection has the wrong arity");
-                Type::Error
-            }
+            answer => self.projection_normalization_error(answer),
         }
     }
     fn header_path(&mut self, path: &[String], arguments: Vec<Type>) -> Type {

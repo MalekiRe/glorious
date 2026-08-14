@@ -56,6 +56,11 @@ pub enum TraitProjectionAnswer {
         expected: u32,
         found: u32,
     },
+    /// Normalizing an associated type led back to a projection already being
+    /// normalized.  Recursive projection values have no finite normal form,
+    /// so callers must report an error rather than preserving a misleading
+    /// symbolic type in an executable interface.
+    RecursiveProjection,
 }
 
 /// The row-kinded counterpart of [`TraitProjectionAnswer`]. Keeping it
@@ -212,10 +217,69 @@ impl TraitSolver {
         self.normalize_associated_type_application(goal, name, &[])
     }
 
+    /// Normalize every concrete associated-type projection contained in a
+    /// type.  Declaration-owned generic projections remain symbolic, while
+    /// a concrete result is reduced to its recursive projection normal form.
+    pub fn normalize_type(&mut self, value: Type) -> Result<Type, Box<TraitProjectionAnswer>> {
+        self.normalize_type_projections(value, &mut vec![])
+    }
+
     /// Normalize an associated type application through selected trait
     /// evidence. Item arguments occupy generic slots after the implementation
     /// binders, preserving a stable substitution layout for GAT-like items.
     pub fn normalize_associated_type_application(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[Type],
+    ) -> TraitProjectionAnswer {
+        let mut active = vec![];
+        let subject = match self.normalize_type_projections(goal.subject, &mut active) {
+            Ok(subject) => subject,
+            Err(answer) => return *answer,
+        };
+        let trait_arguments = match goal
+            .relation
+            .arguments
+            .into_iter()
+            .map(|argument| self.normalize_type_projections(argument, &mut active))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(arguments) => arguments,
+            Err(answer) => return *answer,
+        };
+        let arguments = match arguments
+            .iter()
+            .cloned()
+            .map(|argument| self.normalize_type_projections(argument, &mut active))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(arguments) => arguments,
+            Err(answer) => return *answer,
+        };
+        let goal = TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: goal.relation.definition,
+                arguments: trait_arguments,
+            },
+            subject,
+        };
+        let root_key = associated_projection_key(&goal, name, &arguments);
+        let answer = self.select_associated_type_application(goal, name, &arguments);
+        let TraitProjectionAnswer::Normalized { evidence, ty } = answer else {
+            return answer;
+        };
+        let mut active = vec![root_key];
+        match self.normalize_type_projections(ty, &mut active) {
+            Ok(ty) => TraitProjectionAnswer::Normalized { evidence, ty },
+            Err(answer) => *answer,
+        }
+    }
+
+    /// Perform the one-step selection and substitution for an associated type.
+    /// Recursive normalization is intentionally kept above this boundary so
+    /// every nested projection uses the same candidate selection machinery.
+    fn select_associated_type_application(
         &mut self,
         goal: TraitGoal,
         name: &str,
@@ -255,6 +319,126 @@ impl TraitSolver {
             TraitAnswer::NoSolution => TraitProjectionAnswer::NoSolution,
             TraitAnswer::Ambiguous => TraitProjectionAnswer::Ambiguous,
             TraitAnswer::Overflow => TraitProjectionAnswer::Overflow,
+        }
+    }
+
+    /// Normalize concrete projections nested in a selected associated-type
+    /// value.  In particular, an implementation may define `Output` as
+    /// another associated projection, and that projection must not leak into
+    /// a concrete call site merely because it was introduced by substitution.
+    ///
+    /// Symbolic projections under declaration-owned generic binders are
+    /// retained. They are normalized later once instantiation supplies a
+    /// concrete trait head; attempting to select an implementation early
+    /// would guess evidence that a caller's where-clause may provide instead.
+    fn normalize_type_projections(
+        &mut self,
+        value: Type,
+        active: &mut Vec<Digest>,
+    ) -> Result<Type, Box<TraitProjectionAnswer>> {
+        match value {
+            Type::Nominal {
+                definition,
+                arguments,
+            } => Ok(Type::Nominal {
+                definition,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_type_projections(argument, active))
+                    .collect::<Result<_, _>>()?,
+            }),
+            Type::Projection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                item_arguments,
+            } => {
+                let subject = self.normalize_type_projections(*subject, active)?;
+                let trait_arguments = trait_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_type_projections(argument, active))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let item_arguments = item_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_type_projections(argument, active))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let projection = Type::Projection {
+                    subject: Box::new(subject),
+                    trait_definition,
+                    trait_arguments,
+                    name,
+                    item_arguments,
+                };
+                if !projection_is_concrete(&projection) {
+                    return Ok(projection);
+                }
+                let Type::Projection {
+                    subject,
+                    trait_definition,
+                    trait_arguments,
+                    name,
+                    item_arguments,
+                } = projection
+                else {
+                    unreachable!("projection was just constructed")
+                };
+                let goal = TraitGoal {
+                    relation: ElaboratedTraitReference {
+                        definition: trait_definition,
+                        arguments: trait_arguments,
+                    },
+                    subject: *subject,
+                };
+                let key = associated_projection_key(&goal, &name, &item_arguments);
+                if active.contains(&key) {
+                    return Err(Box::new(TraitProjectionAnswer::RecursiveProjection));
+                }
+                if active.len() >= self.limits.max_depth as usize {
+                    return Err(Box::new(TraitProjectionAnswer::Overflow));
+                }
+                active.push(key);
+                let answer = self.select_associated_type_application(goal, &name, &item_arguments);
+                let result = match answer {
+                    TraitProjectionAnswer::Normalized { ty, .. } => {
+                        self.normalize_type_projections(ty, active)
+                    }
+                    answer => Err(Box::new(answer)),
+                };
+                active.pop();
+                result
+            }
+            Type::Tuple(values) => Ok(Type::Tuple(
+                values
+                    .into_iter()
+                    .map(|value| self.normalize_type_projections(value, active))
+                    .collect::<Result<_, _>>()?,
+            )),
+            Type::Array(value) => Ok(Type::Array(Box::new(
+                self.normalize_type_projections(*value, active)?,
+            ))),
+            Type::Reference {
+                mutability,
+                referent,
+            } => Ok(Type::Reference {
+                mutability,
+                referent: Box::new(self.normalize_type_projections(*referent, active)?),
+            }),
+            Type::Callable {
+                parameters,
+                result,
+                effects,
+                invocation,
+            } => Ok(Type::Callable {
+                parameters: parameters
+                    .into_iter()
+                    .map(|parameter| self.normalize_type_projections(parameter, active))
+                    .collect::<Result<_, _>>()?,
+                result: Box::new(self.normalize_type_projections(*result, active)?),
+                effects,
+                invocation,
+            }),
+            value => Ok(value),
         }
     }
 
@@ -710,4 +894,44 @@ fn goal_key(goal: &TraitGoal) -> Digest {
         format!("{:?}", goal.relation.arguments).as_bytes(),
         format!("{:?}", goal.subject).as_bytes(),
     ])
+}
+
+fn associated_projection_key(goal: &TraitGoal, name: &str, arguments: &[Type]) -> Digest {
+    Digest::of_parts([
+        b"grandiose-stage0-associated-projection-v1".as_slice(),
+        goal.relation.definition.0.as_bytes().as_slice(),
+        format!("{:?}", goal.relation.arguments).as_bytes(),
+        format!("{:?}", goal.subject).as_bytes(),
+        name.as_bytes(),
+        format!("{:?}", arguments).as_bytes(),
+    ])
+}
+
+/// A projection may be selected only after every part of its trait head is
+/// known. This mirrors the Core boundary: type parameters retain projections
+/// for their eventual lexical evidence environment instead of acquiring a
+/// global implementation by accident.
+fn projection_is_concrete(value: &Type) -> bool {
+    match value {
+        Type::Generic(_) | Type::Infer(_) | Type::Error => false,
+        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => {
+            arguments.iter().all(projection_is_concrete)
+        }
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            projection_is_concrete(subject)
+                && trait_arguments.iter().all(projection_is_concrete)
+                && item_arguments.iter().all(projection_is_concrete)
+        }
+        Type::Array(element) => projection_is_concrete(element),
+        Type::Reference { referent, .. } => projection_is_concrete(referent),
+        Type::Callable {
+            parameters, result, ..
+        } => parameters.iter().all(projection_is_concrete) && projection_is_concrete(result),
+        Type::Unit | Type::Never | Type::Scalar(_) => true,
+    }
 }

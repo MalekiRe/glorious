@@ -192,6 +192,95 @@ fn associated_type_application_normalizes_item_generic_arguments() {
 }
 
 #[test]
+fn associated_type_normalization_recurses_through_selected_projections() {
+    let (interface, signatures) = signatures(
+        "trait Source { type Item; } trait Wrapper { type Item; } struct Value {} impl Source for Value { type Item = Text; } impl Wrapper for Value { type Item = <Value as Source>::Item; }",
+    );
+    let wrapper = key(&interface, "Wrapper");
+    let answer = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: wrapper,
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            },
+        },
+        "Item",
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::Text),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn associated_type_normalization_reduces_projections_in_the_trait_head() {
+    let (interface, signatures) = signatures(
+        "trait Source { type Item; } trait Consume<T> { type Output; } struct Value {} impl Source for Value { type Item = i64; } impl Consume<i64> for Value { type Output = Text; }",
+    );
+    let source = key(&interface, "Source");
+    let consume = key(&interface, "Consume");
+    let value = key(&interface, "Value");
+    let answer = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: consume,
+                arguments: vec![Type::Projection {
+                    subject: Box::new(Type::Nominal {
+                        definition: value,
+                        arguments: vec![],
+                    }),
+                    trait_definition: source,
+                    trait_arguments: vec![],
+                    name: "Item".into(),
+                    item_arguments: vec![],
+                }],
+            },
+            subject: Type::Nominal {
+                definition: value,
+                arguments: vec![],
+            },
+        },
+        "Output",
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::Text),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn recursive_associated_type_normalization_is_rejected() {
+    let (interface, signatures) = signatures(
+        "trait Loop { type Item; } struct Value {} impl Loop for Value { type Item = <Value as Loop>::Item; }",
+    );
+    let loop_trait = key(&interface, "Loop");
+    let answer = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: loop_trait,
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            },
+        },
+        "Item",
+    );
+    assert_eq!(answer, TraitProjectionAnswer::RecursiveProjection);
+}
+
+#[test]
 fn method_selection_substitutes_impl_and_method_generic_arguments() {
     let (interface, signatures) = signatures(
         "trait Convert<T> { fn convert<U>(value: T, other: U) -> (T, U); } struct Box<T> {} impl<T> Convert<T> for Box<T> { fn convert<U>(value: T, other: U) -> (T, U) { (value, other) } }",
