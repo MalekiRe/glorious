@@ -90,6 +90,7 @@ runtime_manifest=(
     --runtime-leaf int-checked-add crate __g1_int_checked_add
     --runtime-leaf int-wrapping-add crate __g1_int_wrapping_add
     --runtime-leaf int-wrapping-sub crate __g1_int_wrapping_sub
+    --runtime-leaf int-wrapping-mul crate __g1_int_wrapping_mul
     --runtime-leaf int-equal crate __g1_int_equal
     --runtime-leaf int-less crate __g1_int_less
     --runtime-leaf int-greater crate __g1_int_greater
