@@ -9,9 +9,14 @@ use crate::{
     identity::{DefKey, Digest},
     instance::InstanceKey,
     placeflow::PlaceFlow,
+    signature::{
+        ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedInterface,
+        ElaboratedNominalLayout,
+    },
     types::{
-        GenericArgument, Mutability, Type, is_canonical_generic_argument_identity,
-        is_canonical_type_identity, projection_item_arguments_match_kinds,
+        GenericArgument, Mutability, StructuralU32Expr, Type,
+        is_canonical_generic_argument_identity, is_canonical_type_identity,
+        projection_item_arguments_match_kinds,
     },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1141,9 +1146,22 @@ pub struct MirLocalDecl {
     pub ty: Type,
     pub source: CoreId,
 }
+/// The instantiated owned layout of one nominal identity. This is frozen with
+/// MIR because `Type::Nominal` deliberately carries only identity arguments,
+/// not its declaration-owned fields. Consumers recompute copyability from
+/// these structural fields; there is no producer-asserted `Copy` bit to forge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirNominalCopyDescriptor {
+    pub definition: DefKey,
+    pub arguments: Vec<GenericArgument>,
+    /// A struct has one entry. An enum has one entry per variant, in its
+    /// declaration order.
+    pub variants: Vec<Vec<Type>>,
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirFunction {
     pub definition: DefKey,
+    pub nominal_copy_descriptors: Vec<MirNominalCopyDescriptor>,
     /// Captured environment entries occupy the prefix of `parameters`.
     pub captures: u32,
     pub parameters: Vec<MirLocal>,
@@ -1193,7 +1211,7 @@ pub struct MirLowering {
 
 impl MirLowering {
     pub fn lower(definition: DefKey, body: &TypedBody, flow: &PlaceFlow) -> Self {
-        Self::lower_with_bodies(definition, body, flow, &BTreeMap::new())
+        Self::lower_with_bodies_and_signatures(definition, body, flow, &BTreeMap::new(), None)
     }
     /// Lower one body with access to the immutable Core products of its
     /// package world. The map is an inspection-only interprocedural summary:
@@ -1205,6 +1223,18 @@ impl MirLowering {
         body: &TypedBody,
         flow: &PlaceFlow,
         bodies: &BTreeMap<DefKey, TypedBody>,
+    ) -> Self {
+        Self::lower_with_bodies_and_signatures(definition, body, flow, bodies, None)
+    }
+    /// Lower against the sealed interface that supplied Typed Core. Nominal
+    /// copy descriptors are instantiated here, before MIR drops source-level
+    /// declaration access.
+    pub fn lower_with_bodies_and_signatures(
+        definition: DefKey,
+        body: &TypedBody,
+        flow: &PlaceFlow,
+        bodies: &BTreeMap<DefKey, TypedBody>,
+        signatures: Option<&ElaboratedInterface>,
     ) -> Self {
         // Recovered syntax and Core errors are deliberately editor-only
         // products.  Do not let an otherwise empty ownership analysis make a
@@ -1246,6 +1276,7 @@ impl MirLowering {
         let mut lowerer = Lowerer {
             body,
             bodies,
+            signatures,
             // Core environments are branded by the source callable that
             // owns the whole body.  A lifted child has a synthetic VM key,
             // but it must keep validating nested environments against this
@@ -1254,6 +1285,8 @@ impl MirLowering {
             owner: definition,
             definition,
             locals: vec![],
+            nominal_copy_descriptors: vec![],
+            building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
             named: BTreeMap::new(),
             lifted: BTreeMap::new(),
@@ -2046,6 +2079,7 @@ impl MirLowering {
                 };
             };
             let function = MirFunction {
+                nominal_copy_descriptors: lowerer.nominal_copy_descriptors.clone(),
                 definition,
                 captures: 0,
                 parameters,
@@ -2090,6 +2124,7 @@ impl MirFunction {
         if self.entry.0 as usize >= self.blocks.len() {
             return Err(format!("MIR entry block {} is absent", self.entry.0));
         }
+        validate_nominal_copy_descriptors(&self.nominal_copy_descriptors)?;
         validate_mir_type(&self.result, &mut vec![])?;
         for local in &self.locals {
             validate_mir_type(&local.ty, &mut vec![])?;
@@ -2154,6 +2189,15 @@ impl MirFunction {
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
     fn validate_instruction(&self, instruction: &MirInstruction) -> Result<(), String> {
+        if let MirInstruction::Copy { src, .. } = instruction {
+            if !mir_type_is_duplicable(self.local_type(*src)?, &self.nominal_copy_descriptors) {
+                return Err(format!(
+                    "MIR copy duplicates an affine capability from local {}",
+                    src.0
+                ));
+            }
+            return Ok(());
+        }
         if let MirInstruction::ConstF64 { dst, bits } = instruction {
             if self.local_type(*dst)? != &Type::Scalar(crate::types::ScalarType::F64) {
                 return Err("MIR f64 constant destination is not f64".into());
@@ -2460,6 +2504,197 @@ impl MirFunction {
             MirTerminator::Unreachable => Ok(()),
         }
     }
+}
+
+fn validate_nominal_copy_descriptors(
+    descriptors: &[MirNominalCopyDescriptor],
+) -> Result<(), String> {
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.variants.is_empty() {
+            return Err("MIR nominal copy descriptor has no variants".into());
+        }
+        if descriptors[..index].iter().any(|previous| {
+            previous.definition == descriptor.definition
+                && previous.arguments == descriptor.arguments
+        }) {
+            return Err("MIR nominal copy descriptor is duplicated".into());
+        }
+        for variant in &descriptor.variants {
+            for field in variant {
+                validate_mir_type(field, &mut vec![])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Instantiate a declaration-owned layout using the entire nominal argument
+/// vector. `ElaboratedInterface`'s executable-field query intentionally
+/// focuses on type arguments; copyability also needs empty and scalar-only
+/// layouts such as `Tag<n: u32>`, whose identity carries a non-type binder.
+fn instantiate_nominal_copy_layout(
+    layout: &ElaboratedNominalLayout,
+    arguments: &[GenericArgument],
+) -> Option<Vec<Vec<Type>>> {
+    let instantiate_fields = |fields: &[crate::signature::NominalField]| {
+        fields
+            .iter()
+            .map(|field| substitute_nominal_copy_type(&field.ty, arguments))
+            .collect()
+    };
+    match layout {
+        ElaboratedNominalLayout::Struct(fields) => Some(vec![instantiate_fields(fields)]),
+        ElaboratedNominalLayout::Enum(variants) => Some(
+            variants
+                .iter()
+                .map(|variant| match &variant.payload {
+                    ElaboratedEnumVariantPayload::Unit => vec![],
+                    ElaboratedEnumVariantPayload::Tuple(fields) => fields
+                        .iter()
+                        .map(|field| substitute_nominal_copy_type(field, arguments))
+                        .collect(),
+                    ElaboratedEnumVariantPayload::Struct(fields) => instantiate_fields(fields),
+                })
+                .collect(),
+        ),
+        ElaboratedNominalLayout::Opaque => None,
+    }
+}
+
+fn substitute_nominal_copy_type(value: &Type, arguments: &[GenericArgument]) -> Type {
+    match value {
+        Type::Generic(slot) => arguments
+            .get(*slot as usize)
+            .and_then(|argument| match argument {
+                GenericArgument::Type(value) => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| value.clone()),
+        Type::Tuple(fields) => Type::Tuple(
+            fields
+                .iter()
+                .map(|field| substitute_nominal_copy_type(field, arguments))
+                .collect(),
+        ),
+        Type::Array(element) => {
+            Type::Array(Box::new(substitute_nominal_copy_type(element, arguments)))
+        }
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability: *mutability,
+            lifetime: *lifetime,
+            referent: Box::new(substitute_nominal_copy_type(referent, arguments)),
+        },
+        Type::Nominal {
+            definition,
+            arguments: nested,
+        } => Type::Nominal {
+            definition: *definition,
+            arguments: nested
+                .iter()
+                .map(|argument| substitute_nominal_copy_argument(argument, arguments))
+                .collect(),
+        },
+        Type::ConstGeneric { index, kind } => arguments
+            .get(*index as usize)
+            .and_then(|argument| match (kind, argument) {
+                (crate::types::ConstKind::U32, GenericArgument::ConstU32(value)) => {
+                    Some(Type::ConstU32(*value))
+                }
+                (crate::types::ConstKind::Quantity, GenericArgument::ConstQuantity(value)) => {
+                    Some(Type::ConstQuantity(*value))
+                }
+                (expected, GenericArgument::ConstGeneric { index, kind }) if expected == kind => {
+                    Some(Type::ConstGeneric {
+                        index: *index,
+                        kind: *kind,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| value.clone()),
+        // Callable and projection forms do not contribute inline nominal
+        // storage to this layout. They retain their existing sealed type
+        // contracts and are validated independently.
+        _ => value.clone(),
+    }
+}
+
+fn substitute_nominal_copy_argument(
+    value: &GenericArgument,
+    arguments: &[GenericArgument],
+) -> GenericArgument {
+    match value {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(substitute_nominal_copy_type(value, arguments))
+        }
+        GenericArgument::ConstGeneric { index, kind } => arguments
+            .get(*index as usize)
+            .filter(|argument| match (kind, argument) {
+                (crate::types::ConstKind::U32, GenericArgument::ConstU32(_))
+                | (crate::types::ConstKind::Quantity, GenericArgument::ConstQuantity(_)) => true,
+                (expected, GenericArgument::ConstGeneric { kind, .. }) => expected == kind,
+                _ => false,
+            })
+            .cloned()
+            .unwrap_or_else(|| value.clone()),
+        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
+            StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
+            value => GenericArgument::ConstU32Expr(value),
+        },
+        value => value.clone(),
+    }
+}
+
+fn mir_type_is_duplicable(ty: &Type, descriptors: &[MirNominalCopyDescriptor]) -> bool {
+    fn visit(
+        ty: &Type,
+        descriptors: &[MirNominalCopyDescriptor],
+        active: &mut Vec<(DefKey, Vec<GenericArgument>)>,
+    ) -> bool {
+        match ty {
+            Type::Reference { mutability, .. } => *mutability != Mutability::Unique,
+            Type::Tuple(elements) => elements
+                .iter()
+                .all(|element| visit(element, descriptors, active)),
+            Type::Array(element) => visit(element, descriptors, active),
+            Type::Nominal {
+                definition,
+                arguments,
+            } => {
+                let key = (*definition, arguments.clone());
+                let Some(descriptor) = descriptors.iter().find(|candidate| {
+                    candidate.definition == *definition && candidate.arguments == *arguments
+                }) else {
+                    return false;
+                };
+                if active.contains(&key) {
+                    return false;
+                }
+                active.push(key.clone());
+                let result = descriptor.variants.iter().all(|variant| {
+                    variant
+                        .iter()
+                        .all(|field| visit(field, descriptors, active))
+                });
+                active.pop();
+                result
+            }
+            // Generic bodies are checked before their concrete instance is
+            // materialized. Their copy operations are revalidated after
+            // substitution at the VM boundary, where a concrete nominal
+            // descriptor is available. Rejecting them here would make every
+            // ordinary generic helper falsely affine.
+            Type::Generic(_) => true,
+            Type::Infer(_) | Type::Error => false,
+            Type::Callable { .. } => true,
+            _ => true,
+        }
+    }
+    visit(ty, descriptors, &mut Vec::new())
 }
 
 /// MIR is still permitted to carry declaration-owned generic parameters until
@@ -3464,6 +3699,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
 struct Lowerer<'a> {
     body: &'a TypedBody,
     bodies: &'a BTreeMap<DefKey, TypedBody>,
+    signatures: Option<&'a ElaboratedInterface>,
     /// The source callable whose body-local `CallableId`s and environment
     /// brands this lowering session consumes.  This remains unchanged while
     /// recursively lowering lifted closures; `definition` below is only the
@@ -3471,6 +3707,8 @@ struct Lowerer<'a> {
     owner: DefKey,
     definition: DefKey,
     locals: Vec<MirLocalDecl>,
+    nominal_copy_descriptors: Vec<MirNominalCopyDescriptor>,
+    building_nominal_copy_descriptors: Vec<(DefKey, Vec<GenericArgument>)>,
     values: BTreeMap<CoreId, MirLocal>,
     named: BTreeMap<String, MirLocal>,
     lifted: BTreeMap<DefKey, MirFunction>,
@@ -3832,6 +4070,7 @@ impl Lowerer<'_> {
             terminator: MirTerminator::Return { value: join },
         });
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -4092,6 +4331,7 @@ impl Lowerer<'_> {
                 ]
             };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -4194,6 +4434,7 @@ impl Lowerer<'_> {
         let transferred = self.lower_label_transfer_path(clause.body, brand)?;
         let clause_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -4343,6 +4584,7 @@ impl Lowerer<'_> {
         let result_type = self.body.expression(root).ty.clone();
         let continuation_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -5117,6 +5359,7 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -5193,6 +5436,7 @@ impl Lowerer<'_> {
             (MirBlockId(2), vec![skipped], MirBlockId(1), vec![])
         };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -5472,6 +5716,7 @@ impl Lowerer<'_> {
         blocks[steps.len()].instructions = std::mem::take(&mut self.instructions);
         blocks[steps.len()].terminator = MirTerminator::Return { value: result };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -5760,6 +6005,7 @@ impl Lowerer<'_> {
             terminator: MirTerminator::Unreachable,
         });
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -6203,6 +6449,7 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -6519,6 +6766,7 @@ impl Lowerer<'_> {
             }
         }
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -6812,6 +7060,7 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -7049,6 +7298,7 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -7247,6 +7497,7 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
 
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -7467,6 +7718,7 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -7608,6 +7860,7 @@ impl Lowerer<'_> {
         self.instructions.push(MirInstruction::Cancel);
         let handler_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -8045,6 +8298,7 @@ impl Lowerer<'_> {
         self.named = inner_named;
 
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -8230,6 +8484,7 @@ impl Lowerer<'_> {
         self.named = handler_named;
 
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -8481,6 +8736,7 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -8536,6 +8792,7 @@ impl Lowerer<'_> {
         }
         let result = self.value(outward)?;
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -8721,6 +8978,7 @@ impl Lowerer<'_> {
         }
         self.named = previous_named;
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -8871,6 +9129,7 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = handler_named;
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -9114,6 +9373,7 @@ impl Lowerer<'_> {
                 }),
         );
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -9302,6 +9562,7 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = handler_named;
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -9701,6 +9962,7 @@ impl Lowerer<'_> {
         }
         debug_assert_eq!(next as usize, blocks.len());
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -9975,6 +10237,7 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -10158,6 +10421,7 @@ impl Lowerer<'_> {
         }
         self.named = previous_named;
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -10265,6 +10529,7 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = previous_named;
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -10386,6 +10651,7 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = previous_named;
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -10555,6 +10821,7 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -10774,6 +11041,7 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -10942,6 +11210,7 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -10953,6 +11222,7 @@ impl Lowerer<'_> {
     }
     fn invalid_function(&self, parameters: Vec<MirLocal>) -> MirFunction {
         MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
             parameters,
@@ -11261,10 +11531,18 @@ impl Lowerer<'_> {
                 self.values.insert(id, unit);
                 return Some(unit);
             }
-            let src = self.value(*value)?;
+            let src = self.capability_value(*value)?;
             let local = self.alloc(self.body.expression(*value).ty.clone(), id);
-            self.instructions
-                .push(MirInstruction::Copy { dst: local, src });
+            if mir_type_is_duplicable(
+                &self.body.expression(*value).ty,
+                &self.nominal_copy_descriptors,
+            ) {
+                self.instructions
+                    .push(MirInstruction::Copy { dst: local, src });
+            } else {
+                self.instructions
+                    .push(MirInstruction::Move { dst: local, src });
+            }
             self.named.insert(name.clone(), local);
             let unit = self.alloc(Type::Unit, id);
             self.instructions
@@ -11344,7 +11622,7 @@ impl Lowerer<'_> {
             },
             CoreKind::Local(name) => {
                 let src = *self.named.get(&name).or_else(|| self.values.get(&id))?;
-                self.instructions.push(MirInstruction::Copy { dst, src });
+                self.copy_or_move(dst, src);
             }
             CoreKind::Resumption { id, .. } => {
                 if let Some(snapshot) = self.resumption_snapshots.get(&id) {
@@ -11408,7 +11686,7 @@ impl Lowerer<'_> {
             CoreKind::Tuple(fields) => {
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.value(field))
+                    .map(|field| self.capability_value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions
                     .push(MirInstruction::MakeTuple { dst, fields });
@@ -11420,7 +11698,7 @@ impl Lowerer<'_> {
                 };
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.value(field))
+                    .map(|field| self.capability_value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeArray {
                     dst,
@@ -11435,7 +11713,7 @@ impl Lowerer<'_> {
                     .collect::<Vec<_>>();
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.value(field))
+                    .map(|field| self.capability_value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeRecord {
                     dst,
@@ -11455,7 +11733,7 @@ impl Lowerer<'_> {
                     .collect::<Vec<_>>();
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.value(field))
+                    .map(|field| self.capability_value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeEnum {
                     dst,
@@ -11470,7 +11748,7 @@ impl Lowerer<'_> {
                 index,
                 field_count,
             } => {
-                let base = self.value(base)?;
+                let base = self.place_value(base)?;
                 self.instructions.push(MirInstruction::ProjectRecord {
                     dst,
                     base,
@@ -11518,7 +11796,7 @@ impl Lowerer<'_> {
             } => self.lower_terminal_handle(dst, computation, clauses)?,
             CoreKind::Borrow { unique, value } => {
                 if let CoreKind::Deref(reference) = self.body.expression(value).kind.clone() {
-                    let src = self.value(reference)?;
+                    let src = self.capability_value(reference)?;
                     self.instructions.push(MirInstruction::Borrow {
                         dst,
                         src,
@@ -11542,12 +11820,12 @@ impl Lowerer<'_> {
                 });
             }
             CoreKind::Deref(value) => {
-                let reference = self.value(value)?;
+                let reference = self.capability_value(value)?;
                 self.instructions
                     .push(MirInstruction::DerefCopy { dst, reference });
             }
             CoreKind::Move(value) => {
-                let src = self.value(value)?;
+                let src = self.capability_value(value)?;
                 self.instructions.push(MirInstruction::Move { dst, src });
             }
             CoreKind::Unary { operator, value } => {
@@ -12339,12 +12617,156 @@ impl Lowerer<'_> {
         None
     }
     fn alloc(&mut self, ty: Type, source: CoreId) -> MirLocal {
+        self.register_nominal_copy_descriptors(&ty);
         let id = MirLocal(self.locals.len() as u32);
         self.locals.push(MirLocalDecl { ty, source });
         id
     }
+    /// Freeze every declaration-owned nominal layout reachable from a runtime
+    /// type before MIR erases the elaborated interface. Failure to instantiate
+    /// a layout intentionally leaves no descriptor, making later `Copy`
+    /// validation fail closed for that nominal identity.
+    fn register_nominal_copy_descriptors(&mut self, ty: &Type) {
+        match ty {
+            Type::Tuple(elements) => {
+                for element in elements {
+                    self.register_nominal_copy_descriptors(element);
+                }
+            }
+            Type::Array(element) => self.register_nominal_copy_descriptors(element),
+            // References are independently duplicable/affine according to
+            // their mutability; the referent is not inline storage.
+            Type::Reference { .. } => {}
+            Type::Callable {
+                parameters,
+                result,
+                effects,
+                ..
+            } => {
+                for parameter in parameters {
+                    self.register_nominal_copy_descriptors(parameter);
+                }
+                self.register_nominal_copy_descriptors(result);
+                for effect in &effects.effects {
+                    for argument in &effect.arguments {
+                        if let GenericArgument::Type(argument) = argument {
+                            self.register_nominal_copy_descriptors(argument);
+                        }
+                    }
+                }
+            }
+            Type::Nominal {
+                definition,
+                arguments,
+            } => {
+                let key = (*definition, arguments.clone());
+                if self.nominal_copy_descriptors.iter().any(|descriptor| {
+                    descriptor.definition == *definition && descriptor.arguments == *arguments
+                }) || self.building_nominal_copy_descriptors.contains(&key)
+                {
+                    return;
+                }
+                let Some(signatures) = self.signatures else {
+                    return;
+                };
+                let variants = match signatures.definitions.get(definition) {
+                    Some(ElaboratedHeader::Nominal {
+                        layout: ElaboratedNominalLayout::Struct(_),
+                        ..
+                    }) => signatures
+                        .instantiate_struct_fields_generic(*definition, arguments)
+                        .ok()
+                        .map(|fields| vec![fields.into_iter().map(|field| field.ty).collect()]),
+                    Some(ElaboratedHeader::Nominal {
+                        layout: ElaboratedNominalLayout::Enum(variants),
+                        ..
+                    }) => variants
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| {
+                            signatures
+                                .instantiate_enum_fields_generic(
+                                    *definition,
+                                    arguments,
+                                    index as u32,
+                                )
+                                .ok()
+                                .map(|fields| {
+                                    fields.into_iter().map(|field| field.ty).collect::<Vec<_>>()
+                                })
+                        })
+                        .collect::<Option<Vec<_>>>(),
+                    _ => None,
+                }
+                // The older general layout query exposes only type-valued
+                // substitutions. Copy descriptors must also cover nominals
+                // whose identity is parameterized by lifetimes, effects, or
+                // structural constants, so fall back to the frozen raw
+                // layout with the complete generic-argument substitution.
+                .or_else(|| {
+                    signatures.definitions.get(definition).and_then(|header| {
+                        let ElaboratedHeader::Nominal { layout, .. } = header else {
+                            return None;
+                        };
+                        instantiate_nominal_copy_layout(layout, arguments)
+                    })
+                });
+                let Some(variants) = variants else {
+                    return;
+                };
+                self.building_nominal_copy_descriptors.push(key);
+                for variant in &variants {
+                    for field in variant {
+                        self.register_nominal_copy_descriptors(field);
+                    }
+                }
+                self.building_nominal_copy_descriptors.pop();
+                self.nominal_copy_descriptors
+                    .push(MirNominalCopyDescriptor {
+                        definition: *definition,
+                        arguments: arguments.clone(),
+                        variants,
+                    });
+            }
+            _ => {}
+        }
+    }
     fn statement(&mut self, id: CoreId) -> Option<()> {
         self.value(id).map(|_| ())
+    }
+    /// Feed an affine local directly into an operation that consumes or
+    /// reborrows its capability. Materializing an ordinary `Copy` first would
+    /// defeat the sealed duplicability proof.
+    fn capability_value(&mut self, id: CoreId) -> Option<MirLocal> {
+        if !mir_type_is_duplicable(&self.body.expression(id).ty, &self.nominal_copy_descriptors)
+            && let CoreKind::Local(name) = &self.body.expression(id).kind
+            && let Some(local) = self.named.get(name)
+        {
+            return Some(*local);
+        }
+        self.value(id)
+    }
+    /// Read a stable aggregate place for a projection without materializing a
+    /// whole-value copy. The projection instruction itself carries the field
+    /// path, so copying the containing nominal value would be both redundant
+    /// and invalid when another field is affine.
+    fn place_value(&mut self, id: CoreId) -> Option<MirLocal> {
+        if let CoreKind::Local(name) = &self.body.expression(id).kind
+            && let Some(local) = self.named.get(name)
+        {
+            return Some(*local);
+        }
+        self.value(id)
+    }
+    fn copy_or_move(&mut self, dst: MirLocal, src: MirLocal) {
+        if mir_type_is_duplicable(
+            &self.locals[src.0 as usize].ty,
+            &self.nominal_copy_descriptors,
+        ) {
+            self.instructions.push(MirInstruction::Copy { dst, src });
+        } else {
+            self.instructions.push(MirInstruction::Move { dst, src });
+        }
     }
     /// Resolve a Typed Core value place to its stable runtime root and field
     /// path.  This refuses computed values: a borrow may never be lowered as
@@ -12384,7 +12806,7 @@ impl Lowerer<'_> {
                 Some(dst)
             }
             crate::CorePlace::Deref { reference, .. } => {
-                let reference = self.value(*reference)?;
+                let reference = self.capability_value(*reference)?;
                 let dst = self.alloc(place.ty(), CoreId(u32::MAX));
                 self.instructions
                     .push(MirInstruction::DerefCopy { dst, reference });
@@ -12432,7 +12854,7 @@ impl Lowerer<'_> {
                     self.error("G6010", "MIR store through shared reference");
                     return None;
                 }
-                let reference = self.value(*reference)?;
+                let reference = self.capability_value(*reference)?;
                 self.instructions.push(MirInstruction::DerefStore {
                     reference,
                     src: value,
@@ -12523,9 +12945,12 @@ impl Lowerer<'_> {
         let mut child = Lowerer {
             body: self.body,
             bodies: self.bodies,
+            signatures: self.signatures,
             owner: self.owner,
             definition,
             locals: vec![],
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
             named: BTreeMap::new(),
             lifted: BTreeMap::new(),
@@ -12559,6 +12984,7 @@ impl Lowerer<'_> {
             return None;
         }
         let function = MirFunction {
+            nominal_copy_descriptors: child.nominal_copy_descriptors,
             definition,
             captures: captures.len() as u32,
             parameters: lifted_parameters,

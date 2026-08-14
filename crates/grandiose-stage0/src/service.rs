@@ -1466,7 +1466,13 @@ impl StageZeroCompiler {
             if !valid {
                 continue;
             }
-            let lowered = MirLowering::lower_with_bodies(definition, &core, &flow, &typed_bodies);
+            let lowered = MirLowering::lower_with_bodies_and_signatures(
+                definition,
+                &core,
+                &flow,
+                &typed_bodies,
+                Some(&signatures),
+            );
             diagnostics.extend(lowered.diagnostics.into_iter().map(|diagnostic| {
                 CompileDiagnostic::invariant(diagnostic.code, diagnostic.message)
             }));
@@ -1696,6 +1702,7 @@ fn materialize_concrete_instances(
         let mut specialized = base;
         specialized.definition = executable;
         specialize_mir_local_types(&mut specialized, key.arguments());
+        register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
         targets.insert(key.clone(), executable);
         instances.insert(executable, MirInstance { key, executable });
         functions.insert(executable, specialized);
@@ -1852,6 +1859,19 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
         local.ty = specialize_type(&local.ty, arguments);
     }
     function.result = specialize_type(&function.result, arguments);
+    for descriptor in &mut function.nominal_copy_descriptors {
+        descriptor.arguments = descriptor
+            .arguments
+            .iter()
+            .map(|argument| specialize_generic_argument(argument, arguments))
+            .collect();
+        for variant in &mut descriptor.variants {
+            *variant = variant
+                .iter()
+                .map(|field| specialize_type(field, arguments))
+                .collect();
+        }
+    }
     for block in &mut function.blocks {
         for instruction in &mut block.instructions {
             match instruction {
@@ -1942,6 +1962,116 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
                     .collect();
             }
         }
+    }
+}
+
+/// A template can contain a `T` local whose concrete nominal layout becomes
+/// knowable only while materializing an instance. Re-freeze that layout before
+/// the specialized MIR reaches VM emission.
+fn register_specialized_nominal_copy_descriptors(
+    function: &mut MirFunction,
+    signatures: &ElaboratedInterface,
+) {
+    let roots = function
+        .locals
+        .iter()
+        .map(|local| local.ty.clone())
+        .chain(std::iter::once(function.result.clone()))
+        .collect::<Vec<_>>();
+    let mut building = vec![];
+    for root in roots {
+        register_specialized_nominal_copy_type(&root, function, signatures, &mut building);
+    }
+}
+
+fn register_specialized_nominal_copy_type(
+    value: &Type,
+    function: &mut MirFunction,
+    signatures: &ElaboratedInterface,
+    building: &mut Vec<(DefKey, Vec<GenericArgument>)>,
+) {
+    match value {
+        Type::Tuple(fields) => {
+            for field in fields {
+                register_specialized_nominal_copy_type(field, function, signatures, building);
+            }
+        }
+        Type::Array(element) => {
+            register_specialized_nominal_copy_type(element, function, signatures, building)
+        }
+        Type::Callable {
+            parameters, result, ..
+        } => {
+            for parameter in parameters {
+                register_specialized_nominal_copy_type(parameter, function, signatures, building);
+            }
+            register_specialized_nominal_copy_type(result, function, signatures, building);
+        }
+        Type::Nominal {
+            definition,
+            arguments,
+        } => {
+            let key = (*definition, arguments.clone());
+            if function.nominal_copy_descriptors.iter().any(|descriptor| {
+                descriptor.definition == *definition && descriptor.arguments == *arguments
+            }) || building.contains(&key)
+            {
+                return;
+            }
+            let variants = match signatures.definitions.get(definition) {
+                Some(ElaboratedHeader::Nominal {
+                    layout: crate::signature::ElaboratedNominalLayout::Struct(_),
+                    ..
+                }) => signatures
+                    .instantiate_struct_fields_generic(*definition, arguments)
+                    .ok()
+                    .map(|fields| vec![fields.into_iter().map(|field| field.ty).collect()]),
+                Some(ElaboratedHeader::Nominal {
+                    layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
+                    ..
+                }) => variants
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        signatures
+                            .instantiate_enum_fields_generic(*definition, arguments, index as u32)
+                            .ok()
+                            .map(|fields| {
+                                fields.into_iter().map(|field| field.ty).collect::<Vec<_>>()
+                            })
+                    })
+                    .collect::<Option<Vec<_>>>(),
+                _ => None,
+            };
+            let Some(variants) = variants else {
+                return;
+            };
+            building.push(key);
+            for variant in &variants {
+                for field in variant {
+                    register_specialized_nominal_copy_type(field, function, signatures, building);
+                }
+            }
+            building.pop();
+            function
+                .nominal_copy_descriptors
+                .push(crate::MirNominalCopyDescriptor {
+                    definition: *definition,
+                    arguments: arguments.clone(),
+                    variants,
+                });
+        }
+        Type::Reference { .. }
+        | Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Projection { .. }
+        | Type::Generic(_)
+        | Type::Infer(_)
+        | Type::Error => {}
     }
 }
 
@@ -2534,6 +2664,7 @@ mod tests {
             invocation: Quantity::ONCE,
         };
         let mut function = MirFunction {
+            nominal_copy_descriptors: vec![],
             definition: key("specialize-frozen-mir-witnesses"),
             captures: 0,
             parameters: vec![],

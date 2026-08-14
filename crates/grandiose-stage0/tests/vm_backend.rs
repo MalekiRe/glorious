@@ -6,9 +6,9 @@ use grandiose_stage0::{
     MirTerminator, PackageKey, PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture,
     VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof,
     VmContinuationPolicy, VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument,
-    VmInstruction, VmPattern, VmPatternField, VmType, decode_and_verify_artifact,
-    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
-    encode_artifact, encode_program, verify_vm, verify_vm_program,
+    VmInstruction, VmNominalCopyDescriptor, VmPattern, VmPatternField, VmType,
+    decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
+    emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -23,6 +23,7 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
         Box::new(StructuralU32Expr::Param(0)),
     );
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-symbolic-const-caller")),
         captures: 0,
         parameters: vec![],
@@ -105,6 +106,7 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
     use grandiose_stage0::StructuralU32Expr;
 
     let function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-forged-symbolic-const")),
         captures: 0,
         parameters: 0,
@@ -143,6 +145,7 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
         Box::new(StructuralU32Expr::Literal(0)),
     );
     let function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-forged-invalid-symbolic-const")),
         captures: 0,
         parameters: 0,
@@ -174,6 +177,7 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
     ));
 
     let function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-top-level-const-register")),
         captures: 0,
         parameters: 0,
@@ -208,6 +212,7 @@ struct LeaveFixtureOffsets {
 fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
     let effect = DefKey(Digest::of_bytes(b"vm-non-type-effect"));
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-non-type-effect-caller")),
         captures: 0,
         parameters: vec![],
@@ -289,6 +294,7 @@ fn vm_rejects_higher_ranked_lifetime_leaks_in_nested_effect_identity_metadata() 
         tail: None,
     })];
     let function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -342,6 +348,7 @@ fn vm_rejects_higher_ranked_lifetime_leaks_in_nested_effect_identity_metadata() 
 fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() {
     let entry = DefKey(Digest::of_bytes(b"host-capability-entry"));
     let function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -426,6 +433,7 @@ fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
     let entry = DefKey(Digest::of_bytes(b"reachable-host-capability-entry"));
     let unused = DefKey(Digest::of_bytes(b"unreachable-host-capability-helper"));
     let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -436,6 +444,7 @@ fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
         ],
     };
     let unused_host_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: unused,
         captures: 0,
         parameters: 0,
@@ -482,6 +491,7 @@ fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
             (
                 caller,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: caller,
                     captures: 0,
                     parameters: 0,
@@ -517,6 +527,7 @@ fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
             (
                 callee,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: callee,
                     captures: 0,
                     parameters: 1,
@@ -573,6 +584,7 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
             (
                 outer,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: outer,
                     captures: 0,
                     parameters: 0,
@@ -609,6 +621,7 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
             (
                 middle,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: middle,
                     captures: 0,
                     parameters: 1,
@@ -638,6 +651,7 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
             (
                 leaf,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: leaf,
                     captures: 0,
                     parameters: 1,
@@ -676,6 +690,7 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
             (
                 caller,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: caller,
                     captures: 0,
                     parameters: 0,
@@ -725,6 +740,7 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
             (
                 callee,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: callee,
                     captures: 0,
                     parameters: 1,
@@ -760,6 +776,7 @@ fn verifier_rejects_an_unrestored_handler_across_a_replay_return() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"replay-return-frame-proof")),
             captures: 0,
             parameters: 0,
@@ -881,6 +898,7 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-effect-argument-round-trip")),
             captures: 0,
             parameters: 0,
@@ -905,7 +923,9 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
     // This fixture has one I64 register and a leading `Perform`; its first
     // argument tag is therefore fixed. An unknown tag must fail decoding
     // before the candidate reaches artifact verification.
-    let generic_argument_tag = 53 + 32 + 8 + 8 + 1 + 8 + 1 + 4 + 32 + 8;
+    // Schema 38 inserts the canonical nominal-copy descriptor count between
+    // registers and the instruction stream (zero descriptors here).
+    let generic_argument_tag = 53 + 32 + 8 + 8 + 8 + 1 + 8 + 1 + 4 + 32 + 8;
     assert_eq!(encoded[generic_argument_tag], 0);
     let mut hostile = encoded.clone();
     hostile[generic_argument_tag] = u8::MAX;
@@ -953,6 +973,7 @@ fn vm_decoder_rejects_noncanonical_effect_row_instances() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"effect-row-order-caller")),
             captures: 0,
             parameters: 0,
@@ -1000,8 +1021,9 @@ fn vm_decoder_rejects_noncanonical_effect_row_instances() {
 fn leave_fixture_offsets(bytes: &[u8]) -> LeaveFixtureOffsets {
     // Envelope: magic (8), schema (4), fingerprint (32), no manifest (1),
     // payload size (8). Function: definition (32), captures/parameters (8),
-    // two I64 register types (10), instruction count (8), ConstI64 (13).
-    let leave_opcode = 53 + 32 + 8 + 10 + 8 + 13;
+    // two I64 register types (10), descriptor count (8), instruction count
+    // (8), ConstI64 (13).
+    let leave_opcode = 53 + 32 + 8 + 10 + 8 + 8 + 13;
     assert_eq!(bytes[leave_opcode], 55, "fixture no longer encodes Leave");
     let brand_owner = leave_opcode + 1;
     let target = brand_owner + 32 + 4;
@@ -1041,6 +1063,7 @@ fn encoded_leave_fixture() -> Vec<u8> {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"hostile-leave-fixture")),
             captures: 0,
             parameters: 0,
@@ -1081,6 +1104,7 @@ fn encoded_leave_fixture() -> Vec<u8> {
 fn cleanup_carrying_leave_entry(definition: DefKey, first: VmInstruction) -> VmFunction {
     VmFunction {
         definition,
+        nominal_copy_descriptors: vec![],
         captures: 0,
         parameters: 0,
         registers: vec![VmType::I64, VmType::I64],
@@ -1135,6 +1159,7 @@ fn make_leave_cleanup_noncanonical(function: &mut VmFunction) {
 fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
     VmFunction {
         definition,
+        nominal_copy_descriptors: vec![],
         captures: 0,
         parameters: 0,
         registers: vec![VmType::Bool, VmType::I64],
@@ -1171,6 +1196,7 @@ fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
 fn aggregate_allocation_fixture(definition: DefKey) -> VmFunction {
     VmFunction {
         definition,
+        nominal_copy_descriptors: vec![],
         captures: 0,
         parameters: 0,
         registers: vec![
@@ -1194,6 +1220,7 @@ fn aggregate_allocation_fixture(definition: DefKey) -> VmFunction {
 fn handler_payload_allocation_fixture(definition: DefKey) -> VmFunction {
     VmFunction {
         definition,
+        nominal_copy_descriptors: vec![],
         captures: 0,
         parameters: 0,
         registers: vec![VmType::I64, VmType::I64, VmType::I64],
@@ -1362,6 +1389,7 @@ fn schema_26_leave_payload_mutations_reject_before_vm_execution() {
 fn program_envelope_rejects_truncation_and_function_count_amplification_before_allocation() {
     let entry = DefKey(Digest::of_bytes(b"program-decode-limit-entry"));
     let function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -1438,6 +1466,7 @@ fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
         },
     );
     let helper_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: helper,
         captures: 0,
         parameters: 0,
@@ -1572,6 +1601,7 @@ fn program_call_depth_limit_classifies_recursive_execution() {
     let definition = DefKey(Digest::of_bytes(b"recursive-call-depth"));
     let recursive = VmFunction {
         definition,
+        nominal_copy_descriptors: vec![],
         captures: 0,
         parameters: 0,
         registers: vec![VmType::I64],
@@ -1814,6 +1844,7 @@ fn verified_vm_round_trips_and_executes_typed_tuple_values() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"tuple-value")),
             captures: 0,
             parameters: 0,
@@ -1852,6 +1883,7 @@ fn structural_pattern_tests_round_trip_through_the_independent_vm_decoder() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"pattern-test")),
             captures: 0,
             parameters: 0,
@@ -1885,6 +1917,7 @@ fn vm_scalar_pattern_literals_share_the_lexer_escape_contract() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-escaped-text-pattern")),
             captures: 0,
             parameters: 0,
@@ -1911,6 +1944,7 @@ fn vm_scalar_pattern_literals_share_the_lexer_escape_contract() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-malformed-text-pattern")),
             captures: 0,
             parameters: 0,
@@ -1946,6 +1980,7 @@ fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-pattern-arity-function")),
             captures: 0,
             parameters: 0,
@@ -2004,6 +2039,7 @@ fn vm_decoder_verifier_rejects_nominal_pattern_field_type_forgery() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-pattern-layout-function")),
             captures: 0,
             parameters: 0,
@@ -2062,6 +2098,7 @@ fn vm_decoder_verifier_rejects_forged_array_pattern_element_metadata() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-array-pattern-forgery")),
             captures: 0,
             parameters: 0,
@@ -2110,6 +2147,7 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"effect-test")),
             captures: 0,
             parameters: 0,
@@ -2147,6 +2185,7 @@ fn verified_vm_executes_a_deep_one_shot_handler_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"handler-frame")),
             captures: 0,
             parameters: 0,
@@ -2215,6 +2254,7 @@ fn handlers_match_the_exact_non_type_effect_instance() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"exact-non-type-handler-caller")),
             captures: 0,
             parameters: 0,
@@ -2268,6 +2308,7 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
     let definition = DefKey(Digest::of_bytes(b"replay-handler-frame"));
     let function = VmFunction {
         definition,
+        nominal_copy_descriptors: vec![],
         captures: 0,
         parameters: 0,
         registers: vec![VmType::I64; 10],
@@ -2383,6 +2424,7 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"explicit-snapshot")),
             captures: 0,
             parameters: 0,
@@ -2433,6 +2475,7 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"orphan-snapshot")),
             captures: 0,
             parameters: 0,
@@ -2465,6 +2508,7 @@ fn verifier_rejects_snapshot_capture_from_a_terminal_handler_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"terminal-capture-candidate")),
             captures: 0,
             parameters: 0,
@@ -2508,6 +2552,7 @@ fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-snapshot")),
             captures: 0,
             // Register zero is a well-typed ordinary callable. It must not
@@ -2563,6 +2608,7 @@ fn resumed_handler_frame_reinstalls_for_the_next_matching_operation() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"deep-handler-frame")),
             captures: 0,
             parameters: 0,
@@ -2622,6 +2668,7 @@ fn nested_partial_handler_forwards_to_an_outer_frame_and_restores_it_on_resume()
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"nested-forwarding")),
             captures: 0,
             parameters: 0,
@@ -2691,6 +2738,7 @@ fn verifier_rejects_a_forged_nested_arm_that_skips_the_inner_continuation() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-nested-arm-resume")),
             captures: 0,
             parameters: 0,
@@ -2745,6 +2793,7 @@ fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame()
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"declined-handler-pattern")),
             captures: 0,
             parameters: 0,
@@ -2827,6 +2876,7 @@ fn cancelled_handler_continuation_abandons_its_snapshot_and_returns_clause_value
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cancelled-handler")),
             captures: 0,
             parameters: 0,
@@ -2883,6 +2933,7 @@ fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cancelled-snapshot-alias")),
             captures: 0,
             parameters: 0,
@@ -2951,6 +3002,7 @@ fn verifier_allows_checked_store_reinitialization_but_rejects_type_confusion() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"store-value")),
             captures: 0,
             parameters: 0,
@@ -2993,6 +3045,7 @@ fn verified_vm_round_trips_arrays_and_rejects_type_confused_elements() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"array-value")),
             captures: 0,
             parameters: 0,
@@ -3045,6 +3098,7 @@ fn verified_vm_round_trips_and_executes_typed_nominal_records() {
         runtime_manifest: None,
         function: VmFunction {
             definition,
+            nominal_copy_descriptors: vec![],
             captures: 0,
             parameters: 0,
             registers: vec![
@@ -3089,6 +3143,7 @@ fn verifier_round_trips_record_projection_and_rejects_out_of_bounds_indices() {
         runtime_manifest: None,
         function: VmFunction {
             definition,
+            nominal_copy_descriptors: vec![],
             captures: 0,
             parameters: 0,
             registers: vec![
@@ -3152,6 +3207,7 @@ fn verifier_rejects_malformed_candidate_artifacts_before_execution() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: Some(Digest::of_bytes(b"trusted-runtime-manifest")),
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"bad")),
             captures: 0,
             parameters: 0,
@@ -3173,6 +3229,7 @@ fn standalone_artifact_verifier_rejects_unbound_entry_parameters() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"parameterized-artifact")),
             captures: 0,
             parameters: 1,
@@ -3198,6 +3255,7 @@ fn verifier_rejects_type_confused_constants_before_execution() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"bad-type")),
             captures: 0,
             parameters: 0,
@@ -3226,6 +3284,7 @@ fn vm_rejects_payload_distinct_nan_constants_at_candidate_and_decode_boundaries(
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-vm-nan-payload")),
             captures: 0,
             parameters: 0,
@@ -3261,6 +3320,7 @@ fn verifier_rejects_candidates_with_stale_schema_or_fingerprint() {
         schema: 1,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"schema")),
             captures: 0,
             parameters: 0,
@@ -3280,6 +3340,7 @@ fn verifier_rejects_candidates_with_stale_schema_or_fingerprint() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"fingerprint")),
             captures: 0,
             parameters: 0,
@@ -3349,6 +3410,7 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
     let closure = DefKey(Digest::of_bytes(b"lifted-closure"));
     let entry = DefKey(Digest::of_bytes(b"callable-entry"));
     let closure_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: closure,
         captures: 0,
         parameters: 0,
@@ -3359,6 +3421,7 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
         ],
     };
     let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -3428,6 +3491,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         }],
     };
     let closure = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: callable,
         captures: 1,
         parameters: 1,
@@ -3435,6 +3499,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         instructions: vec![VmInstruction::Return { value: 0 }],
     };
     let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -3566,6 +3631,7 @@ fn callable_type_decoder_limits_recursive_hostile_encodings() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"deep-callable-type")),
             captures: 0,
             parameters: 0,
@@ -3608,6 +3674,7 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"callable-effect-artifact")),
             captures: 0,
             parameters: 0,
@@ -3651,6 +3718,7 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
             (
                 entry,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: entry,
                     captures: 0,
                     parameters: 1,
@@ -3668,6 +3736,7 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
             (
                 target,
                 VmFunction {
+                    nominal_copy_descriptors: vec![],
                     definition: target,
                     captures: 0,
                     parameters: 1,
@@ -3720,6 +3789,7 @@ fn verifier_rejects_noncanonical_callable_effect_rows() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"noncanonical-callable-effect-row")),
             captures: 0,
             parameters: 0,
@@ -3748,6 +3818,7 @@ fn verifier_rejects_noncanonical_callable_effect_rows() {
 fn vm_executes_verified_multiblock_mir_boolean_control_flow() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let mir = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-branch")),
         captures: 0,
         parameters: vec![],
@@ -3820,6 +3891,7 @@ fn vm_lowers_typed_cfg_edge_arguments_through_parallel_copies() {
         source: CoreId(u32::MAX),
     };
     let mir = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-edge-arguments")),
         captures: 0,
         parameters: vec![],
@@ -3882,6 +3954,7 @@ fn vm_lowers_typed_cfg_edge_arguments_through_parallel_copies() {
 fn vm_omits_identity_cfg_edge_transfers() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let mir = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-identity-edge")),
         captures: 0,
         parameters: vec![],
@@ -3928,6 +4001,7 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let owner = DefKey(Digest::of_bytes(b"mir-leave-owner"));
     let mir = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cleanup-leave")),
         captures: 0,
         parameters: vec![],
@@ -3995,6 +4069,7 @@ fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
     let owner = DefKey(Digest::of_bytes(b"forged-vm-label-contract-owner"));
     let function = VmFunction {
         definition,
+        nominal_copy_descriptors: vec![],
         captures: 0,
         parameters: 0,
         registers: vec![VmType::Bool, VmType::I64, VmType::I64, VmType::I64],
@@ -4070,6 +4145,7 @@ fn verifier_rejects_branch_targets_outside_the_instruction_stream() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"invalid-branch-target")),
             captures: 0,
             parameters: 0,
@@ -4102,6 +4178,7 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"branch-into-handler-clause")),
             captures: 0,
             parameters: 0,
@@ -4141,6 +4218,7 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"fallthrough-into-handler-clause")),
             captures: 0,
             parameters: 0,
@@ -4175,6 +4253,7 @@ fn vm_emits_and_executes_the_checked_mir_unreachable_terminal_as_a_trap() {
         source: CoreId(u32::MAX),
     };
     let mir = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-trap-terminal")),
         captures: 0,
         parameters: vec![],
@@ -4229,6 +4308,7 @@ fn program_verifier_rejects_inconsistent_generic_call_bindings() {
     let generic = DefKey(Digest::of_bytes(b"generic-pair"));
     let entry = DefKey(Digest::of_bytes(b"generic-call-entry"));
     let generic_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: generic,
         captures: 0,
         parameters: 2,
@@ -4239,6 +4319,7 @@ fn program_verifier_rejects_inconsistent_generic_call_bindings() {
         ],
     };
     let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -4278,6 +4359,7 @@ fn generic_vm_programs_round_trip_and_execute_after_call_instantiation() {
     let generic = DefKey(Digest::of_bytes(b"generic-identity"));
     let entry = DefKey(Digest::of_bytes(b"generic-identity-entry"));
     let generic_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: generic,
         captures: 0,
         parameters: 1,
@@ -4288,6 +4370,7 @@ fn generic_vm_programs_round_trip_and_execute_after_call_instantiation() {
         ],
     };
     let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
@@ -4323,6 +4406,7 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"unique-reference-store")),
             captures: 0,
             parameters: 0,
@@ -4371,11 +4455,73 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
 }
 
 #[test]
+fn verifier_rejects_copying_a_nominal_carrier_of_a_unique_reference() {
+    let definition = DefKey(Digest::of_bytes(b"affine-nominal-copy"));
+    let unique_i64 = VmType::Reference {
+        unique: true,
+        referent: Box::new(VmType::I64),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition,
+            nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                definition,
+                arguments: vec![],
+                variants: vec![vec![unique_i64.clone()]],
+            }],
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                unique_i64.clone(),
+                VmType::Nominal {
+                    definition,
+                    arguments: vec![],
+                },
+                VmType::Nominal {
+                    definition,
+                    arguments: vec![],
+                },
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                VmInstruction::MakeRecord {
+                    dst: 2,
+                    definition,
+                    fields: vec![1],
+                    field_types: vec![unique_i64],
+                },
+                VmInstruction::Copy { dst: 3, src: 2 },
+                VmInstruction::Return { value: 2 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"affine-nominal-copy-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::AffineValueCopy { register: 2 })
+    ));
+}
+
+#[test]
 fn verifier_rejects_forged_reborrow_capability_and_whole_place_referent() {
     let mut shared_to_unique = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-shared-to-unique-reborrow")),
             captures: 0,
             parameters: 0,
@@ -4421,6 +4567,7 @@ fn verifier_rejects_forged_reborrow_capability_and_whole_place_referent() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-whole-borrow-referent")),
             captures: 0,
             parameters: 0,
@@ -4460,6 +4607,7 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cleanup-carrying-leave")),
             captures: 0,
             parameters: 0,
@@ -4591,6 +4739,7 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"leave-reject-canonical")),
             captures: 0,
             parameters: 0,
@@ -4632,6 +4781,7 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"leave-reject-clause")),
             captures: 0,
             parameters: 0,
@@ -4678,6 +4828,7 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
             schema: grandiose_stage0::STAGE0_VM_SCHEMA,
             runtime_manifest: None,
             function: VmFunction {
+                nominal_copy_descriptors: vec![],
                 definition: DefKey(Digest::of_bytes(b"leave-cleanup-overlap")),
                 captures: 0,
                 parameters: 0,
@@ -4738,6 +4889,7 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
     let effect = DefKey(Digest::of_bytes(b"leave-clause-effect"));
     let owner = DefKey(Digest::of_bytes(b"leave-clause-owner"));
     let function = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"leave-clause")),
         captures: 0,
         parameters: 0,
@@ -4805,6 +4957,7 @@ fn cleanup_leave_program_artifacts_are_insertion_order_deterministic() {
     let helper = DefKey(Digest::of_bytes(b"deterministic-leave-helper"));
     let leave = cleanup_carrying_leave_entry(entry, VmInstruction::ConstI64 { dst: 0, value: 42 });
     let helper = VmFunction {
+        nominal_copy_descriptors: vec![],
         definition: helper,
         captures: 0,
         parameters: 0,

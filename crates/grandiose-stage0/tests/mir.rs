@@ -20,6 +20,7 @@ fn local(ty: Type) -> MirLocalDecl {
 #[test]
 fn mir_rejects_a_forged_nonfinite_replay_budget() {
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-replay-budget")),
         captures: 0,
         parameters: vec![],
@@ -54,6 +55,7 @@ fn mir_rejects_a_forged_nonfinite_replay_budget() {
 fn mir_rejects_one_label_brand_with_contradictory_destinations() {
     let owner = DefKey(Digest::of_bytes(b"forged-mir-label-contract-owner"));
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-label-contract")),
         captures: 0,
         parameters: vec![],
@@ -136,6 +138,7 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
 #[test]
 fn mir_rejects_a_forged_payload_distinct_nan_constant() {
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-nan-payload")),
         captures: 0,
         parameters: vec![],
@@ -161,6 +164,7 @@ fn mir_rejects_a_forged_payload_distinct_nan_constant() {
 #[test]
 fn mir_rejects_a_literal_pattern_that_violates_the_lossless_lexer_contract() {
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-malformed-text-pattern")),
         captures: 0,
         parameters: vec![],
@@ -196,6 +200,7 @@ fn mir_rejects_a_literal_pattern_that_violates_the_lossless_lexer_contract() {
 #[test]
 fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
     let leave = |cleanup| MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-cleanup")),
         captures: 0,
         parameters: vec![],
@@ -263,6 +268,7 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
 
 fn graph() -> MirFunction {
     MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cfg")),
         captures: 0,
         parameters: vec![],
@@ -325,6 +331,7 @@ fn mir_validation_rejects_unresolved_associated_const_projection_identity() {
         }],
     };
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-associated-const-function")),
         captures: 0,
         parameters: vec![],
@@ -355,6 +362,7 @@ fn mir_validation_rejects_nominal_pattern_fields_outside_frozen_arity() {
         arguments: vec![],
     };
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-pattern-arity-function")),
         captures: 0,
         parameters: vec![],
@@ -397,6 +405,7 @@ fn mir_validation_rejects_nominal_pattern_field_type_forgery() {
         arguments: vec![],
     };
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-pattern-layout-function")),
         captures: 0,
         parameters: vec![],
@@ -446,6 +455,7 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
         referent: Box::new(i64.clone()),
     };
     let forged_capability = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-shared-to-unique-reborrow")),
         captures: 0,
         parameters: vec![],
@@ -485,6 +495,7 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
     );
 
     let forged_referent = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-whole-borrow-referent")),
         captures: 0,
         parameters: vec![],
@@ -528,6 +539,7 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
 fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
     let array = Type::Array(Box::new(Type::Scalar(ScalarType::I64)));
     let pattern = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-array-pattern-forgery")),
         captures: 0,
         parameters: vec![],
@@ -554,6 +566,7 @@ fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
     );
 
     let projection = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-array-projection-forgery")),
         captures: 0,
         parameters: vec![],
@@ -582,6 +595,7 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
     let outer = DefKey(Digest::of_bytes(b"forged-mir-nested-outer"));
     let inner = DefKey(Digest::of_bytes(b"forged-mir-nested-inner"));
     let forged = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-nested-resume")),
         captures: 0,
         parameters: vec![],
@@ -1143,6 +1157,7 @@ fn optimizer_folds_checked_scalar_constants_and_eliminates_known_branches() {
 
     let i64_ty = Type::Scalar(ScalarType::I64);
     let arithmetic = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-optimizer")),
         captures: 0,
         parameters: vec![],
@@ -1186,6 +1201,7 @@ fn optimizer_folds_reflexive_integer_and_boolean_comparisons_without_constants()
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-reflexive-comparisons")),
         captures: 0,
         parameters: vec![MirLocal(0), MirLocal(1)],
@@ -1241,6 +1257,7 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
     let char_ty = Type::Scalar(ScalarType::Char);
     let text_ty = Type::Scalar(ScalarType::Text);
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-pattern-constants")),
         captures: 0,
         parameters: vec![],
@@ -1382,6 +1399,7 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
 fn optimizer_propagates_constants_through_typed_block_arguments() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cross-block-constants")),
         captures: 0,
         parameters: vec![],
@@ -1436,6 +1454,7 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-constant-join")),
         captures: 0,
         parameters: vec![MirLocal(0)],
@@ -1514,6 +1533,7 @@ fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-comparison-constants")),
         captures: 0,
         parameters: vec![],
@@ -1618,6 +1638,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         }],
     };
     let target = MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: callee,
         captures: 1,
         parameters: vec![MirLocal(0)],
@@ -1631,6 +1652,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         }],
     };
     let entry_function = |environment: Option<MirCaptureEnvironment>| MirFunction {
+        nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: vec![],

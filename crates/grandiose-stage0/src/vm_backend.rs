@@ -636,8 +636,17 @@ impl VmCleanupProof {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmNominalCopyDescriptor {
+    pub definition: DefKey,
+    pub arguments: Vec<VmType>,
+    pub variants: Vec<Vec<VmType>>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmFunction {
     pub definition: DefKey,
+    /// Sealed declaration-owned layouts for every nominal identity whose
+    /// value may be copied by this function.
+    pub nominal_copy_descriptors: Vec<VmNominalCopyDescriptor>,
     /// Captures occupy the prefix of `parameters` for a lifted closure body.
     pub captures: u32,
     pub parameters: u32,
@@ -710,6 +719,9 @@ pub enum VmArtifactError {
         register: u32,
     },
     UseAfterMove {
+        register: u32,
+    },
+    AffineValueCopy {
         register: u32,
     },
     NoReturn,
@@ -845,6 +857,9 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
+/// Schema 38 adds recursively validated nominal copy descriptors to each VM
+/// function. Earlier encodings lack the declaration-owned evidence required
+/// to distinguish a copyable record from one that carries a unique reference.
 /// Schema 32 adds sealed callable-environment brands, modes, and capture
 /// types to `MakeCallable` and the target-side program registry. Schema 33
 /// adds explicit Borrow carrier-versus-reborrow intent. Schema 34 carries
@@ -855,7 +870,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 37;
+pub const STAGE0_VM_SCHEMA: u32 = 38;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1396,6 +1411,11 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
         }
     }
     let function = VmFunction {
+        nominal_copy_descriptors: function
+            .nominal_copy_descriptors
+            .iter()
+            .map(vm_nominal_copy_descriptor)
+            .collect::<Result<Vec<_>, _>>()?,
         definition: function.definition,
         captures: function.captures,
         parameters: function.parameters.len() as u32,
@@ -1526,6 +1546,30 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
         ),
         functions,
         callable_environments,
+    })
+}
+fn vm_nominal_copy_descriptor(
+    descriptor: &crate::mir::MirNominalCopyDescriptor,
+) -> Result<VmNominalCopyDescriptor, VmArtifactError> {
+    Ok(VmNominalCopyDescriptor {
+        definition: descriptor.definition,
+        arguments: descriptor
+            .arguments
+            .iter()
+            .map(vm_nominal_argument)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|ty| VmArtifactError::UnsupportedType { local: 0, ty })?,
+        variants: descriptor
+            .variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .iter()
+                    .map(vm_type)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|ty| VmArtifactError::UnsupportedType { local: 0, ty })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
@@ -2059,6 +2103,21 @@ fn encode_function(function: &VmFunction, output: &mut Vec<u8>) {
     for register in &function.registers {
         encode_type(register, output);
     }
+    output.extend_from_slice(&(function.nominal_copy_descriptors.len() as u64).to_le_bytes());
+    for descriptor in &function.nominal_copy_descriptors {
+        output.extend_from_slice(&descriptor.definition.0.as_bytes());
+        output.extend_from_slice(&(descriptor.arguments.len() as u64).to_le_bytes());
+        for argument in &descriptor.arguments {
+            encode_type(argument, output);
+        }
+        output.extend_from_slice(&(descriptor.variants.len() as u64).to_le_bytes());
+        for variant in &descriptor.variants {
+            output.extend_from_slice(&(variant.len() as u64).to_le_bytes());
+            for field in variant {
+                encode_type(field, output);
+            }
+        }
+    }
     output.extend_from_slice(&(function.instructions.len() as u64).to_le_bytes());
     for instruction in &function.instructions {
         encode_instruction(instruction, output);
@@ -2575,12 +2634,41 @@ impl<'a> Decoder<'a> {
         for _ in 0..register_count {
             registers.push(self.vm_type()?);
         }
+        let descriptor_count = self.count("nominal copy descriptors", MAX_DECODE_REGISTERS)?;
+        let mut nominal_copy_descriptors = Vec::with_capacity(descriptor_count);
+        for _ in 0..descriptor_count {
+            let definition = self.def_key()?;
+            let argument_count =
+                self.count("nominal copy descriptor arguments", MAX_DECODE_REGISTERS)?;
+            let mut arguments = Vec::with_capacity(argument_count);
+            for _ in 0..argument_count {
+                arguments.push(self.vm_type()?);
+            }
+            let variant_count =
+                self.count("nominal copy descriptor variants", MAX_DECODE_REGISTERS)?;
+            let mut variants = Vec::with_capacity(variant_count);
+            for _ in 0..variant_count {
+                let field_count =
+                    self.count("nominal copy descriptor fields", MAX_DECODE_REGISTERS)?;
+                let mut fields = Vec::with_capacity(field_count);
+                for _ in 0..field_count {
+                    fields.push(self.vm_type()?);
+                }
+                variants.push(fields);
+            }
+            nominal_copy_descriptors.push(VmNominalCopyDescriptor {
+                definition,
+                arguments,
+                variants,
+            });
+        }
         let instruction_count = self.count("instructions", MAX_DECODE_INSTRUCTIONS)?;
         let mut instructions = Vec::with_capacity(instruction_count);
         for _ in 0..instruction_count {
             instructions.push(self.instruction()?);
         }
         Ok(VmFunction {
+            nominal_copy_descriptors,
             definition,
             captures,
             parameters,
@@ -4333,6 +4421,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     for register in &function.registers {
         validate_vm_type(register)?;
     }
+    validate_vm_nominal_copy_descriptors(&function.nominal_copy_descriptors)?;
     for instruction in &function.instructions {
         match instruction {
             VmInstruction::Perform {
@@ -5105,6 +5194,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::Copy { dst, src } => {
                 read(&states, *src)?;
+                if !vm_type_is_duplicable(
+                    &register_type(function, *src)?,
+                    &function.nominal_copy_descriptors,
+                ) {
+                    return Err(VmArtifactError::AffineValueCopy { register: *src });
+                }
                 same_type(function, *dst, *src)?;
                 write(&mut states, *dst)?;
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
@@ -5806,6 +5901,76 @@ fn register_type(function: &VmFunction, register: u32) -> Result<VmType, VmArtif
         .get(register as usize)
         .cloned()
         .ok_or(VmArtifactError::InvalidRegister { register })
+}
+fn validate_vm_nominal_copy_descriptors(
+    descriptors: &[VmNominalCopyDescriptor],
+) -> Result<(), VmArtifactError> {
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.variants.is_empty()
+            || descriptors[..index].iter().any(|previous| {
+                previous.definition == descriptor.definition
+                    && previous.arguments == descriptor.arguments
+            })
+        {
+            return Err(VmArtifactError::InvalidCallableEnvironment {
+                message: "invalid nominal copy descriptor",
+            });
+        }
+        for argument in &descriptor.arguments {
+            validate_vm_type(argument)?;
+        }
+        for variant in &descriptor.variants {
+            for field in variant {
+                validate_vm_type(field)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn vm_type_is_duplicable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -> bool {
+    fn visit(
+        ty: &VmType,
+        descriptors: &[VmNominalCopyDescriptor],
+        active: &mut Vec<(DefKey, Vec<VmType>)>,
+    ) -> bool {
+        match ty {
+            VmType::Reference { unique, .. } => !*unique,
+            VmType::Tuple(elements) => elements
+                .iter()
+                .all(|element| visit(element, descriptors, active)),
+            VmType::Array(element) => visit(element, descriptors, active),
+            VmType::Nominal {
+                definition,
+                arguments,
+            } => {
+                let key = (*definition, arguments.clone());
+                let Some(descriptor) = descriptors.iter().find(|candidate| {
+                    candidate.definition == *definition && candidate.arguments == *arguments
+                }) else {
+                    return false;
+                };
+                if active.contains(&key) {
+                    return false;
+                }
+                active.push(key);
+                let result = descriptor.variants.iter().all(|variant| {
+                    variant
+                        .iter()
+                        .all(|field| visit(field, descriptors, active))
+                });
+                active.pop();
+                result
+            }
+            // A generic function is verified again after each direct-call
+            // instantiation. Until then its binder has no concrete nominal
+            // layout to inspect, so leave the copy admissible here and let
+            // the specialized function close the proof.
+            VmType::Generic(_) => true,
+            VmType::Callable { .. } => true,
+            _ => true,
+        }
+    }
+    visit(ty, descriptors, &mut Vec::new())
 }
 fn expect_type(
     function: &VmFunction,

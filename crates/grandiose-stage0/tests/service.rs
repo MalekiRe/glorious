@@ -1141,6 +1141,25 @@ fn service_lowers_unique_borrow_deref_and_mutation_without_copying_the_place() {
 }
 
 #[test]
+fn affine_nominal_values_cannot_copy_an_embedded_unique_reference() {
+    let source = r#"
+        pub struct Holder { reference: &mut i64 }
+        pub fn main() -> i64 {
+            let value = 1;
+            let parent = &mut value;
+            let holder = Holder { reference: move parent };
+            let alias = holder;
+            *alias.reference = 42;
+            *holder.reference
+        }
+    "#;
+    assert!(
+        StageZeroCompiler::new().compile(request(source)).is_err(),
+        "copying a nominal carrier must not duplicate its unique reference"
+    );
+}
+
+#[test]
 fn shared_dereference_cannot_be_used_as_a_mutation_place() {
     let diagnostics = match StageZeroCompiler::new().compile(request(
         "pub fn main() -> i64 { let value = 1; let reference = &value; *reference = 42; value }",
