@@ -1197,6 +1197,12 @@ fn verify_artifact(
         }
         return Err(error);
     }
+    if let Err(error) = verify_function_code_layout(artifact) {
+        if timing_enabled || std::env::var_os("G1_VERIFY_TRACE").is_some() {
+            eprintln!("g1-verifier artifact stage function-code-layout: {error}");
+        }
+        return Err(error);
+    }
     if let Err(error) = verify_function_metadata(artifact) {
         if timing_enabled || std::env::var_os("G1_VERIFY_TRACE").is_some() {
             eprintln!("g1-verifier artifact stage function-metadata: {error}");
@@ -1295,6 +1301,38 @@ fn verify_artifact(
         );
     }
     Ok(cleanups)
+}
+
+/// Require every in-memory function to claim one contiguous, disjoint slice
+/// of the artifact instruction stream.
+///
+/// The wire decoder already reconstructs function bodies in this canonical
+/// order. `verify` also accepts compiler-assembled [`Artifact`] values,
+/// however, so it must enforce the same ownership boundary before analyses
+/// use function-local program counters or build execution layouts. In
+/// particular, accepting overlapping slices would let distinct functions
+/// attach incompatible cleanup and capture metadata to the same instruction.
+fn verify_function_code_layout(a: &Artifact) -> Result<(), VerifyError> {
+    let code_len =
+        u32::try_from(a.code.len()).map_err(|_| VerifyError::InvalidFunction(u32::MAX))?;
+    let mut next = 0u32;
+    for (id, function) in a.functions.iter().enumerate() {
+        let id = id as u32;
+        if function.code_start != next {
+            return Err(VerifyError::InvalidFunction(id));
+        }
+        next = function
+            .code_start
+            .checked_add(function.code_len)
+            .ok_or(VerifyError::InvalidFunction(id))?;
+        if next > code_len {
+            return Err(VerifyError::InvalidFunction(id));
+        }
+    }
+    if next != code_len {
+        return Err(VerifyError::InvalidFunction(u32::MAX));
+    }
+    Ok(())
 }
 
 fn verify_function_metadata(a: &Artifact) -> Result<(), VerifyError> {
@@ -18402,6 +18440,43 @@ mod tests {
         assert!(matches!(
             verify(unordered_names),
             Err(VerifyError::InvalidFunction(0))
+        ));
+    }
+
+    #[test]
+    fn direct_verification_enforces_canonical_function_code_ownership() {
+        let valid = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(1) },
+            ],
+            vec![UNIT, I64],
+        );
+
+        let mut overlapping = valid.clone();
+        overlapping.functions.push(overlapping.functions[0].clone());
+        assert!(matches!(
+            verify(overlapping),
+            Err(VerifyError::InvalidFunction(1))
+        ));
+
+        let mut gap_before_first_function = valid.clone();
+        gap_before_first_function.functions[0].code_start = 1;
+        assert!(matches!(
+            verify(gap_before_first_function),
+            Err(VerifyError::InvalidFunction(0))
+        ));
+
+        let mut unclaimed_trailing_instruction = valid;
+        unclaimed_trailing_instruction
+            .code
+            .push(Instruction::Unreachable);
+        assert!(matches!(
+            verify(unclaimed_trailing_instruction),
+            Err(VerifyError::InvalidFunction(u32::MAX))
         ));
     }
 
