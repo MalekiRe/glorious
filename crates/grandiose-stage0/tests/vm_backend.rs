@@ -12,6 +12,188 @@ use grandiose_stage0::{
 };
 use std::collections::BTreeMap;
 
+#[test]
+fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols() {
+    use grandiose_stage0::{ConstKind, Quantity, StructuralU32Expr};
+
+    let nominal = DefKey(Digest::of_bytes(b"vm-symbolic-const-nominal"));
+    let effect = DefKey(Digest::of_bytes(b"vm-symbolic-const-effect"));
+    let expression = StructuralU32Expr::Add(
+        Box::new(StructuralU32Expr::Literal(1)),
+        Box::new(StructuralU32Expr::Param(0)),
+    );
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"vm-symbolic-const-caller")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            MirLocalDecl {
+                ty: Type::Scalar(ScalarType::I64),
+                source: CoreId(u32::MAX),
+            },
+            MirLocalDecl {
+                ty: Type::Nominal {
+                    definition: nominal,
+                    arguments: vec![
+                        GenericArgument::ConstU32Expr(expression.clone()),
+                        GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
+                        GenericArgument::ConstGeneric {
+                            index: 3,
+                            kind: ConstKind::Quantity,
+                        },
+                    ],
+                },
+                source: CoreId(u32::MAX),
+            },
+        ],
+        result: Type::Scalar(ScalarType::I64),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![MirInstruction::Perform {
+                dst: MirLocal(0),
+                effect,
+                effect_arguments: vec![GenericArgument::ConstU32Expr(expression.clone())],
+                operation: 0,
+                arguments: vec![],
+            }],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+    let artifact = emit_vm(&function).expect("symbolic structural consts have a VM form");
+    assert!(matches!(
+        artifact.function.registers[1],
+        VmType::Nominal { ref arguments, .. }
+            if matches!(arguments.as_slice(), [
+                VmType::ConstU32Expr(found),
+                VmType::ConstQuantity { lower: 2, upper: Some(4) },
+                VmType::ConstGeneric { index: 3, kind: ConstKind::Quantity },
+            ] if *found == expression)
+    ));
+    assert!(matches!(
+        artifact.function.instructions.as_slice(),
+        [VmInstruction::Perform { effect_arguments, .. }, ..]
+            if effect_arguments == &[VmGenericArgument::ConstU32Expr(expression.clone())]
+    ));
+    let encoded = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
+    assert_eq!(
+        decode_and_verify_artifact(&encoded).unwrap().fingerprint(),
+        artifact.fingerprint
+    );
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry: artifact.function.definition,
+        functions: BTreeMap::from([(artifact.function.definition, artifact.function.clone())]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"vm-symbolic-const-program-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let encoded = encode_program(&program);
+    assert_eq!(decode_program(&encoded).unwrap(), program);
+    assert_eq!(
+        decode_and_verify_program(&encoded).unwrap().fingerprint(),
+        program.fingerprint
+    );
+}
+
+#[test]
+fn vm_rejects_forged_noncanonical_structural_const_identity() {
+    use grandiose_stage0::StructuralU32Expr;
+
+    let function = VmFunction {
+        definition: DefKey(Digest::of_bytes(b"vm-forged-symbolic-const")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            VmType::Nominal {
+                definition: DefKey(Digest::of_bytes(b"vm-forged-symbolic-const-nominal")),
+                // Addition is commutative and must be serialized in canonical
+                // order. A hostile candidate cannot make this alternate
+                // spelling observable through a separate layout fingerprint.
+                arguments: vec![VmType::ConstU32Expr(StructuralU32Expr::Add(
+                    Box::new(StructuralU32Expr::Param(0)),
+                    Box::new(StructuralU32Expr::Literal(1)),
+                ))],
+            },
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"vm-forged-symbolic-const-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::NonCanonicalEncoding)
+    ));
+
+    let invalid_expression = StructuralU32Expr::Div(
+        Box::new(StructuralU32Expr::Literal(1)),
+        Box::new(StructuralU32Expr::Literal(0)),
+    );
+    let function = VmFunction {
+        definition: DefKey(Digest::of_bytes(b"vm-forged-invalid-symbolic-const")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            VmType::Nominal {
+                definition: DefKey(Digest::of_bytes(
+                    b"vm-forged-invalid-symbolic-const-nominal",
+                )),
+                arguments: vec![VmType::ConstU32Expr(invalid_expression)],
+            },
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"vm-forged-invalid-symbolic-const-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::MalformedEncoding { message })
+            if message.contains("invalid structural u32 expression")
+    ));
+
+    let function = VmFunction {
+        definition: DefKey(Digest::of_bytes(b"vm-top-level-const-register")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::ConstU32(7)],
+        instructions: vec![VmInstruction::Trap],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"vm-top-level-const-register-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::MalformedEncoding { message })
+            if message.contains("metadata-only structural const")
+    ));
+}
+
 #[derive(Clone, Copy)]
 struct LeaveFixtureOffsets {
     brand_owner: usize,

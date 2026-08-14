@@ -19,7 +19,9 @@ use crate::{
         MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern, MirPatternField,
         MirProgram, MirTerminator, lifted_callable_definition,
     },
-    types::{ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, Type},
+    types::{
+        ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, StructuralU32Expr, Type,
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +35,19 @@ pub enum VmType {
     /// Binder-local type variable in a generic VM function. The program
     /// verifier instantiates it at each direct call before execution begins.
     Generic(u32),
+    /// A checked structural constant in a nominal layout.  Const kinds are
+    /// retained as VM types solely because nominal layout identity is typed;
+    /// they never become independently executable values.
+    ConstU32(u32),
+    ConstU32Expr(StructuralU32Expr),
+    ConstQuantity {
+        lower: u64,
+        upper: Option<u64>,
+    },
+    ConstGeneric {
+        index: u32,
+        kind: ConstKind,
+    },
     Array(Box<VmType>),
     Tuple(Vec<VmType>),
     Nominal {
@@ -85,8 +100,18 @@ pub enum VmGenericArgument {
     EffectRow(VmEffectRow),
     Lifetime(Lifetime),
     ConstU32(u32),
-    ConstQuantity { lower: u64, upper: Option<u64> },
-    ConstGeneric { index: u32, kind: ConstKind },
+    /// Symbolic arithmetic remains a frozen, canonical const identity until
+    /// the declaration binder is instantiated.  Do not replace it with an
+    /// error type: handlers select on this full protocol identity.
+    ConstU32Expr(StructuralU32Expr),
+    ConstQuantity {
+        lower: u64,
+        upper: Option<u64>,
+    },
+    ConstGeneric {
+        index: u32,
+        kind: ConstKind,
+    },
 }
 
 /// VM-owned structural representation of an effect-row generic argument.
@@ -805,8 +830,10 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// types to `MakeCallable` and the target-side program registry. Schema 33
 /// adds explicit Borrow carrier-versus-reborrow intent. Schema 34 carries
 /// exact finite replay budgets in `InstallHandler`; older payloads cannot be
-/// decoded safely with these independent boundary proofs.
-pub const STAGE0_VM_SCHEMA: u32 = 34;
+/// decoded safely with these independent boundary proofs. Schema 35 seals
+/// structural u32 expressions and all const kinds inside nominal layouts and
+/// effect protocol identities.
+pub const STAGE0_VM_SCHEMA: u32 = 35;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1488,6 +1515,15 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         Type::Scalar(ScalarType::Char) => Ok(VmType::Char),
         Type::Scalar(ScalarType::Text) => Ok(VmType::Text),
         Type::Generic(index) => Ok(VmType::Generic(*index)),
+        Type::ConstU32(value) => Ok(VmType::ConstU32(*value)),
+        Type::ConstQuantity(value) => Ok(VmType::ConstQuantity {
+            lower: value.lower,
+            upper: value.upper,
+        }),
+        Type::ConstGeneric { index, kind } => Ok(VmType::ConstGeneric {
+            index: *index,
+            kind: *kind,
+        }),
         Type::Array(element) => Ok(VmType::Array(Box::new(vm_type(element)?))),
         Type::Tuple(values) => Ok(VmType::Tuple(
             values.iter().map(vm_type).collect::<Result<Vec<_>, _>>()?,
@@ -1530,7 +1566,7 @@ fn vm_nominal_argument(value: &GenericArgument) -> Result<VmType, Box<Type>> {
     match value {
         GenericArgument::Type(value) => vm_type(value),
         GenericArgument::ConstU32(value) => vm_type(&Type::ConstU32(*value)),
-        GenericArgument::ConstU32Expr(_) => Err(Box::new(Type::Error)),
+        GenericArgument::ConstU32Expr(value) => Ok(VmType::ConstU32Expr(value.clone())),
         GenericArgument::ConstQuantity(value) => vm_type(&Type::ConstQuantity(*value)),
         GenericArgument::ConstGeneric { index, kind } => vm_type(&Type::ConstGeneric {
             index: *index,
@@ -1597,12 +1633,7 @@ fn vm_effect_argument(
         }
         GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
         GenericArgument::ConstU32(value) => VmGenericArgument::ConstU32(*value),
-        GenericArgument::ConstU32Expr(_) => {
-            return Err(VmArtifactError::UnsupportedEffectArgumentType {
-                effect,
-                ty: Box::new(Type::Error),
-            });
-        }
+        GenericArgument::ConstU32Expr(value) => VmGenericArgument::ConstU32Expr(value.clone()),
         GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
             lower: value.lower,
             upper: value.upper,
@@ -1633,6 +1664,10 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Tuple(_) => 7,
         VmType::Nominal { .. } => 8,
         VmType::Reference { .. } => 11,
+        VmType::ConstU32(_) => 12,
+        VmType::ConstU32Expr(_) => 13,
+        VmType::ConstQuantity { .. } => 14,
+        VmType::ConstGeneric { .. } => 15,
     });
     match value {
         VmType::Callable { parameters, result } => {
@@ -1659,12 +1694,83 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
             }
         }
         VmType::Generic(index) => output.extend_from_slice(&index.to_le_bytes()),
+        VmType::ConstU32(value) => output.extend_from_slice(&value.to_le_bytes()),
+        VmType::ConstU32Expr(value) => encode_vm_structural_u32_expr(value, output),
+        VmType::ConstQuantity { lower, upper } => {
+            output.extend_from_slice(&lower.to_le_bytes());
+            match upper {
+                Some(upper) => {
+                    output.push(0);
+                    output.extend_from_slice(&upper.to_le_bytes());
+                }
+                None => output.push(1),
+            }
+        }
+        VmType::ConstGeneric { index, kind } => {
+            output.extend_from_slice(&index.to_le_bytes());
+            output.push(encode_const_kind(*kind));
+        }
         VmType::Reference { unique, referent } => {
             output.push(*unique as u8);
             encode_type(referent, output);
         }
         VmType::Array(element) => encode_type(element, output),
         _ => {}
+    }
+}
+
+fn encode_const_kind(kind: ConstKind) -> u8 {
+    match kind {
+        ConstKind::U32 => 0,
+        ConstKind::Quantity => 1,
+    }
+}
+
+fn decode_const_kind(tag: u8) -> Result<ConstKind, VmArtifactError> {
+    match tag {
+        0 => Ok(ConstKind::U32),
+        1 => Ok(ConstKind::Quantity),
+        _ => Err(VmArtifactError::MalformedEncoding {
+            message: "invalid const generic kind",
+        }),
+    }
+}
+
+fn encode_vm_structural_u32_expr(value: &StructuralU32Expr, output: &mut Vec<u8>) {
+    match value {
+        StructuralU32Expr::Literal(value) => {
+            output.push(0);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        StructuralU32Expr::Param(value) => {
+            output.push(1);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        StructuralU32Expr::Add(left, right) => {
+            output.push(2);
+            encode_vm_structural_u32_expr(left, output);
+            encode_vm_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Sub(left, right) => {
+            output.push(3);
+            encode_vm_structural_u32_expr(left, output);
+            encode_vm_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Mul(left, right) => {
+            output.push(4);
+            encode_vm_structural_u32_expr(left, output);
+            encode_vm_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Div(left, right) => {
+            output.push(5);
+            encode_vm_structural_u32_expr(left, output);
+            encode_vm_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Rem(left, right) => {
+            output.push(6);
+            encode_vm_structural_u32_expr(left, output);
+            encode_vm_structural_u32_expr(right, output);
+        }
     }
 }
 
@@ -1742,6 +1848,10 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
             output.push(3);
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmGenericArgument::ConstU32Expr(value) => {
+            output.push(6);
+            encode_vm_structural_u32_expr(value, output);
+        }
         VmGenericArgument::ConstQuantity { lower, upper } => {
             output.push(4);
             output.extend_from_slice(&lower.to_le_bytes());
@@ -1756,10 +1866,7 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
         VmGenericArgument::ConstGeneric { index, kind } => {
             output.push(5);
             output.extend_from_slice(&index.to_le_bytes());
-            output.push(match kind {
-                ConstKind::U32 => 0,
-                ConstKind::Quantity => 1,
-            });
+            output.push(encode_const_kind(*kind));
         }
     }
 }
@@ -1996,8 +2103,66 @@ impl<'a> Decoder<'a> {
                 },
                 referent: Box::new(self.vm_type_at_depth(depth + 1)?),
             }),
+            12 => Ok(VmType::ConstU32(self.u32()?)),
+            13 => Ok(VmType::ConstU32Expr(
+                self.vm_structural_u32_expr(depth + 1)?,
+            )),
+            14 => {
+                let lower = self.u64()?;
+                let upper = self.quantity_upper()?;
+                if upper.is_some_and(|upper| lower > upper) {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid quantity interval",
+                    });
+                }
+                Ok(VmType::ConstQuantity { lower, upper })
+            }
+            15 => Ok(VmType::ConstGeneric {
+                index: self.u32()?,
+                kind: decode_const_kind(self.byte()?)?,
+            }),
             _ => Err(VmArtifactError::MalformedEncoding {
                 message: "unknown VM register type",
+            }),
+        }
+    }
+    fn quantity_upper(&mut self) -> Result<Option<u64>, VmArtifactError> {
+        match self.byte()? {
+            0 => Ok(Some(self.u64()?)),
+            1 => Ok(None),
+            _ => Err(VmArtifactError::MalformedEncoding {
+                message: "invalid quantity upper-bound tag",
+            }),
+        }
+    }
+    fn vm_structural_u32_expr(&mut self, depth: u64) -> Result<StructuralU32Expr, VmArtifactError> {
+        if depth > MAX_DECODE_TYPE_DEPTH {
+            return Err(VmArtifactError::DecodeLimit {
+                kind: "structural const nesting",
+                limit: MAX_DECODE_TYPE_DEPTH,
+            });
+        }
+        let binary = |decoder: &mut Self,
+                      constructor: fn(
+            Box<StructuralU32Expr>,
+            Box<StructuralU32Expr>,
+        ) -> StructuralU32Expr|
+         -> Result<StructuralU32Expr, VmArtifactError> {
+            Ok(constructor(
+                Box::new(decoder.vm_structural_u32_expr(depth + 1)?),
+                Box::new(decoder.vm_structural_u32_expr(depth + 1)?),
+            ))
+        };
+        match self.byte()? {
+            0 => Ok(StructuralU32Expr::Literal(self.u32()?)),
+            1 => Ok(StructuralU32Expr::Param(self.u32()?)),
+            2 => binary(self, StructuralU32Expr::Add),
+            3 => binary(self, StructuralU32Expr::Sub),
+            4 => binary(self, StructuralU32Expr::Mul),
+            5 => binary(self, StructuralU32Expr::Div),
+            6 => binary(self, StructuralU32Expr::Rem),
+            _ => Err(VmArtifactError::MalformedEncoding {
+                message: "invalid structural u32 expression tag",
             }),
         }
     }
@@ -2096,15 +2261,7 @@ impl<'a> Decoder<'a> {
             3 => Ok(VmGenericArgument::ConstU32(self.u32()?)),
             4 => {
                 let lower = self.u64()?;
-                let upper = match self.byte()? {
-                    0 => Some(self.u64()?),
-                    1 => None,
-                    _ => {
-                        return Err(VmArtifactError::MalformedEncoding {
-                            message: "invalid quantity upper-bound tag",
-                        });
-                    }
-                };
+                let upper = self.quantity_upper()?;
                 if upper.is_some_and(|upper| lower > upper) {
                     return Err(VmArtifactError::MalformedEncoding {
                         message: "invalid quantity interval",
@@ -2114,17 +2271,12 @@ impl<'a> Decoder<'a> {
             }
             5 => {
                 let index = self.u32()?;
-                let kind = match self.byte()? {
-                    0 => ConstKind::U32,
-                    1 => ConstKind::Quantity,
-                    _ => {
-                        return Err(VmArtifactError::MalformedEncoding {
-                            message: "invalid const generic kind",
-                        });
-                    }
-                };
+                let kind = decode_const_kind(self.byte()?)?;
                 Ok(VmGenericArgument::ConstGeneric { index, kind })
             }
+            6 => Ok(VmGenericArgument::ConstU32Expr(
+                self.vm_structural_u32_expr(depth + 1)?,
+            )),
             _ => Err(VmArtifactError::MalformedEncoding {
                 message: "unknown VM effect argument tag",
             }),
@@ -3872,6 +4024,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
     // identity cannot receive distinct executable fingerprints.
+    for register in &function.registers {
+        validate_vm_type(register)?;
+    }
     for instruction in &function.instructions {
         match instruction {
             VmInstruction::Perform {
@@ -5033,7 +5188,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
 fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmArtifactError> {
     for value in values {
         match value {
-            VmGenericArgument::Type(_) | VmGenericArgument::ConstU32(_) => {}
+            VmGenericArgument::Type(value) => validate_vm_type(value)?,
+            VmGenericArgument::ConstU32(_) => {}
+            VmGenericArgument::ConstU32Expr(value) => validate_vm_structural_u32_expr(value)?,
             VmGenericArgument::Lifetime(Lifetime::Bound { .. }) => {
                 return Err(VmArtifactError::MalformedEncoding {
                     message: "VM effect identity retains an escaped higher-ranked lifetime",
@@ -5054,6 +5211,62 @@ fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmA
         }
     }
     Ok(())
+}
+
+fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
+    match value {
+        VmType::Array(value) => validate_vm_type(value),
+        VmType::Tuple(values) => values.iter().try_for_each(validate_vm_type),
+        VmType::Nominal { arguments, .. } => arguments
+            .iter()
+            .try_for_each(validate_vm_nominal_argument_type),
+        VmType::Callable { parameters, result } => {
+            parameters.iter().try_for_each(validate_vm_type)?;
+            validate_vm_type(result)
+        }
+        VmType::Reference { referent, .. } => validate_vm_type(referent),
+        // Consts are metadata slots inside a nominal identity, not VM value
+        // layouts. Reject direct candidate registers/parameters/results and
+        // any attempt to smuggle one through a tuple, array, callable, or
+        // reference type.
+        VmType::ConstU32(_)
+        | VmType::ConstU32Expr(_)
+        | VmType::ConstQuantity { .. }
+        | VmType::ConstGeneric { .. } => Err(VmArtifactError::MalformedEncoding {
+            message: "metadata-only structural const used as VM value type",
+        }),
+        VmType::Unit
+        | VmType::I64
+        | VmType::F64
+        | VmType::Bool
+        | VmType::Char
+        | VmType::Text
+        | VmType::Generic(_) => Ok(()),
+    }
+}
+
+fn validate_vm_nominal_argument_type(value: &VmType) -> Result<(), VmArtifactError> {
+    match value {
+        VmType::ConstU32(_) | VmType::ConstGeneric { .. } => Ok(()),
+        VmType::ConstU32Expr(value) => validate_vm_structural_u32_expr(value),
+        VmType::ConstQuantity { lower, upper } if upper.is_some_and(|upper| *lower > upper) => {
+            Err(VmArtifactError::MalformedEncoding {
+                message: "invalid quantity interval",
+            })
+        }
+        VmType::ConstQuantity { .. } => Ok(()),
+        value => validate_vm_type(value),
+    }
+}
+
+fn validate_vm_structural_u32_expr(value: &StructuralU32Expr) -> Result<(), VmArtifactError> {
+    match value.clone().normalized() {
+        Ok(normalized) if normalized == *value => Ok(()),
+        Ok(_) => Err(VmArtifactError::NonCanonicalEncoding),
+        Err(_) => Err(VmArtifactError::MalformedEncoding {
+            message: "invalid structural u32 expression",
+        }),
+    }
 }
 
 fn validate_vm_effect_row(row: &VmEffectRow) -> Result<(), VmArtifactError> {
@@ -5913,6 +6126,12 @@ fn aggregate_matches_layout(values: &[VmValue], field_types: &[VmType]) -> bool 
 fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
     match expected {
         VmType::Generic(_) => true,
+        // Structural constants inhabit nominal identity only; no standalone
+        // runtime value may claim one of these metadata-only layouts.
+        VmType::ConstU32(_)
+        | VmType::ConstU32Expr(_)
+        | VmType::ConstQuantity { .. }
+        | VmType::ConstGeneric { .. } => false,
         VmType::Unit => matches!(value, VmValue::Unit),
         VmType::I64 => matches!(value, VmValue::I64(_)),
         VmType::F64 => matches!(value, VmValue::F64(_)),

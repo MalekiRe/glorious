@@ -111,6 +111,16 @@ fn service_compiles_and_runs_a_verified_vm_artifact_from_an_immutable_request() 
 }
 
 #[test]
+fn service_accepts_symbolic_structural_const_layout_contracts() {
+    let source = "pub struct Tag<n: u32> {} pub fn identity<n: u32>(value: Tag<n + 1>) -> Tag<1 + n> { value } pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a generic callable may carry canonical symbolic const layouts");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_host_imports_not_granted_by_the_frozen_request_manifest() {
     let error = StageZeroCompiler::new()
         .compile(request(
