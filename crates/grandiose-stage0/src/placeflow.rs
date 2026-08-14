@@ -337,6 +337,16 @@ impl Analyzer<'_> {
                 if self.projection(value).is_none() {
                     self.visit_with_live_after(value, live_after);
                 }
+                if let CoreKind::Deref(reference) = self.body.expression(value).kind
+                    && !matches!(self.body.expression(reference).kind, CoreKind::Local(_))
+                {
+                    self.error(
+                        e.span,
+                        "G5006",
+                        "reborrow through an aggregate-held reference requires an explicit local loan binding".into(),
+                    );
+                    return;
+                }
                 self.borrow_place(value, unique, e.span, None)
             }
             CoreKind::Deref(value) => {

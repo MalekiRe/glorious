@@ -727,6 +727,68 @@ fn unique_reborrow_reuses_the_original_vm_place() {
 }
 
 #[test]
+fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
+    let source = r#"
+        pub struct Inner { value: i64 }
+        pub struct Outer { inner: Inner, tag: i64 }
+        pub fn main() -> i64 {
+            let outer = Outer { inner: Inner { value: 42 }, tag: 0 };
+            let parent = &mut outer.inner.value;
+            let child = &mut *parent;
+            *child
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let escaping = r#"
+        effect Store { save(value: &mut i64); }
+        pub struct Inner { value: i64 }
+        pub struct Outer { inner: Inner, tag: i64 }
+        pub fn bad() -> i64 / {Store} {
+            let outer = Outer { inner: Inner { value: 1 }, tag: 0 };
+            let parent = &mut outer.inner.value;
+            let child = &mut *parent;
+            Store::save(child);
+            0
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(escaping))
+    else {
+        panic!("nested reborrow escaped through an effect payload")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5015"),
+        "missing nested-reborrow suspension diagnostic: {diagnostics:#?}"
+    );
+
+    let aggregate_held = r#"
+        pub struct Holder { reference: &mut i64 }
+        pub fn main() -> i64 {
+            let value = 1;
+            let holder = Holder { reference: &mut value };
+            let child = &mut *holder.reference;
+            *child
+        }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(aggregate_held))
+    else {
+        panic!("aggregate-held reborrow unexpectedly bypassed loan ownership")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "missing aggregate-held reborrow diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn parent_unique_reference_is_suspended_while_a_unique_reborrow_is_live() {
     let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = &mut *parent; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
