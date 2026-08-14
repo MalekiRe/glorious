@@ -280,6 +280,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                             PrimitiveRole::IntBitAnd,
                             PrimitiveRole::IntBitOr,
                             PrimitiveRole::IntBitXor,
+                            PrimitiveRole::IntBitXor,
                         ]
                         .map(PrimitiveRole::selector_name)
                         .join(", ")
