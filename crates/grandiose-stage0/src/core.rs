@@ -9,8 +9,8 @@ use crate::{
     pattern::{PatternDecision, PatternGenericScope, elaborate_pattern_with_scope},
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{
-        ElaboratedEffect, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
-        HostImport,
+        CallableSignature, ElaboratedEffect, ElaboratedHeader, ElaboratedInterface,
+        ElaboratedNominalLayout, HostImport,
     },
     source::Span,
     trait_solver::{
@@ -7018,7 +7018,7 @@ impl Elaborator<'_> {
             span,
         );
         let call = self.call(callee, values, span);
-        self.check_where_bounds(signature.where_bounds.clone(), span);
+        self.check_callable_contract_bounds(*signature, span);
         call
     }
     fn call(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span) -> CoreId {
@@ -7322,7 +7322,7 @@ impl Elaborator<'_> {
                 "qualified trait method value does not match its contextual callable type",
             ));
         }
-        self.check_where_bounds(signature.where_bounds.clone(), span);
+        self.check_callable_contract_bounds(*signature.clone(), span);
         Some(self.alloc(
             CoreKind::TraitMethod {
                 evidence,
@@ -7491,7 +7491,7 @@ impl Elaborator<'_> {
             span,
         );
         let call = self.call(callee, values, span);
-        self.check_where_bounds(signature.where_bounds.clone(), span);
+        self.check_callable_contract_bounds(*signature.clone(), span);
         Some(call)
     }
     fn perform(
@@ -9074,13 +9074,217 @@ impl Elaborator<'_> {
             self.recovered = true;
             return;
         };
+        self.check_callable_contract_bounds(signature, span);
+    }
+
+    /// Verify the whole frozen callable contract after argument inference has
+    /// constrained it.  A trait predicate is only one part of that contract:
+    /// associated type and effect-row equalities are obligations too.
+    fn check_callable_contract_bounds(&mut self, signature: CallableSignature, span: Span) {
         self.check_where_bounds(signature.where_bounds.clone(), span);
         self.check_intrinsic_callable_bindings(
             signature.where_bounds,
+            signature.where_associated_type_bindings.clone(),
+            signature.where_associated_effect_bindings.clone(),
+            span,
+        );
+        self.check_nonintrinsic_associated_bindings(
             signature.where_associated_type_bindings,
             signature.where_associated_effect_bindings,
             span,
         );
+    }
+
+    fn check_nonintrinsic_associated_bindings(
+        &mut self,
+        type_bindings: Vec<crate::ElaboratedAssociatedTypeBinding>,
+        effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
+        span: Span,
+    ) {
+        for binding in type_bindings {
+            if crate::is_intrinsic_callable_trait(&binding.relation) {
+                continue;
+            }
+            let Some((subject, relation, item_arguments, value)) =
+                self.zonk_associated_type_binding(&binding)
+            else {
+                self.error(
+                    span,
+                    "G4141",
+                    "cannot prove a callable associated type equality with unresolved arguments",
+                );
+                self.recovered = true;
+                continue;
+            };
+            if self.ambient_associated_type_binding_proves(
+                &binding,
+                &subject,
+                &relation,
+                &item_arguments,
+                &value,
+            ) {
+                continue;
+            }
+            let answer = TraitSolver::new(self.signatures).normalize_associated_type_application(
+                TraitGoal { relation, subject },
+                &binding.name,
+                &item_arguments,
+            );
+            if !matches!(answer, TraitProjectionAnswer::Normalized { ty, .. } if ty == value) {
+                self.error(
+                    span,
+                    "G4143",
+                    "no implementation satisfies a required callable associated type equality",
+                );
+                self.recovered = true;
+            }
+        }
+        for binding in effect_bindings {
+            if crate::is_intrinsic_callable_trait(&binding.relation) {
+                continue;
+            }
+            let Some((subject, relation, item_arguments, value)) =
+                self.zonk_associated_effect_binding(&binding)
+            else {
+                self.error(
+                    span,
+                    "G4141",
+                    "cannot prove a callable associated effect-row equality with unresolved arguments",
+                );
+                self.recovered = true;
+                continue;
+            };
+            if self.ambient_associated_effect_binding_proves(
+                &binding,
+                &subject,
+                &relation,
+                &item_arguments,
+                &value,
+            ) {
+                continue;
+            }
+            let answer = TraitSolver::new(self.signatures)
+                .normalize_associated_effect_row_application(
+                    TraitGoal { relation, subject },
+                    &binding.name,
+                    &item_arguments,
+                );
+            if !matches!(answer, TraitEffectRowProjectionAnswer::Normalized { row, .. } if row == value)
+            {
+                self.error(
+                    span,
+                    "G4143",
+                    "no implementation satisfies a required callable associated effect-row equality",
+                );
+                self.recovered = true;
+            }
+        }
+    }
+
+    fn zonk_associated_type_binding(
+        &mut self,
+        binding: &crate::ElaboratedAssociatedTypeBinding,
+    ) -> Option<(
+        Type,
+        crate::ElaboratedTraitReference,
+        Vec<GenericArgument>,
+        Type,
+    )> {
+        Some((
+            self.inference.zonk(binding.subject.clone()).ok()?,
+            self.zonk_trait_reference(binding.relation.clone())?,
+            self.zonk_generic_arguments(binding.item_arguments.clone())?,
+            self.inference.zonk(binding.value.clone()).ok()?,
+        ))
+    }
+
+    fn zonk_associated_effect_binding(
+        &mut self,
+        binding: &crate::ElaboratedAssociatedEffectBinding,
+    ) -> Option<(
+        Type,
+        crate::ElaboratedTraitReference,
+        Vec<GenericArgument>,
+        EffectRow,
+    )> {
+        Some((
+            self.inference.zonk(binding.subject.clone()).ok()?,
+            self.zonk_trait_reference(binding.relation.clone())?,
+            self.zonk_generic_arguments(binding.item_arguments.clone())?,
+            self.inference
+                .zonk_effects_allowing_generic_tail(binding.value.clone())
+                .ok()?,
+        ))
+    }
+
+    fn zonk_trait_reference(
+        &mut self,
+        relation: crate::ElaboratedTraitReference,
+    ) -> Option<crate::ElaboratedTraitReference> {
+        Some(crate::ElaboratedTraitReference {
+            definition: relation.definition,
+            arguments: self.zonk_generic_arguments(relation.arguments)?,
+        })
+    }
+
+    fn zonk_generic_arguments(
+        &mut self,
+        arguments: Vec<GenericArgument>,
+    ) -> Option<Vec<GenericArgument>> {
+        arguments
+            .into_iter()
+            .map(|argument| self.inference.zonk_generic_argument(argument).ok())
+            .collect()
+    }
+
+    fn ambient_associated_type_binding_proves(
+        &mut self,
+        binding: &crate::ElaboratedAssociatedTypeBinding,
+        subject: &Type,
+        relation: &crate::ElaboratedTraitReference,
+        item_arguments: &[GenericArgument],
+        value: &Type,
+    ) -> bool {
+        self.ambient_callable_type_bindings
+            .clone()
+            .iter()
+            .any(|ambient| {
+                ambient.name == binding.name
+                    && ambient.item_generic_kinds == binding.item_generic_kinds
+                    && self.zonk_associated_type_binding(ambient).is_some_and(
+                        |(ambient_subject, ambient_relation, ambient_arguments, ambient_value)| {
+                            ambient_subject == *subject
+                                && ambient_relation == *relation
+                                && ambient_arguments == item_arguments
+                                && ambient_value == *value
+                        },
+                    )
+            })
+    }
+
+    fn ambient_associated_effect_binding_proves(
+        &mut self,
+        binding: &crate::ElaboratedAssociatedEffectBinding,
+        subject: &Type,
+        relation: &crate::ElaboratedTraitReference,
+        item_arguments: &[GenericArgument],
+        value: &EffectRow,
+    ) -> bool {
+        self.ambient_callable_effect_bindings
+            .clone()
+            .iter()
+            .any(|ambient| {
+                ambient.name == binding.name
+                    && ambient.item_generic_kinds == binding.item_generic_kinds
+                    && self.zonk_associated_effect_binding(ambient).is_some_and(
+                        |(ambient_subject, ambient_relation, ambient_arguments, ambient_value)| {
+                            ambient_subject == *subject
+                                && ambient_relation == *relation
+                                && ambient_arguments == item_arguments
+                                && ambient_value == *value
+                        },
+                    )
+            })
     }
     fn check_where_bounds(
         &mut self,

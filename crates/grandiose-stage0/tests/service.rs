@@ -2692,6 +2692,69 @@ fn service_enforces_selected_trait_method_where_bounds() {
 }
 
 #[test]
+fn service_enforces_selected_trait_method_associated_type_bindings() {
+    let accepted = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for i64 { type Item = i64; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, 0) }";
+    let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for Text { type Item = Text; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, \"wrong\") }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(rejected))
+    else {
+        panic!("trait method accepted a mismatched associated type binding");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4143"),
+        "missing trait method associated-binding diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_enforces_selected_trait_method_associated_effect_bindings() {
+    let accepted = "trait Capability { type Effects: EffectRow; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}>; } impl Capability for i64 { type Effects = {}; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, 0) }";
+    let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = "effect Log { note(); } trait Capability { type Effects: EffectRow; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}>; } impl Capability for Text { type Effects = { Log }; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, \"wrong\") }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(rejected))
+    else {
+        panic!("trait method accepted a mismatched associated effect-row binding");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4143"),
+        "missing trait method associated effect-binding diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_enforces_trait_method_value_associated_bindings() {
+    let accepted = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for i64 { type Item = i64; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn apply(callable: (i64, i64) -> i64) -> i64 { callable(41, 0) } pub fn main() -> i64 { apply(Keep::keep) }";
+    let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for Text { type Item = Text; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn apply(callable: (i64, Text) -> i64) -> i64 { callable(41, \"wrong\") } pub fn main() -> i64 { apply(Keep::keep) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(rejected))
+    else {
+        panic!("trait method value accepted a mismatched associated type binding");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4143"),
+        "missing trait method value associated-binding diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
     let enum_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(42) }";
     let outcome = StageZeroCompiler::new()
