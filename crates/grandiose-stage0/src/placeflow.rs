@@ -225,58 +225,7 @@ impl Analyzer<'_> {
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
             CoreKind::Closure { environment, .. } => {
-                if environment.post_states.len() != environment.captures.len()
-                    || environment
-                        .captures
-                        .iter()
-                        .zip(&environment.post_states)
-                        .any(|(capture, state)| {
-                            capture.name != state.name || capture.mode != state.mode
-                        })
-                {
-                    self.error(
-                        e.span,
-                        "G5020",
-                        "closure environment capture post-state disagrees with its sealed layout"
-                            .into(),
-                    );
-                    return;
-                }
-                for (capture, post_state) in
-                    environment.captures.iter().zip(&environment.post_states)
-                {
-                    self.capture_reference_loan(&capture.name, e.span);
-                    let place = Projection {
-                        root: capture.name.clone(),
-                        fields: vec![],
-                    };
-                    match post_state.mode {
-                        CaptureMode::SharedBorrow => {
-                            self.borrow(&capture.name, false, e.span);
-                            self.place_event(
-                                FlowEventKind::BorrowShared(capture.name.clone()),
-                                place,
-                                e.span,
-                            );
-                        }
-                        CaptureMode::UniqueBorrow => {
-                            self.borrow(&capture.name, true, e.span);
-                            self.place_event(
-                                FlowEventKind::BorrowUnique(capture.name.clone()),
-                                place,
-                                e.span,
-                            );
-                        }
-                        CaptureMode::Move => {
-                            self.move_(&capture.name, e.span);
-                            self.place_event(
-                                FlowEventKind::Move(capture.name.clone()),
-                                place,
-                                e.span,
-                            );
-                        }
-                    }
-                }
+                self.visit_closure_environment(&environment, e.span, None);
             }
             CoreKind::Local(_) => self.read_place(id, e.span),
             CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
@@ -302,6 +251,16 @@ impl Analyzer<'_> {
                     if !self.reborrow_place(value, unique, e.span, name.clone()) {
                         self.borrow_place(value, unique, e.span, Some(name.clone()));
                     }
+                } else if let CoreKind::Closure { environment, .. } =
+                    self.body.expression(value).kind.clone()
+                {
+                    // A closure bound to a local has a concrete region owner.
+                    // Keep both its direct capture loans and any reborrowed
+                    // backing loans only until that callable's last use,
+                    // including when the binding was created in a handler
+                    // arm. Bare closure expressions still use `None` below:
+                    // they may be returned, passed, or otherwise escape.
+                    self.visit_closure_environment(&environment, e.span, Some(name.as_str()));
                 } else {
                     self.visit_with_live_after(value, live_after);
                 }
@@ -356,9 +315,24 @@ impl Analyzer<'_> {
                 self.use_deref_reference(value, e.span, false);
             }
             CoreKind::Call { callee, arguments } => {
-                let mut values = vec![callee];
-                values.extend(arguments);
-                self.visit_sequence(&values, live_after);
+                if let CoreKind::Closure { environment, .. } =
+                    self.body.expression(callee).kind.clone()
+                {
+                    // An immediately-invoked closure has no outward value
+                    // owner. Give its environment a transient NLL owner that
+                    // remains live across argument evaluation and the call,
+                    // then release it before the following expression.
+                    let owner = format!("<temporary-closure-{}>", callee.0);
+                    let mut during_call = live_after.clone();
+                    during_call.insert(owner.clone());
+                    self.visit_closure_environment(&environment, e.span, Some(owner.as_str()));
+                    self.visit_sequence(&arguments, &during_call);
+                    self.release_owner_loans(&owner, e.span);
+                } else {
+                    let mut values = vec![callee];
+                    values.extend(arguments);
+                    self.visit_sequence(&values, live_after);
+                }
             }
             CoreKind::Perform { arguments, .. } => {
                 self.visit_sequence(&arguments, live_after);
@@ -612,6 +586,88 @@ impl Analyzer<'_> {
         }
     }
 
+    fn visit_closure_environment(
+        &mut self,
+        environment: &crate::core::CaptureEnvironment,
+        span: Span,
+        owner: Option<&str>,
+    ) {
+        if environment.post_states.len() != environment.captures.len()
+            || environment
+                .captures
+                .iter()
+                .zip(&environment.post_states)
+                .any(|(capture, state)| capture.name != state.name || capture.mode != state.mode)
+        {
+            self.error(
+                span,
+                "G5020",
+                "closure environment capture post-state disagrees with its sealed layout".into(),
+            );
+            return;
+        }
+        for (capture, post_state) in environment.captures.iter().zip(&environment.post_states) {
+            self.capture_reference_loan(&capture.name, span, owner);
+            match post_state.mode {
+                CaptureMode::SharedBorrow => {
+                    self.capture_place_loan(&capture.name, false, span, owner);
+                }
+                CaptureMode::UniqueBorrow => {
+                    self.capture_place_loan(&capture.name, true, span, owner);
+                }
+                CaptureMode::Move => {
+                    self.move_(&capture.name, span);
+                    self.place_event(
+                        FlowEventKind::Move(capture.name.clone()),
+                        Projection {
+                            root: capture.name.clone(),
+                            fields: vec![],
+                        },
+                        span,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Record a closure capture of a direct local as an ordinary, owned loan
+    /// rather than a permanent borrow-state bit. A named environment owner
+    /// makes the capture eligible for NLL release; an anonymous closure keeps
+    /// the conservative escaping representation.
+    fn capture_place_loan(&mut self, name: &str, unique: bool, span: Span, owner: Option<&str>) {
+        let place = Projection {
+            root: name.to_owned(),
+            fields: vec![],
+        };
+        if self
+            .projection_loans
+            .iter()
+            .any(|loan| loan.place.overlaps(&place) && (unique || loan.unique))
+        {
+            self.error(
+                span,
+                "G5006",
+                format!("conflicting closure capture of place `{name}`"),
+            );
+            return;
+        }
+        self.borrow(name, unique, span);
+        self.place_event(
+            if unique {
+                FlowEventKind::BorrowUnique(name.to_owned())
+            } else {
+                FlowEventKind::BorrowShared(name.to_owned())
+            },
+            place.clone(),
+            span,
+        );
+        self.projection_loans.push(ProjectionLoan {
+            place,
+            unique,
+            owner: owner.map(str::to_owned),
+        });
+    }
+
     /// Transfer the backing region of a named reference into a closure
     /// environment.  `let r = &place; let f = || r` is not merely a borrow of
     /// the stack slot for `r`: `f` can later read the reference value and
@@ -623,14 +679,14 @@ impl Analyzer<'_> {
     /// This is also the first reborrow operation in the flow domain.  We copy
     /// the exact projected source loan, preserving mutability, rather than
     /// widening `&pair.left` to an imprecise whole-record loan.
-    fn capture_reference_loan(&mut self, name: &str, span: Span) {
+    fn capture_reference_loan(&mut self, name: &str, span: Span, owner: Option<&str>) {
         let reborrows = self
             .projection_loans
             .iter()
             .filter(|loan| loan.owner.as_deref() == Some(name))
             .cloned()
             .map(|mut loan| {
-                loan.owner = None;
+                loan.owner = owner.map(str::to_owned);
                 loan
             })
             .collect::<Vec<_>>();

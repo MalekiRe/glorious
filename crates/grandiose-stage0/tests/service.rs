@@ -920,6 +920,56 @@ fn handler_join_keeps_shared_reborrow_parent_suspended() {
 }
 
 #[test]
+fn nll_releases_a_handler_local_closure_capture_after_its_last_use() {
+    let source = r#"
+        effect Ask { [0, 1] ask() -> i64; }
+        pub fn main() -> i64 {
+            let value = 1;
+            handle Ask::ask() {
+                Ask::ask() with _ => {
+                    let loan = &value;
+                    let callback = () -> i64 { *loan };
+                    callback();
+                    0
+                }
+            };
+            value = 42;
+            value
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a closure dead at the end of a handler arm must not retain its capture");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nll_keeps_a_closure_capture_live_across_a_handler_when_used_afterward() {
+    let source = r#"
+        effect Ask { [0, 1] ask() -> i64; }
+        pub fn main() -> i64 {
+            let value = 1;
+            let loan = &value;
+            let callback = () -> i64 { *loan };
+            handle Ask::ask() { Ask::ask() with _ => 0 };
+            value = 42;
+            callback()
+        }
+    "#;
+    let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("a live closure capture unexpectedly allowed mutation: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5007"),
+        "missing live closure-capture loan diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn shared_reborrow_still_suspends_unique_parent_mutation() {
     let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = & *parent; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
@@ -3827,6 +3877,16 @@ fn service_lowers_immediately_invoked_typed_closures_with_captures() {
     let source =
         "pub fn main() -> i64 { let value = 40; ((extra: i64) -> i64 { value + extra })(2) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nll_releases_an_immediately_invoked_closure_capture_before_the_next_write() {
+    let source = "pub fn main() -> i64 { let value = 1; ((extra: i64) -> i64 { value + extra })(1); value = 42; value }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("an immediately invoked closure must not retain its capture after returning");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 

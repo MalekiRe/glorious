@@ -965,7 +965,7 @@ fn placeflow_releases_a_named_loan_after_a_nested_block_last_use() {
 }
 
 #[test]
-fn placeflow_reborrows_a_named_loan_captured_by_a_closure() {
+fn placeflow_releases_a_dead_let_bound_closure_capture() {
     let source = "pub fn main() -> i64 { let value = 1; let loan = &value; let saved = () -> &i64 { loan }; value = 2; 0 }";
     let flow = flow_for("core-nll-captured-reference@0.1.0", source);
     assert!(
@@ -976,16 +976,17 @@ fn placeflow_reborrows_a_named_loan_captured_by_a_closure() {
         flow.events
     );
     assert!(
-        flow.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G5007"),
-        "an escaping closure capture must keep the source place borrowed: {:#?}",
-        flow.diagnostics
+        flow.events.iter().any(
+            |event| matches!(&event.kind, FlowEventKind::EndBorrow(owner) if owner == "saved")
+        ),
+        "a dead closure environment must release its owned capture loan: {:#?}",
+        flow.events
     );
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
 }
 
 #[test]
-fn placeflow_keeps_a_captured_reborrow_live_across_a_handler_join() {
+fn placeflow_releases_a_dead_handler_arm_closure_capture_after_the_join() {
     let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let value = 1; let loan = &value; handle Tick::tick() { Tick::tick() => { let saved = () -> &i64 { loan }; 0 } }; value = 2; 0 }";
     let flow = flow_for("core-nll-captured-reference-handler@0.1.0", source);
     assert!(
@@ -996,12 +997,13 @@ fn placeflow_keeps_a_captured_reborrow_live_across_a_handler_join() {
         flow.events
     );
     assert!(
-        flow.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G5007"),
-        "handler joins must retain a closure-captured loan from every reachable arm: {:#?}",
-        flow.diagnostics
+        flow.events.iter().any(
+            |event| matches!(&event.kind, FlowEventKind::EndBorrow(owner) if owner == "saved")
+        ),
+        "a handler-local closure must release its capture before the join: {:#?}",
+        flow.events
     );
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
 }
 
 #[test]
