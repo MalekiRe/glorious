@@ -1144,24 +1144,16 @@ fn service_executes_explicit_generic_callable_applications() {
 }
 
 #[test]
-fn service_rejects_non_type_direct_callable_arguments_at_the_contract_boundary() {
+fn service_instantiates_non_type_direct_callable_arguments_at_the_contract_boundary() {
     for source in [
         "pub fn region<'a>() -> i64 { 0 } pub fn main() -> i64 { region<'static>() }",
         "pub fn row<e: EffectRow>() -> i64 { 0 } pub fn main() -> i64 { row<{}>() }",
         "pub fn count<n: u32>() -> i64 { 0 } pub fn main() -> i64 { count<3>() }",
         "pub fn amount<q: Quantity>() -> i64 { 0 } pub fn main() -> i64 { amount<[1, 2]>() }",
     ] {
-        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
-            StageZeroCompiler::new().compile(request(source))
-        else {
-            panic!("non-type generic argument unexpectedly crossed a type-only callable contract");
-        };
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "G4184"),
-            "missing direct callable generic-contract diagnostic: {diagnostics:#?}"
-        );
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 0);
     }
 }
 
